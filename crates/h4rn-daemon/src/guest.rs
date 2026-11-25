@@ -386,6 +386,14 @@ pub struct GuestService {
     /// the delete, the resolved events and a submission's insert cannot
     /// interleave, so a card can never be raised after it was resolved.
     submit_lock: tokio::sync::Mutex<()>,
+    /// Serializes writing a finished request's answer to the journal.
+    ///
+    /// A row's `resolution_emitted` marker is written only after the append is
+    /// durable, so the marker alone cannot keep two writers apart in the window
+    /// before it. This lock makes the journal check, the append and the marker
+    /// one step for every writer in this daemon; the journal check makes the
+    /// step repeatable after a crash.
+    resolution_lock: tokio::sync::Mutex<()>,
     /// A test's pause point for the next submission.
     submit_gate: Mutex<Option<Arc<SubmitGate>>>,
     /// A test's pause point for the next Send or Dismiss.
@@ -398,6 +406,9 @@ pub struct GuestService {
     /// A test's pause point after the next guest snapshot read its events and
     /// before it revalidates its link.
     snapshot_gate: Mutex<Option<Arc<ClaimGate>>>,
+    /// A test's pause point between a resolution's journal check and its
+    /// append.
+    resolution_gate: Mutex<Option<Arc<ClaimGate>>>,
 }
 
 impl std::fmt::Debug for GuestService {
@@ -439,11 +450,13 @@ impl GuestService {
             tokens: Mutex::new(std::collections::HashMap::new()),
             local_base: Mutex::new(None),
             submit_lock: tokio::sync::Mutex::new(()),
+            resolution_lock: tokio::sync::Mutex::new(()),
             submit_gate: Mutex::new(None),
             claim_gate: Mutex::new(None),
             send_gate: Mutex::new(None),
             cleanup_gate: Mutex::new(None),
             snapshot_gate: Mutex::new(None),
+            resolution_gate: Mutex::new(None),
         };
         service.ensure_schema().await?;
         std::fs::create_dir_all(service.guest_root())?;
@@ -571,6 +584,52 @@ impl GuestService {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Arc::clone(&gate));
         gate
+    }
+
+    /// Pauses the next resolution between its journal check and its append,
+    /// until the returned gate is released.
+    ///
+    /// Used by a test that kills the writer in that window: the marker must
+    /// still be unset, and a restart must raise the answer the crash lost. It
+    /// is not read by the production path unless a test installs one.
+    #[doc(hidden)]
+    pub fn pause_next_resolution(&self) -> Arc<ClaimGate> {
+        let gate = Arc::new(ClaimGate {
+            used: std::sync::atomic::AtomicBool::new(false),
+            arrived: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        });
+        *self
+            .resolution_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Arc::clone(&gate));
+        gate
+    }
+
+    /// Waits at the resolution gate a test installed.
+    async fn hold_resolution(&self) {
+        let gate = self
+            .resolution_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        let Some(gate) = gate else {
+            return;
+        };
+        if gate.used.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        gate.hold().await;
+        let mut slot = self
+            .resolution_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if slot
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, &gate))
+        {
+            *slot = None;
+        }
     }
 
     /// Waits at the claim gate a test installed.
@@ -868,8 +927,63 @@ impl GuestService {
                 removed += 1;
             }
         }
+        // Startup has no writer left to finish an answer, so compare every
+        // finished row with the thread's journal before the sweep decides what
+        // to keep. A resolution the marker claims but the journal never
+        // received (an older build could leave one) is raised here; one the
+        // journal already holds only gets its marker back.
+        if recover_in_flight {
+            self.reconcile_finished_resolutions().await;
+        }
         self.sweep_finished_requests(recover_in_flight).await?;
         Ok(removed)
+    }
+
+    /// Repairs finished rows whose marker and journal disagree after a crash.
+    ///
+    /// The marker is written only after the append is durable, so a crash can
+    /// leave a row whose answer is in the journal with no marker (harmless,
+    /// the sweep re-checks) or, from a build that marked first, a row whose
+    /// marker claims an answer the journal never got. Asking the journal is the
+    /// only honest answer for both, and [`Self::emit_resolution`] appends only
+    /// what is missing.
+    async fn reconcile_finished_resolutions(&self) {
+        let rows = match sqlx::query(
+            "SELECT request_id, link_id, thread_id, text, attachments_json, size_bytes, created_at, status, resolution, resolution_emitted
+             FROM guest_requests
+             WHERE status IN ('sent', 'dismissed', 'deleting')",
+        )
+        .fetch_all(&self.pool)
+        .await
+        {
+            Ok(rows) => rows,
+            Err(error) => {
+                tracing::warn!(%error, "guest resolutions wait for the next startup");
+                return;
+            }
+        };
+        for row in rows {
+            let mut request = match row_to_request(row) {
+                Ok(request) => request,
+                Err(error) => {
+                    tracing::warn!(%error, "a guest request row could not be read");
+                    continue;
+                }
+            };
+            if request.resolution.is_none() {
+                continue;
+            }
+            // The marker may describe an append that never landed, so the
+            // journal decides even when the row says it was emitted.
+            request.resolution_emitted = false;
+            if let Err(error) = self.emit_resolution(&request).await {
+                tracing::warn!(
+                    request = %request.request_id,
+                    %error,
+                    "a recovered guest resolution waits for the next sweep"
+                );
+            }
+        }
     }
 
     /// Deletes files for requests whose link is gone or whose turn settled.
@@ -1120,14 +1234,21 @@ impl GuestService {
     ///
     /// A Dismiss and the sweep can both hold a copy of the same finished row
     /// (the Dismiss claims it, then pauses, while the sweep reads and resolves
-    /// it). The row's `resolution_emitted` marker is claimed with a conditional
-    /// update before anything is journaled, so exactly one writer emits and the
-    /// other's stale copy is a no-op: one answer, one `GuestRequestResolved`.
+    /// it). The in-process lock serialises the journal check, the append and
+    /// the marker, and the journal check makes a stale copy a no-op: one
+    /// answer, one `GuestRequestResolved`.
     ///
-    /// Ok means the event is durable, another writer owns it, or the thread is
-    /// gone so no card can remain. A failed journal write puts the marker back
-    /// so the sweep, startup and an ended link try again instead of losing the
-    /// answer.
+    /// The row's `resolution_emitted` marker is written only after the append
+    /// is durable. A crash in between therefore leaves the marker unset, and a
+    /// crash before the append leaves nothing at all; either way the next pass
+    /// asks the journal and emits only an answer it does not already hold
+    /// instead of trusting a flag that could describe a write that never
+    /// landed. A crash after the append but before the marker is answered by
+    /// that same check, so recovery never appends a second answer.
+    ///
+    /// Ok means the event is durable, another writer already emitted it, or
+    /// the thread is gone so no card can remain. A failed append leaves the
+    /// marker alone, so the sweep, startup and an ended link try again.
     async fn emit_resolution(&self, request: &RequestRow) -> Result<(), ManagerError> {
         if request.resolution_emitted {
             return Ok(());
@@ -1135,17 +1256,25 @@ impl GuestService {
         let Some(resolution) = request.resolution.as_deref() else {
             return Ok(());
         };
-        let claimed = sqlx::query(
-            "UPDATE guest_requests SET resolution_emitted = 1
-             WHERE request_id = ? AND resolution_emitted = 0",
-        )
-        .bind(&request.request_id)
-        .execute(&self.pool)
-        .await
-        .map_err(|error| ManagerError::Internal(error.to_string()))?;
-        if claimed.rows_affected() == 0 {
-            return Ok(());
+        let _guard = self.resolution_lock.lock().await;
+        // The copy in hand may predate a writer that finished while this one
+        // waited for the lock. The journal, not the copy's marker, says whether
+        // the answer already exists.
+        match self
+            .manager
+            .guest_resolution_in_thread(&request.thread_id, &request.request_id)
+            .await
+        {
+            Ok(true) => return self.mark_resolution_emitted(&request.request_id).await,
+            Ok(false) => {}
+            // The thread is gone, so no card can stay raised and there is no
+            // journal to ask.
+            Err(ManagerError::NotFound(_)) => return Ok(()),
+            Err(error) => return Err(error),
         }
+        // A test can pause here, between the decision to append and the
+        // append, to prove a crash in this window leaves no marker behind.
+        self.hold_resolution().await;
         match self
             .manager
             .emit_guest_request_resolved(
@@ -1158,25 +1287,21 @@ impl GuestService {
             Ok(_) => {}
             // The thread is gone, so no card can stay raised.
             Err(ManagerError::NotFound(_)) => {}
-            Err(error) => {
-                // Nothing reached the journal, so release the claim and let
-                // the next pass try again.
-                if let Err(reset) = sqlx::query(
-                    "UPDATE guest_requests SET resolution_emitted = 0 WHERE request_id = ?",
-                )
-                .bind(&request.request_id)
-                .execute(&self.pool)
-                .await
-                {
-                    tracing::warn!(
-                        request = %request.request_id,
-                        %reset,
-                        "a guest resolution could not be released for a retry"
-                    );
-                }
-                return Err(error);
-            }
+            Err(error) => return Err(error),
         }
+        // Only a durable append makes this true. A failure above leaves the
+        // marker as it was, and the journal check above keeps the retry from
+        // appending the answer twice.
+        self.mark_resolution_emitted(&request.request_id).await
+    }
+
+    /// Notes that `request_id`'s answer is in the journal.
+    async fn mark_resolution_emitted(&self, request_id: &str) -> Result<(), ManagerError> {
+        sqlx::query("UPDATE guest_requests SET resolution_emitted = 1 WHERE request_id = ?")
+            .bind(request_id)
+            .execute(&self.pool)
+            .await
+            .map_err(|error| ManagerError::Internal(error.to_string()))?;
         Ok(())
     }
 
@@ -1232,9 +1357,10 @@ impl GuestService {
     ///
     /// The row was already the one decision's first half: its files are on
     /// disk and its attachments are recorded, but the card may or may not have
-    /// been raised. A live link gets the card again (the owner's projection
-    /// keys by request id, so a repeat is one card), and an ended link gets
-    /// the row and files removed.
+    /// been raised. The journal decides which. A card the journal holds only
+    /// needs its row's second half and one broadcast, never a second
+    /// `GuestRequested`; a card the journal never received is appended now. An
+    /// ended link gets the row and files removed.
     async fn recover_publishing(&self, request: &RequestRow) -> Result<(), GuestError> {
         let live: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM guest_links WHERE link_id = ? AND expires_at > ?",
@@ -1244,8 +1370,54 @@ impl GuestService {
         .fetch_one(&self.pool)
         .await?;
         if live > 0 && !self.is_settled(&request.thread_id).await {
+            match self
+                .manager
+                .guest_card_in_thread(&request.thread_id, &request.request_id)
+                .await
+            {
+                Ok(true) => {
+                    // The card is already journaled; the failed final update is
+                    // the only half missing. Making the row `pending` earns the
+                    // broadcast the failed publication never sent, without a
+                    // duplicate card in the journal or the guest's page.
+                    if let Err(error) = self.mark_pending(&request.request_id).await {
+                        tracing::warn!(
+                            request = %request.request_id,
+                            %error,
+                            "a recovered guest card waits for the next sweep"
+                        );
+                        return Ok(());
+                    }
+                    if let Err(error) = self
+                        .manager
+                        .republish_guest_request(&request.thread_id, &request.request_id)
+                        .await
+                    {
+                        // The row is answerable and a fresh snapshot sees the
+                        // card; a live client gets it on its next snapshot.
+                        tracing::warn!(
+                            request = %request.request_id,
+                            %error,
+                            "a recovered guest card was not re-announced"
+                        );
+                    }
+                    return Ok(());
+                }
+                Ok(false) => {}
+                Err(ManagerError::NotFound(_)) => {}
+                Err(error) => {
+                    // Leave it publishing so the next sweep tries again rather
+                    // than appending a card that may already exist.
+                    tracing::warn!(
+                        request = %request.request_id,
+                        %error,
+                        "a recovered guest card waits for the next sweep"
+                    );
+                    return Ok(());
+                }
+            }
             // The row becomes `pending` as the card's second half, so the card
-            // this path re-raises is answerable the moment anyone sees it.
+            // this path raises is answerable the moment anyone sees it.
             match self
                 .manager
                 .emit_guest_request_then(&request.thread_id, request.to_proto(), || async {

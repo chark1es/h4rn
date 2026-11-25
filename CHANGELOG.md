@@ -769,6 +769,17 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Fixed
 
+- **A guest link's answers and repeated messages survive a crash.** A guest
+  request's resolution could be marked as sent before its event was durable, so
+  a crash in between lost the owner's answer; the marker is now written only
+  after the journal holds it, and startup compares every finished request with
+  the journal and raises an answer that is missing. A second delivery of a guest
+  prompt that may already have reached the agent now gets its own transcript id,
+  so both messages show instead of the second disappearing behind the first.
+  Recovering a card whose row update failed re-announces the card the journal
+  already holds instead of journaling a second one, and the guest row write no
+  longer runs inside the daemon-wide append lock, where one guest could stall
+  every thread on the machine.
 - **A refused prompt survives a crash right after its turn is recorded.** A
   prompt the daemon refused because its outside grant was revoked could sit in
   neither the journal's claim nor the queue between the turn's settlement and

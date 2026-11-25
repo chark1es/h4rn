@@ -83,6 +83,37 @@ describe("foldEvent", () => {
     expect(log.guestRequests.map((request) => request.request_id)).toEqual(["greq_a"]);
   });
 
+  it("shows both deliveries of a resent guest prompt", () => {
+    let log = createThreadLog();
+    // The first delivery keeps the id its request named. A resend is a second
+    // message of its own, so the daemon journals it under a fresh id and the
+    // transcript must keep both rows rather than dedupe one away.
+    for (const [turnId, itemId] of [
+      ["turn_1", "item_guest_greq_1"],
+      ["turn_2", "item_user_2"],
+    ]) {
+      log = foldEvent(log, {
+        type: "item_completed",
+        thread_id: "t1",
+        turn_id: turnId as string,
+        item: {
+          kind: "message",
+          item_id: itemId as string,
+          role: "user",
+          text: "guest prompt",
+          attachments: [],
+        },
+      });
+    }
+    const messages = log.turns.flatMap((turn) =>
+      turn.items.filter((item) => item.kind === "message"),
+    );
+    expect(messages.map((item) => (item.kind === "message" ? item.itemId : "")).sort()).toEqual([
+      "item_guest_greq_1",
+      "item_user_2",
+    ]);
+  });
+
   it("accumulates message deltas into a running turn", () => {
     let log = createThreadLog();
     log = foldEvent(log, {
