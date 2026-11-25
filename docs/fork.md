@@ -33,7 +33,9 @@ The fork keeps:
   messages and their attachments, tool calls, delegated subagent rows in their
   final state, the plan, error and usage-limit rows, and an assistant reply
   that was still streaming when h4rn stopped (rebuilt from its streamed text).
-  A prompt is shown before the turn it started, as in the live thread, so every
+  A message steered into a running turn keeps its steer mark in the copy, so a
+  fork of that fork still shows it in the turn it was written into. A prompt is
+  shown before the turn it started, as in the live thread, so every
   copied prompt sits above its own reply — including two prompts queued behind
   one running turn, which stay above that turn's reply where the source showed
   them;
@@ -91,15 +93,21 @@ conversation over:
   starting makes the fork hand off instead. While a provider reads the source's
   saved session, the source's next message is accepted at once — it already has
   its turn and its durable row — but it cannot reach the harness until the copy
-  is over. The copy is over when
-  the fork reports its session or the startup fails. The fork's first message is
-  written before its copy is waited on, and the deadline runs from that write:
-  Claude Code prints its init frame only after the first user frame, so a fork
-  that waited for the report first would never get one. A provider still reading
-  the source when the deadline passes has its process shut down and fenced, and
-  the source is released there — after the copy is stopped, before the fork's
-  handoff session starts — so a message sent after the deadline can never reach
-  something the fork shows. A queued message
+  is over. The copy has one absolute deadline, starting when the source's copy
+  gate opens: a slow start eats into the time left to confirm the copy instead
+  of earning a second budget, so the source's own backstop always stays a
+  little longer than the fence. The fork's first message is written before its
+  copy is waited on; a provider like Claude Code prints its init frame only
+  after the first user frame, so a fork that waited for the report first would
+  never get one. The copy is over when the fork reports its session, shows its
+  first real output (text, a tool call or a plan), or the startup fails. A
+  provider still reading the source when the deadline passes has its process
+  shut down and fenced, and the source is released there — after the copy is
+  stopped, before the fork's handoff session starts — so a message sent after
+  the deadline can never reach something the fork shows. If a Stop lands while
+  the native start is still booting, before the fork's prompt is written, there
+  is nothing to confirm: the copy session is shut down and the source released
+  at once rather than left holding the gate. A queued message
   that becomes active while a copy is pending waits for that gate in the
   background, never while holding the thread's session-switch lock: a Send that
   arrives once the queue has moved on is still answered at once. Only a thread
@@ -112,11 +120,16 @@ conversation over:
 - **Portable handoff.** For a harness with no native fork, a source that moved
   on, or a native fork that dies before it reports a session, h4rn starts a
   fresh session and sends a bounded handoff of the copied transcript ahead of
-  your exact request. The handoff selects the first request plus the newest
-  messages under the same byte budget as an import (`H4RN_HANDOFF_BYTES`, 16,000
-  by default, clamped to 1,024–64,000) and never shortens your own message. It
-  reads only the turns before the one it is starting, so a message queued while
-  the startup was pending is not sent twice when it is promoted.
+  your exact request. A native fork whose first answer is a failed result (a
+  real Claude Code `--resume <missing> --fork-session` prints an `is_error`
+  result after the prompt and exits 1) counts as a copy that died, not as a
+  failed turn: that same turn retries on the handoff, and later sends keep
+  using the fork's own session. The handoff selects the first request plus the
+  newest messages under the same byte budget as an import
+  (`H4RN_HANDOFF_BYTES`, 16,000 by default, clamped to 1,024–64,000) and never
+  shortens your own message. It reads only the turns before the one it is
+  starting, so a message queued while the startup was pending is not sent
+  twice when it is promoted.
 
 The native attempt is spent once. If it succeeds, the fork's session id becomes
 the fork's own; if it fails before starting, the fork records that and uses the
@@ -148,7 +161,9 @@ until you write.
 
 ## Publishing a fork
 
-Creating a fork publishes only the new thread's summary on the live feed. Its
-transcript is durable history and arrives through the same paged history as any
-other thread, so forking hundreds of turns never fills the event feed or makes a
-slow client miss a later completion on another thread.
+Creating a fork publishes only the new thread's summary on the live feed. The
+fork's handle exists before that summary is published, so a client that reacts
+to the summary can send to the fork at once. Its transcript is durable history
+and arrives through the same paged history as any other thread, so forking
+hundreds of turns never fills the event feed or makes a slow client miss a
+later completion on another thread.

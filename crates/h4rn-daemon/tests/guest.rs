@@ -3279,6 +3279,16 @@ impl h4rn_daemon::journal::Journal for PoolLessJournal {
         self.0.append_steer(meta, domain, wire, item_id).await
     }
 
+    async fn append_fork(
+        &self,
+        meta: &h4rn_daemon::journal::ThreadMeta,
+        domain: &[h4rn_core::ThreadEvent],
+        wire: &[Event],
+        steer_items: &[&str],
+    ) -> Result<Vec<u64>, h4rn_daemon::journal::JournalError> {
+        self.0.append_fork(meta, domain, wire, steer_items).await
+    }
+
     async fn append_wire(
         &self,
         thread_id: &ThreadId,

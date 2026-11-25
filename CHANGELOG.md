@@ -732,6 +732,23 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Fixed
 
+- **A Stop during a fork's native copy releases the source at once.** If the
+  stop landed after the native start returned but before the fork's prompt was
+  written, nothing confirmed or fenced the copy, so it kept the source's copy
+  gate until every later source Send waited out the 70-second backstop. The
+  unused copy is now shut down and the source released immediately.
+- **A native fork whose provider answers with a failed result falls back to the
+  handoff.** A real Claude Code fork of a missing session prints an `is_error`
+  result after the prompt and exits 1; that used to count as the copy finishing,
+  so the turn failed and later sends retried the same dead native fork. A failed
+  completion or an error before the copy reports a session is now the copy
+  dying: the same turn runs on the handoff and later sends keep the fork's own
+  session.
+- **A fork keeps its copied steers marked as steers.** The copy wrote the
+  steered rows without their journal marks, so a fork of that fork read them as
+  an older daemon's queued prompt and dropped them, and one more turn made the
+  fork refuse to fork at all. The marks are now written for the fork in the same
+  append as its copied transcript.
 - **A native fork starts by sending its own prompt.** Claude Code prints nothing
   for a natively forked session until the first user frame arrives, so waiting
   for its session report before writing the prompt made every Claude fork wait
