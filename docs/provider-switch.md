@@ -36,12 +36,17 @@ only fail after the switch, so it is not listed.
    new session normally. A message still waiting behind the running turn is not
    history: the handoff leaves every queued prompt out, by its recorded id, and
    those ids are kept durably until a provider accepts the prompt, so a restart
-   does not turn a queued message into history. A rate-limited write parks the
-   request you sent, not the prompt with its handoff block; the block is built
-   again for the next delivery instead of being wrapped twice. A turn is only
-   shown as done once that acceptance is durable (and the switch flag is
-   cleared), so the thread cannot look idle while the journal still calls your
-   request undelivered.
+   does not turn a queued message into history. That covers a message the daemon
+   promoted from the queue itself: if the provider never takes it, it stays
+   undelivered and out of the handoff, and a resend is carried once. A
+   rate-limited write parks the request you sent, not the prompt with its
+   handoff block; the block is built again for the next delivery instead of
+   being wrapped twice. A turn is only shown as done once that acceptance is
+   durable (and the switch flag is cleared), so the thread cannot look idle
+   while the journal still calls your request undelivered. That holds even when
+   the harness reports the turn and then exits: a prompt it accepted is not
+   settled before the journal has the acceptance, so a switch in that window
+   carries both the request and the reply.
 5. Each turn is metered against the harness and model that actually ran it.
 6. A recorded usage limit belonged to the old provider, so the switch clears
    it and its countdown leaves the sidebar and the phone inbox. An armed

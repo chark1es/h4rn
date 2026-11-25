@@ -708,6 +708,13 @@ All notable changes to h4rn are recorded here. The format follows
   catalogue. Previous Turn and Next Turn skip a switch divider and a user cue, and an imported
   conversation with no assistant turn still shows where it came from. See
   [docs/provider-switch.md](docs/provider-switch.md).
+- **A message promoted from the queue is delivered only once the provider takes it.** When the
+  daemon's own next turn comes from the queue and that write fails, the prompt no longer comes back
+  in the conversation handed to another harness, and a resend is carried once. A harness that
+  reports a finished turn and then exits cannot settle it before the journal records that it took
+  the prompt, so a switch in that window carries both the request and the reply. While that record
+  is being written the daemon waits for it instead of spinning a core, so a busy journal no longer
+  costs a busy core. See [docs/provider-switch.md](docs/provider-switch.md).
 - **A replaced transcript is offered as the new conversation it is.** When a
   session's path now holds a transcript with a different explicit session id, the
   scan offers it instead of hiding it behind the old path claim. The stored claim
