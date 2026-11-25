@@ -1637,6 +1637,37 @@ impl Journal for SqliteJournal {
         for turn in &mut turns {
             turn.native_turn_id = native.get(turn.turn_id.as_str()).cloned();
         }
+
+        // A daemon from before this round recorded a host loss as the domain
+        // event and an error row, but never the wire `TurnCompleted` that now
+        // ends the turn it lost. Without that row the turn reads as "started,
+        // never settled", which refuses a fork at it and at every later turn
+        // forever. The domain log still holds the evidence: a turn that had
+        // already started when a host loss was recorded, and which never
+        // reported its own end, ended with that loss. It is settled as
+        // interrupted here, exactly as a restart records it now.
+        let host_lost: Vec<DateTime<Utc>> = self
+            .read_domain(thread_id)
+            .await?
+            .into_iter()
+            .filter_map(|event| match event {
+                ThreadEvent::HostLost { at } => Some(at),
+                _ => None,
+            })
+            .collect();
+        if !host_lost.is_empty() {
+            for turn in &mut turns {
+                if turn.status.is_some() {
+                    continue;
+                }
+                let Some(started) = turn.started_at else {
+                    continue;
+                };
+                if host_lost.iter().any(|at| *at >= started) {
+                    turn.status = Some(h4rn_protocol::TurnStatus::Interrupted);
+                }
+            }
+        }
         Ok(turns)
     }
 

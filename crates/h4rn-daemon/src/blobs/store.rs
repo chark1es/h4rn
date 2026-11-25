@@ -184,12 +184,14 @@ pub trait AttachmentResolver: Send + Sync {
         ids: &[AttachmentId],
     ) -> Result<Vec<Attachment>, BlobError>;
 
-    /// Releases every retain [`Self::resolve`] took for `thread_id`.
+    /// Undoes every retain [`Self::resolve`] took for `thread_id`, including
+    /// the per-thread files it materialised.
     ///
     /// A fork adopts its attachments all or nothing: the daemon resolves them
     /// for the new thread before the thread is journaled, so a failure part way
-    /// through has to leave nothing behind. Releasing an id this thread never
-    /// retained is a no-op, which lets a rollback name the whole batch.
+    /// through — or a failed journal append — has to leave nothing behind.
+    /// Releasing an id this thread never retained is a no-op, which lets a
+    /// rollback name the whole batch.
     async fn release(&self, thread_id: &ThreadId, ids: &[AttachmentId]) -> Result<(), BlobError>;
 }
 
@@ -771,9 +773,33 @@ impl AttachmentResolver for BlobStore {
     }
 
     async fn release(&self, thread_id: &ThreadId, ids: &[AttachmentId]) -> Result<(), BlobError> {
+        let directory = self.attachments_root.join(thread_id.as_str());
         for id in ids {
+            // The per-thread copy is named after the id's own prefix and the
+            // blob's name; resolve it before the row can be released, and fall
+            // back to the prefix when the blob itself is already gone.
+            let name = self.info(id).await.ok().map(|info| info.name);
             BlobStore::release(self, thread_id, id).await?;
+            let prefix: String = id.as_str().chars().take(8).collect();
+            let prefix = format!("{prefix}-");
+            match name {
+                Some(name) => {
+                    let _ = std::fs::remove_file(directory.join(format!("{prefix}{name}")));
+                }
+                None => {
+                    if let Ok(entries) = std::fs::read_dir(&directory) {
+                        for entry in entries.flatten() {
+                            if entry.file_name().to_string_lossy().starts_with(&prefix) {
+                                let _ = std::fs::remove_file(entry.path());
+                            }
+                        }
+                    }
+                }
+            }
         }
+        // The directory only exists for this batch: a rollback leaves no empty
+        // shell behind.
+        let _ = std::fs::remove_dir(&directory);
         Ok(())
     }
 }

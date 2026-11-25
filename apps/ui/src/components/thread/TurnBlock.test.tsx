@@ -2,8 +2,8 @@ import { readFileSync } from "node:fs";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
-import type { ThreadSummary, Usage } from "@/gen";
-import type { StreamTurn } from "@/lib/store/projection";
+import type { Event, ThreadSummary, Usage } from "@/gen";
+import { createThreadLog, foldEvent, type StreamTurn } from "@/lib/store/projection";
 import { TurnBlock } from "./TurnBlock";
 
 const usage: Usage = {
@@ -99,6 +99,65 @@ describe("TurnBlock", () => {
 
   it("leaves a running user turn without a stopped notice", () => {
     expect(render(userOnlyTurn("running"))).not.toContain("Stopped:");
+  });
+
+  it("shows a copied import as finished history, never as an interrupted turn", () => {
+    const threadId = "thread_import";
+    const turnId = "turn_import";
+    const events: Event[] = [
+      {
+        type: "turn_started",
+        thread_id: threadId,
+        turn_id: turnId,
+        started_at: "2026-08-24T09:00:00.000Z",
+      },
+      {
+        type: "item_completed",
+        thread_id: threadId,
+        turn_id: turnId,
+        item: {
+          kind: "message",
+          item_id: "import_prompt",
+          role: "user",
+          text: "an earlier request",
+          attachments: [],
+        },
+        at: "2026-08-24T09:00:00.000Z",
+      },
+      {
+        type: "item_completed",
+        thread_id: threadId,
+        turn_id: turnId,
+        item: {
+          kind: "message",
+          item_id: "import_reply",
+          role: "assistant",
+          text: "the newest reply",
+          attachments: [],
+        },
+        at: "2026-08-24T09:05:00.000Z",
+      },
+      // A fork of an imported conversation keeps the finished status: the
+      // copied turn has no completion of its own in the source, and the
+      // daemon records it as completed.
+      {
+        type: "turn_completed",
+        thread_id: threadId,
+        turn_id: turnId,
+        usage,
+        status: "completed",
+      },
+    ];
+    let log = createThreadLog();
+    for (const event of events) log = foldEvent(log, event);
+    const turn = log.turns.find((candidate) => candidate.id === turnId);
+    expect(turn?.imported).toBe(true);
+    expect(turn?.status).toBe("completed");
+    if (!turn) throw new Error("the copied turn is in the projection");
+    const markup = render(turn);
+    expect(markup).toContain("the newest reply");
+    expect(markup).not.toContain("The turn was interrupted");
+    expect(markup).not.toContain("Nothing after this ran.");
   });
 
   it("shows plan steps and their status quietly", () => {

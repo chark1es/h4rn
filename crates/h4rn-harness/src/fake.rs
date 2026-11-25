@@ -62,6 +62,17 @@ impl EventSink {
             }
         }
     }
+
+    /// Whether the reader of this stream is gone.
+    ///
+    /// A detached sender can still hold the channel open after the daemon
+    /// fenced the session; this is how that task knows its result is discarded.
+    fn is_closed(&self) -> bool {
+        match self {
+            Self::Unbounded(sender) => sender.is_closed(),
+            Self::Bounded(sender) => sender.is_closed(),
+        }
+    }
 }
 
 /// A test-only failure a fake session reports instead of answering a prompt.
@@ -315,6 +326,15 @@ pub struct FakeHarness {
     start_gate_after: Option<usize>,
     /// Startups seen so far, so [`Self::start_gate_after`] can count.
     starts_seen: Arc<AtomicUsize>,
+    /// A test-only latch before a started session reports `SessionStarted`.
+    ///
+    /// `start_session` returns first, as a provider that spawns its child and
+    /// reads the source afterwards does; the report — and the native copy it
+    /// confirms — waits on this latch.
+    session_started_gate: Option<Gate>,
+    /// When set with [`Self::session_started_gate`], only startups from this
+    /// index on wait on it (0-based). `None` gates every startup.
+    session_started_gate_after: Option<usize>,
     /// A test-only message: after the start gate, `start_session` fails.
     start_failure: Option<String>,
     /// A test-only message: a startup asked to resume fails with it, while a
@@ -773,6 +793,8 @@ impl Default for FakeHarness {
             start_gate: None,
             start_gate_after: None,
             starts_seen: Arc::new(AtomicUsize::new(0)),
+            session_started_gate: None,
+            session_started_gate_after: None,
             start_failure: None,
             resume_failure: None,
             resume_death: None,
@@ -931,6 +953,21 @@ impl FakeHarness {
         let gate = Gate::new();
         self.start_gate = Some(gate.clone());
         self.start_gate_after = Some(starts);
+        (self, gate)
+    }
+
+    /// Holds the `SessionStarted` report of every startup after the first
+    /// `starts`, until the gate is released.
+    ///
+    /// Unlike [`Self::with_start_gate_after`], `start_session` still returns at
+    /// once: this models a provider whose child is up before it has read the
+    /// source, so the copy is only confirmed when the report arrives. The fake
+    /// takes its native copy of the source at that same moment, exactly as such
+    /// a provider would.
+    pub fn with_session_started_gate_after(mut self, starts: usize) -> (Self, Gate) {
+        let gate = Gate::new();
+        self.session_started_gate = Some(gate.clone());
+        self.session_started_gate_after = Some(starts);
         (self, gate)
     }
 
@@ -1428,12 +1465,6 @@ impl Harness for FakeHarness {
                 .clone()
                 .unwrap_or_else(|| format!("fake-{}", uuid_like(&spec.workspace)))
         };
-        // A native fork copies the source conversation through the turn it
-        // was bound to, exactly as a provider would.
-        let native_fork_context = self
-            .native_sessions
-            .as_ref()
-            .and_then(|sessions| sessions.copy_for_fork(&spec));
         let dies_on_start = self
             .native_fork_death
             .as_ref()
@@ -1444,6 +1475,10 @@ impl Harness for FakeHarness {
                     .filter(|_| spec.resume_id.is_some())
             })
             .cloned();
+        let started_gate = self.session_started_gate.as_ref().filter(|_| {
+            self.session_started_gate_after
+                .is_none_or(|after| starts_seen >= after)
+        });
         if let Some(message) = &dies_on_start {
             // The adapter returned `Ok` and the agent then exited before it
             // reported a session. Its stream carries only that death and then
@@ -1456,7 +1491,42 @@ impl Harness for FakeHarness {
                     reset_at: None,
                 })
                 .await;
+        } else if let Some(gate) = started_gate {
+            // The child is up, but the provider has not read the source yet.
+            // The copy is taken when the report is about to be sent; a report
+            // whose stream is already gone (the daemon fenced this session)
+            // confirms nothing and records no copy.
+            let gate = gate.clone();
+            let sender = sender.clone();
+            let sessions = self.native_sessions.clone();
+            let spec = spec.clone();
+            let reported_id = session_id.clone();
+            tokio::spawn(async move {
+                gate.wait().await;
+                if sender.is_closed() {
+                    // The daemon fenced this session, so this copy is never
+                    // used and nothing about it is recorded.
+                    return;
+                }
+                let context = sessions
+                    .as_ref()
+                    .and_then(|sessions| sessions.copy_for_fork(&spec));
+                sender
+                    .send(HarnessEvent::SessionStarted {
+                        session_id: reported_id.clone(),
+                    })
+                    .await;
+                if let (Some(sessions), Some(context)) = (&sessions, context) {
+                    sessions.note_fork(&spec, &reported_id, context);
+                }
+            });
         } else {
+            // A native fork copies the source conversation through the turn it
+            // was bound to, exactly as a provider would.
+            let native_fork_context = self
+                .native_sessions
+                .as_ref()
+                .and_then(|sessions| sessions.copy_for_fork(&spec));
             sender
                 .send(HarnessEvent::SessionStarted {
                     session_id: session_id.clone(),

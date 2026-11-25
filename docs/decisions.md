@@ -1815,14 +1815,19 @@ the events that showed it with each record's own time and in the journal's own
 sequence: messages with their attachments, tool calls, delegated rows, plans,
 error and usage-limit rows, and a reply that only ever streamed. Only a turn the
 journal has evidence ended can be forked: copied history, or a turn it saw start
-and saw end (interrupted counts). A prompt whose turn never started — queued at
-the crash, or lost with it — is not a turn: it is left out of a later turn's
-copy and cannot itself be forked, so a fork at a later turn never inherits it.
-The source's active turn and any message still waiting in its queue are refused,
-and a turn that started without settling refuses the fork the same way. A
-message queued behind a running turn is its own turn with its own id from the
-moment it arrives, so forking the running turn cannot copy it. The source is
-only read.
+and saw end (interrupted counts). An older journal recorded a host loss as the
+domain event and an error row without the wire completion that now ends the turn
+it lost; that stored loss is evidence too, so the turn beside it reads as
+interrupted and the turns after it stay forkable. A prompt whose turn never
+started — queued at the crash, or lost with it — is not a turn: it is left out
+of a later turn's copy and cannot itself be forked, so a fork at a later turn
+never inherits it. The source's active turn and any message still waiting in its
+queue are refused, and a turn that started without settling refuses the fork the
+same way. A message queued behind a running turn is its own turn with its own id
+from the moment it arrives, so forking the running turn cannot copy it. An
+imported turn has no completion of its own: it was already finished when it was
+written, so a copy of it stays completed rather than being mistaken for an
+interruption. The source is only read.
 
 The first message continues the conversation one of two ways. A native fork is
 a copy of the provider's own conversation, so it must be bounded to the chosen
@@ -1835,13 +1840,17 @@ the chosen turn is still the source session's tip, re-checked under the
 source's record lock when the fork starts. That check opens a per-source gate
 before the lock is released: the source's next dispatch waits until the fork
 reports `SessionStarted`, its startup fails, or the copy's own deadline passes,
-so a message sent in that window cannot be read into the copy. The source's Send
-is answered at once — its turn and prompt are already durable — and only its
-dispatch waits, so the UI's deadline never reports a failure for a prompt that
-will run. The deadline belongs to the copy, not the source: a provider still
-reading the source after it is abandoned, any session it produces is shut down
-without being used, the fork switches to the handoff, and only then is the source
-released. Each startup claims the thread's one session slot (its generation)
+so a message sent in that window cannot be read into the copy. The deadline
+covers the whole copy, not just the child starting: a provider returns from its
+start once the process is up and reads the source afterwards, so the copy is only
+confirmed by that report. A provider still reading the source when the deadline
+passes has its process shut down, any session it produces is discarded without
+being used, the fork switches to the handoff, and only then is the source
+released. The source's Send is answered at once — its turn and prompt are already
+durable — and only its dispatch waits, in the background delivery, never while
+holding the per-thread switch lock, so the UI's deadline never reports a failure
+for a prompt that will run and a Send after the queue moved on is still answered
+at once. Each startup claims the thread's one session slot (its generation)
 before anything slow is awaited, and a gate hold is owned by that generation, so
 a second startup spawned for the same fork can neither copy nor release the
 source's gate. A session id is offered only by a thread that started that
@@ -1860,17 +1869,22 @@ An older journal filed a queued prompt under the running turn. The replay gives
 it to the next turn that starts and has no prompt of its own; a turn that already
 has one never inherits it. A held prompt that never became a turn is shown in no
 copy, and the fork at that point or later is refused with a clear message rather
-than copying a transcript that silently drops a row the source showed. The same
-rule runs in the client projection, where such a prompt's row is given no turn
-to fork.
+than copying a transcript that silently drops a row the source showed; that
+refusal advises forking from an earlier turn or starting a new thread, because no
+later fork point can include the lost row. The same rule runs in the client
+projection, where such a prompt's row is given no turn to fork.
 
 A fork's attachment blobs are adopted all or nothing: every blob is resolved for
 the new thread before it is journaled, and a failure rolls back every retain the
-attempt made and fails the fork. A transcript that pointed at the source's files,
-or at half its attachments, is not a fork. Only the new thread's summary is
-published on the live feed; the copied transcript is durable history read through
-the ordinary paged replay, so a long fork cannot fill the feed and stall other
-threads. Lineage is a `forked_from { thread_id, turn_id }` in the thread row,
+attempt made — and the per-thread files it materialised — and fails the fork. A
+journal append that fails after adoption rolls back the same way. A transcript
+that pointed at the source's files, or at half its attachments, is not a fork.
+Only the new thread's summary is published on the live feed, in the same append
+lock scope as the copy, so no event with a later sequence can be delivered before
+it and make a client drop it as stale; the copied transcript is durable history
+read through the ordinary paged replay, so a long fork cannot fill the feed and
+stall other threads. Lineage is a `forked_from { thread_id, turn_id }` in the
+thread row,
 projected on the summary; the origin title is read from the thread list so a
 rename needs no rewrite. No cascade exists in either direction, so deleting or
 archiving the source cannot take the fork with it. A fork in a worktree keeps the

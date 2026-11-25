@@ -15,10 +15,13 @@ waiting to run, is refused with a message to let it finish first.
 
 A turn is offered only on the journal's evidence that it ended: it was copied
 from a finished conversation, or the daemon saw it start and saw it end (a
-restart records the turn it lost as interrupted). A prompt that never started
-is not a turn: it is left out of a later turn's copy and cannot itself be
-forked. A turn that started but never settled — with a later turn behind it —
-is refused rather than copied half-written.
+restart records the turn it lost as interrupted). A turn whose run a restart
+interrupted is read the same way even from an older journal that stored the host
+loss without the turn's completion row: the loss itself is the evidence, so the
+turn beside it is interrupted and the turns after it stay forkable. A prompt that
+never started is not a turn: it is left out of a later turn's copy and cannot
+itself be forked. A turn that started but never settled — with a later turn
+behind it — is refused rather than copied half-written.
 
 The fork keeps:
 
@@ -39,11 +42,14 @@ The fork keeps:
 - the turn's own completion: its token usage, its file-change list for the
   "N files changed" card, and its real status. A turn the daemon lost to a
   restart copies as **interrupted**; copied history was already finished and
-  stays finished;
+  stays finished, so an imported turn — which has no completion row of its own —
+  copies as **completed**;
 - its own copy of every attachment blob. The fork retains the blob and gets its
   own per-thread file, so deleting the source never removes a file the fork
   still shows. Adoption is all or nothing: if any attachment is gone, the fork
-  is refused with a message, and every retain it already made is rolled back.
+  is refused with a message, and every retain it already made is rolled back,
+  together with the per-thread files it materialised. A journal write that fails
+  after adoption rolls back the same way.
 
 A queued message is its own turn from the moment it arrives; it is never part of
 the turn it waits behind, and a fork at that turn does not copy it. A turn
@@ -55,7 +61,9 @@ has no prompt of its own. A prompt that never became a turn — the daemon stopp
 before it could run — is never attached to a later turn that already has its
 own. Its row cannot name a real turn, so no fork is offered from it, and a fork
 at that point or any later one is refused with a clear message instead of
-copying a transcript the source did not have.
+copying a transcript the source did not have. That refusal has its own advice —
+**Fork from an earlier turn or start a new thread** — rather than the generic
+"wait for the turn" note.
 
 The original thread is read, never changed. Deleting, archiving or settling it
 afterwards does not affect the fork.
@@ -78,11 +86,17 @@ conversation over:
   While that provider reads the source's saved session, the source's next message
   is accepted at once — it already has its turn and its durable row — but it
   cannot reach the harness until the copy is over. The copy is over when
-  the fork reports its session or the startup fails. The copy has its own
-  deadline: a provider still reading the source after it is abandoned, any
-  session it produces later is shut down without being used, and the fork
+  the fork reports its session or the startup fails. The deadline covers the
+  whole copy, not just the child starting: a provider returns from its start as
+  soon as the process is up and only then reads the source, so the fork holds
+  the source's gate until that provider reports its new session. A provider
+  still reading the source when the deadline passes has its process shut down,
+  any session it produces later is discarded without being used, and the fork
   continues on the handoff. Only then is the source released, so a message sent
-  after the deadline can never reach something the fork shows. Only a thread
+  after the deadline can never reach something the fork shows. A queued message
+  that becomes active while a copy is pending waits for that gate in the
+  background, never while holding the thread's session-switch lock: a Send that
+  arrives once the queue has moved on is still answered at once. Only a thread
   that started a session of its own offers its session id: a fork that has not
   sent anything yet still points at the conversation it was made from, so a
   fork of that fork uses the handoff instead. If the source has moved on by
