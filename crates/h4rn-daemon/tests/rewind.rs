@@ -45,6 +45,10 @@ impl AttachmentResolver for TestAttachments {
             })
             .collect())
     }
+
+    async fn release(&self, _thread_id: &ThreadId, _ids: &[AttachmentId]) -> Result<(), BlobError> {
+        Ok(())
+    }
 }
 
 struct Fixture {

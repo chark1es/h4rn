@@ -2247,6 +2247,40 @@ export async function createThread(input: CreateThreadInput): Promise<boolean> {
   }
 }
 
+/**
+ * Forks one thread at a finished turn and opens the new thread.
+ *
+ * The daemon copies the source transcript; the client only records the row it
+ * returns (an event for the same thread may already have arrived) and loads the
+ * fork's history through the ordinary thread route. A refusal — a turn still
+ * running or queued — names its recovery in the toast.
+ */
+export async function forkThread(threadId: ThreadId, turnId: string): Promise<boolean> {
+  try {
+    const response = await getClient().request({
+      type: "fork_thread",
+      thread_id: threadId,
+      turn_id: turnId,
+    });
+    if (response.type !== "thread_forked") return false;
+    const state = getState();
+    setState({
+      ...state,
+      threads: { ...state.threads, [response.thread_id]: response.summary },
+    });
+    openThread(response.thread_id);
+    return true;
+  } catch (error) {
+    const proto = toProtoError(error);
+    pushToast({
+      variant: "error",
+      title: "Couldn't fork that turn.",
+      description: proto.hint ? `${proto.message} ${proto.hint}` : proto.message,
+    });
+    return false;
+  }
+}
+
 export async function refreshHosts(): Promise<void> {
   try {
     const response = await getClient().request({ type: "list_hosts" });

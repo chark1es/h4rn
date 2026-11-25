@@ -5,6 +5,8 @@ import {
   CircleIcon,
   ClockIcon,
   CornerDownLeftIcon,
+  GitForkIcon,
+  MoreHorizontalIcon,
   PauseIcon,
   PencilLineIcon,
 } from "lucide-react";
@@ -12,13 +14,21 @@ import type { ReactNode } from "react";
 
 import { AgentGlyph } from "@/components/agent/AgentGlyph";
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { MessageAttachments } from "@/features/attachments/MessageAttachments";
 import { ChangeSetCard } from "@/features/changes/ChangeSetCard";
 import type { PlanStep, ThreadSummary } from "@/gen";
 import { useSmoothText } from "@/hooks/use-smooth-text";
 import { agentStateIsActive, glyphForAgentState } from "@/lib/agent";
 import { harnessLabel, harnessSeed } from "@/lib/entities";
+import { forkableTurn } from "@/lib/fork";
 import { absoluteTime, countdown } from "@/lib/format";
+import { forkThread } from "@/lib/store/appStore";
 import type {
   DelegatedItem,
   HarnessSwitchItem,
@@ -37,16 +47,44 @@ function AssistantMessage({ item, streaming }: { item: MessageItem; streaming: b
   return <Markdown text={text} interceptHtmlLinks />;
 }
 
+function TurnMenu({
+  threadId,
+  turnId,
+  label,
+}: {
+  threadId: string;
+  turnId: string;
+  label: string;
+}) {
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <button type="button" className="q-turn-menu" aria-label={label} title={label}>
+          <MoreHorizontalIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="w-44">
+        <DropdownMenuItem onSelect={() => void forkThread(threadId, turnId)}>
+          <GitForkIcon aria-hidden />
+          Fork from here
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
 function UserMessage({
   item,
   at,
   onEdit,
   editDisabledReason = null,
+  fork,
 }: {
   item: MessageItem;
   at: string;
   onEdit?: ((item: MessageItem) => void) | undefined;
   editDisabledReason?: string | null | undefined;
+  fork?: { threadId: string; turnId: string; label: string } | undefined;
 }) {
   return (
     <div className="q-turn q-you-msg">
@@ -66,6 +104,7 @@ function UserMessage({
             Edit from here
           </button>
         ) : null}
+        {fork ? <TurnMenu {...fork} /> : null}
       </div>
     </div>
   );
@@ -203,6 +242,7 @@ function Item({ item, threadId }: { item: TurnItem; threadId: string }) {
 
 export function TurnBlock({
   turn,
+  turns,
   threadId,
   summary,
   onReply,
@@ -211,6 +251,8 @@ export function TurnBlock({
   staleAt = null,
 }: {
   turn: StreamTurn;
+  /** Every row in the stream, so a cue can look up the turn it belongs to. */
+  turns: StreamTurn[];
   threadId: string;
   summary: ThreadSummary;
   /** Focus the composer so the person can reply to a stopped or failed turn. */
@@ -238,6 +280,7 @@ export function TurnBlock({
     turn.status === "running" && !turn.imported && agentStateIsActive(summary.agent_state);
   const stopped = stoppedNotice(turn.status);
   const failed = turn.status === "failed" || turn.status === "interrupted";
+  const forkTurnId = forkableTurn(turn, turns);
   const turnHarness = turn.harness ?? summary.harness;
 
   if (turn.divider) {
@@ -260,6 +303,15 @@ export function TurnBlock({
             at={turn.startedAt}
             onEdit={item.itemId === cueItemId ? onEditFromHere : undefined}
             editDisabledReason={editDisabledReason}
+            fork={
+              forkTurnId
+                ? {
+                    threadId,
+                    turnId: forkTurnId,
+                    label: "Fork from this turn",
+                  }
+                : undefined
+            }
           />
         ))}
         {stopped !== null ? (
@@ -325,6 +377,9 @@ export function TurnBlock({
         <span>on {summary.host}</span>
         <span>·</span>
         <span className="q-num">{absoluteTime(turn.startedAt)}</span>
+        {forkTurnId ? (
+          <TurnMenu threadId={threadId} turnId={forkTurnId} label="Turn actions" />
+        ) : null}
       </div>
 
       {content}

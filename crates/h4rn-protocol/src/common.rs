@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use ts_rs::TS;
 
-use crate::ids::{DeviceId, HostId, SubagentId, ThreadId};
+use crate::ids::{DeviceId, HostId, SubagentId, ThreadId, TurnId};
 use crate::rewind::RewindMethod;
 use crate::subagents::SubagentState;
 
@@ -370,6 +370,18 @@ impl Usage {
     }
 }
 
+/// Where a thread was forked from.
+///
+/// Only the ids are recorded: the origin title is read from the thread list,
+/// so a rename of the source shows in every fork without rewriting them.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct ForkRef {
+    /// Thread the fork was copied from.
+    pub thread_id: ThreadId,
+    /// Turn the fork's transcript ends at, inclusive.
+    pub turn_id: TurnId,
+}
+
 /// A thread as projected for the list pane.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 pub struct ThreadSummary {
@@ -412,6 +424,13 @@ pub struct ThreadSummary {
     #[serde(default)]
     #[ts(optional)]
     pub project_path: Option<String>,
+    /// Thread and turn this thread was forked from, when it was.
+    ///
+    /// A fork is otherwise an ordinary thread and holds no live state of its
+    /// source, so the origin disappearing never affects it.
+    #[serde(default)]
+    #[ts(optional)]
+    pub forked_from: Option<ForkRef>,
     /// Current git branch of the workspace, when it has one.
     #[serde(default)]
     #[ts(optional)]
@@ -919,6 +938,7 @@ mod tests {
             title: "usage limit".into(),
             workspace_path: "/tmp/work".into(),
             project_path: None,
+            forked_from: None,
             branch: Some("h4rn/usage-limit".into()),
             model: "claude-sonnet-5".into(),
             runtime_mode: RuntimeMode::ApprovalRequired,

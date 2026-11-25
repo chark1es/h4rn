@@ -5,7 +5,7 @@
 //! projection or lifecycle test needs, and lets a test assert the daemon's
 //! response to any event sequence without a child process.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -63,6 +63,17 @@ impl EventSink {
             Self::Bounded(sender) => {
                 let _ = sender.clone().send(event).await;
             }
+        }
+    }
+
+    /// Whether the reader of this stream is gone.
+    ///
+    /// A detached sender can still hold the channel open after the daemon
+    /// fenced the session; this is how that task knows its result is discarded.
+    fn is_closed(&self) -> bool {
+        match self {
+            Self::Unbounded(sender) => sender.is_closed(),
+            Self::Bounded(sender) => sender.is_closed(),
         }
     }
 }
@@ -161,6 +172,133 @@ impl EventInjector {
     }
 }
 
+/// One provider turn a fake session ran.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NativeTurn {
+    /// The provider's own turn id.
+    pub turn_id: String,
+    /// The prompt that turn carried.
+    pub prompt: String,
+}
+
+/// The source conversation one native fork copied, as the fake saw it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NativeForkCopy {
+    /// Session the fork was told to copy, when it named one.
+    pub source_session: Option<String>,
+    /// Provider turn it was told to stop at, inclusive.
+    pub bound_turn: Option<String>,
+    /// The prompts its context held after the copy.
+    pub context: Vec<String>,
+}
+
+/// The provider conversations a fake harness kept, so tests can read back what
+/// a native fork really carried.
+///
+/// A real provider copies its own conversation; the fake records each prompt
+/// under the session it ran in, hands a fork the turns through `lastTurnId`
+/// when one was named, and reports its own turn ids. That is enough for a
+/// daemon test to prove a fork's agent context stops at the chosen turn.
+#[derive(Clone, Debug, Default)]
+pub struct NativeSessions(Arc<Mutex<NativeSessionState>>);
+
+#[derive(Debug, Default)]
+struct NativeSessionState {
+    /// Provider session id -> the turns it ran, oldest first.
+    conversations: HashMap<String, Vec<NativeTurn>>,
+    /// Every native fork this fake was asked to start, in order.
+    forks: Vec<NativeForkCopy>,
+    /// Turns handed out so far, so ids never repeat.
+    turns: usize,
+}
+
+impl NativeSessions {
+    /// The next provider turn id this fake would report.
+    fn next_turn_id(&self) -> String {
+        let mut state = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.turns += 1;
+        format!("provider-turn-{}", state.turns)
+    }
+
+    /// Records one prompt under the session that ran it.
+    fn record_prompt(&self, session: &str, turn_id: &str, prompt: &str) {
+        let mut state = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state
+            .conversations
+            .entry(session.to_string())
+            .or_default()
+            .push(NativeTurn {
+                turn_id: turn_id.to_string(),
+                prompt: prompt.to_string(),
+            });
+    }
+
+    /// The turns a fork of `spec` would copy, when it is a native fork.
+    fn copy_for_fork(&self, spec: &SessionSpec) -> Option<Vec<NativeTurn>> {
+        if !spec.native_fork {
+            return None;
+        }
+        let state = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut turns = spec
+            .resume_id
+            .as_ref()
+            .and_then(|session| state.conversations.get(session))
+            .cloned()
+            .unwrap_or_default();
+        if let Some(bound) = spec.native_fork_turn.as_deref() {
+            match turns.iter().position(|turn| turn.turn_id == bound) {
+                Some(index) => turns.truncate(index + 1),
+                // A provider that cannot find the named turn copies nothing.
+                None => turns.clear(),
+            }
+        }
+        Some(turns)
+    }
+
+    /// Records the copy and seeds the new session's conversation with it.
+    fn note_fork(&self, spec: &SessionSpec, session: &str, context: Vec<NativeTurn>) {
+        let mut state = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.forks.push(NativeForkCopy {
+            source_session: spec.resume_id.clone(),
+            bound_turn: spec.native_fork_turn.clone(),
+            context: context.iter().map(|turn| turn.prompt.clone()).collect(),
+        });
+        state.conversations.insert(session.to_string(), context);
+    }
+
+    /// Every native fork this fake started, in order.
+    pub fn forks(&self) -> Vec<NativeForkCopy> {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .forks
+            .clone()
+    }
+
+    /// The prompts one provider session holds, oldest first.
+    pub fn context(&self, session: &str) -> Vec<String> {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .conversations
+            .get(session)
+            .map(|turns| turns.iter().map(|turn| turn.prompt.clone()).collect())
+            .unwrap_or_default()
+    }
+}
+
 /// A fake harness adapter.
 #[derive(Clone, Debug)]
 pub struct FakeHarness {
@@ -199,6 +337,23 @@ pub struct FakeHarness {
     start_gate_after: Option<usize>,
     /// Startups seen so far, so [`Self::start_gate_after`] can count.
     starts_seen: Arc<AtomicUsize>,
+    /// A test-only latch before a started session reports `SessionStarted`.
+    ///
+    /// `start_session` returns first, as a provider that spawns its child and
+    /// reads the source afterwards does; the report — and the native copy it
+    /// confirms — waits on this latch.
+    session_started_gate: Option<Gate>,
+    /// When set with [`Self::session_started_gate`], only startups from this
+    /// index on wait on it (0-based). `None` gates every startup.
+    session_started_gate_after: Option<usize>,
+    /// Reports `SessionStarted` only after the daemon writes the fork's first
+    /// prompt, the way Claude Code prints its init frame only after the first
+    /// user frame.
+    ///
+    /// A native fork with this set returns from `start_session` with nothing on
+    /// its stream: the report — and the copy it confirms — waits for that write,
+    /// exactly like the real CLI with stdin open and no prompt.
+    session_started_on_first_send: bool,
     /// A test-only message: after the start gate, `start_session` fails.
     start_failure: Option<String>,
     /// A test-only message: a startup asked to resume fails with it, while a
@@ -208,12 +363,31 @@ pub struct FakeHarness {
     /// before it reports a session, the way a real adapter's bad `--resume`
     /// fails after `start_session` returned `Ok`.
     resume_death: Option<String>,
+    /// A test-only message: a startup asked to fork a native session starts
+    /// and then dies before it reports a new session, the way a provider that
+    /// cannot find the source conversation fails after the spawn.
+    native_fork_death: Option<String>,
+    /// What this fake advertises for [`Harness::native_fork_scope`].
+    ///
+    /// A test picks `None` to model a harness with no native fork at all, or
+    /// one of the two scopes to exercise how far its fork reaches.
+    native_fork_scope: Option<crate::NativeFork>,
+    /// The provider conversations this fake kept, when a test asked for them.
+    ///
+    /// It is what makes a native fork observable: the fake reports its own turn
+    /// ids, records each prompt under the session it ran in, and a fork copies
+    /// only the turns through the bound id, exactly as a real provider would.
+    native_sessions: Option<NativeSessions>,
     /// How many startups fail before one succeeds; `None` fails every one.
     start_failure_budget: Option<usize>,
     /// Startups attempted so far, so a budget can count down.
     start_attempts: Option<Arc<AtomicUsize>>,
     /// The model of every session this harness actually started.
     session_models: Option<SessionModels>,
+    /// Every startup's resume and fork intent, when a test asked for it.
+    session_starts: Option<SessionStarts>,
+    /// Every prompt a session was asked to write, when a test asked for it.
+    sent_prompts: Option<SentPrompts>,
     /// A test-only latch between a `send`'s prompt and its completion.
     completion_gate: Option<Gate>,
     /// Whether the completion gate also holds the session's first send. Off
@@ -477,6 +651,45 @@ impl SessionModels {
     }
 }
 
+/// One session startup a test can inspect.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StartSpec {
+    /// The native session the startup asked to resume, when it did.
+    pub resume_id: Option<String>,
+    /// Whether the startup asked to fork that session.
+    pub native_fork: bool,
+    /// The provider turn it asked the fork to stop at, when it named one.
+    pub native_fork_turn: Option<String>,
+}
+
+/// The session startups one fake harness saw, in order.
+#[derive(Clone, Debug, Default)]
+pub struct SessionStarts(Arc<Mutex<Vec<StartSpec>>>);
+
+impl SessionStarts {
+    /// Every startup so far, oldest first.
+    pub fn get(&self) -> Vec<StartSpec> {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+}
+
+/// The prompts one fake harness was asked to write, in order.
+#[derive(Clone, Debug, Default)]
+pub struct SentPrompts(Arc<Mutex<Vec<String>>>);
+
+impl SentPrompts {
+    /// Every prompt written so far, oldest first.
+    pub fn get(&self) -> Vec<String> {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+}
+
 /// One setting change a fake thread went through.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SettingChange {
@@ -661,12 +874,20 @@ impl Default for FakeHarness {
             start_gate: None,
             start_gate_after: None,
             starts_seen: Arc::new(AtomicUsize::new(0)),
+            session_started_gate: None,
+            session_started_gate_after: None,
+            session_started_on_first_send: false,
             start_failure: None,
             resume_failure: None,
             resume_death: None,
+            native_fork_death: None,
+            native_fork_scope: Some(crate::NativeFork::LatestOnly),
+            native_sessions: None,
             start_failure_budget: None,
             start_attempts: None,
             session_models: None,
+            session_starts: None,
+            sent_prompts: None,
             session_settings: None,
             session_mcp: None,
             advertised_models: None,
@@ -842,6 +1063,21 @@ impl FakeHarness {
         (self, gate)
     }
 
+    /// Reports a native fork's session only after the daemon writes its first
+    /// prompt.
+    ///
+    /// Claude Code prints nothing for a natively forked session until the first
+    /// user frame arrives, so a fork that waits for `SessionStarted` before it
+    /// writes the prompt waits forever. The copy is taken at that write — the
+    /// moment the provider really reads the source — and confirmed by the
+    /// report that follows it. A [`Self::with_session_started_gate_after`]
+    /// latch still holds the report after the write when a test wants to
+    /// inspect the window.
+    pub fn with_session_started_on_first_send(mut self) -> Self {
+        self.session_started_on_first_send = true;
+        self
+    }
+
     /// Holds every startup after the first `starts` until the gate is released.
     ///
     /// A test uses this to keep a replacement session from booting while it
@@ -851,6 +1087,21 @@ impl FakeHarness {
         let gate = Gate::new();
         self.start_gate = Some(gate.clone());
         self.start_gate_after = Some(starts);
+        (self, gate)
+    }
+
+    /// Holds the `SessionStarted` report of every startup after the first
+    /// `starts`, until the gate is released.
+    ///
+    /// Unlike [`Self::with_start_gate_after`], `start_session` still returns at
+    /// once: this models a provider whose child is up before it has read the
+    /// source, so the copy is only confirmed when the report arrives. The fake
+    /// takes its native copy of the source at that same moment, exactly as such
+    /// a provider would.
+    pub fn with_session_started_gate_after(mut self, starts: usize) -> (Self, Gate) {
+        let gate = Gate::new();
+        self.session_started_gate = Some(gate.clone());
+        self.session_started_gate_after = Some(starts);
         (self, gate)
     }
 
@@ -912,6 +1163,50 @@ impl FakeHarness {
         let models = SessionModels::default();
         self.session_models = Some(models.clone());
         (self, models)
+    }
+
+    /// Records each startup's resume id and native-fork intent.
+    pub fn with_session_starts(mut self) -> (Self, SessionStarts) {
+        let starts = SessionStarts::default();
+        self.session_starts = Some(starts.clone());
+        (self, starts)
+    }
+
+    /// Records every prompt the daemon writes to a session.
+    pub fn with_sent_prompts(mut self) -> (Self, SentPrompts) {
+        let prompts = SentPrompts::default();
+        self.sent_prompts = Some(prompts.clone());
+        (self, prompts)
+    }
+
+    /// Starts a native fork, then kills it before it reports a session.
+    ///
+    /// Models a provider that cannot load the source conversation: the
+    /// adapter returns `Ok`, and the only report the daemon sees is the death.
+    /// A fresh startup (no resume, no fork) still succeeds.
+    pub fn with_native_fork_death(mut self, message: impl Into<String>) -> Self {
+        self.native_fork_death = Some(message.into());
+        self
+    }
+
+    /// A fake whose adapter can fork natively, in the given scope.
+    pub fn with_native_fork(mut self, scope: crate::NativeFork) -> Self {
+        self.native_fork_scope = Some(scope);
+        self
+    }
+
+    /// A fake whose adapter cannot fork natively at all.
+    pub fn without_native_fork(mut self) -> Self {
+        self.native_fork_scope = None;
+        self
+    }
+
+    /// A fake that reports its provider turn ids and keeps each session's
+    /// conversation, so a native fork's context can be read back.
+    pub fn with_native_sessions(mut self) -> (Self, NativeSessions) {
+        let sessions = NativeSessions::default();
+        self.native_sessions = Some(sessions.clone());
+        (self, sessions)
     }
 
     /// Records each session's starting settings and every live switch it
@@ -1264,6 +1559,13 @@ impl Harness for FakeHarness {
         self.install.clone()
     }
 
+    fn native_fork_scope(&self) -> Option<crate::NativeFork> {
+        // A test chooses a harness whose native fork it wants to exercise; the
+        // fake can model both scopes, including a fork that dies before
+        // `SessionStarted`.
+        self.native_fork_scope
+    }
+
     fn rewind_method(&self) -> RewindMethod {
         self.rewind_method
     }
@@ -1302,6 +1604,17 @@ impl Harness for FakeHarness {
                 endpoint: spec.mcp_endpoint.clone(),
                 token: spec.env_overrides.get(crate::ENV_MCP_AUTH_TOKEN).cloned(),
             });
+        }
+        if let Some(starts) = &self.session_starts {
+            starts
+                .0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(StartSpec {
+                    resume_id: spec.resume_id.clone(),
+                    native_fork: spec.native_fork,
+                    native_fork_turn: spec.native_fork_turn.clone(),
+                });
         }
         if let Some(settings) = &self.session_settings {
             settings.note(SettingChange::Started {
@@ -1350,15 +1663,31 @@ impl Harness for FakeHarness {
                     (EventSink::Unbounded(sender), receiver.boxed())
                 }
             };
-        let session_id = spec
-            .resume_id
-            .clone()
-            .unwrap_or_else(|| format!("fake-{}", uuid_like(&spec.workspace)));
+        // A native fork starts a new conversation, so it never reuses the
+        // source's session id; a plain resume keeps it, as the real adapters do.
+        let session_id = if spec.native_fork {
+            format!("fake-fork-{}", uuid_like(&spec.workspace))
+        } else {
+            spec.resume_id
+                .clone()
+                .unwrap_or_else(|| format!("fake-{}", uuid_like(&spec.workspace)))
+        };
         let dies_on_start = self
-            .resume_death
+            .native_fork_death
             .as_ref()
-            .filter(|_| spec.resume_id.is_some())
+            .filter(|_| spec.native_fork)
+            .or_else(|| {
+                self.resume_death
+                    .as_ref()
+                    .filter(|_| spec.resume_id.is_some())
+            })
             .cloned();
+        let started_gate = self.session_started_gate.as_ref().filter(|_| {
+            self.session_started_gate_after
+                .is_none_or(|after| starts_seen >= after)
+        });
+        let mut deferred_fork = None;
+        let mut output_gate = None;
         if let Some(message) = &dies_on_start {
             // The adapter returned `Ok` and the agent then exited before it
             // reported a session. Its stream carries only that death and then
@@ -1371,12 +1700,59 @@ impl Harness for FakeHarness {
                     reset_at: None,
                 })
                 .await;
+        } else if self.session_started_on_first_send && spec.native_fork {
+            // The provider has not read the source yet because it has not
+            // received the fork's prompt: Claude Code prints nothing until the
+            // first user frame. The copy is taken when that write arrives, and
+            // the report that confirms it follows (after a test's latch, when
+            // one is set).
+            deferred_fork = Some((spec.clone(), session_id.clone(), started_gate.cloned()));
+        } else if let Some(gate) = started_gate {
+            // The child is up, but the provider has not read the source yet.
+            // The copy is taken when the report is about to be sent; a report
+            // whose stream is already gone (the daemon fenced this session)
+            // confirms nothing and records no copy. Nothing it is asked to run
+            // can show output before that report either.
+            output_gate = Some(gate.clone());
+            let gate = gate.clone();
+            let sender = sender.clone();
+            let sessions = self.native_sessions.clone();
+            let spec = spec.clone();
+            let reported_id = session_id.clone();
+            tokio::spawn(async move {
+                gate.wait().await;
+                if sender.is_closed() {
+                    // The daemon fenced this session, so this copy is never
+                    // used and nothing about it is recorded.
+                    return;
+                }
+                let context = sessions
+                    .as_ref()
+                    .and_then(|sessions| sessions.copy_for_fork(&spec));
+                sender
+                    .send(HarnessEvent::SessionStarted {
+                        session_id: reported_id.clone(),
+                    })
+                    .await;
+                if let (Some(sessions), Some(context)) = (&sessions, context) {
+                    sessions.note_fork(&spec, &reported_id, context);
+                }
+            });
         } else {
+            // A native fork copies the source conversation through the turn it
+            // was bound to, exactly as a provider would.
+            let native_fork_context = self
+                .native_sessions
+                .as_ref()
+                .and_then(|sessions| sessions.copy_for_fork(&spec));
             sender
                 .send(HarnessEvent::SessionStarted {
                     session_id: session_id.clone(),
                 })
                 .await;
+            if let (Some(sessions), Some(context)) = (&self.native_sessions, native_fork_context) {
+                sessions.note_fork(&spec, &session_id, context);
+            }
         }
         let health = TransportHealth::new();
         if let Some(injector) = &self.event_injector {
@@ -1438,6 +1814,7 @@ impl Harness for FakeHarness {
                 .clone()
                 .map(|gate| (self.send_gate_after, gate)),
             send_count: self.send_count.clone(),
+            sent_prompts: self.sent_prompts.clone(),
             steer_count: self.steer_count.clone(),
             steer_failure: self.steer_failure.clone(),
             steer_rejection: self.steer_rejection.clone(),
@@ -1464,6 +1841,9 @@ impl Harness for FakeHarness {
             immediate_stream_end: self.immediate_stream_end,
             generic_death_gate: self.generic_death_gate.clone(),
             tagged_prompts: self.tagged_prompts.clone(),
+            native_sessions: self.native_sessions.clone(),
+            deferred_fork,
+            output_gate,
         }))
     }
 }
@@ -1503,6 +1883,8 @@ pub struct FakeSession {
     send_gate: Option<(usize, Gate)>,
     /// A shared count of prompts this session was asked to write.
     send_count: Option<SendCount>,
+    /// Every prompt this session was asked to write, when a test asked for it.
+    sent_prompts: Option<SentPrompts>,
     /// A shared count of messages steered into the running turn.
     steer_count: Option<SteerCount>,
     /// A test-only failure a steer reports.
@@ -1558,6 +1940,18 @@ pub struct FakeSession {
     generic_death_gate: Option<Gate>,
     /// Where tagged prompt ids are recorded, when a test asked for them.
     tagged_prompts: Option<TaggedPrompts>,
+    /// The provider conversations this fake kept, when a test asked for them.
+    native_sessions: Option<NativeSessions>,
+    /// A native fork's copy and session id, reported when the first prompt
+    /// arrives, and the latch that holds that report when a test set one.
+    deferred_fork: Option<(SessionSpec, String, Option<Gate>)>,
+    /// Holds a turn's output until the startup's session report goes out.
+    ///
+    /// A provider that has not reported the session it is preparing cannot show
+    /// that turn's output: the report is what lets the turn run. Only set by
+    /// [`FakeHarness::with_session_started_gate_after`], where the report is
+    /// deliberately late.
+    output_gate: Option<Gate>,
 }
 
 #[async_trait]
@@ -1639,9 +2033,42 @@ impl HarnessSession for FakeSession {
                 message: "session is shut down".into(),
             });
         }
+        // A provider that needs the first user frame before it does anything
+        // reads the source and reports its forked session now. The report (and
+        // the copy it confirms) lands before this send's own events, exactly as
+        // the real CLI's init frame does.
+        if let Some((spec, session_id, gate)) = self.deferred_fork.take() {
+            let context = self
+                .native_sessions
+                .as_ref()
+                .and_then(|sessions| sessions.copy_for_fork(&spec));
+            if let Some(gate) = gate {
+                gate.wait().await;
+            }
+            self.emit(HarnessEvent::SessionStarted {
+                session_id: session_id.clone(),
+            });
+            if let (Some(sessions), Some(context)) = (&self.native_sessions, context) {
+                sessions.note_fork(&spec, &session_id, context);
+            }
+        }
         self.sends += 1;
+        if let Some(sessions) = &self.native_sessions {
+            // The provider names its turn before it does anything with the
+            // prompt, so the daemon records the id with this turn.
+            let turn_id = sessions.next_turn_id();
+            sessions.record_prompt(&self.session_id, &turn_id, &input.text);
+            self.emit(HarnessEvent::NativeTurnId { turn_id });
+        }
         if let Some(count) = &self.send_count {
             count.note();
+        }
+        if let Some(prompts) = &self.sent_prompts {
+            prompts
+                .0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(input.text.clone());
         }
 
         // The first send starts the thread; a test gates later turns so a
@@ -1847,6 +2274,37 @@ impl HarnessSession for FakeSession {
                         },
                     );
                 }
+                send_opt(
+                    &sender,
+                    HarnessEvent::TextDelta {
+                        text: format!("echo: {text}"),
+                    },
+                );
+                send_opt(
+                    &sender,
+                    HarnessEvent::Usage {
+                        usage: usage.clone(),
+                    },
+                );
+                send_opt(
+                    &sender,
+                    HarnessEvent::TurnCompleted {
+                        status: TurnStatus::Completed,
+                        usage,
+                    },
+                );
+            });
+            return Ok(());
+        }
+
+        if let Some(gate) = self.output_gate.take() {
+            // The provider has not reported the session it is preparing, so it
+            // cannot show this turn's output yet: that report comes first.
+            let sender = self.sender.clone();
+            let text = input.text;
+            tokio::spawn(async move {
+                gate.wait().await;
+                let usage = usage_for(&text);
                 send_opt(
                     &sender,
                     HarnessEvent::TextDelta {
@@ -2149,6 +2607,8 @@ pub fn test_spec() -> SessionSpec {
         reasoning_effort: None,
         fast: false,
         resume_id: None,
+        native_fork: false,
+        native_fork_turn: None,
         mcp_endpoint: Some("http://127.0.0.1:9100/mcp".into()),
         env_overrides: BTreeMap::new(),
         attachments: Vec::new(),

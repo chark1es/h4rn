@@ -5,7 +5,7 @@
 //! the journal to find which prompt turns are still live, and putting the
 //! workspace back to the snapshot taken before the edited message.
 //!
-//! A rewind is one durable decision (ADR-049): the files and the history end at
+//! A rewind is one durable decision (ADR-050): the files and the history end at
 //! the same boundary or not at all. The restore writes a durable journal first,
 //! applies the files, commits the `ThreadRewound` event with that journal's id,
 //! and only then publishes the new in-memory state. A crash between the apply

@@ -43,7 +43,7 @@ All notable changes to h4rn are recorded here. The format follows
   records the cut, a durable restore journal ties the files to that commit, and
   an interrupted restore is finished or rolled back at the next startup; a
   failed file restore leaves the conversation unchanged. See
-  [docs/rewind.md](docs/rewind.md) and ADR-049.
+  [docs/rewind.md](docs/rewind.md) and ADR-050.
 - **A new thread can run in its own git worktree.** Choose **Run in a new
   worktree** in the New thread dialog, with an optional branch name. The daemon
   checks out the project's current `HEAD` on a generated `h4rn/<name>` branch
@@ -215,6 +215,73 @@ All notable changes to h4rn are recorded here. The format follows
   is split into chunks the client joins, so no message is shortened to fit.
   Message text is never logged and
   token shapes are redacted before storage. See [docs/import.md](docs/import.md).
+- **Fork a thread at any finished turn and carry on separately.** Each finished
+  turn has a **Fork from here** action, and the thread menu and command palette
+  can fork from the latest turn while it is settled. The fork is an ordinary
+  thread with the same project, workspace, harness, model, permissions and
+  reasoning settings, titled `<original> (fork)`, and its transcript is
+  everything the source showed through the one turn you chose — messages with
+  their attachments, tool calls, delegated rows, plans, error and limit rows,
+  and a reply that was still streaming — each with its own time and in the
+  order the source showed it, by the journal's own sequence, so a prompt sits
+  above its reply and a prompt queued behind a running turn stays above that
+  turn's reply. Each copied turn starts at its own first record's time. A
+  copied turn keeps its completion's token usage, change set and real status: a
+  turn the daemon lost to a restart copies as interrupted, not as a success,
+  and a delegated row shows its child's final state. An imported turn has no
+  completion of its own, so it copies as completed rather than as an
+  interruption. A turn is only offered
+  when the journal has evidence it ended: copied history, or a turn that
+  really started and settled (or was interrupted by a restart). An older
+  journal that stored a host loss without the turn's completion is read the
+  same way: the stored loss ends the turn it interrupted, so a later settled
+  turn stays forkable, and a restart writes that turn's missing completion so a
+  thread that was running when an older daemon stopped leaves Working. A prompt that
+  never started is not a turn, so it is left out of a later turn's copy and
+  cannot itself be forked. The copy owns its attachment blobs and adopts them
+  all or nothing: if any file is gone, the fork fails and the retains made so
+  far are rolled back, along with their per-thread files, instead of a
+  transcript pointing at the source's files; a failed journal write rolls back
+  the same way.
+  A prompt that has an answerless finished turn can be forked too. The provider
+  keeps its own conversation where it can copy the chosen turn: Codex's
+  `thread/fork` copies through that provider turn, so an earlier turn is still
+  exact after the source carries on, and Claude Code's `--resume <id>
+  --fork-session` is used only while the chosen turn is still the source
+  session's tip, re-checked when the fork starts. While Claude Code reads that
+  saved conversation, the source's next send is acknowledged at once (it has a
+  turn and a durable row) but its dispatch waits, and that wait never holds the
+  thread's session-switch lock, so a later send is still answered at once. The
+  fork's first message is written before its copy is waited on, and the deadline
+  runs from that write: Claude Code reports its session only after the first user
+  frame, so a fork that waited for that report first would never copy at all. A
+  provider still reading the source at the deadline has its process shut down and
+  fenced, and the source is released there — after the copy is stopped, before
+  the handoff session starts — so a message sent afterwards can never reach the
+  fork. A thread that has not started a session of its own
+  never lends a borrowed session id to another fork. Any other case — a harness
+  without native forks, a source that moved on, or a native fork that dies
+  before it starts — sends a bounded handoff of the copied history instead,
+  stopping before the current turn so a message queued during the startup is
+  never sent twice. A fork shares no live session, queued message, approval,
+  parked prompt or rate-limit schedule with its source; a queued or claimed
+  message is not a turn, so it is never copied into the turn it waited behind.
+  A source's queued message that is later promoted waits for the copy gate too,
+  exactly as a send does, so the fork cannot read it either way. An older
+  journal that filed a queued prompt under the running turn keeps the prompt
+  with the next turn that starts and has no prompt of its own; one that never
+  became a turn is not given to a later turn, and a fork at or after that point
+  is refused with a clear message — fork from an earlier turn or start a new
+  thread — rather than copied without a row the source showed. Only the new
+  thread's summary is published on the live feed, in the same append lock scope
+  as the copy, so no later event can arrive first and make a client drop it as
+  stale; a fork of hundreds of turns never stalls other threads, and the copied
+  transcript arrives through the same paged history as any thread. A fork of a worktree
+  thread starts in the same workspace path. The thread header says **Forked
+  from** with a link back, and the lineage survives a restart; deleting or
+  archiving the source never affects the fork. A turn that is still running or
+  waiting in the queue is refused with a message to wait for it. New request:
+  `ForkThread`. See [docs/fork.md](docs/fork.md).
 - **A prompt can run on a schedule or when a webhook fires.** Settings →
   Scheduled tasks creates a task with a workspace, harness, model, permissions
   and prompt, then runs it once, every N minutes or hours, daily or weekly at a
@@ -702,6 +769,94 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Fixed
 
+- **A refused prompt survives a crash right after its turn is recorded.** A
+  prompt the daemon refused because its outside grant was revoked could sit in
+  neither the journal's claim nor the queue between the turn's settlement and
+  the write that put it back, so a daemon that stopped in that window lost the
+  person's text. The settlement now carries the refused claim back as a normal
+  known-unsent queue row in its own write, and holds it out of the promotion
+  it just made, so a restart shows the message and never sends it on its own.
+- **Switching harness drops the old provider's rewind point.** A pending
+  native rewind names a message in the conversation the thread is leaving, so
+  the new harness cannot apply it; its first turn used to fail and need a
+  resend. A switch now turns that boundary into the bounded handoff the kept
+  history already needs and journals the same "fell back" notice the adapter
+  refusal path publishes.
+- **A steer that is still being written is never also shown as uncertain.**
+  When its turn settled while the adapter write was in flight, an edit in that
+  window turned the steer's claim into a "may have been delivered" queue row,
+  and the same text then appeared delivered and queued, so Send again delivered
+  it twice. Claims whose write is in flight are now left alone until it
+  returns, and a successful steer clears any queue row that racing edit could
+  have made.
+- **A native fork starts by sending its own prompt.** Claude Code prints nothing
+  for a natively forked session until the first user frame arrives, so waiting
+  for its session report before writing the prompt made every Claude fork wait
+  out the whole copy deadline and fall back to the handoff. The fork's prompt is
+  written first and the deadline runs from that write. A provider that never
+  reports its session still confirms the copy with its first output, and one
+  that stays silent is shut down and fenced; the source is released after the
+  copy is stopped and before the handoff session starts.
+- **A steered message stays in the turn it was written into.** A replay read
+  every extra user row in a running turn as an old daemon's queued prompt, so a
+  fork of a steered turn dropped the steer and the next turn was refused as
+  ambiguous. Steered rows now say what they are, so a fork keeps the steer in
+  order and every later turn stays forkable; a prompt an older journal really
+  filed under a running turn is still recovered the same way.
+- **A thread that was running when an older daemon stopped leaves Working.**
+  The journal's host-loss recovery already ends that turn for forks, but the
+  restart's repair looked only for a turn with no status at all, so its
+  completion and the finished phase were never written. The restart now finds
+  the turn in the wire rows too and finishes it.
+- **A worktree location is refused wherever it would put a checkout in a working
+  tree.** Saving the location and creating a thread now find the real main
+  checkout even when the repository keeps its git directory elsewhere — a
+  `--separate-git-dir` repository, a submodule — instead of naming `api.git` or
+  an admin directory, and also refuse a location inside any sibling linked
+  worktree, not only the main one. When the main checkout cannot be proved, h4rn
+  refuses the location instead of taking the first worktree registration, which
+  may be a linked worktree, so it never creates a checkout inside the real main
+  checkout by guessing. A folder git reports as the main worktree only because
+  its git directory is named `.git` counts only when it really holds the
+  checkout, and as a last check no folder on the destination's way up may belong
+  to the same repository. The same reading of the repository decides both the
+  project folder's name and the destination that is checked and created, so a
+  location that passes is exactly the one used. The check uses one complete
+  worktree snapshot, so an admin entry git cannot read refuses the location
+  rather than allowing a nested checkout. A bare repository's refusal says the
+  destination is its git directory and to choose a folder outside it.
+- **A registered project whose folder is gone no longer blocks every settings
+  save.** Its location check is skipped when the folder or its git repository
+  no longer exists, so one deleted project or unmounted volume cannot stop you
+  saving a worktree location. A repository that is still there but whose main
+  checkout cannot be proved still refuses.
+- **A failed worktree create no longer leaves its checkout behind when the
+  daemon stops.** Create admission closes at shutdown, running creates finish by
+  adopting their checkout or rolling back, and the daemon waits for those
+  rollbacks. A thread that committed in that window keeps its checkout. The
+  create writes an atomic intent before touching git and marks the registration
+  before checking out, so a kill in the checkout hook is recovered next start.
+  The ownership token is also written into the folder's claim before git runs,
+  so a kill between the registration and the mark is recovered too. A checkout
+  folder deleted while its registration and mark remain is finished from the
+  registration's admin dir, and the removal is marked before git runs, so a kill
+  between the removal and the progress write still deletes the branch h4rn
+  made. Recovery removes only a checkout it can prove this create made (a
+  registration that names its path and branch, plus the owner marker or, before
+  the marker was written, the matching claim token), retries a locked worktree after it is unlocked, and never
+  runs a repository-wide prune: a moved worktree h4rn did not make keeps its
+  registration. Once the checkout is removed, that step is recorded, and the
+  next start finishes from the record itself: it deletes the branch h4rn made
+  only when the branch is not registered, not checked out and still at the
+  commit the create began from, then retires the record. A branch deletion git
+  refuses is retried on a later start instead of being lost, a start reports
+  only checkouts it actually removed, and a thread working in a parent folder is
+  not mistaken for one using the checkout. A thread's checkout is never
+  touched.
+- **One daemon owns one data folder.** Startup takes an operating-system lock
+  before restoring threads or sweeping recovery and holds it until shutdown, so
+  a second daemon on the same folder exits without adopting or clearing the
+  first one's checkouts.
 - **A base or commit change keeps the tab its review was started for.** When a
   Branch or Commits list is still loading, changing the base or the commit now
   reopens the tab that list was started for instead of the file from before it,

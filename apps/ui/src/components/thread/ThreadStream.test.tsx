@@ -127,6 +127,35 @@ describe("ThreadReceipt", () => {
     expect(markup).not.toContain("Imported from");
   });
 
+  it("stays out of a fork while its stream is only copied history", () => {
+    const markup = renderToStaticMarkup(
+      <ThreadReceipt
+        summary={{
+          ...summary,
+          forked_from: { thread_id: "thread_source", turn_id: "turn_source" },
+        }}
+        turns={[turn(true)]}
+      />,
+    );
+    expect(markup).toBe("");
+  });
+
+  it("shows a fork's own receipt once it has run a turn here", () => {
+    const markup = renderToStaticMarkup(
+      <ThreadReceipt
+        summary={{
+          ...summary,
+          forked_from: { thread_id: "thread_source", turn_id: "turn_source" },
+          usage: { ...usage, input_tokens: 10, output_tokens: 5, duration_ms: 1_500 },
+        }}
+        turns={[turn(true), turn(false)]}
+      />,
+    );
+    expect(markup).toContain("Finished");
+    expect(markup).toContain("15 tokens");
+    expect(markup).not.toContain("Imported from");
+  });
+
   it("does not read a thread that switched harness as imported", () => {
     const divider: StreamTurn = {
       id: "switch:claude_code:codex",
@@ -209,7 +238,13 @@ describe("Harness switch divider", () => {
       divider: true,
     };
     const markup = renderToStaticMarkup(
-      <TurnBlock turn={divider} threadId="thread_1" summary={summary} onReply={() => undefined} />,
+      <TurnBlock
+        turn={divider}
+        turns={[divider]}
+        threadId="thread_1"
+        summary={summary}
+        onReply={() => undefined}
+      />,
     );
     expect(markup).toContain("Switched from Claude Code to Codex");
     expect(markup).not.toContain("q-ag-head");

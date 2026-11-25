@@ -33,6 +33,34 @@ pub const MAX_HANDOFF_MESSAGES: usize = 200;
 /// Environment variable that overrides [`DEFAULT_HANDOFF_BYTES`].
 pub const ENV_HANDOFF_BYTES: &str = "H4RN_HANDOFF_BYTES";
 
+/// Where the history in a handoff came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HandoffKind {
+    /// A transcript read from another harness's own storage.
+    Imported,
+    /// A copy of an h4rn thread's transcript, made by a fork.
+    Forked,
+    /// The kept part of an edited conversation, continuing after a rewind.
+    Rewound,
+}
+
+impl HandoffKind {
+    /// The line that introduces the history to the agent.
+    fn header(self) -> &'static str {
+        match self {
+            Self::Imported => {
+                "Earlier conversation history, imported from another harness. Older messages may be omitted.\n\n"
+            }
+            Self::Forked => {
+                "Earlier conversation history, forked from another thread. Older messages may be omitted.\n\n"
+            }
+            Self::Rewound => {
+                "Earlier conversation history, after an earlier message was edited and the turns after it removed. Older messages may be omitted.\n\n"
+            }
+        }
+    }
+}
+
 /// One saved message offered to the builder.
 #[derive(Clone, Copy, Debug)]
 pub struct HandoffMessage<'a> {
@@ -65,25 +93,24 @@ pub fn clamp_budget(bytes: usize) -> usize {
 /// the caller appends `request` verbatim with [`with_request`], so the result
 /// never exceeds the budget.
 pub fn build(messages: &[HandoffMessage<'_>], budget: usize, request: &str) -> Option<String> {
-    build_with_header(messages, budget, request, IMPORT_HEADER)
+    build_for(HandoffKind::Imported, messages, budget, request)
 }
 
-/// [`build`] with a preface that names why the history is being handed over.
+/// Builds a handoff that says where its history came from.
 ///
-/// An imported conversation and a rewound one both need the same bounded
-/// history block, but telling the agent it was imported when it was actually
-/// rewound would be misleading. The header is part of the budget.
-pub fn build_with_header(
+/// The selection, budget and return value are exactly [`build`]'s; only the
+/// header differs so a forked or rewound thread does not claim it was imported.
+pub fn build_for(
+    kind: HandoffKind,
     messages: &[HandoffMessage<'_>],
     budget: usize,
     request: &str,
-    header: &str,
 ) -> Option<String> {
     if messages.is_empty() {
         return None;
     }
     let budget = clamp_budget(budget).min(IMPORTED_HISTORY_BYTES);
-    let envelope = header.len() + REQUEST_LEAD.len() + request.len();
+    let envelope = kind.header().len() + REQUEST_LEAD.len() + request.len();
     if envelope >= budget {
         return None;
     }
@@ -121,7 +148,7 @@ pub fn build_with_header(
     }
     indices.sort_unstable();
     indices.dedup();
-    let mut block = String::from(header);
+    let mut block = String::from(kind.header());
     for index in indices {
         let message = messages[index];
         block.push_str(label(message.role));
@@ -138,12 +165,6 @@ pub fn build_with_header(
 pub fn with_request(block: &str, request: &str) -> String {
     format!("{block}{request}")
 }
-
-/// The preface for a conversation imported from another harness.
-pub const IMPORT_HEADER: &str = "Earlier conversation history, imported from another harness. Older messages may be omitted.\n\n";
-
-/// The preface when a fresh session continues an edited conversation.
-pub const REWIND_HEADER: &str = "Earlier conversation history, after an earlier message was edited and the turns after it removed. Older messages may be omitted.\n\n";
 
 const REQUEST_LEAD: &str = "My next message:\n";
 
@@ -207,7 +228,7 @@ mod tests {
         let request = "what next?";
         let text = "x".repeat(2_000);
         let history = [message(MessageRole::User, &text)];
-        let envelope = IMPORT_HEADER.len() + REQUEST_LEAD.len() + request.len();
+        let envelope = HandoffKind::Imported.header().len() + REQUEST_LEAD.len() + request.len();
         let message_cost = "User:\n".len() + text.len() + 2;
 
         // Exactly at the budget: the first prompt fits.
@@ -251,6 +272,20 @@ mod tests {
         assert_eq!(clamp_budget(1), MIN_HANDOFF_BYTES);
         assert_eq!(clamp_budget(usize::MAX), MAX_HANDOFF_BYTES);
         assert!(build(&[], DEFAULT_HANDOFF_BYTES, "next").is_none());
+    }
+
+    #[test]
+    fn a_forked_handoff_names_its_real_origin() {
+        let history = [message(MessageRole::User, "first")];
+        let block = build_for(
+            HandoffKind::Forked,
+            &history,
+            DEFAULT_HANDOFF_BYTES,
+            "carry on",
+        )
+        .expect("block");
+        assert!(block.starts_with("Earlier conversation history, forked from another thread."));
+        assert!(!block.contains("imported from another harness"));
     }
 
     #[test]

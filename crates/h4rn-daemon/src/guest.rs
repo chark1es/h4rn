@@ -3297,6 +3297,7 @@ mod tests {
             title: "shared".into(),
             workspace_path: "/home/secret/work".into(),
             project_path: None,
+            forked_from: None,
             branch: None,
             model: "fake-model".into(),
             runtime_mode: h4rn_protocol::RuntimeMode::ApprovalRequired,

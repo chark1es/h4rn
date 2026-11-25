@@ -67,6 +67,8 @@ fn spec(
         reasoning_effort: None,
         fast: false,
         resume_id,
+        native_fork: false,
+        native_fork_turn: None,
         mcp_endpoint: None,
         env_overrides: Default::default(),
         attachments: Vec::new(),

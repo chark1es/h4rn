@@ -70,6 +70,9 @@ its turn settles without knowing the outcome, so the daemon shows the text as
 **May have been delivered** right away — the same row a restart would recover —
 and both the dialog and the daemon refuse an edit until it is resent or
 discarded. A claim whose turn is still running is not shown: that turn owns it.
+A steer whose adapter write has not returned is not shown either, even when its
+turn settles in that window; once the write comes back the text is in the turn
+once, with no uncertain row beside it.
 
 A boundary belongs to the provider session that recorded it. h4rn stores that
 session id beside the boundary, and only uses it while the thread still resumes
@@ -83,9 +86,11 @@ If the adapter cannot keep its native promise — the provider no longer has the
 named turn, the CLI refuses the message id, or no recorded boundary exists —
 the daemon falls back to the handoff, clears the refused boundary, journals a
 **fell back** event and tells the person, so a plan that named a native rewind
-never turns into a silent handoff. Both fallback paths journal that event: the
-retry that starts a fresh session, and a failed startup that has to turn the
-pending boundary into a handoff.
+never turns into a silent handoff. Every fallback path journals that event: the
+retry that starts a fresh session, a failed startup that has to turn the pending
+boundary into a handoff, and a switch to another harness, whose first session
+already carries the kept history as a handoff and cannot use the old provider's
+boundary at all.
 
 ## Files
 

@@ -300,11 +300,20 @@ async fn a_closed_acp_transport_is_replaced_before_the_next_turn() {
     .await
     .expect("the fixture reached its exit gate before the turn ended");
 
-    // The follow-up queues behind the dying turn, not behind a fresh one.
+    // The follow-up queues behind the dying turn, not behind a fresh one: it
+    // has a queue row, not a turn of its own, until that turn settles.
     let queued = manager
         .send_message(&thread_id, "second".into(), Vec::new())
         .await
         .expect("send");
+    assert!(
+        queued.queued_message_id.is_some(),
+        "the follow-up waits in the queue"
+    );
+    assert_eq!(
+        queued.turn_id, dying.turn_id,
+        "a queued message is not a turn of its own"
+    );
     std::fs::write(workspace.path().join(".agy-fixture-exit-gate"), b"")
         .expect("release the fixture's exit gate");
 

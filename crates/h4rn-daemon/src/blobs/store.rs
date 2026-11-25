@@ -184,6 +184,15 @@ pub trait AttachmentResolver: Send + Sync {
         ids: &[AttachmentId],
     ) -> Result<Vec<Attachment>, BlobError>;
 
+    /// Undoes every retain [`Self::resolve`] took for `thread_id`, including
+    /// the per-thread files it materialised.
+    ///
+    /// A fork adopts its attachments all or nothing: the daemon resolves them
+    /// for the new thread before the thread is journaled, so a failure part way
+    /// through — or a failed journal append — has to leave nothing behind.
+    /// Releasing an id this thread never retained is a no-op, which lets a
+    /// rollback name the whole batch.
+    async fn release(&self, thread_id: &ThreadId, ids: &[AttachmentId]) -> Result<(), BlobError>;
     /// Resolves the ids for a guest Send on behalf of `holder`.
     ///
     /// The references are recorded under `holder` in the same transaction that
@@ -623,6 +632,50 @@ impl BlobStore {
         Ok(())
     }
 
+    /// Releases a thread's refcount and its claim on `id`.
+    ///
+    /// The counterpart of [`Self::retain`] for a caller that has to undo a
+    /// partial adoption. Releasing an id the thread never retained, or the same
+    /// id twice, changes nothing.
+    pub async fn release(&self, thread_id: &ThreadId, id: &AttachmentId) -> Result<(), BlobError> {
+        let mut tx = self.pool.begin().await?;
+        let updated = sqlx::query(
+            "UPDATE blob_thread_refs SET refs = refs - 1
+             WHERE blob_id = ? AND thread_id = ? AND refs > 0",
+        )
+        .bind(id.as_str())
+        .bind(thread_id.as_str())
+        .execute(&mut *tx)
+        .await?;
+        if updated.rows_affected() > 0 {
+            sqlx::query(
+                "DELETE FROM blob_thread_refs WHERE blob_id = ? AND thread_id = ? AND refs <= 0",
+            )
+            .bind(id.as_str())
+            .bind(thread_id.as_str())
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query("UPDATE blobs SET refcount = refcount - 1 WHERE id = ? AND refcount > 0")
+                .bind(id.as_str())
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// How many retains the store currently holds for one blob.
+    ///
+    /// Tests use it to prove a failed adoption left nothing behind.
+    #[cfg(test)]
+    pub(crate) async fn refcount(&self, id: &AttachmentId) -> Result<i64, BlobError> {
+        let row = sqlx::query("SELECT refcount FROM blobs WHERE id = ?")
+            .bind(id.as_str())
+            .fetch_one(&self.pool)
+            .await?;
+        row.try_get("refcount").map_err(BlobError::from)
+    }
+
     /// Deletes unreferenced blobs older than the grace window.
     ///
     /// Returns the number of blobs removed. Pending uploads that were never
@@ -905,6 +958,37 @@ impl AttachmentResolver for BlobStore {
         }
         transaction.commit().await?;
         Ok(resolved)
+    }
+
+    async fn release(&self, thread_id: &ThreadId, ids: &[AttachmentId]) -> Result<(), BlobError> {
+        let directory = self.attachments_root.join(thread_id.as_str());
+        for id in ids {
+            // The per-thread copy is named after the id's own prefix and the
+            // blob's name; resolve it before the row can be released, and fall
+            // back to the prefix when the blob itself is already gone.
+            let name = self.info(id).await.ok().map(|info| info.name);
+            BlobStore::release(self, thread_id, id).await?;
+            let prefix: String = id.as_str().chars().take(8).collect();
+            let prefix = format!("{prefix}-");
+            match name {
+                Some(name) => {
+                    let _ = std::fs::remove_file(directory.join(format!("{prefix}{name}")));
+                }
+                None => {
+                    if let Ok(entries) = std::fs::read_dir(&directory) {
+                        for entry in entries.flatten() {
+                            if entry.file_name().to_string_lossy().starts_with(&prefix) {
+                                let _ = std::fs::remove_file(entry.path());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // The directory only exists for this batch: a rollback leaves no empty
+        // shell behind.
+        let _ = std::fs::remove_dir(&directory);
+        Ok(())
     }
 }
 

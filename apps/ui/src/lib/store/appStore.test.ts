@@ -20,6 +20,7 @@ import {
   applyEvent,
   createThread,
   editQueuedMessage,
+  forkThread,
   getState,
   loadThread,
   loadThreadQueue,
@@ -311,6 +312,58 @@ describe("createThread draft handoff", () => {
     // Nothing will ever reconcile this id, and another session could reuse it:
     // its memory-only draft must not outlive the failed create.
     expect(readThreadDraft("handoff_host", tempId)).toBe("");
+  });
+});
+
+describe("forkThread", () => {
+  beforeEach(() => {
+    fake.request.mockReset();
+    seedHosts([]);
+  });
+
+  it("names the source turn and opens the returned fork", async () => {
+    const fork = {
+      ...threadSummary({ threadId: "thread_fork", host: "fork_host" }),
+      forked_from: { thread_id: "thread_source", turn_id: "turn_1" },
+    };
+    fake.request.mockImplementation(async (raw: unknown) => {
+      const request = raw as { type: string };
+      if (request.type === "fork_thread") {
+        return { type: "thread_forked", thread_id: "thread_fork", summary: fork };
+      }
+      if (request.type === "get_thread") {
+        return { type: "thread", summary: fork, events: [], next_seq: 0, more: false };
+      }
+      return { type: "ack" };
+    });
+
+    expect(await forkThread("thread_source", "turn_1")).toBe(true);
+
+    const request = fake.request.mock.calls[0]?.[0] as
+      | { type: string; thread_id: string; turn_id: string }
+      | undefined;
+    expect(request).toEqual({
+      type: "fork_thread",
+      thread_id: "thread_source",
+      turn_id: "turn_1",
+    });
+    expect(getState().threads.thread_fork?.forked_from).toEqual({
+      thread_id: "thread_source",
+      turn_id: "turn_1",
+    });
+    expect(getState().ui.route).toEqual({ kind: "thread", threadId: "thread_fork" });
+  });
+
+  it("names the problem when the turn is still running", async () => {
+    fake.request.mockRejectedValueOnce(new Error("This turn is still running."));
+
+    expect(await forkThread("thread_source", "turn_1")).toBe(false);
+
+    const toast = getState().toasts.at(-1);
+    expect(toast?.variant).toBe("error");
+    expect(toast?.title).toBe("Couldn't fork that turn.");
+    expect(toast?.description).toContain("still running");
+    expect(getState().threads.thread_fork).toBeUndefined();
   });
 });
 

@@ -3,6 +3,7 @@ import {
   ExternalLinkIcon,
   FileDiffIcon,
   GitBranchIcon,
+  GitForkIcon,
   MoreHorizontalIcon,
   PanelRightIcon,
   PencilIcon,
@@ -20,6 +21,7 @@ import { EntityAvatar } from "@/components/agent/EntityAvatar";
 import { SidebarReveal } from "@/components/shell/Sidebar";
 import { GitActionsDialog } from "@/components/thread/GitActionsDialog";
 import { RenameThreadDialog } from "@/components/thread/RenameThreadDialog";
+import { ThreadForkLine } from "@/components/thread/ThreadForkLine";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -36,10 +38,12 @@ import { useIsPhone } from "@/hooks/use-media-query";
 import { useViewportWidth } from "@/hooks/use-viewport-width";
 import { glyphForThread } from "@/lib/agent";
 import { harnessSeed, machineSeed, threadHarnessLabel } from "@/lib/entities";
+import { latestForkableTurn } from "@/lib/fork";
 import { absoluteDateTime, relativeAge } from "@/lib/format";
 import { shortcutText, titleWithShortcut } from "@/lib/keybindings";
 import {
   acknowledgeThread,
+  forkThread,
   interruptThread,
   navigate,
   panelFits,
@@ -52,9 +56,12 @@ import {
   toggleTheme,
   useApp,
 } from "@/lib/store/appStore";
+import type { StreamTurn } from "@/lib/store/projection";
 import { nonDefaultSettings } from "@/lib/threadControls";
 import { cn } from "@/lib/utils";
 import { HarnessSwitch } from "./HarnessSwitch";
+
+const NO_TURNS: StreamTurn[] = [];
 
 export function ViewCluster({
   terminalOpen = false,
@@ -140,6 +147,8 @@ export function ThreadHeader({
   const [gitOpen, setGitOpen] = useState(false);
   const hostOnline = host?.online ?? false;
   const working = summary.tab === "working";
+  const turns = useApp((state) => state.logs[summary.thread_id]?.turns ?? NO_TURNS);
+  const forkTurn = latestForkableTurn(turns);
   const threadSettings = useThreadSettings();
   const changedSettings = nonDefaultSettings(summary, threadSettings.defaultPermissionMode);
   const unreachable =
@@ -175,6 +184,15 @@ export function ThreadHeader({
         <DropdownMenuItem onSelect={() => setRenaming(true)}>
           <PencilIcon aria-hidden />
           Rename…
+        </DropdownMenuItem>
+        <DropdownMenuItem
+          disabled={!forkTurn}
+          onSelect={() => {
+            if (forkTurn) void forkThread(summary.thread_id, forkTurn);
+          }}
+        >
+          <GitForkIcon aria-hidden />
+          Fork from latest turn
         </DropdownMenuItem>
         <DropdownMenuItem onSelect={() => setGitOpen(true)}>
           <GitBranchIcon aria-hidden />
@@ -283,6 +301,7 @@ export function ThreadHeader({
         </div>
         <div className="q-ph-th-title">
           <div className="q-ph-th-name">{summary.title}</div>
+          <ThreadForkLine summary={summary} />
           <div className="q-ph-th-meta">
             <EntityAvatar
               seed={machineSeed(summary.host)}
@@ -352,6 +371,7 @@ export function ThreadHeader({
             </span>
           ) : null}
         </div>
+        <ThreadForkLine summary={summary} />
       </div>
 
       <div className={cn("q-th-state", summary.needs_attention && "q-accent")}>

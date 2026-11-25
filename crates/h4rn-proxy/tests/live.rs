@@ -112,6 +112,8 @@ async fn live_cliproxyapi_detects_lists_and_runs_claude_code() {
         reasoning_effort: None,
         fast: false,
         resume_id: None,
+        native_fork: false,
+        native_fork_turn: None,
         mcp_endpoint: None,
         env_overrides: applied.env.clone(),
         attachments: Vec::new(),

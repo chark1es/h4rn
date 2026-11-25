@@ -349,8 +349,240 @@ describe("foldEvent", () => {
     expect(next.pending).toHaveLength(0);
     expect(next.turns.at(-1)).toMatchObject({
       id: "cue:user:server_1",
+      // The cue names the daemon turn it belongs to, so a fork can wait for
+      // that turn to settle.
+      forkTurnId: "turn_1",
       items: [{ kind: "message", role: "user", text: "ship it" }],
     });
+  });
+
+  it("attaches a replayed error row to the turn it followed", () => {
+    let log = createThreadLog();
+    log = foldEvent(log, {
+      type: "item_completed",
+      thread_id: "t1",
+      turn_id: "turn_1",
+      item: {
+        kind: "message",
+        item_id: "server_1",
+        role: "assistant",
+        text: "done",
+        attachments: [],
+      },
+      at: "2026-01-01T00:00:00.000Z",
+    });
+    log = foldEvent(log, {
+      type: "error",
+      thread_id: "t1",
+      message: "the transport closed",
+      hint: null,
+      retryable: true,
+    });
+
+    const turn = log.turns.find((candidate) => candidate.id === "turn_1");
+    expect(turn?.items.at(-1)).toMatchObject({
+      kind: "error",
+      message: "the transport closed",
+    });
+  });
+
+  it("attaches a replayed limit row to the turn it followed", () => {
+    let log = createThreadLog();
+    log = foldEvent(log, {
+      type: "item_completed",
+      thread_id: "t1",
+      turn_id: "turn_1",
+      item: {
+        kind: "message",
+        item_id: "server_1",
+        role: "assistant",
+        text: "done",
+        attachments: [],
+      },
+      at: "2026-01-01T00:00:00.000Z",
+    });
+    log = foldEvent(log, {
+      type: "usage_limit_hit",
+      thread_id: "t1",
+      reset_at: "2026-01-01T01:00:00.000Z",
+      auto_resume: false,
+    });
+
+    const turn = log.turns.find((candidate) => candidate.id === "turn_1");
+    expect(turn?.items.at(-1)).toMatchObject({
+      kind: "limit",
+      resetAt: "2026-01-01T01:00:00.000Z",
+    });
+  });
+
+  it("folds a fork's wire so a prompt sits above its reply and a limit stays in its turn", () => {
+    // The exact order a fork journals: the prompt before `TurnStarted` (as a
+    // live send does), the reply, then the settlement row, then completion.
+    const at = "2026-01-01T00:00:00.000Z";
+    let log = createThreadLog();
+    log = foldEvent(log, {
+      type: "item_completed",
+      thread_id: "t1",
+      turn_id: "turn_1",
+      item: {
+        kind: "message",
+        item_id: "item_user",
+        role: "user",
+        text: "the prompt",
+        attachments: [],
+      },
+      at,
+    });
+    log = foldEvent(log, {
+      type: "turn_started",
+      thread_id: "t1",
+      turn_id: "turn_1",
+      started_at: at,
+    });
+    log = foldEvent(log, {
+      type: "item_completed",
+      thread_id: "t1",
+      turn_id: "turn_1",
+      item: {
+        kind: "message",
+        item_id: "item_reply",
+        role: "assistant",
+        text: "the reply",
+        attachments: [],
+      },
+      at,
+    });
+    log = foldEvent(log, {
+      type: "usage_limit_hit",
+      thread_id: "t1",
+      reset_at: null,
+      auto_resume: false,
+    });
+    log = foldEvent(log, {
+      type: "turn_completed",
+      thread_id: "t1",
+      turn_id: "turn_1",
+      usage: USAGE,
+      status: "completed",
+    });
+
+    expect(log.turns.map((turn) => turn.id)).toEqual(["cue:user:item_user", "turn_1"]);
+    expect(log.turns[0]?.items.map((item) => item.kind)).toEqual(["message"]);
+    expect(log.turns[1]?.items.map((item) => item.kind)).toEqual(["message", "limit"]);
+    expect(log.turns[1]?.items.at(-1)).toMatchObject({ kind: "limit" });
+    expect(log.turns[1]?.imported).toBe(true);
+  });
+
+  it("keeps a replayed error off a prompt cue after the turn settled", () => {
+    // A queued prompt's cue can be the newest row while the turn that already
+    // settled is the one an error belongs to. The cue must not take the row.
+    const at = "2026-01-01T00:00:00.000Z";
+    let log = createThreadLog();
+    log = foldEvent(log, {
+      type: "item_completed",
+      thread_id: "t1",
+      turn_id: "turn_1",
+      item: {
+        kind: "message",
+        item_id: "item_user",
+        role: "user",
+        text: "the prompt",
+        attachments: [],
+      },
+    });
+    log = foldEvent(log, {
+      type: "turn_started",
+      thread_id: "t1",
+      turn_id: "turn_1",
+      started_at: at,
+    });
+    log = foldEvent(log, {
+      type: "item_completed",
+      thread_id: "t1",
+      turn_id: "turn_1",
+      item: {
+        kind: "message",
+        item_id: "item_reply",
+        role: "assistant",
+        text: "the reply",
+        attachments: [],
+      },
+    });
+    log = foldEvent(log, {
+      type: "turn_completed",
+      thread_id: "t1",
+      turn_id: "turn_1",
+      usage: USAGE,
+      status: "completed",
+    });
+    // The person queued another prompt; its cue is now the newest row, but its
+    // turn has not started.
+    log = foldEvent(log, {
+      type: "item_completed",
+      thread_id: "t1",
+      turn_id: "turn_2",
+      item: {
+        kind: "message",
+        item_id: "item_queued",
+        role: "user",
+        text: "the queued prompt",
+        attachments: [],
+      },
+    });
+    log = foldEvent(log, {
+      type: "error",
+      thread_id: "t1",
+      message: "the transport closed",
+      hint: null,
+      retryable: true,
+    });
+
+    const cue = log.turns.find((turn) => turn.id === "cue:user:item_queued");
+    expect(cue?.items.every((item) => item.kind === "message")).toBe(true);
+    const daemon = log.turns.find((turn) => turn.id === "turn_1");
+    expect(daemon?.items.at(-1)).toMatchObject({
+      kind: "error",
+      message: "the transport closed",
+    });
+  });
+
+  it("marks the daemon row of a copied prompt-only turn imported", () => {
+    // A copied turn with no reply has no item to carry the copied marker, so
+    // its empty daemon row must learn it from the cue. Otherwise the fork
+    // claims a zero-token "Finished" receipt.
+    const at = "2026-01-01T00:00:00.000Z";
+    let log = createThreadLog();
+    log = foldEvent(log, {
+      type: "item_completed",
+      thread_id: "t1",
+      turn_id: "turn_1",
+      item: {
+        kind: "message",
+        item_id: "item_user",
+        role: "user",
+        text: "just this",
+        attachments: [],
+      },
+      at,
+    });
+    log = foldEvent(log, {
+      type: "turn_started",
+      thread_id: "t1",
+      turn_id: "turn_1",
+      started_at: at,
+    });
+    log = foldEvent(log, {
+      type: "turn_completed",
+      thread_id: "t1",
+      turn_id: "turn_1",
+      usage: USAGE,
+      status: "completed",
+    });
+
+    const daemon = log.turns.find((turn) => turn.id === "turn_1");
+    expect(daemon?.items).toEqual([]);
+    expect(daemon?.imported).toBe(true);
+    expect(log.turns.every((turn) => turn.imported)).toBe(true);
   });
 
   it("ignores a duplicate completed user message", () => {
@@ -605,6 +837,130 @@ describe("foldEvent", () => {
     });
 
     expect(source.turns).toHaveLength(0);
+  });
+
+  it("refuses to name an owner for an older journal's queued prompt", () => {
+    // An older journal filed B's prompt under A's turn while A was running.
+    // B's real turn is the next one that starts, which the event does not name,
+    // so the row offers no fork instead of pointing at A.
+    let log = foldEvent(createThreadLog(), {
+      type: "item_completed",
+      thread_id: "t1",
+      turn_id: "turn_a",
+      item: {
+        kind: "message",
+        item_id: "a_prompt",
+        role: "user",
+        text: "A prompt",
+        attachments: [],
+      },
+    });
+    log = foldEvent(log, {
+      type: "turn_started",
+      thread_id: "t1",
+      turn_id: "turn_a",
+      started_at: "2026-01-01T00:00:00.000Z",
+    });
+    log = foldEvent(log, {
+      type: "item_completed",
+      thread_id: "t1",
+      turn_id: "turn_a",
+      item: {
+        kind: "message",
+        item_id: "b_prompt",
+        role: "user",
+        text: "B lost",
+        attachments: [],
+      },
+    });
+
+    const bCue = log.turns.find((turn) => turn.id === "cue:user:b_prompt");
+    expect(bCue?.forkTurnId).toBeUndefined();
+    const aCue = log.turns.find((turn) => turn.id === "cue:user:a_prompt");
+    expect(aCue?.forkTurnId).toBe("turn_a");
+  });
+
+  it("keeps a fork's promoted prompts above the earlier turn's reply", () => {
+    // The fork's own wire sequence for A running with B and C queued behind it.
+    // The source showed C's prompt before B's reply, and the rows have to keep
+    // that order.
+    const wire = [
+      { turn: "turn_a", kind: "prompt", text: "A prompt" },
+      { turn: "turn_a", kind: "started" },
+      { turn: "turn_b", kind: "prompt", text: "B prompt" },
+      { turn: "turn_c", kind: "prompt", text: "C prompt" },
+      { turn: "turn_a", kind: "reply", text: "echo: A prompt" },
+      { turn: "turn_a", kind: "completed" },
+      { turn: "turn_b", kind: "started" },
+      { turn: "turn_b", kind: "reply", text: "echo: B prompt" },
+      { turn: "turn_b", kind: "completed" },
+      { turn: "turn_c", kind: "started" },
+      { turn: "turn_c", kind: "reply", text: "echo: C prompt" },
+      { turn: "turn_c", kind: "completed" },
+    ] as const;
+    let log = createThreadLog();
+    for (const row of wire) {
+      if (row.kind === "prompt") {
+        log = foldEvent(log, {
+          type: "item_completed",
+          thread_id: "t1",
+          turn_id: row.turn,
+          at: "2026-01-01T00:00:00.000Z",
+          item: {
+            kind: "message",
+            item_id: `prompt_${row.turn}`,
+            role: "user",
+            text: row.text,
+            attachments: [],
+          },
+        });
+      } else if (row.kind === "reply") {
+        log = foldEvent(log, {
+          type: "item_completed",
+          thread_id: "t1",
+          turn_id: row.turn,
+          at: "2026-01-01T00:00:01.000Z",
+          item: {
+            kind: "message",
+            item_id: `reply_${row.turn}`,
+            role: "assistant",
+            text: row.text,
+            attachments: [],
+          },
+        });
+      } else if (row.kind === "started") {
+        log = foldEvent(log, {
+          type: "turn_started",
+          thread_id: "t1",
+          turn_id: row.turn,
+          started_at: "2026-01-01T00:00:00.000Z",
+        });
+      } else {
+        log = foldEvent(log, {
+          type: "turn_completed",
+          thread_id: "t1",
+          turn_id: row.turn,
+          status: "completed",
+          usage: USAGE,
+        });
+      }
+    }
+
+    const ids = log.turns.map((turn) => turn.id);
+    expect(ids).toEqual([
+      "cue:user:prompt_turn_a",
+      "turn_a",
+      "cue:user:prompt_turn_b",
+      "cue:user:prompt_turn_c",
+      "turn_b",
+      "turn_c",
+    ]);
+    expect(
+      log.turns[1]?.items.map((item) => (item.kind === "message" ? item.text : item.kind)),
+    ).toEqual(["echo: A prompt"]);
+    expect(
+      log.turns[4]?.items.map((item) => (item.kind === "message" ? item.text : item.kind)),
+    ).toEqual(["echo: B prompt"]);
   });
 });
 

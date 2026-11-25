@@ -177,7 +177,13 @@ impl CodexParser {
                 self.error_seen = false;
                 self.agent_deltas.clear();
                 self.state = AgentState::Thinking;
-                Vec::new()
+                // The provider's own turn id is what a later `thread/fork`
+                // names as `lastTurnId`, so the daemon records it with the
+                // turn it belongs to.
+                self.turn_id
+                    .clone()
+                    .map(|turn_id| vec![HarnessEvent::NativeTurnId { turn_id }])
+                    .unwrap_or_default()
             }
             "item/agentMessage/delta" => {
                 let Some(delta) = params["delta"].as_str() else {
@@ -1044,6 +1050,25 @@ mod tests {
             "turnId": "turn-1",
             "startedAtMs": 1_794_548_672_613i64
         })
+    }
+
+    #[test]
+    fn a_started_turn_reports_the_providers_own_turn_id() {
+        let mut parser = CodexParser::new();
+        let events = parser.push_value(&json!({
+            "method": "turn/started",
+            "params": {
+                "threadId": "thread-1",
+                "turn": { "id": "turn-provider-7" }
+            }
+        }));
+        assert_eq!(
+            events,
+            vec![HarnessEvent::NativeTurnId {
+                turn_id: "turn-provider-7".into()
+            }],
+            "the daemon records the id a later fork copies through"
+        );
     }
 
     #[test]
