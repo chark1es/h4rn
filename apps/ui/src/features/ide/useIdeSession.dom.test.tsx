@@ -1067,6 +1067,142 @@ describe("a direct open replaces the finished list's file", () => {
   });
 });
 
+describe("a base change keeps the tab a pending review was started for", () => {
+  it("reopens that tab after a round-trip and reads its list once", async () => {
+    await mount();
+    await waitFor(() => latest?.active?.path === "a.ts");
+    await act(async () => {
+      await latest?.selectDiffSource("branch");
+    });
+    await waitFor(() => latest?.state.diff?.path === "a.ts" && !latest?.state.filesLoading);
+
+    // The pane is closed while the person moves to b.ts and picks Branch: the
+    // load is for b.ts, but `diffPath` still names a.ts until it lands.
+    await act(async () => {
+      latest?.openFile("b.ts");
+    });
+    await waitFor(() => latest?.active?.path === "b.ts");
+    const releaseTabLoad = holdNext("fs_diff_files");
+    await act(async () => {
+      void latest?.selectDiffSource("branch");
+    });
+    await waitFor(() => latest?.state.filesLoading === true);
+    expect(latest?.state.diffPath).toBe("a.ts");
+
+    // The base changes before that list lands; its own list is held too.
+    const releaseBase = holdNext("fs_diff_files");
+    await act(async () => {
+      void latest?.setDiffBase("feature");
+    });
+    await waitFor(() => latest?.state.filesLoading === true);
+
+    // Leave mid-read and come back. The resumed read reopens b.ts, the file the
+    // base change was started for, and the tab follow leaves its read alone.
+    const home = workspace.path;
+    await switchWorkspace(`${home}-other`);
+    state.requests = [];
+    const listReads = () =>
+      state.requests.filter((request) => request.type === "fs_diff_files").length;
+    const releaseResume = holdNext("fs_diff_files");
+    await switchWorkspace(home);
+    await waitFor(() => latest?.state.filesLoading === true);
+    expect(listReads()).toBe(1);
+
+    await act(async () => {
+      void latest?.followDiffTab("b.ts");
+    });
+    expect(listReads()).toBe(1);
+
+    await releaseHold(releaseResume);
+    await waitFor(() => latest?.state.diff?.path === "b.ts");
+    expect(latest?.state.diffPath).toBe("b.ts");
+    expect(latest?.state.diff?.against).toEqual({ kind: "base", base: "feature" });
+
+    // The two earlier reads belong to requests the round-trip replaced.
+    await releaseHold(releaseBase);
+    await releaseHold(releaseTabLoad);
+    expect(latest?.state.diff?.path).toBe("b.ts");
+    expect(listReads()).toBe(1);
+  });
+});
+
+describe("a commit change keeps the tab a pending review was started for", () => {
+  it("reopens that tab after a round-trip and reads its lists once", async () => {
+    await mount();
+    await waitFor(() => latest?.active?.path === "a.ts");
+    await act(async () => {
+      await latest?.selectDiffSource("commit");
+    });
+    await waitFor(() => latest?.state.diff?.against?.kind === "commit");
+
+    // The pane is closed while the person moves to b.ts and picks Commits: the
+    // commit list is for b.ts, but `diffPath` still names a.ts.
+    await act(async () => {
+      latest?.openFile("b.ts");
+    });
+    await waitFor(() => latest?.active?.path === "b.ts");
+    const releaseTabCommits = holdNext("fs_diff_commits");
+    await act(async () => {
+      void latest?.selectDiffSource("commit");
+    });
+    await waitFor(() => latest?.state.commitsLoading === true);
+    expect(latest?.state.diffPath).toBe("a.ts");
+
+    // The commit changes before that list lands; its file list is held too.
+    state.commits = {
+      ...state.commits,
+      commits: [
+        {
+          sha: "commit-2",
+          short_sha: "c2",
+          subject: "second",
+          author: "you",
+          authored_at: "2026-03-04T12:03:00Z",
+        },
+        ...state.commits.commits,
+      ],
+    };
+    const releaseCommit = holdNext("fs_diff_files");
+    await act(async () => {
+      void latest?.setDiffCommit("commit-2");
+    });
+    await waitFor(() => latest?.state.filesLoading === true);
+
+    // Leave mid-read and come back. The resumed read reopens b.ts with the new
+    // commit, and the tab follow leaves its lists alone.
+    const home = workspace.path;
+    await switchWorkspace(`${home}-other`);
+    state.requests = [];
+    const commitReads = () =>
+      state.requests.filter((request) => request.type === "fs_diff_commits").length;
+    const fileReads = () =>
+      state.requests.filter((request) => request.type === "fs_diff_files").length;
+    const releaseResumeCommits = holdNext("fs_diff_commits");
+    await switchWorkspace(home);
+    await waitFor(() => latest?.state.commitsLoading === true);
+    expect(commitReads()).toBe(1);
+
+    await act(async () => {
+      void latest?.followDiffTab("b.ts");
+    });
+    expect(commitReads()).toBe(1);
+
+    await releaseHold(releaseResumeCommits);
+    await waitFor(() => latest?.state.diff?.path === "b.ts");
+    expect(latest?.state.diffPath).toBe("b.ts");
+    expect(latest?.state.diff?.against).toEqual({ kind: "commit", sha: "commit-2" });
+    expect(commitReads()).toBe(1);
+    expect(fileReads()).toBe(1);
+
+    // The two earlier reads belong to requests the round-trip replaced.
+    await releaseHold(releaseCommit);
+    await releaseHold(releaseTabCommits);
+    expect(latest?.state.diff?.path).toBe("b.ts");
+    expect(commitReads()).toBe(1);
+    expect(fileReads()).toBe(1);
+  });
+});
+
 describe("a workspace change advances the branch generation", () => {
   it("ignores the previous workspace's branch list and file list", async () => {
     await mount();

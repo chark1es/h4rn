@@ -122,7 +122,10 @@ until you press Send. The comments then leave the pane.
   same list twice when you come back (Commits still re-reads its commit list once, then the
   commit's files once), and reopens the tab it was started for even if the editor has moved
   since: the resumed load already opens that file, so the tab follow does not read the same list
-  again. A diff that was opening directly resumes the file it was opening.
+  again. A diff that was opening directly resumes the file it was opening. A base or commit
+  change made while a Branch or Commits list is still loading keeps that list's tab: the new
+  comparison reopens the tab the read was started for, and a round-trip in the middle of it
+  still reads its list once.
 - Binary files and files over the 2 MiB read limit say so instead of showing mojibake, in the diff
   body only: the file list, source bar and comment actions stay usable, so another file or source
   is one click away. Both sides of `HEAD` and commit diffs are size-checked before they are read.

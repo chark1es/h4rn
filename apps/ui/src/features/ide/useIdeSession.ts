@@ -1034,20 +1034,23 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
   /** Changes the branch the review compares against. */
   const setDiffBase = useCallback(
     async (base: string | null) => {
+      // A list that is still out will open the tab it was started for, so that
+      // tab is this read's file too; `diffPath` may still name the one before.
+      const preferred = stateRef.current.diffListPath ?? stateRef.current.diffPath;
       const token = beginDiffRequest();
       setState((current) => ({
         ...current,
         diffBase: base,
         diffCommit: null,
         diffCommits: null,
-        // This read prefers the diff's file, not a list read's tab.
-        diffListPath: null,
+        // Record the file this load will open, so a workspace round-trip
+        // reopens it and the tab follow leaves the resumed list alone.
+        diffListPath: preferred,
         // The body on screen was compared against the old base; keep it off
         // the screen while the new comparison's list loads.
         diff: null,
         diffError: null,
       }));
-      const preferred = stateRef.current.diffPath;
       const files = await fetchDiffFiles({ kind: "base", base });
       if (!diffRequestCurrent(token)) return;
       await showDiffForFiles(files, "branch", preferred, { base: files?.base ?? base });
@@ -1058,15 +1061,16 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
   /** Opens one commit's files. */
   const setDiffCommit = useCallback(
     async (sha: string) => {
+      // See `setDiffBase`: a pending list's tab is this read's file too.
+      const preferred = stateRef.current.diffListPath ?? stateRef.current.diffPath;
       const token = beginDiffRequest();
       setState((current) => ({
         ...current,
         diffCommit: sha,
-        diffListPath: null,
+        diffListPath: preferred,
         diff: null,
         diffError: null,
       }));
-      const preferred = stateRef.current.diffPath;
       const files = await fetchDiffFiles({ kind: "commit", sha });
       if (!diffRequestCurrent(token)) return;
       await showDiffForFiles(files, "commit", preferred, { commit: sha });
