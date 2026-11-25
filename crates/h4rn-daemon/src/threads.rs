@@ -220,10 +220,18 @@ pub struct NewThread {
 /// only the checkout is new.
 struct WorktreeRollback(Option<crate::worktrees::create::CreatedWorktree>);
 
+/// Starts the same rollback a dropped thread-create guard would start.
+#[cfg(test)]
+pub(crate) fn rollback_worktree_for_test(created: crate::worktrees::create::CreatedWorktree) {
+    drop(WorktreeRollback(Some(created)));
+}
+
 impl WorktreeRollback {
     /// The thread now owns the worktree.
     fn keep(mut self) {
-        self.0 = None;
+        if let Some(created) = self.0.take() {
+            created.keep();
+        }
     }
 }
 
@@ -234,14 +242,9 @@ impl Drop for WorktreeRollback {
         };
         // The rollback removes the checkout and deletes the branch, both by
         // shelling out to git. A `Drop` cannot await, so it runs on the blocking
-        // pool instead of stalling an async worker; the checkout is gone a
-        // moment later. Outside a runtime (a plain unit test) it runs inline.
-        match tokio::runtime::Handle::try_current() {
-            Ok(handle) => {
-                handle.spawn_blocking(move || created.rollback());
-            }
-            Err(_) => created.rollback(),
-        }
+        // pool instead of stalling an async worker; the creator's shutdown
+        // waits for it, and a crash leaves a record the next startup sweeps.
+        created.rollback_detached();
     }
 }
 
@@ -273,6 +276,51 @@ mod workspace_path_fault {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .as_deref()
             .is_some_and(|forced| forced == std::path::Path::new(workspace))
+    }
+}
+
+/// Test-only: holds a thread create between its durable insert and `keep`.
+#[cfg(test)]
+mod worktree_keep_pause {
+    use std::sync::{Arc, Mutex};
+
+    use tokio::sync::Notify;
+
+    struct Pause {
+        thread: String,
+        reached: Arc<Notify>,
+        release: Arc<Notify>,
+    }
+
+    static PAUSE: Mutex<Option<Pause>> = Mutex::new(None);
+
+    pub(super) fn install(thread: &str, reached: Arc<Notify>, release: Arc<Notify>) {
+        *PAUSE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Pause {
+            thread: thread.to_owned(),
+            reached,
+            release,
+        });
+    }
+
+    pub(super) async fn before_keep(thread: &str) {
+        let waiting = PAUSE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .filter(|pause| pause.thread == thread)
+            .map(|pause| (Arc::clone(&pause.reached), Arc::clone(&pause.release)));
+        if let Some((reached, release)) = waiting {
+            reached.notify_one();
+            release.notified().await;
+        }
+    }
+
+    pub(super) fn clear() {
+        *PAUSE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
     }
 }
 
@@ -4226,6 +4274,9 @@ impl ThreadManager {
         // Worktree creation is the last fallible setup: once the checkout
         // exists, the thread runs there. A failure after this point rolls the
         // new branch back, while a named branch that was already there stays.
+        // The admission is held until this call has adopted or rolled back the
+        // checkout, so shutdown can wait for that outcome instead of taking it.
+        let mut worktree_admission: Option<crate::worktrees::create::CreateAdmission> = None;
         let worktree_guard = if let Some(worktree) = request
             .worktree
             .as_ref()
@@ -4236,6 +4287,7 @@ impl ThreadManager {
                     "this daemon build has no worktree support".into(),
                 ));
             };
+            worktree_admission = Some(creator.admit().map_err(ManagerError::Conflict)?);
             let created = creator
                 .create_for_thread(&request.workspace_path, worktree, &request.prompt)
                 .await
@@ -4383,6 +4435,14 @@ impl ThreadManager {
             .await
             .insert(thread_id.as_str().to_owned(), handle.clone());
 
+        // The row is durable and in memory: the thread now owns its checkout.
+        // Do this before any job or session starts, so a shutdown can only see
+        // an adopted thread or a rollback, never a create between the two.
+        #[cfg(test)]
+        worktree_keep_pause::before_keep(thread_id.as_str()).await;
+        worktree_guard.keep();
+        drop(worktree_admission.take());
+
         if title_eligible {
             self.inner
                 .spawn_title_job(
@@ -4394,7 +4454,6 @@ impl ThreadManager {
                 .await;
         }
 
-        worktree_guard.keep();
         self.inner.spawn_session(handle);
         Ok(CreatedThread {
             thread_id,
@@ -15006,6 +15065,69 @@ mod tests {
         );
     }
 
+    /// A shutdown that starts in the window between the thread insert and
+    /// `keep` waits for the create to adopt its checkout.
+    #[tokio::test]
+    async fn a_thread_committed_during_shutdown_keeps_its_worktree() {
+        let repo = worktree_repo();
+        let data = tempfile::tempdir().expect("data");
+        let manager = open_test_manager(FakeHarness::new(), HostId::new("host_test")).await;
+        let creator = Arc::new(crate::worktrees::create::WorktreeCreator::new(
+            data.path().to_path_buf(),
+            Arc::new(crate::worktrees::settings::WorktreeSettingsStore::in_memory()),
+        ));
+        manager.set_worktree_creator(Arc::clone(&creator));
+
+        let thread_id = ThreadId::new_uuid_v7();
+        let mut request = new_thread(HostId::new("host_test"), repo.path(), "Keep the checkout");
+        request.thread_id = Some(thread_id.clone());
+        request.worktree = Some(h4rn_protocol::WorktreeRequest::Generated(true));
+        let reached = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        super::worktree_keep_pause::install(
+            thread_id.as_str(),
+            Arc::clone(&reached),
+            Arc::clone(&release),
+        );
+        let create_manager = manager.clone();
+        let create = tokio::spawn(async move { create_manager.create_thread(request).await });
+        reached.notified().await;
+
+        let shutdown_manager = manager.clone();
+        let shutdown_creator = Arc::clone(&creator);
+        let shutdown = tokio::spawn(async move {
+            shutdown_creator.close_admission();
+            shutdown_creator.drain_admissions().await;
+            let in_use = shutdown_manager.workspace_paths().await;
+            shutdown_manager.shutdown().await;
+            shutdown_creator.shutdown(&in_use).await;
+        });
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert!(
+            !shutdown.is_finished(),
+            "shutdown waited for the create that had not kept its checkout"
+        );
+        release.notify_one();
+
+        let created = create
+            .await
+            .expect("create task")
+            .expect("the thread commits");
+        shutdown.await.expect("shutdown task");
+        super::worktree_keep_pause::clear();
+        assert!(
+            std::path::Path::new(&created.summary.workspace_path).is_dir(),
+            "the committed thread still has its checkout"
+        );
+        assert_eq!(
+            crate::worktrees::git::list_worktrees(repo.path())
+                .expect("list")
+                .len(),
+            1,
+            "the checkout is still registered"
+        );
+    }
+
     /// A clock that only moves when a test says so.
     ///
     /// Wall time and monotonic time advance together, but a test can move one
@@ -15829,6 +15951,44 @@ mod tests {
                 .await
                 .is_empty()
         );
+    }
+
+    /// Shutdown waits for a rollback that has already started, instead of
+    /// dropping the process while its checkout is still there.
+    #[tokio::test]
+    async fn shutdown_waits_for_a_started_worktree_rollback() {
+        let repo = worktree_repo();
+        let data = tempfile::tempdir().expect("data");
+        let creator = crate::worktrees::create::WorktreeCreator::new(
+            data.path().to_path_buf(),
+            Arc::new(crate::worktrees::settings::WorktreeSettingsStore::in_memory()),
+        );
+        let created = creator
+            .create_for_thread(
+                repo.path().to_str().unwrap(),
+                &h4rn_protocol::WorktreeRequest::Named("shutdown/wait".into()),
+                "shutdown",
+            )
+            .await
+            .expect("create");
+        let dest = created.path.clone();
+        crate::worktrees::create::test_hooks::hold_rollback(
+            dest.clone(),
+            Duration::from_millis(400),
+        );
+        let guard = WorktreeRollback(Some(created));
+        let dropped = tokio::spawn(async move { drop(guard) });
+        tokio::time::sleep(Duration::from_millis(40)).await;
+
+        let started = std::time::Instant::now();
+        creator.shutdown(&[]).await;
+        assert!(
+            started.elapsed() >= Duration::from_millis(300),
+            "shutdown waited for the rollback it had started"
+        );
+        dropped.await.expect("drop task");
+        crate::worktrees::create::test_hooks::clear_rollback();
+        assert!(!dest.exists(), "the rollback finished");
     }
 
     /// A rollback runs off the async runtime: while its git cleanup is held

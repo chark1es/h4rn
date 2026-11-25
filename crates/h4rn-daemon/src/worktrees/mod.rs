@@ -330,6 +330,30 @@ struct Candidate {
     last_seen: DateTime<Utc>,
 }
 
+/// Finishes the rollback of creates that never reached a thread.
+///
+/// Runs before the tracker starts serving, so a checkout left by a shutdown is
+/// gone before anything can show it. A thread already using the checkout keeps
+/// it: the sweep drops that create's record without touching the worktree.
+async fn sweep_unfinished_creates(threads: &Arc<ThreadManager>, data_dir: &Path) {
+    let in_use = threads.workspace_paths().await;
+    let data_dir = data_dir.to_path_buf();
+    let swept = tokio::task::spawn_blocking(move || {
+        crate::worktrees::create::sweep_pending(&data_dir, &in_use)
+    })
+    .await;
+    match swept {
+        Ok(paths) if !paths.is_empty() => {
+            tracing::info!(
+                count = paths.len(),
+                "removed worktrees left by creates that never finished"
+            );
+        }
+        Ok(_) => {}
+        Err(error) => tracing::warn!(%error, "could not sweep unfinished worktree creates"),
+    }
+}
+
 impl WorktreeTracker {
     /// Opens the tracker over `<data_dir>/worktrees.db`.
     ///
@@ -342,6 +366,7 @@ impl WorktreeTracker {
         let store = WorktreeStore::connect(data_dir.join("worktrees.db"))
             .await
             .map_err(|error| WorktreeError::Store(error.to_string()))?;
+        sweep_unfinished_creates(&threads, &data_dir).await;
         Ok(Self::with_store(threads, subagents, data_dir, store))
     }
 
@@ -354,6 +379,7 @@ impl WorktreeTracker {
         let store = WorktreeStore::in_memory()
             .await
             .map_err(|error| WorktreeError::Store(error.to_string()))?;
+        sweep_unfinished_creates(&threads, &data_dir).await;
         Ok(Self::with_store(threads, subagents, data_dir, store))
     }
 
