@@ -7,6 +7,8 @@ import { ForgeSettings } from "@/features/forge/ForgeSettings";
 import { GuestSettingsForm } from "@/features/guest/GuestSettings";
 import { HarnessSettings } from "@/features/harnesses/HarnessSettings";
 import {
+  agentAlertsAvailabilityText,
+  agentAlertsSwitchEnabled,
   loadAgentAlertSettings,
   setAgentAlertsEnabled,
   useAgentAlerts,
@@ -18,6 +20,7 @@ import {
 } from "@/features/notifications/channel";
 import {
   type DeviceAlertsState,
+  deviceAvailabilityNote,
   deviceStatusLine,
   disableDeviceAlerts,
   enableDeviceAlerts,
@@ -464,6 +467,8 @@ function NotificationsForm() {
   const [permission, setPermission] = useState<NotificationPermissionState | null>(null);
   const [error, setError] = useState<string | null>(null);
   const agentAlerts = useAgentAlerts();
+  const daemonMachineId = useApp((state) => state.daemonMachineId);
+  const daemonPaired = daemonMachineId !== null;
   const [device, setDevice] = useState<DeviceAlertsState | null>(null);
   const [deviceBusy, setDeviceBusy] = useState(false);
   const alertsShell = deviceAlertsShell();
@@ -530,7 +535,7 @@ function NotificationsForm() {
   };
 
   const changeAgentAlerts = async (next: boolean) => {
-    if (!signedIn) return;
+    if (next && !signedIn && !daemonPaired) return;
     await setAgentAlertsEnabled(next);
   };
 
@@ -547,6 +552,7 @@ function NotificationsForm() {
   const rows = relayPresence
     ? NOTIFICATION_ROWS
     : NOTIFICATION_ROWS.filter((row) => row.key !== "hostOffline");
+  const availabilityNote = deviceAvailabilityNote(device);
 
   return (
     <div className="q-form">
@@ -617,16 +623,18 @@ function NotificationsForm() {
             <Toggle
               checked={agentAlerts.enabled === true}
               label="Send agent alerts to my phone through Connect"
-              disabled={!signedIn || agentAlerts.enabled === null || agentAlerts.saving}
+              disabled={
+                !agentAlertsSwitchEnabled(
+                  agentAlerts.enabled,
+                  agentAlerts.saving,
+                  signedIn || daemonPaired,
+                )
+              }
               onChange={(next) => void changeAgentAlerts(next)}
             />
           </div>
         </div>
-        <p className="s q-muted">
-          {signedIn
-            ? "Each alert carries the thread id, its title, the project name, the state and the time. Never message text, tool output, file paths or credentials. Delivery goes through Connect, not a direct connection."
-            : "Sign in to Connect to send alerts to a phone."}
-        </p>
+        <p className="s q-muted">{agentAlertsAvailabilityText(daemonPaired)}</p>
         {agentAlerts.error ? (
           <p className="s" role="alert" style={{ color: "var(--danger)" }}>
             {agentAlerts.error}
@@ -665,12 +673,7 @@ function NotificationsForm() {
                 This build has no Firebase configuration, so it cannot receive alerts.
               </p>
             ) : null}
-            {device?.available && device.configured === false ? (
-              <p className="s q-muted">
-                This Connect server has no push sender configured. An operator has to add a Firebase
-                service account before alerts can arrive.
-              </p>
-            ) : null}
+            {availabilityNote ? <p className="s q-muted">{availabilityNote}</p> : null}
             {device?.error ? (
               <p className="s" role="alert" style={{ color: "var(--danger)" }}>
                 {device.error}

@@ -1,6 +1,6 @@
 /**
  * Android device alerts: registration with Connect and the foreground route
- * (ADR-049).
+ * (ADR-048).
  *
  * The daemon publishes transitions; Connect decides and sends them; this module
  * only makes the phone reachable. The chosen state is this device's own, so it
@@ -34,7 +34,7 @@ export type DeviceAlertsState = {
   /** A successful registration is known to exist for this install. */
   registered: boolean;
   /** The signed-in relay has an FCM service account configured. */
-  configured: boolean;
+  configured: boolean | null;
   token: string | null;
   error: string | null;
 };
@@ -53,6 +53,24 @@ export function deviceStatusLine(device: DeviceAlertsState | null, signedIn: boo
   if (device.enabled && device.registered) return "Registered with this phone.";
   if (device.enabled) return "Registered, but Connect has not confirmed this phone yet.";
   return "Off.";
+}
+
+/**
+ * What this Connect server's push sender state means, or `null` when it is
+ * fine or not yet known.
+ *
+ * A failed status call is not evidence that the server has no sender; saying
+ * so would send the person to their operator for the wrong reason.
+ */
+export function deviceAvailabilityNote(device: DeviceAlertsState | null): string | null {
+  if (device === null) return null;
+  if (device.configured === false) {
+    return "This Connect server has no push sender configured. An operator has to add a Firebase service account before alerts can arrive.";
+  }
+  if (device.configured === null && device.error !== null) {
+    return "Could not check whether this Connect server can send alerts.";
+  }
+  return null;
 }
 
 export function devicePushEnabled(): boolean {
@@ -90,20 +108,22 @@ export async function readDeviceAlerts(): Promise<DeviceAlertsState> {
       permission: "unknown",
       enabled: devicePushEnabled(),
       registered: false,
-      configured: false,
+      configured: null,
       token: null,
       error: null,
     };
   }
   const status = await nativePushStatus();
-  let configured = false;
+  let configured: boolean | null = null;
   let registered = lastRegistered;
   const client = currentConnectClient();
   if (client) {
     try {
       const relay = await client.pushStatus();
       configured = relay.configured;
-      registered = devicePushEnabled() && relay.devices > 0;
+      // The relay answers about this device's own row. The account's other
+      // phones say nothing about whether this one can receive an alert.
+      registered = relay.registered === true;
       lastRegistered = registered;
     } catch (error) {
       return {
@@ -112,7 +132,7 @@ export async function readDeviceAlerts(): Promise<DeviceAlertsState> {
         permission: status?.permission ?? "unknown",
         enabled: devicePushEnabled(),
         registered,
-        configured: false,
+        configured: null,
         token: status?.token ?? null,
         error: describe(error),
       };

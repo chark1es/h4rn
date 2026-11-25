@@ -33,7 +33,7 @@ const MAX_SECRET_VALUE: usize = 64 * 1024;
 #[cfg(any(target_os = "android", target_os = "ios"))]
 struct SecretStore(PluginHandle<tauri::Wry>);
 
-/// Android FCM bridge (ADR-049). The plugin is Android-only; iOS alerts are a
+/// Android FCM bridge (ADR-048). The plugin is Android-only; iOS alerts are a
 /// later task, so the commands report the feature unavailable there.
 #[cfg(target_os = "android")]
 struct PushBridge(PluginHandle<tauri::Wry>);
@@ -47,7 +47,7 @@ struct PushStatusValue {
     #[allow(dead_code)]
     channel: bool,
     /// Filled by the shell from its own crate version.
-    #[serde(default)]
+    #[serde(default, rename = "appVersion")]
     app_version: String,
 }
 
@@ -394,4 +394,26 @@ pub fn run() {
     builder
         .run(tauri::generate_context!())
         .expect("error while running the h4rn mobile shell");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PushStatusValue;
+
+    #[test]
+    fn the_push_status_uses_the_key_the_ui_reads() {
+        let value = PushStatusValue {
+            available: true,
+            permission: "granted".to_string(),
+            token: None,
+            channel: true,
+            app_version: "1.2.3".to_string(),
+        };
+        let json = serde_json::to_value(&value).expect("serialise push status");
+        assert_eq!(json["appVersion"], "1.2.3");
+        assert!(
+            json.get("app_version").is_none(),
+            "the UI reads appVersion, not the Rust field name"
+        );
+    }
 }
