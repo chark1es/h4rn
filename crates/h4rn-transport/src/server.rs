@@ -1126,9 +1126,15 @@ impl SecureService {
                 let Ok(record) = Record::decode_plaintext(&plaintext) else {
                     return false;
                 };
+                // A path proves it is alive by authenticating anything, and a
+                // health probe is a control record. An idle session sends no
+                // data but keeps pinging; if only data reset this deadline, the
+                // daemon would close a perfectly live path after
+                // `path_timeout` of quiet.
+                let now = self.now_ms();
+                *idle_since = now;
                 match record.kind {
                     RecordKind::Data | RecordKind::Ack => {
-                        let now = self.now_ms();
                         let deliveries = {
                             let mut guard = lock(session);
                             let incoming = Incoming {
@@ -1156,7 +1162,6 @@ impl SecureService {
                                 return false;
                             }
                         }
-                        *idle_since = now;
                         true
                     }
                     RecordKind::Control => match Control::decode(&record.payload) {
