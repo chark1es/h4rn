@@ -4,6 +4,7 @@ import type {
   ApprovalDecision,
   Attachment,
   ClientRequest,
+  DroppedSetting,
   HarnessKind,
   HostId,
   HostSummary,
@@ -1403,6 +1404,59 @@ export async function setThreadFast(threadId: ThreadId, fast: boolean): Promise<
     thread_id: threadId,
     fast,
   });
+}
+
+/** What a harness switch did, including the settings the new harness dropped. */
+export type SwitchHarnessResult =
+  | { ok: true; dropped: DroppedSetting[] }
+  | { ok: false; message: string; hint: string | null };
+
+/**
+ * Moves a thread to another harness between turns.
+ *
+ * A successful answer is acked through the event stream like every other
+ * thread change; this returns the dropped settings so the caller can say which
+ * ones the new harness could not keep. A refusal is a toast plus a returned
+ * error, so the control that made the request can also show it in place.
+ */
+export async function switchThreadHarness(
+  threadId: ThreadId,
+  harness: HarnessKind,
+  model: string,
+  agentId: string | null = null,
+): Promise<SwitchHarnessResult> {
+  const state = getState();
+  setState({
+    ...state,
+    pendingActions: { ...state.pendingActions, [threadId]: "Switching harness" },
+  });
+  try {
+    const response = await getClient().request({
+      type: "switch_thread_harness",
+      thread_id: threadId,
+      harness,
+      agent_id: agentId,
+      model,
+    });
+    return {
+      ok: true,
+      dropped: response.type === "thread_switched" ? response.dropped : [],
+    };
+  } catch (error) {
+    const proto = toProtoError(error);
+    pushToast({
+      variant: "error",
+      title: `Switching harness failed on ${getState().threads[threadId]?.host ?? "the host"}.`,
+      description: proto.hint ?? proto.message,
+    });
+    return { ok: false, message: proto.message, hint: proto.hint ?? null };
+  } finally {
+    const current = getState();
+    setState({
+      ...current,
+      pendingActions: { ...current.pendingActions, [threadId]: undefined },
+    });
+  }
 }
 
 /** Renames a thread by hand. The daemon never replaces a name you typed. */

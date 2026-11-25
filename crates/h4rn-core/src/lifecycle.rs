@@ -6,7 +6,7 @@
 //! share exactly one predicate set, and so clock-skew behaviour is testable.
 
 use chrono::{DateTime, Duration, Utc};
-use h4rn_protocol::{AgentState, ThreadTab, TurnStatus};
+use h4rn_protocol::{AgentState, HarnessKind, ThreadTab, TurnStatus};
 use serde::{Deserialize, Serialize};
 
 /// How long a thread may sit idle before it settles automatically.
@@ -439,6 +439,21 @@ impl ThreadState {
             ThreadEvent::PrWatchStopped { .. } => {
                 self.pr_watch = false;
             }
+            // A harness switch lands between turns. It changes which provider
+            // runs next, never the thread's placement, so only the shared
+            // activity clock above moves.
+            ThreadEvent::HarnessSwitched { .. } => {
+                // A limit belonged to the provider the thread just left. The
+                // new harness has its own account and reset, so the old
+                // countdown must not keep the thread paused (or show in the
+                // sidebar and the phone inbox) after the switch.
+                if matches!(self.phase, Phase::RateLimited) {
+                    self.phase = Phase::Idle;
+                    self.agent_state = AgentState::Idle;
+                    self.usage_limit = None;
+                    self.pending_failure = false;
+                }
+            }
         }
 
         // A raised hand always wins over a stale snooze (ADR-004): run
@@ -651,6 +666,19 @@ pub enum ThreadEvent {
         /// Event time.
         at: DateTime<Utc>,
     },
+    /// The thread moved to another harness between turns.
+    ///
+    /// Lifecycle placement does not change: the switch happens between turns,
+    /// after the last one settled and before the next one starts. The event is
+    /// journaled so the transcript can show where the provider changed.
+    HarnessSwitched {
+        /// Harness the thread ran on until now.
+        from: HarnessKind,
+        /// Harness the next turn runs on.
+        to: HarnessKind,
+        /// Event time.
+        at: DateTime<Utc>,
+    },
     /// The harness reported a finer-grained agent state.
     AgentStateChanged {
         /// New state.
@@ -816,6 +844,7 @@ impl ThreadEvent {
         match self {
             Self::TurnQueued { at }
             | Self::TurnStarted { at }
+            | Self::HarnessSwitched { at, .. }
             | Self::AgentStateChanged { at, .. }
             | Self::Rewound { at, .. }
             | Self::ApprovalRequested { at }

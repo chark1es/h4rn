@@ -6,8 +6,8 @@
 //! plus the newest messages, in order, under a byte budget; the request itself
 //! is appended afterwards and is never shortened.
 //!
-//! The builder takes only roles and text, so provider switching and forking
-//! can reuse it later with their own history.
+//! The builder takes only roles and text, so the import fallback, provider
+//! switching and forking all use the same selection and budget rules.
 
 use h4rn_protocol::MessageRole;
 

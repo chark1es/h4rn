@@ -43,7 +43,8 @@ mod test_scripts;
 pub mod versions;
 
 pub use controls::{
-    CLAUDE_EFFORTS, CODEX_EFFORTS, SessionControls, ThreadControls, thread_controls,
+    CLAUDE_EFFORTS, CODEX_EFFORTS, SessionControls, ThreadControls, runtime_mode_for_acp_mode_id,
+    thread_controls,
 };
 
 pub use acp_agent::{
@@ -807,7 +808,7 @@ pub trait Harness: Send + Sync {
     ///
     /// A native harness truncates the provider conversation; every other
     /// harness starts a fresh session with a bounded handoff of the kept
-    /// history (ADR-048). Adapters must not claim a method they cannot honour.
+    /// history (ADR-049). Adapters must not claim a method they cannot honour.
     fn rewind_method(&self) -> RewindMethod {
         RewindMethod::Handoff
     }

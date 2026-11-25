@@ -3292,6 +3292,7 @@ class MockDaemon {
             installed: false,
             models: [],
             modes: [],
+            efforts: [],
             error: "The browser preview cannot start a local process.",
           },
         });

@@ -709,6 +709,41 @@ async fn a_large_prompt_fits_the_paired_frames_and_is_replayed_whole() {
         );
     }
 
+    // A message sent while a turn runs is queued and becomes its own transcript
+    // row when it is promoted. Wait for all four here, so what follows tests the
+    // transport rather than how quickly the fake finished its turns.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let (_, result) = client
+            .request_frames(ClientRequest::GetThread {
+                thread_id: thread_id.clone(),
+                since_seq: 0,
+            })
+            .await;
+        let mut seen = 0;
+        if let Ok(ResponseBody::Thread { events, .. }) = result {
+            seen = events
+                .into_iter()
+                .filter(|entry| {
+                    matches!(
+                        &entry.event,
+                        Event::ItemCompleted {
+                            item: h4rn_protocol::Item::Message {
+                                role: MessageRole::User,
+                                ..
+                            },
+                            ..
+                        }
+                    )
+                })
+                .count();
+        }
+        if seen >= prompts.len() || std::time::Instant::now() >= deadline {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+
     let mut since = 0;
     let mut texts = Vec::new();
     let mut saw_more = false;

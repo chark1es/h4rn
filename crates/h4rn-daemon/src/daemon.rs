@@ -337,6 +337,12 @@ impl DaemonBuilder {
             .map_err(|error| anyhow::anyhow!("open CLIProxyAPI profiles: {error}"))?,
         );
         manager.set_proxy(Arc::clone(&proxy));
+        // A harness switch resolves a target ACP agent's catalogue before it
+        // commits, so the mode and effort it carries over are ones the agent
+        // really offers.
+        manager.set_acp_capabilities(
+            Arc::clone(&acp_agents) as Arc<dyn crate::threads::AcpCapabilitySource>
+        );
 
         let guest = Arc::new(
             crate::guest::GuestService::open(

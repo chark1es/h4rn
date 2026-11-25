@@ -43,6 +43,7 @@ const mock = vi.hoisted(() => {
       workspace?: string;
       against?: unknown;
       base?: unknown;
+      turn_id?: TurnId;
     }>,
     phone: false,
     /** Makes the commit list empty, as a branch with nothing beyond its base. */
@@ -81,6 +82,7 @@ vi.mock("@/lib/store/appStore", async () => {
         workspace?: string;
         against?: unknown;
         base?: unknown;
+        turn_id?: TurnId;
       }) => {
         mock.requests.push(request);
         if (mock.hold && mock.hold.type === request.type) {
@@ -191,6 +193,13 @@ let project = 0;
 let workspacePath = "/work";
 /** The turn the thread reports as its latest; a test can move it forward. */
 let activeTurn: TurnId = turn;
+/**
+ * The thread's stream rows, when a test needs more than one.
+ *
+ * A harness switch adds a divider row after the turns, and the IDE must read
+ * the newest turn an agent really ran from it, not the divider.
+ */
+let streamTurns: Array<{ id: TurnId; divider?: boolean }> | null = null;
 
 function listing(path: string, workspace?: string): FsListing {
   const empty = workspace?.endsWith("-empty") ?? false;
@@ -381,7 +390,9 @@ function seed() {
       path: null,
     },
   };
-  mock.state.logs = { [thread]: { turns: [{ id: activeTurn }] } };
+  mock.state.logs = {
+    [thread]: { turns: streamTurns ?? [{ id: activeTurn }] },
+  };
   mock.state.ui.selectedThreadId = thread;
 }
 
@@ -468,6 +479,7 @@ beforeEach(() => {
   // the next test.
   workspacePath = `/work-${project}`;
   activeTurn = turn;
+  streamTurns = null;
   mock.requests = [];
   mock.phone = false;
   mock.emptyCommits = false;
@@ -851,6 +863,31 @@ describe("the diff pane stays on the file the person picked", () => {
       expect(within(diffLines()).getByRole("button", { name: /Line 1: anew/ })).toBeTruthy(),
     );
     expect(pathBar().textContent).toBe("a.ts");
+  });
+
+  it("asks for the newest real turn's diff when a switch divider is the newest row", async () => {
+    // A harness switch appends a divider row after the turns. It has no work of
+    // its own, so Turn must name the last turn an agent really ran.
+    streamTurns = [{ id: turn }, { id: "switch:claude_code:codex" as TurnId, divider: true }];
+    seed();
+    await mount();
+    await openDiff();
+
+    openChip(screen.getByRole("button", { name: "Diff source: Uncommitted" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: /Turn/ }));
+
+    await waitFor(() =>
+      expect(diffRequests().at(-1)?.against).toEqual({
+        kind: "agent_turn",
+        thread_id: thread,
+        turn_id: turn,
+      }),
+    );
+    const changes = mock.requests.filter((request) => request.type === "fs_turn_changes");
+    expect(changes.at(-1)?.turn_id).toBe(turn);
+    await waitFor(() =>
+      expect(within(diffLines()).getByRole("button", { name: /Line 1: anew turn/ })).toBeTruthy(),
+    );
   });
 
   it("labels a review comment with the turn it was written in", async () => {

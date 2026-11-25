@@ -47,6 +47,7 @@ pub mod mcp_server;
 pub mod network_access;
 pub mod pr_links;
 pub mod projects;
+pub mod provider_switch;
 pub mod remote;
 pub mod rewind;
 pub mod schedules;

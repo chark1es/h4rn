@@ -1,6 +1,6 @@
 //! Editing an earlier prompt rewinds the conversation, and optionally its files.
 //!
-//! A rewind is one durable decision (ADR-048). The daemon truncates the thread
+//! A rewind is one durable decision (ADR-049). The daemon truncates the thread
 //! at the chosen user message, tells the harness to drop that message and
 //! everything after it from its own history, and can put the workspace back to
 //! the turn snapshot taken before the message. The wire types here are shared
