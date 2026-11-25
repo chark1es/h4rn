@@ -390,7 +390,9 @@ export type ResponseOf<T extends ClientRequest["type"]> = T extends "list_worktr
           ? Extract<ResponseBody, { type: "rewind_plan" }>
           : T extends "get_rewind_settings" | "set_rewind_settings_enabled"
             ? Extract<ResponseBody, { type: "rewind_settings" }>
-            : ResponseOfRest<T>;
+            : T extends "get_agent_alert_settings" | "set_agent_alert_settings"
+              ? Extract<ResponseBody, { type: "agent_alert_settings" }>
+              : ResponseOfRest<T>;
 
 /**
  * Events that carry no durable position: `seq` is the daemon's current

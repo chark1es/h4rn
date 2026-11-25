@@ -193,6 +193,14 @@ trusted differently from a typed one.
 - **Icons and id.** `dev.h4rn.app`, product name `h4rn`, scaffold icons, min SDK 26, target SDK
   37.
 
+## Agent alerts
+
+Android alerts when an agent finishes, fails, needs approval or asks a question
+are documented in [mobile-notifications.md](mobile-notifications.md), including
+the exact metadata that leaves the daemon and the Firebase setup for users and
+operators. They go through Connect and are off until both the machine switch
+and the phone's own switch are on.
+
 ## iOS
 
 iOS is configured in `apps/mobile/src-tauri/tauri.conf.json` (bundle id, minimum iOS 16,

@@ -7,10 +7,32 @@
 import java.util.Properties
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
+// Firebase Messaging compiles into every build, but the Google Services plugin
+// (and therefore a real Firebase project) is applied only when the operator
+// supplies `H4RN_ANDROID_GOOGLE_SERVICES_FILE`. Without it the app still
+// builds and Settings reports that alerts are unavailable (ADR-051).
+buildscript {
+    repositories {
+        google()
+        mavenCentral()
+    }
+    dependencies {
+        classpath("com.google.gms:google-services:4.4.4")
+    }
+}
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("rust")
+}
+
+val googleServicesFile = System.getenv("H4RN_ANDROID_GOOGLE_SERVICES_FILE")
+    ?.takeIf { it.isNotBlank() }
+    ?.let { file(it) }
+val hasGoogleServices = googleServicesFile != null && googleServicesFile.exists()
+if (hasGoogleServices) {
+    apply(plugin = "com.google.gms.google-services")
 }
 
 val tauriProperties = Properties().apply {
@@ -111,6 +133,9 @@ rust {
 }
 
 dependencies {
+    // Present in every build so the Kotlin compiles without a Firebase
+    // project; without google-services.json nothing initialises at runtime.
+    implementation("com.google.firebase:firebase-messaging:24.1.1")
     implementation("androidx.webkit:webkit:1.14.0")
     implementation("androidx.appcompat:appcompat:1.7.1")
     implementation("androidx.activity:activity-ktx:1.10.1")

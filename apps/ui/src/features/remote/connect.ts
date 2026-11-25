@@ -12,6 +12,7 @@ import type {
   ConnectDeviceKind,
   ConnectErrorBody,
   ConnectMeResponse,
+  ConnectPushStatus,
   ConnectUser,
   DeviceGrantPollResponse,
   DeviceGrantStartResponse,
@@ -439,6 +440,31 @@ export class ConnectClient {
 
   async revokeDevice(id: string): Promise<void> {
     await this.authorized("DELETE", `/v1/devices/${id}`);
+  }
+
+  /** Registers or rotates this install's FCM token (ADR-051). */
+  async registerPushDevice(input: {
+    deviceId: string;
+    token: string;
+    packageName?: string;
+    appVersion?: string;
+  }): Promise<void> {
+    await this.authorized("PUT", "/v1/push/devices", {
+      device_id: input.deviceId,
+      token: input.token,
+      package_name: input.packageName ?? null,
+      app_version: input.appVersion ?? null,
+    });
+  }
+
+  /** Removes this install's push registration. */
+  async deregisterPushDevice(deviceId: string): Promise<void> {
+    await this.authorized("DELETE", `/v1/push/devices/${deviceId}`);
+  }
+
+  /** Whether this relay can push, and how many installs the account has. */
+  async pushStatus(): Promise<ConnectPushStatus> {
+    return this.authorizedJson<ConnectPushStatus>("GET", "/v1/push/status");
   }
 
   async listPairings(): Promise<PairingInfo[]> {

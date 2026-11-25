@@ -9,11 +9,13 @@
 //!
 //! The relay is deliberately dumb. A [`RelayFrame`] carries an opaque payload
 //! for one Noise session; connect routes it by `conn_id` and never inspects it
-//! (ADR-010). Only [`RelayFrameKind::Open`] and the guest control frames
-//! ([`RelayFrameKind::GuestHttp`], [`RelayFrameKind::GuestHttpChunk`],
-//! [`RelayFrameKind::GuestHttpAdmit`], [`RelayFrameKind::GuestHttpCancel`],
-//! [`RelayFrameKind::Hello`]) have a payload
-//! the relay parses; everything else is opaque.
+//! (ADR-010). Only [`RelayFrameKind::Open`], [`RelayFrameKind::Activity`] and
+//! the guest control frames ([`RelayFrameKind::GuestHttp`],
+//! [`RelayFrameKind::GuestHttpChunk`], [`RelayFrameKind::GuestHttpAdmit`],
+//! [`RelayFrameKind::GuestHttpCancel`], [`RelayFrameKind::Hello`]) have a
+//! payload the relay parses; everything else is opaque. An `Activity` payload
+//! is read only to gate it (a daemon may publish, a phone may not) and to hand
+//! the transition to Connect's alert service.
 //!
 //! Payload bytes travel as base64 in JSON because control frames and data
 //! frames share one WebSocket. The relay is the fallback path, so the
@@ -68,6 +70,13 @@ pub enum RelayFrameKind {
     /// single WebSocket message approaches the transport's frame limit. The
     /// payload is a JSON [`GuestHttpChunk`].
     GuestHttpChunk,
+    /// One alertable thread transition from a daemon (ADR-051).
+    ///
+    /// Only a daemon may send it, and the payload is the fixed
+    /// [`crate::AgentActivity`] shape: thread id, title, project name, state
+    /// and time. Connect reads it to decide whether a phone should be woken;
+    /// it never carries message text, tool output, paths or credentials.
+    Activity,
     /// The daemon's go-ahead for a chunked guest body (ADR-044).
     ///
     /// The daemon checks the link, the browser binding and the pending budget
@@ -1106,6 +1115,36 @@ pub struct UsageEvent {
     pub ts: DateTime<Utc>,
     /// Raw provider usage payload, for reconciliation.
     pub raw: Option<serde_json::Value>,
+}
+
+/// One Android install registering for push alerts (ADR-051).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct PushDeviceRegistration {
+    /// The caller's connect device id. A registration is refused for any other.
+    pub device_id: String,
+    /// Firebase Cloud Messaging registration token.
+    pub token: String,
+    /// Android package name, so delivery can be restricted to this app.
+    #[serde(default)]
+    pub package_name: Option<String>,
+    /// App version, for diagnostics only.
+    #[serde(default)]
+    pub app_version: Option<String>,
+}
+
+/// What this relay can do about push, and how many devices this account has.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct ConnectPushStatus {
+    /// Whether an operator configured a Firebase service account.
+    pub configured: bool,
+    /// Registered Android installs on this account.
+    pub devices: usize,
+    /// Whether the caller's own device has a registration row.
+    ///
+    /// A phone asks about itself, so the account-wide count cannot answer
+    /// "will this phone get an alert". Older relays omit it; unset means no.
+    #[serde(default)]
+    pub registered: bool,
 }
 
 #[cfg(test)]

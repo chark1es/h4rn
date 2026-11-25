@@ -1643,6 +1643,10 @@ request_id: string, } | { "type": "get_guest_settings" } | { "type": "set_guest_
 /**
  * New setting. Turning it off disables every live link at once.
  */
+enabled: boolean, } | { "type": "get_agent_alert_settings" } | { "type": "set_agent_alert_settings", 
+/**
+ * New setting. Off stops every publish immediately.
+ */
 enabled: boolean, } | { "type": "scan_session_imports", 
 /**
  * Host to scan.

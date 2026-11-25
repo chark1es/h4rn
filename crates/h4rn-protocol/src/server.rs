@@ -851,6 +851,11 @@ pub enum ResponseBody {
         /// Current settings, as saved.
         settings: crate::WorktreeSettings,
     },
+    /// This machine's switch for sending agent alerts to a phone.
+    AgentAlertSettings {
+        /// Current settings, as saved.
+        settings: crate::AgentAlertSettings,
+    },
     /// Registered projects on one host, oldest first.
     Projects {
         /// Projects.

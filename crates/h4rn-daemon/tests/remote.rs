@@ -343,6 +343,7 @@ impl h4rn_transport::relay::RelayLink for ConnectRelayLink {
                     h4rn_protocol::RelayFrameKind::Open => continue,
                     h4rn_protocol::RelayFrameKind::GuestHttp => continue,
                     h4rn_protocol::RelayFrameKind::GuestHttpChunk => continue,
+                    h4rn_protocol::RelayFrameKind::Activity => continue,
                     h4rn_protocol::RelayFrameKind::GuestHttpAdmit => continue,
                     h4rn_protocol::RelayFrameKind::GuestHttpCancel => continue,
                     h4rn_protocol::RelayFrameKind::Hello => continue,
