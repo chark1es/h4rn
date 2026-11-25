@@ -105,8 +105,9 @@ conversation over:
   shut down and fenced, and the source is released there — after the copy is
   stopped, before the fork's handoff session starts — so a message sent after
   the deadline can never reach something the fork shows. If a Stop lands while
-  the native start is still booting, before the fork's prompt is written, there
-  is nothing to confirm: the copy session is shut down and the source released
+  the native start is still booting, or between the startup's check and the
+  fork prompt's claim, before the fork's prompt is written, there is nothing to
+  confirm: the copy session is shut down and the source released
   at once rather than left holding the gate. A queued message
   that becomes active while a copy is pending waits for that gate in the
   background, never while holding the thread's session-switch lock: a Send that
@@ -135,8 +136,10 @@ The native attempt is spent once. If it succeeds, the fork's session id becomes
 the fork's own; if it fails before starting, the fork records that and uses the
 handoff for that turn. A copy confirmed only by its first output never named a
 session, so there is no id of its own to resume: the attempt is spent there too,
-and the next session starts with the handoff of the fork's history, including
-the turn that output answered. A restart never tries to fork the source again.
+and the session that answered keeps using the copy without being sent the
+history again. The handoff belongs to the next session: a restart, or that
+session dying, starts with the fork's history including the turn that output
+answered. A restart never tries to fork the source again.
 
 A native fork copies the provider's conversation. A handoff is text only: it
 carries the visible messages, not attachments or tool-call state, though the

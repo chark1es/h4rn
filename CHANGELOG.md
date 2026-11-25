@@ -221,7 +221,11 @@ All notable changes to h4rn are recorded here. The format follows
   provider still reading the source at the deadline has its process shut down and
   fenced, and the source is released there — after the copy is stopped, before
   the handoff session starts — so a message sent afterwards can never reach the
-  fork. A thread that has not started a session of its own
+  fork. A fork whose copy is confirmed only by its first answer keeps using that
+  session without being sent its own history again; the handoff is owed to the
+  next session, whether a restart or that session dying. A Stop that lands
+  before the fork's prompt is written — including while its claim waits — shuts
+  the copy down and releases the source at once. A thread that has not started a session of its own
   never lends a borrowed session id to another fork. Any other case — a harness
   without native forks, a source that moved on, or a native fork that dies
   before it starts — sends a bounded handoff of the copied history instead,
