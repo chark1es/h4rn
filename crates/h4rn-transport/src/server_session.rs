@@ -256,7 +256,9 @@ pub struct ServerSession {
     pub attached: BTreeSet<PathId>,
     /// Creation time on the daemon's monotonic clock.
     pub created_ms: u64,
-    /// Last time the session carried traffic.
+    /// Last authenticated record on any path, health probes included (see
+    /// [`ServerSession::mark_seen`]). The resume grace counts from here, so
+    /// narrowing this to application frames evicts idle devices on resume.
     pub last_seen_ms: u64,
 }
 
@@ -345,6 +347,16 @@ impl ServerSession {
         self.active_path
     }
 
+    /// Records that an authenticated record arrived, even one that carries no
+    /// application data.
+    ///
+    /// The resume grace is measured from this instant. A health probe proves
+    /// the device is alive, so a session that was idle on probes alone must
+    /// stay resumable after its path detaches.
+    pub fn mark_seen(&mut self, now_ms: u64) {
+        self.last_seen_ms = now_ms;
+    }
+
     /// Applies one received record.
     pub fn on_record(
         &mut self,
@@ -352,7 +364,7 @@ impl ServerSession {
         record: Incoming,
         now_ms: u64,
     ) -> Result<Vec<AppFrame>, SessionError> {
-        self.last_seen_ms = now_ms;
+        self.mark_seen(now_ms);
         self.layer.on_record(record, now_ms)?;
         Ok(self.layer.take_deliveries())
     }
