@@ -212,16 +212,16 @@ impl IssueLinkService {
         }
         let account_id = self.source.resolve_account(account_id, scope).await?;
         let state = self.read(&account_id, scope, issue_id).await?;
-        // Keep what people search for, so a failed refresh can still name the
-        // issue instead of falling back to a provider UUID.
-        let identifier = match &state {
-            LinkedIssueState::Forge { .. } => None,
-            LinkedIssueState::Linear { issue } => Some(issue.identifier.clone()),
+        // A Linear link keeps what people search for, so a failed refresh can
+        // still name the issue instead of falling back to a provider UUID. A
+        // forge link already has a readable number, so nothing is copied: its
+        // title must stop showing once access to the repository is revoked.
+        let (identifier, title) = match &state {
+            LinkedIssueState::Forge { .. } => (None, None),
+            LinkedIssueState::Linear { issue } => {
+                (Some(issue.identifier.clone()), Some(issue.title.clone()))
+            }
         };
-        let title = Some(match &state {
-            LinkedIssueState::Forge { issue } => issue.title.clone(),
-            LinkedIssueState::Linear { issue } => issue.title.clone(),
-        });
         let record = IssueLinkRecord {
             thread_id: thread_id.clone(),
             account_id,
@@ -461,10 +461,12 @@ mod tests {
         ) -> Result<ForgeIssueSummary, IssueLinkError> {
             self.calls.lock().unwrap().push(format!("forge:{number}"));
             if *self.forge_missing.lock().unwrap() {
-                // GitHub's own words when the number is really a pull request.
-                return Err(IssueLinkError::IssueNotFound(format!(
+                // GitHub's own words when the number is really a pull request,
+                // through the same conversion a real forge miss takes.
+                return Err(ForgeError::NotFound(format!(
                     "#{number} is a pull request, not an issue"
-                )));
+                ))
+                .into());
             }
             if *self.fail.lock().unwrap() {
                 return Err(IssueLinkError::Tracker("forge is down".into()));
@@ -494,9 +496,8 @@ mod tests {
                 .unwrap()
                 .push(format!("linear:{issue_id}"));
             if *self.missing.lock().unwrap() {
-                return Err(IssueLinkError::IssueNotFound(
-                    "Linear issue was not found".into(),
-                ));
+                // The client's own error, through the production conversion.
+                return Err(ForgeError::NotFound("Linear issue was not found".into()).into());
             }
             if *self.fail.lock().unwrap() {
                 return Err(IssueLinkError::Tracker("linear is down".into()));
@@ -591,6 +592,26 @@ mod tests {
                 .unwrap()
                 .contains("forge is down")
         );
+    }
+
+    #[tokio::test]
+    async fn a_forge_link_stores_no_title_to_outlive_its_access() {
+        let (service, source, _journal) = service().await;
+        let thread = ThreadId::new("th_1");
+        let scope = IssueScope::Forge {
+            repo: source.repo.clone(),
+        };
+        let linked = service.link(&thread, None, &scope, "12").await.unwrap();
+        assert_eq!(linked.title, None);
+        assert_eq!(linked.identifier, None);
+
+        // Access to the repository is gone: the row must not keep showing the
+        // issue's title from a copy taken at link time.
+        *source.fail.lock().unwrap() = true;
+        let listed = service.list(&thread).await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert!(listed[0].state.is_none());
+        assert_eq!(listed[0].title, None);
     }
 
     #[tokio::test]

@@ -517,11 +517,15 @@ connected".
 ### Thread links
 
 `LinkIssue` stores the tracker scope and provider issue id in the journal, so
-a link survives a restart. It also stores the issue's human identifier
-(`ENG-123` for Linear) and its title at link time, so a failed refresh still
-names the issue instead of falling back to the provider's internal id, whether
-the tracker is unreachable or reports the issue missing; a link made before
-those were stored is labelled "Linear issue". `ThreadIssues` reads
+a link survives a restart. A Linear link also stores the issue's human
+identifier (`ENG-123`) and its title at link time, so a failed refresh still
+names the issue instead of falling back to Linear's internal id, whether
+Linear is unreachable or reports the issue missing (a 404, a `NOT_FOUND`
+error, or an "Entity not found" message); a link made before those were stored
+is labelled "Linear issue". A rejected key, a missing permission or a rate
+limit keeps its own message even when it says something was "not found". A
+forge link stores no copy of the title: its readable `owner/repo#12` already
+names it, and the title stops showing once access to the repository is gone. `ThreadIssues` reads
 each linked issue live and reports a failed read as an error rather than a
 stale row. The thread header's linked-items panel shows issues beside pull
 requests with open and unlink, and names each issue by its scope
