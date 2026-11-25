@@ -365,6 +365,11 @@ export function startDevicePush(): void {
       void nativeSetPushEnabled(false);
       return;
     }
+    // A launch reaches "signed_in" only after the stored credentials load, so
+    // the flag the launch turned off must come back on here for a phone whose
+    // switch is on; otherwise its alerts would stay silenced until the switch
+    // was flipped again.
+    mirrorNativeFlag();
     void (async () => {
       await reconcileDeviceDeregistration();
       if (!devicePushEnabled()) return;

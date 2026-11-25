@@ -237,6 +237,10 @@ pub struct AlertService {
     group_window: Duration,
     max_age: Duration,
     pending: Mutex<HashMap<Uuid, PendingGroup>>,
+    /// How many transitions reached `ingest`, so a relay test can prove a
+    /// gated frame never got this far.
+    #[cfg(test)]
+    pub(crate) ingested: std::sync::atomic::AtomicUsize,
 }
 
 impl AlertService {
@@ -253,6 +257,8 @@ impl AlertService {
             group_window,
             max_age,
             pending: Mutex::new(HashMap::new()),
+            #[cfg(test)]
+            ingested: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -262,6 +268,9 @@ impl AlertService {
     /// the relay loop never wait for FCM. The baseline is written first, so a
     /// duplicate published while the group is still collecting is dropped.
     pub async fn ingest(self: &Arc<Self>, user_id: Uuid, activity: AgentActivity) {
+        #[cfg(test)]
+        self.ingested
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         match self
             .store
             .claim_push_thread_state(

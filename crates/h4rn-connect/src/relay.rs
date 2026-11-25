@@ -2563,6 +2563,14 @@ mod tests {
         dispatch(&state, &authed("mobile"), frame(payload), Uuid::now_v7())
             .await
             .expect("a phone's activity frame is ignored, not an error");
+        assert_eq!(
+            state
+                .alerts
+                .ingested
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a phone's activity frame reached the alerts"
+        );
 
         let error = dispatch(
             &state,
