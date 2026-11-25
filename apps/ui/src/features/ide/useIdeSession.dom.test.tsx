@@ -1126,6 +1126,66 @@ describe("a base change keeps the tab a pending review was started for", () => {
   });
 });
 
+describe("a refresh keeps the tab a pending review was started for", () => {
+  it("reopens that tab after a round-trip and reads its list once", async () => {
+    await mount();
+    await waitFor(() => latest?.active?.path === "a.ts");
+    await act(async () => {
+      await latest?.selectDiffSource("branch");
+    });
+    await waitFor(() => latest?.state.diff?.path === "a.ts" && !latest?.state.filesLoading);
+
+    // The pane is closed while the person moves to b.ts and picks Branch: the
+    // load is for b.ts, but `diffPath` still names a.ts until it lands.
+    await act(async () => {
+      latest?.openFile("b.ts");
+    });
+    await waitFor(() => latest?.active?.path === "b.ts");
+    const releaseTabLoad = holdNext("fs_diff_files");
+    await act(async () => {
+      void latest?.selectDiffSource("branch");
+    });
+    await waitFor(() => latest?.state.filesLoading === true);
+    expect(latest?.state.diffPath).toBe("a.ts");
+
+    // The Refresh button stays enabled while that list is out, and it is
+    // pressed before the reply lands; its own list is held too.
+    const releaseRefresh = holdNext("fs_diff_files");
+    await act(async () => {
+      void latest?.refreshDiffLists();
+    });
+    await waitFor(() => latest?.state.filesLoading === true);
+
+    // Leave mid-read and come back. The resumed read reopens b.ts, the file the
+    // refresh was started for, and the tab follow leaves its read alone.
+    const home = workspace.path;
+    await switchWorkspace(`${home}-other`);
+    state.requests = [];
+    const listReads = () =>
+      state.requests.filter((request) => request.type === "fs_diff_files").length;
+    const releaseResume = holdNext("fs_diff_files");
+    await switchWorkspace(home);
+    await waitFor(() => latest?.state.filesLoading === true);
+    expect(listReads()).toBe(1);
+
+    await act(async () => {
+      void latest?.followDiffTab("b.ts");
+    });
+    expect(listReads()).toBe(1);
+
+    await releaseHold(releaseResume);
+    await waitFor(() => latest?.state.diff?.path === "b.ts");
+    expect(latest?.state.diffPath).toBe("b.ts");
+    expect(latest?.state.diff?.against).toEqual({ kind: "base", base: "main" });
+
+    // The two earlier reads belong to requests the round-trip replaced.
+    await releaseHold(releaseRefresh);
+    await releaseHold(releaseTabLoad);
+    expect(latest?.state.diff?.path).toBe("b.ts");
+    expect(listReads()).toBe(1);
+  });
+});
+
 describe("a commit change keeps the tab a pending review was started for", () => {
   it("reopens that tab after a round-trip and reads its lists once", async () => {
     await mount();
@@ -1141,14 +1201,19 @@ describe("a commit change keeps the tab a pending review was started for", () =>
       latest?.openFile("b.ts");
     });
     await waitFor(() => latest?.active?.path === "b.ts");
-    const releaseTabCommits = holdNext("fs_diff_commits");
+    const releaseTabFiles = holdNext("fs_diff_files");
     await act(async () => {
       void latest?.selectDiffSource("commit");
     });
-    await waitFor(() => latest?.state.commitsLoading === true);
+    await waitFor(() => latest?.state.filesLoading === true);
     expect(latest?.state.diffPath).toBe("a.ts");
+    // The commit list landed, so the picker is enabled: only the file list for
+    // b.ts is still out.
+    expect(latest?.state.commitsLoading).toBe(false);
+    expect(latest?.state.diffCommits?.commits[0]?.sha).toBe("commit-1");
 
-    // The commit changes before that list lands; its file list is held too.
+    // The file list is still out and the person changes the commit while it
+    // is: that list was for b.ts, so the change must keep b.ts.
     state.commits = {
       ...state.commits,
       commits: [
@@ -1196,7 +1261,7 @@ describe("a commit change keeps the tab a pending review was started for", () =>
 
     // The two earlier reads belong to requests the round-trip replaced.
     await releaseHold(releaseCommit);
-    await releaseHold(releaseTabCommits);
+    await releaseHold(releaseTabFiles);
     expect(latest?.state.diff?.path).toBe("b.ts");
     expect(commitReads()).toBe(1);
     expect(fileReads()).toBe(1);
