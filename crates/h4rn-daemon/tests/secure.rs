@@ -1168,6 +1168,103 @@ async fn a_resumed_path_reattaches_without_forking_the_session() {
     daemon.stop().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_idle_session_resumes_after_its_path_detaches() {
+    // A device that only probes is alive. Its path can still drop (the LAN
+    // goes away, the relay socket reconnects), so the resume grace must count
+    // from its last authenticated record. Counting only application frames
+    // evicted a long-idle device before its token was even looked up.
+    let client_identity = device_identity();
+    let allowed = PairingPolicy::new([client_identity.public().noise_public]);
+    let mut options = SecureOptions::new(device_identity()).with_policy(allowed);
+    // The grace is four path timeouts (eight seconds here). Idle well past it
+    // on probes alone, so without the fix the session's last_seen_ms is stale
+    // by the detach, while the resume itself still has the whole grace.
+    options.path_timeout = Duration::from_secs(2);
+    let service = Arc::new(SecureService::new(options));
+    let daemon = boot(Arc::clone(&service)).await;
+
+    let client = SecureClient::connect(&daemon, client_identity.clone(), None).await;
+    let ticket = client.ticket.expect("the daemon issues a resume ticket");
+    // Twelve seconds is 1.5x the eight-second grace; the client's 250 ms
+    // probes are the only traffic and keep the path open the whole time.
+    tokio::time::sleep(Duration::from_secs(12)).await;
+    assert_eq!(
+        service.session_count(),
+        1,
+        "probes must keep the idle session"
+    );
+    assert_eq!(
+        service.attached_path_count(&ticket.session_id),
+        Some(1),
+        "the idle session still has its path"
+    );
+
+    client.close().await;
+    // Wait until the daemon has seen the socket close. Resuming while the old
+    // path is still attached would keep the session for the wrong reason.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while service.attached_path_count(&ticket.session_id) != Some(0) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the daemon detaches a closed path");
+
+    // A new socket presents the same session id and token, the way a device
+    // that lost its LAN path resumes over the relay.
+    let mut engine = EngineConfig::new(
+        ticket.session_id,
+        client_identity,
+        service.public_identity().noise_public,
+    );
+    engine.resume = Some(ticket);
+    // The client's own path deadline stays out of reach, as in the other
+    // tests here; the daemon's short deadline is what this test exercises.
+    engine.path_timeout_ms = 60_000;
+    let paths = vec![ClientPath::websocket(
+        TransportPathKind::Relay,
+        format!("ws://{}/secure", daemon.addr),
+    )];
+    let mut resumed = Client::connect(ClientConfig::new(engine, paths)).expect("start resume");
+    let mut resumed_ticket = None;
+    tokio::time::timeout(SECURE_WAIT, async {
+        loop {
+            match resumed.recv().await {
+                Some(ClientEvent::Established(value)) => {
+                    resumed_ticket = Some(value);
+                    return;
+                }
+                Some(ClientEvent::Closed { reason }) => {
+                    panic!("an idle session was refused on resume: {reason}")
+                }
+                Some(_) => {}
+                None => panic!("the resume client stopped before establishing"),
+            }
+        }
+    })
+    .await
+    .expect("the idle session resumes within its grace");
+
+    // The resume attached to the existing session, and it still answers.
+    assert_eq!(
+        service.session_count(),
+        1,
+        "the resume must not start a second session"
+    );
+    assert_eq!(service.attached_path_count(&ticket.session_id), Some(1));
+    let mut resumed = SecureClient {
+        client: resumed,
+        next_id: 1,
+        pending: VecDeque::new(),
+        ticket: resumed_ticket,
+        chunk: None,
+    };
+    resumed.hello().await;
+    resumed.close().await;
+    daemon.stop().await;
+}
+
 #[tokio::test]
 async fn secure_transport_psk_pairs_a_new_device() {
     let client_identity = device_identity();

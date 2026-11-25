@@ -741,17 +741,20 @@ All notable changes to h4rn are recorded here. The format follows
   publish a thread whose copy then failed to record — a row a client could open
   and send to that never existed. The fork now starts with the summary's own
   signature, so only the fork's successful write publishes it.
-- **A fork confirmed by its first output stops re-copying the source after a
-  restart.** A provider that reports no session leaves the fork with no id of
+- **A fork confirmed by its first output neither re-copies nor re-sends its
+  history.** A provider that reports no session leaves the fork with no id of
   its own, but the borrowed source id stayed, so the next start after a restart
   forked the source again and silently dropped the turn the fork had already
-  answered. The attempt is now spent durably at that confirmation: the next
-  session hands off the fork's own history instead.
+  answered. The attempt is now spent durably at that confirmation, while the
+  session that answered keeps using its copy without the journaled history
+  again; the handoff is owed to the next session, after a restart or that
+  session dying.
 - **A Stop during a fork's native copy releases the source at once.** If the
   stop landed after the native start returned but before the fork's prompt was
-  written, nothing confirmed or fenced the copy, so it kept the source's copy
-  gate until every later source Send waited out the 70-second backstop. The
-  unused copy is now shut down and the source released immediately.
+  written — including while the prompt's claim was still waiting — nothing
+  confirmed or fenced the copy, so it kept the source's copy gate until every
+  later source Send waited out the 70-second backstop. The unused copy is now
+  shut down and the source released immediately.
 - **A native fork whose provider answers with a failed result falls back to the
   handoff.** A real Claude Code fork of a missing session prints an `is_error`
   result after the prompt and exits 1; that used to count as the copy finishing,
@@ -764,6 +767,13 @@ All notable changes to h4rn are recorded here. The format follows
   an older daemon's queued prompt and dropped them, and one more turn made the
   fork refuse to fork at all. The marks are now written for the fork in the same
   append as its copied transcript.
+- **An idle paired device can resume its session after its path drops.** The
+  resume grace was counted from the last application frame, so a device that
+  had been quiet for longer than four path timeouts (8 s by default) — and had
+  only been sending health probes — was evicted before its resume token was
+  checked, and refused as unpaired. The grace now counts from the last
+  authenticated record, probes included, so reconnecting from a dead LAN path
+  to the relay still resumes the same session.
 - **A native fork starts by sending its own prompt.** Claude Code prints nothing
   for a natively forked session until the first user frame arrives, so waiting
   for its session report before writing the prompt made every Claude fork wait
