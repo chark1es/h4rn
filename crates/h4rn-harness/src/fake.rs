@@ -22,6 +22,14 @@ use crate::{
     TransportCloseKind, TransportHealth, UserInput,
 };
 
+/// How long a fake's failed native fork waits before it answers.
+///
+/// A real CLI answers a prompt only after the daemon has accepted and recorded
+/// it, so the failure belongs to a settled write; reporting it inside `send`
+/// would queue it behind a write the daemon is still recording, and the daemon
+/// would rightly hold the completion.
+const FORK_FAILURE_REPORT_DELAY: Duration = Duration::from_millis(20);
+
 /// The event producer for one fake session.
 ///
 /// Production sessions read their transport into a bounded queue; a test that
@@ -1191,8 +1199,9 @@ impl FakeHarness {
     /// Models `claude --resume <missing> --fork-session` with stdin open: the
     /// adapter returns `Ok`, then prints an `is_error` result
     /// (`error_during_execution`, no init frame) once the prompt is written, and
-    /// exits 1. The fake emits the error row and the failed completion, then
-    /// ends its stream.
+    /// exits 1. The fake keeps the real order: the failed completion first,
+    /// then the supervisor's non-retryable exit error, then the end of the
+    /// stream.
     pub fn with_native_fork_failure_result(mut self, message: impl Into<String>) -> Self {
         self.native_fork_failure_result = Some(message.into());
         self
@@ -2021,18 +2030,34 @@ impl HarnessSession for FakeSession {
         if let Some(message) = self.deferred_fork_failure.take() {
             // The prompt reached a provider that could not open the source:
             // it answers with an error result and exits 1, without ever
-            // reporting a session. Both events belong to the fork's turn.
-            self.emit(HarnessEvent::Error {
-                message,
-                retryable: true,
-            });
-            self.emit(HarnessEvent::TurnCompleted {
-                status: TurnStatus::Failed,
-                usage: Usage::default(),
-            });
+            // reporting a session. The real order is the result frame's failed
+            // completion, then the supervisor's exit report, then the end of
+            // the stream, and it arrives after the daemon has accepted the
+            // prompt (the CLI answers, it does not answer inside the write).
+            // Emitting it from here would land it behind a write the daemon is
+            // still recording, so the completion would be held and the later
+            // error would carry the death instead. The task below keeps the
+            // stream open until both reports are out.
+            let sender = self.sender.take();
             self.closed = true;
-            // The process is gone, so nothing else can arrive on its stream.
-            self.sender = None;
+            tokio::spawn(async move {
+                tokio::time::sleep(FORK_FAILURE_REPORT_DELAY).await;
+                if let Some(sender) = sender {
+                    sender
+                        .send(HarnessEvent::TurnCompleted {
+                            status: TurnStatus::Failed,
+                            usage: Usage::default(),
+                        })
+                        .await;
+                    sender
+                        .send(HarnessEvent::Error {
+                            message,
+                            retryable: false,
+                        })
+                        .await;
+                }
+                // Dropping the last sender ends the process's stream.
+            });
             return Ok(());
         }
         self.sends += 1;

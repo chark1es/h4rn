@@ -133,7 +133,10 @@ conversation over:
 
 The native attempt is spent once. If it succeeds, the fork's session id becomes
 the fork's own; if it fails before starting, the fork records that and uses the
-handoff for that turn. A restart never tries to fork the source again.
+handoff for that turn. A copy confirmed only by its first output never named a
+session, so there is no id of its own to resume: the attempt is spent there too,
+and the next session starts with the handoff of the fork's history, including
+the turn that output answered. A restart never tries to fork the source again.
 
 A native fork copies the provider's conversation. A handoff is text only: it
 carries the visible messages, not attachments or tool-call state, though the
@@ -163,7 +166,9 @@ until you write.
 
 Creating a fork publishes only the new thread's summary on the live feed. The
 fork's handle exists before that summary is published, so a client that reacts
-to the summary can send to the fork at once. Its transcript is durable history
-and arrives through the same paged history as any other thread, so forking
-hundreds of turns never fills the event feed or makes a slow client miss a
-later completion on another thread.
+to the summary can send to the fork at once. A fork whose journal write fails
+publishes nothing and leaves no thread: its handle is removed, and the periodic
+refresh never sees a summary to project for it. Its transcript is durable
+history and arrives through the same paged history as any other thread, so
+forking hundreds of turns never fills the event feed or makes a slow client
+miss a later completion on another thread.

@@ -732,6 +732,17 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Fixed
 
+- **A fork whose journal write fails never appears.** The fork's handle became
+  reachable before its summary was durable, so the periodic refresh could
+  publish a thread whose copy then failed to record — a row a client could open
+  and send to that never existed. The fork now starts with the summary's own
+  signature, so only the fork's successful write publishes it.
+- **A fork confirmed by its first output stops re-copying the source after a
+  restart.** A provider that reports no session leaves the fork with no id of
+  its own, but the borrowed source id stayed, so the next start after a restart
+  forked the source again and silently dropped the turn the fork had already
+  answered. The attempt is now spent durably at that confirmation: the next
+  session hands off the fork's own history instead.
 - **A Stop during a fork's native copy releases the source at once.** If the
   stop landed after the native start returned but before the fork's prompt was
   written, nothing confirmed or fenced the copy, so it kept the source's copy

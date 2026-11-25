@@ -3800,6 +3800,9 @@ mod tests {
 
     /// The fallback from a dead native resume changes only its own fields, and
     /// only on the switch it saw.
+    ///
+    /// It spends both native origins: an import's saved conversation and a
+    /// fork's copy, each of which must never be tried again after the fallback.
     #[tokio::test]
     async fn a_fallback_write_is_generation_checked_and_field_limited() {
         let journal = SqliteJournal::in_memory().await.unwrap();
@@ -3814,6 +3817,13 @@ mod tests {
             project_path: None,
             native_resume: true,
         });
+        one.forked_from = Some(ForkOrigin {
+            thread_id: ThreadId::new("th_source"),
+            turn_id: h4rn_protocol::TurnId::new("turn_source"),
+            project_path: None,
+            native_fork: true,
+            provider_turn_id: None,
+        });
         one.switch_generation = 4;
         journal.upsert_thread(&one).await.unwrap();
 
@@ -3826,6 +3836,12 @@ mod tests {
         );
         let row = journal.list_threads().await.unwrap().remove(0);
         assert_eq!(row.resume_id.as_deref(), Some("saved-session"));
+        assert!(
+            row.forked_from
+                .as_ref()
+                .is_some_and(|forked| forked.native_fork),
+            "a refused fallback spent the fork's native attempt"
+        );
 
         assert!(
             journal
@@ -3842,6 +3858,12 @@ mod tests {
                 .as_ref()
                 .is_some_and(|imported| !imported.native_resume),
             "the import's native resume was not spent"
+        );
+        assert!(
+            row.forked_from
+                .as_ref()
+                .is_some_and(|forked| !forked.native_fork),
+            "the fork's native attempt was not spent"
         );
         // Everything the fallback does not own is left exactly as it was.
         assert_eq!(row.title, "keep me");

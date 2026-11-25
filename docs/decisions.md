@@ -2155,7 +2155,11 @@ fork starts a fresh session and sends a bounded handoff of its copied history.
 This reuses the import's one-attempt machinery (ADR-045): the native intent is
 cleared when a session reports `SessionStarted`, or when it cannot be bounded,
 dies before that report, or misses its deadline, and the same turn is retried
-with the handoff. A failed completion or an `Error` while the native origin is
+with the handoff. A copy confirmed by its first output without ever naming a
+session is spent there too — the borrowed source id is cleared durably and the
+next session carries the handoff, including the turn that output answered — so
+a restart can never fork the source again and drop that turn. A failed
+completion or an `Error` while the native origin is
 still pending is that death, not the turn's own failure, so the person's request
 still runs and later sends use the fork's own session instead of retrying the
 dead copy. The handoff reads only the journaled turns before the dispatch it
@@ -2189,7 +2193,9 @@ that pointed at the source's files, or at half its attachments, is not a fork.
 Only the new thread's summary is published on the live feed, in the same append
 lock scope as the copy, so no event with a later sequence can be delivered before
 it and make a client drop it as stale; the fork's handle is installed before that
-summary is broadcast, so a client that reacts to it can send at once. The copied
+summary is broadcast, so a client that reacts to it can send at once, and it is
+installed with the summary's own signature so the periodic refresh never
+publishes a fork whose append then fails. The copied
 transcript is durable history read through the ordinary paged replay, so a long
 fork cannot fill the feed and stall other threads. Lineage is a `forked_from { thread_id, turn_id }` in the
 thread row,

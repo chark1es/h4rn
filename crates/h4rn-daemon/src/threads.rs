@@ -5080,7 +5080,7 @@ impl ThreadManager {
             .iter()
             .flat_map(|turn| turn.steers.iter().map(String::as_str))
             .collect();
-        let record = ThreadRecord {
+        let mut record = ThreadRecord {
             meta: fork_meta,
             state,
             active: None,
@@ -5112,6 +5112,13 @@ impl ThreadManager {
             closed: false,
         };
         let summary = record.summary(&self.inner.options.settings, self.now());
+        // The tick snapshots handles without the emit lock, so a handle that is
+        // reachable before its summary is published would be picked up and
+        // projected by a refresh of its own. That refresh could then queue a
+        // `ThreadUpserted` for a fork whose append is about to fail, showing a
+        // thread that never exists. The record starts with the signature of the
+        // summary it is about to publish, so only this fork publishes it.
+        record.last_signature = Some(SummarySignature::of(&summary));
         wire.push(Event::ThreadUpserted(summary.clone()));
         let fork_meta = record.meta.clone();
         let handle: ThreadHandle = Arc::new(Mutex::new(record));
@@ -12026,6 +12033,30 @@ impl Inner {
                     {
                         let fork_id = record.meta.thread_id.clone();
                         self.release_fork_copy(&fork_id, generation).await;
+                        // The provider answered from the copy without ever
+                        // naming a session, so there is no id of its own to
+                        // resume later. Spend the fork's one native attempt
+                        // durably, exactly as a fallback from a dead copy does:
+                        // the borrowed source id is cleared and the next
+                        // startup owes the handoff. Leaving it unspent would
+                        // make a restart fork the source again, and that copy
+                        // would not contain the turn just answered here.
+                        record.meta.resume_id = None;
+                        record.meta.handoff_pending = true;
+                        if let Some(forked) = record.meta.forked_from.as_mut() {
+                            forked.native_fork = false;
+                        }
+                        let switch_generation = record.meta.switch_generation;
+                        if let Err(error) = self
+                            .journal
+                            .fall_back_from_native_resume(&fork_id, switch_generation)
+                            .await
+                        {
+                            tracing::warn!(
+                                %error,
+                                "could not record a fork's output-confirmed native copy"
+                            );
+                        }
                     }
                     confirm.send_replace(true);
                 }
@@ -15380,6 +15411,18 @@ mod tests {
         clear_gate: std::sync::Mutex<Option<Arc<ClearGate>>>,
         fallback_gate: std::sync::Mutex<Option<Arc<FallbackGate>>>,
         accept_gate: std::sync::Mutex<Option<Arc<AcceptGate>>>,
+        fork_append_gate: std::sync::Mutex<Option<Arc<ForkAppendGate>>>,
+    }
+
+    /// A test's hold on a fork's journal append.
+    ///
+    /// The fork's handle is reachable before this write, so a lifecycle refresh
+    /// in this window can see a fork that the failing write then removes. The
+    /// hold lets a test run the refresh there instead of guessing the timing.
+    #[derive(Default)]
+    struct ForkAppendGate {
+        reached: tokio::sync::Notify,
+        resume: tokio::sync::Notify,
     }
 
     /// A test's hold on the durable acceptance write.
@@ -15424,6 +15467,7 @@ mod tests {
                 clear_gate: std::sync::Mutex::new(None),
                 fallback_gate: std::sync::Mutex::new(None),
                 accept_gate: std::sync::Mutex::new(None),
+                fork_append_gate: std::sync::Mutex::new(None),
             })
         }
 
@@ -15473,6 +15517,20 @@ mod tests {
             let gate = Arc::new(ClearGate::default());
             *self
                 .clear_gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(gate.clone());
+            gate
+        }
+
+        /// Holds the next fork append, which then fails.
+        ///
+        /// The fork's handle is already reachable at this point, so a test can
+        /// run the periodic refresh in the window the failed append leaves
+        /// behind.
+        fn hold_next_failing_fork_append(&self) -> Arc<ForkAppendGate> {
+            let gate = Arc::new(ForkAppendGate::default());
+            *self
+                .fork_append_gate
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(gate.clone());
             gate
@@ -15560,6 +15618,18 @@ mod tests {
             wire: &[Event],
             steer_items: &[&str],
         ) -> Result<Vec<u64>, crate::journal::JournalError> {
+            let gate = self
+                .fork_append_gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .take();
+            if let Some(gate) = gate {
+                gate.reached.notify_one();
+                gate.resume.notified().await;
+                return Err(crate::journal::JournalError::Io(std::io::Error::other(
+                    "injected fork write failure",
+                )));
+            }
             if self.fail_next_appends.load(Ordering::SeqCst) > 0 {
                 self.fail_next_appends.fetch_sub(1, Ordering::SeqCst);
                 return Err(crate::journal::JournalError::Io(std::io::Error::other(
@@ -37043,6 +37113,148 @@ mod tests {
 
     /// A provider that never reports `SessionStarted` still confirms its copy
     /// with the first real output: text can only follow the source being read.
+    /// The copy has no id of its own, so the fork's one native attempt is spent
+    /// durably: a restart hands off the fork's own history instead of copying
+    /// the source again and dropping the turn answered here.
+    #[tokio::test]
+    async fn a_fork_confirmed_by_its_first_output_hands_off_after_a_restart() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let journal = FlakyJournal::in_memory().await;
+        let (harness, starts) = FakeHarness::new().with_session_starts();
+        let harness = harness.with_text_without_session_started();
+        let host = HostId::new("host_test");
+        let manager = open_test_manager_with_journal(
+            harness,
+            host.clone(),
+            Arc::clone(&journal) as Arc<dyn Journal>,
+        )
+        .await;
+        *manager
+            .inner
+            .fork_copy_timeout_override
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Duration::from_secs(5));
+        let mut events = manager.subscribe();
+        let created = manager
+            .create_thread(new_thread(host.clone(), workspace.path(), "first"))
+            .await
+            .expect("create");
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(10), next_turn_status(&mut events))
+                .await
+                .expect("the first turn completed"),
+            TurnStatus::Completed
+        );
+
+        let forked = manager
+            .fork_thread(&created.thread_id, &created.turn_id)
+            .await
+            .expect("fork");
+        manager
+            .send_message(&forked.thread_id, "carry on".into(), Vec::new())
+            .await
+            .expect("the fork's send");
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(10), next_turn_status(&mut events))
+                .await
+                .expect("the fork's turn completed"),
+            TurnStatus::Completed
+        );
+        assert_eq!(
+            starts.get().len(),
+            2,
+            "the first output confirmed the native copy: {:?}",
+            starts.get()
+        );
+        assert!(
+            starts.get()[1].native_fork,
+            "the fork copied the source natively: {:?}",
+            starts.get()
+        );
+        manager.shutdown().await;
+
+        // A restart has no session to resume: the copy never named one, and the
+        // source's borrowed id must not be tried again.
+        let (fresh, restarted_starts) = FakeHarness::new().with_session_starts();
+        let (fresh, restarted_prompts) = fresh.with_sent_prompts();
+        let restarted =
+            open_test_manager_with_journal(fresh, host, Arc::clone(&journal) as Arc<dyn Journal>)
+                .await;
+        // The restart reads a row that spent the copy: no borrowed id, and the
+        // handoff is still owed.
+        let row = journal
+            .list_threads()
+            .await
+            .expect("threads after a restart")
+            .into_iter()
+            .find(|meta| meta.thread_id == forked.thread_id)
+            .expect("the fork's row");
+        assert!(
+            row.resume_id.is_none(),
+            "the restored row names the source's session: {:?}",
+            row.resume_id
+        );
+        assert!(row.handoff_pending, "the restored row does not owe history");
+        assert!(
+            row.forked_from
+                .as_ref()
+                .is_some_and(|forked| !forked.native_fork),
+            "the restored row still owes a native fork"
+        );
+        let mut events = restarted.subscribe();
+        let after = restarted
+            .send_message(&forked.thread_id, "after the restart".into(), Vec::new())
+            .await
+            .expect("the send after a restart");
+        assert_eq!(
+            tokio::time::timeout(
+                Duration::from_secs(10),
+                settled_turn(&mut events, &after.turn_id)
+            )
+            .await
+            .expect("the restarted fork's turn completed"),
+            TurnStatus::Completed
+        );
+        let starts_now = restarted_starts.get();
+        assert_eq!(starts_now.len(), 1, "one fresh session: {starts_now:?}");
+        assert!(
+            !starts_now[0].native_fork,
+            "the restart forked the source again: {starts_now:?}"
+        );
+        assert!(
+            starts_now[0].resume_id.is_none(),
+            "the restart resumed the source's borrowed session: {starts_now:?}"
+        );
+        let sent = restarted_prompts.get();
+        let prompt = sent.last().expect("the restarted fork's prompt");
+        assert!(
+            prompt.contains("Earlier conversation history, forked from another thread."),
+            "the next session owes the handoff: {prompt:?}"
+        );
+        assert!(
+            prompt.contains("carry on"),
+            "the handoff carries the fork's own first turn: {prompt:?}"
+        );
+        let meta = restarted
+            .inner
+            .handle(&forked.thread_id)
+            .await
+            .expect("fork handle")
+            .lock()
+            .await
+            .meta
+            .clone();
+        assert!(
+            meta.forked_from
+                .as_ref()
+                .is_some_and(|forked| !forked.native_fork),
+            "the restored row still owes a native fork"
+        );
+        restarted.shutdown().await;
+    }
+
+    /// A provider that never reports `SessionStarted` still confirms its copy
+    /// with the first real output: text can only follow the source being read.
     #[tokio::test]
     async fn a_native_fork_without_a_session_report_confirms_on_its_first_output() {
         let workspace = tempfile::tempdir().expect("tempdir");
@@ -38019,6 +38231,92 @@ mod tests {
         let threads = fixture.manager.list_threads(&ThreadFilter::default()).await;
         assert_eq!(threads.len(), 1, "the failed fork created no thread");
         fixture.manager.shutdown().await;
+    }
+
+    /// A fork whose journal write fails never appears on the live feed, even
+    /// when a lifecycle refresh sees its handle in the window before the
+    /// failure. The handle is inserted before the append so a Send that answers
+    /// the summary finds it; the refresh must not mistake that for a published
+    /// thread.
+    #[tokio::test]
+    async fn a_fork_that_cannot_record_its_copy_is_never_published() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let journal = FlakyJournal::in_memory().await;
+        let host = HostId::new("host_test");
+        let manager = Arc::new(
+            open_test_manager_with_journal(
+                FakeHarness::new(),
+                host.clone(),
+                Arc::clone(&journal) as Arc<dyn Journal>,
+            )
+            .await,
+        );
+        let mut events = manager.subscribe();
+        let created = manager
+            .create_thread(new_thread(host, workspace.path(), "first"))
+            .await
+            .expect("create");
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(10), next_turn_status(&mut events))
+                .await
+                .expect("the first turn completed"),
+            TurnStatus::Completed
+        );
+
+        let gate = journal.hold_next_failing_fork_append();
+        let forking = tokio::spawn({
+            let manager = Arc::clone(&manager);
+            let thread_id = created.thread_id.clone();
+            let turn_id = created.turn_id.clone();
+            async move { manager.fork_thread(&thread_id, &turn_id).await }
+        });
+        tokio::time::timeout(Duration::from_secs(10), gate.reached.notified())
+            .await
+            .expect("the fork's handle exists and its append is held");
+        // A refresh snapshots every handle before it takes the emit lock the
+        // fork's held append owns, so the window it can publish from is real.
+        let ticking = tokio::spawn({
+            let inner = Arc::clone(&manager.inner);
+            async move { inner.tick().await }
+        });
+        for _ in 0..16 {
+            if ticking.is_finished() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        gate.resume.notify_one();
+        let error = forking
+            .await
+            .expect("the fork task joins")
+            .expect_err("the fork's append failed");
+        assert!(
+            error.to_string().contains("injected fork write failure"),
+            "{error}"
+        );
+        tokio::time::timeout(Duration::from_secs(10), ticking)
+            .await
+            .expect("the refresh finishes after the failed fork")
+            .expect("the refresh task joins");
+
+        let mut published = Vec::new();
+        while let Ok(wire) = events.try_recv() {
+            if let Event::ThreadUpserted(summary) = wire.event
+                && summary.thread_id != created.thread_id
+            {
+                published.push(summary.thread_id);
+            }
+        }
+        assert!(
+            published.is_empty(),
+            "a fork whose append failed was published: {published:?}"
+        );
+        assert_eq!(
+            manager.list_threads(&ThreadFilter::default()).await.len(),
+            1,
+            "the failed fork left no thread behind"
+        );
+        manager.shutdown().await;
     }
 
     /// A manager with a blob store and one thread whose chosen turn carries an
