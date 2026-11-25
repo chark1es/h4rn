@@ -170,15 +170,35 @@ fn grouped(activities: &[AgentActivity]) -> PushAlert {
     }
 }
 
+/// The latest transition per thread, in first-seen order.
+///
+/// A thread that asks twice inside one group window is still one agent the
+/// person has to answer, so the later transition replaces the earlier one.
+fn latest_per_thread(activities: &[AgentActivity]) -> Vec<AgentActivity> {
+    let mut ordered: Vec<AgentActivity> = Vec::new();
+    for activity in activities {
+        match ordered
+            .iter_mut()
+            .find(|existing| existing.thread_id == activity.thread_id)
+        {
+            Some(existing) => *existing = activity.clone(),
+            None => ordered.push(activity.clone()),
+        }
+    }
+    ordered
+}
+
 /// Turns a batch of new transitions into the alerts it deserves.
 ///
 /// Attention and completion form separate groups, so two agents asking for a
 /// person produce one attention alert even if a third finished in the same
-/// window. A group of one keeps that thread's own title and link.
+/// window. A group of one keeps that thread's own title and link, and a thread
+/// that raised several transitions contributes only its latest one.
 pub fn group_activities(activities: &[AgentActivity]) -> Vec<PushAlert> {
+    let activities = latest_per_thread(activities);
     let mut attention: Vec<AgentActivity> = Vec::new();
     let mut finished: Vec<AgentActivity> = Vec::new();
-    for activity in activities {
+    for activity in &activities {
         if activity.state.needs_attention() {
             attention.push(activity.clone());
         } else {
@@ -452,6 +472,31 @@ mod tests {
         assert_eq!(alerts.len(), 2);
         assert_eq!(alerts[0].title, "2 agents need attention");
         assert_eq!(alerts[1].title, "2 agents finished");
+    }
+
+    #[test]
+    fn the_grouped_count_counts_threads_not_transitions() {
+        let first = activity(AgentAlertState::Approval, "one");
+        let mut second = first.clone();
+        second.transition = Uuid::now_v7().to_string();
+        let alerts = group_activities(&[first.clone(), second]);
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(alerts[0].title, "one");
+        assert_eq!(alerts[0].body, "Needs approval");
+        assert_eq!(alerts[0].count, 1);
+        assert_eq!(alerts[0].thread_id, first.thread_id.to_string());
+    }
+
+    #[test]
+    fn a_repeated_thread_does_not_inflate_a_group() {
+        let one = activity(AgentAlertState::Completed, "one");
+        let two = activity(AgentAlertState::Completed, "two");
+        let mut one_again = one.clone();
+        one_again.transition = Uuid::now_v7().to_string();
+        let alerts = group_activities(&[one, two, one_again]);
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(alerts[0].title, "2 agents finished");
+        assert_eq!(alerts[0].count, 2);
     }
 
     #[test]
