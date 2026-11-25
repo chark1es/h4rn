@@ -12,6 +12,7 @@ use tokio::task::JoinHandle;
 use crate::server::Connection;
 
 pub(super) mod acp_agents;
+pub(super) mod alerts;
 pub(super) mod forge;
 pub(super) mod git_actions;
 pub(super) mod guest;
@@ -92,6 +93,7 @@ declare_services! {
     NetworkAccess => network_access,
     TextGeneration => text_generation,
     Guest => guest,
+    Alerts => alerts,
     Schedules => schedules,
     Import => import,
 }

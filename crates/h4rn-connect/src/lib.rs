@@ -18,6 +18,7 @@
 
 use std::net::SocketAddr;
 
+pub mod alerts;
 pub mod api;
 pub mod config;
 pub mod crypto;
@@ -26,6 +27,7 @@ pub mod error;
 pub mod jwt;
 pub mod oidc;
 pub mod pairing;
+pub mod push;
 pub mod rate_limit;
 pub mod relay;
 pub mod store;

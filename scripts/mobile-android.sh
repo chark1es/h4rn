@@ -150,6 +150,16 @@ apply_native_overlay() {
   # present when an up-to-date cargo build skips the plugin entirely (cargo
   # build scripts are not rerun just because the generated manifest changed).
   cp -a "${OVERLAY_DIR}/app/." "${GEN_DIR}/app/"
+  # Firebase configuration is an operator secret, never checked in. The
+  # Google Services plugin is only applied when this file is present, so a
+  # build without one still compiles and reports alerts unavailable.
+  if [[ -n "${H4RN_ANDROID_GOOGLE_SERVICES_FILE:-}" ]]; then
+    [[ -f "${H4RN_ANDROID_GOOGLE_SERVICES_FILE}" ]] \
+      || die "H4RN_ANDROID_GOOGLE_SERVICES_FILE does not exist"
+    cp "${H4RN_ANDROID_GOOGLE_SERVICES_FILE}" "${GEN_DIR}/app/google-services.json"
+  else
+    rm -f "${GEN_DIR}/app/google-services.json"
+  fi
 }
 
 ensure_android_project() {

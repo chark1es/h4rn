@@ -7,7 +7,7 @@
  */
 
 import { useSyncExternalStore } from "react";
-
+import { deregisterDeviceAlertsOnSignOut } from "@/features/notifications/devicePush";
 import type { ConnectDevice, ConnectUser, MachineSummary, PairingInfo, PairScope } from "@/gen";
 import { MOCK_ALLOWED, readBootConfig } from "@/lib/client/config";
 import { takeConnectPair, takeOidcCallback } from "@/lib/platform/pending";
@@ -734,6 +734,8 @@ export async function signOut(): Promise<void> {
   // Local cleanup happens first and synchronously: a relay that hangs must
   // never keep the person signed in or stuck on a spinning button.
   const client = currentConnectClient();
+  // Stop phone alerts before the tokens that authorise the removal are gone.
+  deregisterDeviceAlertsOnSignOut();
   resetConnectSession();
   clearActiveRemote();
   remoteStore.setState({

@@ -109,6 +109,27 @@ impl DeviceRow {
     }
 }
 
+/// One Android install registered for push alerts (ADR-051).
+#[derive(Clone, Debug, FromRow)]
+pub struct PushDeviceRow {
+    /// Row id.
+    pub id: Uuid,
+    /// Owner.
+    pub user_id: Uuid,
+    /// h4rn-connect device id this install signed in as.
+    pub device_id: String,
+    /// Firebase Cloud Messaging registration token.
+    pub token: String,
+    /// Android package name, so FCM can restrict the message to it.
+    pub package_name: Option<String>,
+    /// App version, for diagnostics.
+    pub app_version: Option<String>,
+    /// Creation time.
+    pub created_at: DateTime<Utc>,
+    /// Last registration or rotation.
+    pub updated_at: DateTime<Utc>,
+}
+
 /// A machine row.
 #[derive(Clone, Debug, FromRow)]
 pub struct MachineRow {
@@ -661,6 +682,10 @@ impl Store {
 
     /// Revokes a device, its sessions and every pairing. Returns the machines
     /// whose daemons must be told.
+    ///
+    /// The device's push registrations are deleted in the same transaction: a
+    /// lost phone that is revoked from the desktop must stop receiving thread
+    /// titles at once, not at its next sign-out.
     pub async fn revoke_device(&self, user_id: Uuid, device_id: Uuid) -> Result<Vec<Uuid>> {
         let mut tx = self.pool.begin().await?;
         let device = sqlx::query_as::<_, DeviceRow>(
@@ -699,6 +724,11 @@ impl Store {
             .bind(device_id)
             .execute(&mut *tx)
             .await?;
+        sqlx::query("DELETE FROM push_devices WHERE user_id = $1 AND device_id = $2")
+            .bind(user_id)
+            .bind(device_id.to_string())
+            .execute(&mut *tx)
+            .await?;
         sqlx::query(
             "UPDATE sessions SET revoked_at = now(), revoke_reason = 'device_revoked'
              WHERE device_id = $1 AND revoked_at IS NULL",
@@ -719,6 +749,152 @@ impl Store {
         .await?;
         tx.commit().await?;
         Ok(machine_ids)
+    }
+
+    /// Registers or rotates one install's FCM token.
+    ///
+    /// A token names one install on Google's side, so a token seen on another
+    /// row is that install's stale binding and is removed first. The upsert is
+    /// keyed by `(user_id, device_id)`: registering again replaces the token
+    /// instead of creating a second deliverable row.
+    pub async fn register_push_device(
+        &self,
+        user_id: Uuid,
+        device_id: &str,
+        token: &str,
+        package_name: Option<&str>,
+        app_version: Option<&str>,
+    ) -> Result<PushDeviceRow> {
+        if device_id.trim().is_empty() || token.trim().is_empty() {
+            return Err(AppError::bad_request(
+                "push_device_invalid",
+                "device_id and token must not be empty",
+            ));
+        }
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            "DELETE FROM push_devices WHERE token = $1 AND NOT (user_id = $2 AND device_id = $3)",
+        )
+        .bind(token)
+        .bind(user_id)
+        .bind(device_id)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "DELETE FROM push_devices WHERE user_id = $1 AND device_id = $2 AND token <> $3",
+        )
+        .bind(user_id)
+        .bind(device_id)
+        .bind(token)
+        .execute(&mut *tx)
+        .await?;
+        let row = sqlx::query_as::<_, PushDeviceRow>(
+            "INSERT INTO push_devices
+             (id, user_id, device_id, token, package_name, app_version)
+             VALUES ($1,$2,$3,$4,$5,$6)
+             ON CONFLICT (user_id, device_id) DO UPDATE SET
+                 token = $4, package_name = $5, app_version = $6, updated_at = now()
+             RETURNING id, user_id, device_id, token, package_name, app_version,
+                       created_at, updated_at",
+        )
+        .bind(Uuid::now_v7())
+        .bind(user_id)
+        .bind(device_id)
+        .bind(token)
+        .bind(package_name)
+        .bind(app_version)
+        .fetch_one(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(row)
+    }
+
+    /// Removes one install's registration; missing rows are not an error.
+    pub async fn deregister_push_device(&self, user_id: Uuid, device_id: &str) -> Result<bool> {
+        let removed = sqlx::query("DELETE FROM push_devices WHERE user_id = $1 AND device_id = $2")
+            .bind(user_id)
+            .bind(device_id)
+            .execute(&self.pool)
+            .await?
+            .rows_affected();
+        Ok(removed > 0)
+    }
+
+    /// Removes a token FCM reported as unregistered or unknown.
+    pub async fn delete_push_device_by_token(&self, token: &str) -> Result<bool> {
+        let removed = sqlx::query("DELETE FROM push_devices WHERE token = $1")
+            .bind(token)
+            .execute(&self.pool)
+            .await?
+            .rows_affected();
+        Ok(removed > 0)
+    }
+
+    /// Every Android install registered by one account.
+    ///
+    /// A device whose `revoked_at` is set never receives an alert even if a
+    /// registration row survived (revocation deletes it; this is the second
+    /// line of defence).
+    pub async fn push_devices(&self, user_id: Uuid) -> Result<Vec<PushDeviceRow>> {
+        Ok(sqlx::query_as::<_, PushDeviceRow>(
+            "SELECT p.id, p.user_id, p.device_id, p.token, p.package_name, p.app_version,
+                    p.created_at, p.updated_at
+             FROM push_devices p
+             JOIN devices d ON d.id::text = p.device_id
+             WHERE p.user_id = $1 AND d.revoked_at IS NULL
+             ORDER BY p.created_at",
+        )
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
+    /// One install's registration, when it exists.
+    pub async fn push_device(
+        &self,
+        user_id: Uuid,
+        device_id: &str,
+    ) -> Result<Option<PushDeviceRow>> {
+        Ok(sqlx::query_as::<_, PushDeviceRow>(
+            "SELECT id, user_id, device_id, token, package_name, app_version,
+                    created_at, updated_at
+             FROM push_devices WHERE user_id = $1 AND device_id = $2",
+        )
+        .bind(user_id)
+        .bind(device_id)
+        .fetch_optional(&self.pool)
+        .await?)
+    }
+
+    /// Claims one activity transition for a thread.
+    ///
+    /// Returns true only when this transition has not been delivered before.
+    /// The insert/update is one statement, so two relays or two retries of the
+    /// same frame cannot both claim it. A later transition carries a different
+    /// id even when its state repeats, so a thread alerts again in the same
+    /// state.
+    pub async fn claim_push_thread_state(
+        &self,
+        user_id: Uuid,
+        thread_id: &str,
+        state: &str,
+        transition: &str,
+    ) -> Result<bool> {
+        let claimed: Option<bool> = sqlx::query_scalar(
+            "INSERT INTO push_thread_states (user_id, thread_id, state, transition, updated_at)
+             VALUES ($1,$2,$3,$4,now())
+             ON CONFLICT (user_id, thread_id) DO UPDATE
+                 SET state = excluded.state, transition = excluded.transition, updated_at = now()
+                 WHERE push_thread_states.transition <> excluded.transition
+             RETURNING true",
+        )
+        .bind(user_id)
+        .bind(thread_id)
+        .bind(state)
+        .bind(transition)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(claimed.unwrap_or(false))
     }
 
     /// Marks a device seen.

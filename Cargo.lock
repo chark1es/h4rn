@@ -1725,9 +1725,12 @@ dependencies = [
  "http-body-util",
  "openidconnect",
  "rand 0.9.5",
+ "rand_core 0.6.4",
  "reqwest 0.13.5",
+ "rsa",
  "serde",
  "serde_json",
+ "sha2",
  "sqlx",
  "subtle",
  "tempfile",
@@ -1741,6 +1744,7 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid",
+ "wiremock",
 ]
 
 [[package]]
@@ -3791,6 +3795,7 @@ dependencies = [
  "pkcs1",
  "pkcs8",
  "rand_core 0.6.4",
+ "sha2",
  "signature",
  "spki",
  "subtle",

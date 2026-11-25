@@ -11,13 +11,21 @@ use chrono::Utc;
 use ed25519_dalek::{Signer as _, SigningKey};
 use h4rn_protocol::{ConnectDeviceKind, PairingPayload};
 use http_body_util::BodyExt;
+use rsa::RsaPrivateKey;
+use rsa::pkcs8::{EncodePrivateKey, LineEnding};
+use std::sync::Arc;
+use std::time::Duration;
 use tower::ServiceExt as _;
 use uuid::Uuid;
+use wiremock::matchers::{body_string_contains, method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
 
+use h4rn_connect::alerts::AlertService;
 use h4rn_connect::api::{AppState, build_state, router};
 use h4rn_connect::config::Config;
 use h4rn_connect::crypto::{b64, random_b64, random_bytes};
 use h4rn_connect::dpop::canonical_proof;
+use h4rn_connect::push::FcmClient;
 
 fn database_url() -> String {
     std::env::var("H4RN_TEST_DATABASE_URL").expect(
@@ -1459,6 +1467,487 @@ async fn a_relay_guest_link_keeps_its_cookie_and_carries_a_large_upload() {
 
     server.abort();
     fake.abort();
+}
+
+#[tokio::test]
+#[ignore = "requires H4RN_TEST_DATABASE_URL (use ./scripts/test-connect.sh)"]
+async fn push_devices_register_rotate_and_leave_with_the_session() {
+    let state = test_state().await;
+    let phone = actor(&state, ConnectDeviceKind::Mobile, None).await;
+    let other = actor(&state, ConnectDeviceKind::Mobile, None).await;
+    let token_one = random_b64(32);
+    let token_two = random_b64(32);
+
+    let (status, body) = send(
+        &state,
+        request(Method::GET, "/v1/push/status", Some(&phone), None),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["devices"], 0);
+    assert_eq!(
+        body["registered"], false,
+        "an unregistered phone must not claim a registration"
+    );
+
+    let (status, body) = send(
+        &state,
+        request(
+            Method::PUT,
+            "/v1/push/devices",
+            Some(&phone),
+            Some(serde_json::json!({
+                "device_id": phone.device.id.to_string(),
+                "token": token_one,
+                "package_name": "dev.h4rn.app",
+                "app_version": "1.0.1",
+            })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let (status, body) = send(
+        &state,
+        request(Method::GET, "/v1/push/status", Some(&phone), None),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["configured"], false);
+    assert_eq!(body["devices"], 1);
+    assert_eq!(
+        body["registered"], true,
+        "the phone's own registration must be reported"
+    );
+
+    // Rotation replaces the old token instead of adding a row.
+    let (status, body) = send(
+        &state,
+        request(
+            Method::PUT,
+            "/v1/push/devices",
+            Some(&phone),
+            Some(serde_json::json!({
+                "device_id": phone.device.id.to_string(),
+                "token": token_two,
+                "package_name": "dev.h4rn.app",
+                "app_version": "1.0.2",
+            })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT token, app_version FROM push_devices WHERE user_id = $1 ORDER BY created_at",
+    )
+    .bind(phone.user.id)
+    .fetch_all(state.store.pool())
+    .await
+    .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].0, token_two);
+    assert_eq!(rows[0].1, "1.0.2");
+
+    // A device can only register itself, and only remove itself.
+    let (status, body) = send(
+        &state,
+        request(
+            Method::PUT,
+            "/v1/push/devices",
+            Some(&other),
+            Some(serde_json::json!({
+                "device_id": phone.device.id.to_string(),
+                "token": random_b64(32),
+            })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body["code"], "push_device_forbidden");
+    let (status, body) = send(
+        &state,
+        request(
+            Method::DELETE,
+            &format!("/v1/push/devices/{}", phone.device.id),
+            Some(&other),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body["code"], "push_device_forbidden");
+
+    // The phone removes its own registration.
+    let (status, body) = send(
+        &state,
+        request(
+            Method::DELETE,
+            &format!("/v1/push/devices/{}", phone.device.id),
+            Some(&phone),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM push_devices WHERE user_id = $1")
+        .bind(phone.user.id)
+        .fetch_one(state.store.pool())
+        .await
+        .unwrap();
+    assert_eq!(remaining, 0, "the phone's own delete left its token behind");
+
+    // Register again so sign-out has a row to clear.
+    let (status, body) = send(
+        &state,
+        request(
+            Method::PUT,
+            "/v1/push/devices",
+            Some(&phone),
+            Some(serde_json::json!({
+                "device_id": phone.device.id.to_string(),
+                "token": token_two,
+                "package_name": "dev.h4rn.app",
+                "app_version": "1.0.2",
+            })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+
+    // Signing out removes the registration as well as the session.
+    let (status, _) = send(
+        &state,
+        request(
+            Method::POST,
+            "/v1/auth/logout",
+            Some(&phone),
+            Some(serde_json::json!({"refresh_token": phone.refresh})),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM push_devices WHERE user_id = $1")
+        .bind(phone.user.id)
+        .fetch_one(state.store.pool())
+        .await
+        .unwrap();
+    assert_eq!(remaining, 0, "sign-out left a deliverable token");
+
+    // The delivered baseline is keyed by the transition, not only the state:
+    // a reply of one frame is dropped, while a later completion or approval in
+    // the same state alerts again.
+    let thread = h4rn_protocol::ThreadId::new_uuid_v7();
+    assert!(
+        state
+            .store
+            .claim_push_thread_state(phone.user.id, thread.as_str(), "completed", "turn-1")
+            .await
+            .unwrap()
+    );
+    assert!(
+        !state
+            .store
+            .claim_push_thread_state(phone.user.id, thread.as_str(), "completed", "turn-1")
+            .await
+            .unwrap(),
+        "a replay of the same frame was claimed twice"
+    );
+    assert!(
+        state
+            .store
+            .claim_push_thread_state(phone.user.id, thread.as_str(), "completed", "turn-2")
+            .await
+            .unwrap(),
+        "a later completion in the same state never alerted"
+    );
+    assert!(
+        state
+            .store
+            .claim_push_thread_state(phone.user.id, thread.as_str(), "approval", "approval-1")
+            .await
+            .unwrap()
+    );
+    assert!(
+        !state
+            .store
+            .claim_push_thread_state(phone.user.id, thread.as_str(), "approval", "approval-1")
+            .await
+            .unwrap(),
+        "a replay of the same approval was claimed twice"
+    );
+    assert!(
+        state
+            .store
+            .claim_push_thread_state(phone.user.id, thread.as_str(), "approval", "approval-2")
+            .await
+            .unwrap(),
+        "a later approval in the same state never alerted"
+    );
+
+    // Account deletion cascades to every device row.
+    send(
+        &state,
+        request(
+            Method::PUT,
+            "/v1/push/devices",
+            Some(&other),
+            Some(serde_json::json!({
+                "device_id": other.device.id.to_string(),
+                "token": random_b64(32),
+            })),
+        ),
+    )
+    .await;
+    sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(other.user.id)
+        .execute(state.store.pool())
+        .await
+        .unwrap();
+    let leftover: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM push_devices WHERE user_id = $1")
+        .bind(other.user.id)
+        .fetch_one(state.store.pool())
+        .await
+        .unwrap();
+    assert_eq!(leftover, 0, "deleting the account left device rows");
+}
+
+#[tokio::test]
+#[ignore = "requires H4RN_TEST_DATABASE_URL (use ./scripts/test-connect.sh)"]
+async fn a_revoked_phone_loses_its_push_rows() {
+    let state = test_state().await;
+    let phone = actor(&state, ConnectDeviceKind::Mobile, None).await;
+    state
+        .store
+        .register_push_device(
+            phone.user.id,
+            &phone.device.id.to_string(),
+            "revoked-phone-token",
+            Some("dev.h4rn.app"),
+            Some("1.0.1"),
+        )
+        .await
+        .expect("register");
+    assert_eq!(
+        state.store.push_devices(phone.user.id).await.unwrap().len(),
+        1
+    );
+
+    // Defence in depth: even a row that survives revocation is not deliverable.
+    sqlx::query("UPDATE devices SET revoked_at = now() WHERE id = $1")
+        .bind(phone.device.id)
+        .execute(state.store.pool())
+        .await
+        .unwrap();
+    assert!(
+        state
+            .store
+            .push_devices(phone.user.id)
+            .await
+            .unwrap()
+            .is_empty(),
+        "a revoked device was still returned as a push target"
+    );
+    sqlx::query("UPDATE devices SET revoked_at = NULL WHERE id = $1")
+        .bind(phone.device.id)
+        .execute(state.store.pool())
+        .await
+        .unwrap();
+
+    // Revoking through the API deletes the registration in the same
+    // transaction, so the lost phone stops receiving titles at once.
+    let (status, body) = send(
+        &state,
+        request(
+            Method::DELETE,
+            &format!("/v1/devices/{}", phone.device.id),
+            Some(&phone),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM push_devices WHERE user_id = $1")
+        .bind(phone.user.id)
+        .fetch_one(state.store.pool())
+        .await
+        .unwrap();
+    assert_eq!(rows, 0, "revoking a device left its push row behind");
+}
+
+/// A service account generated for one test; it is never written to disk or
+/// committed.
+fn service_account(server: &MockServer, project: &str) -> String {
+    let key = RsaPrivateKey::new(&mut rand_core::OsRng, 2048).expect("generate RSA key");
+    let pem = key.to_pkcs8_pem(LineEnding::LF).expect("encode PKCS#8 PEM");
+    serde_json::json!({
+        "project_id": project,
+        "client_email": format!("relay@{project}.iam.gserviceaccount.example"),
+        "private_key": pem.as_str(),
+        "token_uri": format!("{}/token", server.uri()),
+    })
+    .to_string()
+}
+
+fn alert_activity(
+    thread: &h4rn_protocol::ThreadId,
+    state: h4rn_protocol::AgentAlertState,
+    at: chrono::DateTime<Utc>,
+    transition: &str,
+) -> h4rn_protocol::AgentActivity {
+    h4rn_protocol::AgentActivity {
+        thread_id: thread.clone(),
+        thread_title: format!("Thread {}", transition),
+        project_name: "h4rn".to_string(),
+        state,
+        at,
+        transition: transition.to_string(),
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires H4RN_TEST_DATABASE_URL (use ./scripts/test-connect.sh)"]
+async fn alert_service_drops_stale_completions_groups_and_deletes_a_dead_token() {
+    use h4rn_protocol::{AgentAlertState, ThreadId};
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "access_token": "test-access-token",
+            "expires_in": 3600,
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/projects/demo/messages:send"))
+        .and(body_string_contains("kept-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"name": "x"})))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/projects/demo/messages:send"))
+        .and(body_string_contains("gone-token"))
+        .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+            "error": {
+                "status": "NOT_FOUND",
+                "details": [{
+                    "@type": "type.googleapis.com/google.firebase.fcm.v1.FcmError",
+                    "errorCode": "UNREGISTERED"
+                }]
+            }
+        })))
+        .mount(&server)
+        .await;
+
+    let state = test_state().await;
+    let subject = Uuid::now_v7().to_string();
+    let kept = actor_with_subject(&state, ConnectDeviceKind::Mobile, None, &subject).await;
+    let gone = actor_with_subject(&state, ConnectDeviceKind::Mobile, None, &subject).await;
+    assert_eq!(kept.user.id, gone.user.id, "one account, two phones");
+    state
+        .store
+        .register_push_device(
+            kept.user.id,
+            &kept.device.id.to_string(),
+            "kept-token",
+            None,
+            None,
+        )
+        .await
+        .expect("register kept phone");
+    state
+        .store
+        .register_push_device(
+            kept.user.id,
+            &gone.device.id.to_string(),
+            "gone-token",
+            None,
+            None,
+        )
+        .await
+        .expect("register gone phone");
+
+    let config = Config {
+        fcm_service_account: Some(service_account(&server, "demo")),
+        fcm_token_url: format!("{}/token", server.uri()),
+        fcm_url: server.uri(),
+        ..Config::default()
+    };
+    let fcm = Arc::new(FcmClient::new(&config, reqwest::Client::new()));
+    let service = Arc::new(AlertService::new(
+        state.store.clone(),
+        fcm,
+        Duration::from_millis(100),
+        Duration::from_secs(120),
+    ));
+
+    // A completion older than the cutoff is recorded but never sent.
+    let stale = ThreadId::new_uuid_v7();
+    service
+        .ingest(
+            kept.user.id,
+            alert_activity(
+                &stale,
+                AgentAlertState::Completed,
+                Utc::now() - chrono::Duration::minutes(10),
+                "stale",
+            ),
+        )
+        .await;
+    service.flush(kept.user.id).await;
+
+    // Two completions inside the window become one grouped alert.
+    let first = ThreadId::new_uuid_v7();
+    let second = ThreadId::new_uuid_v7();
+    service
+        .ingest(
+            kept.user.id,
+            alert_activity(&first, AgentAlertState::Completed, Utc::now(), "first"),
+        )
+        .await;
+    service
+        .ingest(
+            kept.user.id,
+            alert_activity(&second, AgentAlertState::Completed, Utc::now(), "second"),
+        )
+        .await;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    let sends: Vec<wiremock::Request> = server
+        .received_requests()
+        .await
+        .expect("requests")
+        .into_iter()
+        .filter(|request| request.url.path().ends_with("messages:send"))
+        .collect();
+    assert_eq!(
+        sends.len(),
+        2,
+        "one grouped alert per phone, and nothing for the stale completion"
+    );
+    for request in &sends {
+        let body: serde_json::Value = serde_json::from_slice(&request.body).expect("json");
+        assert_eq!(body["message"]["data"]["count"], "2");
+        assert_eq!(body["message"]["data"]["state"], "completed");
+    }
+
+    // The token FCM reported as UNREGISTERED is removed; the live one stays.
+    assert!(
+        state
+            .store
+            .push_device(kept.user.id, &gone.device.id.to_string())
+            .await
+            .unwrap()
+            .is_none(),
+        "an unregistered token was kept"
+    );
+    assert!(
+        state
+            .store
+            .push_device(kept.user.id, &kept.device.id.to_string())
+            .await
+            .unwrap()
+            .is_some()
+    );
 }
 
 #[tokio::test]
