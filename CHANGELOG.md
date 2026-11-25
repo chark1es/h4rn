@@ -751,6 +751,22 @@ All notable changes to h4rn are recorded here. The format follows
   restart's repair looked only for a turn with no status at all, so its
   completion and the finished phase were never written. The restart now finds
   the turn in the wire rows too and finishes it.
+- **A linked worktree inside a metadata folder no longer counts as the main
+  checkout.** A workspace inside the folder git calls the main worktree now
+  counts only when its own git directory is the repository's common git
+  directory; sitting inside the folder is not enough. A location inside the
+  real main checkout is now refused even when the thread started in a linked
+  worktree that sits under a metadata folder's parent.
+- **A worktree create interrupted before it registered its checkout no longer
+  stays behind.** When the destination's claim proves the create and there is no
+  admin dir, the next start removes an empty destination folder, deletes the
+  branch h4rn made under the usual guards, and retires the record instead of
+  retrying it forever.
+- **A repository whose `HEAD` tree has no files cannot prove its main checkout
+  from a linked worktree, and this is now documented.** h4rn refuses locations
+  for that project rather than guess, until the repository tracks a file or
+  names its main checkout with `core.worktree`. See
+  [docs/worktrees.md](docs/worktrees.md).
 - **A worktree location is refused wherever it would put a checkout in a working
   tree.** Saving the location and creating a thread now find the real main
   checkout even when the repository keeps its git directory elsewhere — a

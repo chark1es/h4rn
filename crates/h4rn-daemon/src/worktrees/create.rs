@@ -325,17 +325,38 @@ impl CreatedWorktree {
         {
             admin = Some(found);
         }
+        // A kill between `git worktree add` and the marker leaves no marker in
+        // the admin dir; the claim this create wrote into the destination's
+        // lock file before the add is then the ownership proof.
+        let claim_owner = claim_names_owner(&self.path, owner);
         let Some(admin) = admin else {
+            if claim_owner && self.destination_gone_or_empty() {
+                // A kill between recording the owner in the claim and
+                // `git worktree add` leaves no registration at all. The claim
+                // proves this create made the folder, and an absent (or empty)
+                // destination has nothing to remove, so finish the branch step
+                // and retire instead of retrying this record forever. Anything
+                // in the folder belongs to someone else and is left alone.
+                match std::fs::remove_dir(&self.path) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => {
+                        tracing::warn!(
+                            %error,
+                            path = %self.path.display(),
+                            "could not remove an empty worktree folder; leaving it in place"
+                        );
+                        return Cleanup::NONE;
+                    }
+                }
+                return self.finish_after_removal();
+            }
             tracing::warn!(
                 path = %self.path.display(),
                 "refusing to roll back a worktree whose registration was not proved"
             );
             return Cleanup::NONE;
         };
-        // A kill between `git worktree add` and the marker leaves no marker in
-        // the admin dir; the claim this create wrote into the destination's
-        // lock file before the add is then the ownership proof.
-        let claim_owner = claim_names_owner(&self.path, owner);
         if !registration_proves(&admin, &self.path, owner, &self.branch, claim_owner) {
             if self.replacement_now(&admin) {
                 // A different checkout lives here now; this attempt has
@@ -352,8 +373,6 @@ impl CreatedWorktree {
         }
         #[cfg(test)]
         test_hooks::before_rollback_remove(&self.path);
-        #[cfg(test)]
-        test_hooks::before_cleanup_removal(&self.path);
         // Re-check after any hook and immediately before the destructive step:
         // the path or its registration may have been replaced in between.
         if !registration_proves(&admin, &self.path, owner, &self.branch, claim_owner) {
@@ -372,6 +391,10 @@ impl CreatedWorktree {
             if !self.save_removing(&admin) {
                 return Cleanup::NONE;
             }
+            // The removal is now on record; this is the last point before git
+            // acts on it.
+            #[cfg(test)]
+            test_hooks::before_cleanup_removal(&self.path);
             let removed = git::run_with_timeout(
                 &self.repo,
                 [
@@ -485,6 +508,18 @@ impl CreatedWorktree {
                     .admin
                     .as_ref()
                     .is_some_and(|admin| !admin.exists()))
+    }
+
+    /// Whether this create's destination is gone or still an empty folder.
+    ///
+    /// A record interrupted before `git worktree add` never got a registration,
+    /// so the only thing left to judge is the folder the claim created. An
+    /// empty folder is that one; anything in it belongs to someone else.
+    fn destination_gone_or_empty(&self) -> bool {
+        match std::fs::read_dir(&self.path) {
+            Ok(mut entries) => entries.next().is_none(),
+            Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+        }
     }
 
     fn branch_removed(&self) -> bool {
@@ -2111,8 +2146,9 @@ pub(crate) mod test_hooks {
     static CLAIM_IDENTITY: Mutex<Vec<(PathBuf, Option<super::DirIdentity>)>> =
         Mutex::new(Vec::new());
 
-    /// Holds a failed add's cleanup for `dest` just before its recursive
-    /// removal, until a test releases it.
+    /// Holds a cleanup of `dest` just before its destructive removal, until a
+    /// test releases it. A rollback has already recorded the removal here; a
+    /// failed add has no record and pauses before its recursive removal.
     pub(crate) fn pause_before_cleanup_removal(
         dest: PathBuf,
         paused: Arc<Barrier>,
@@ -3630,6 +3666,155 @@ mod tests {
         );
     }
 
+    /// A linked worktree inside the metadata directory's parent proves nothing
+    /// about where the main checkout is: `repo_of` names that parent after the
+    /// common dir's `.git`. A location that is an ignored repository inside the
+    /// real main checkout must still be refused instead of accepted because the
+    /// workspace happens to sit inside the folder git calls the main worktree.
+    #[test]
+    fn a_linked_worktree_inside_the_metadata_parent_never_proves_the_main_checkout() {
+        let root = tempfile::tempdir().expect("root");
+        let meta = root.path().join("meta");
+        std::fs::create_dir(&meta).expect("meta");
+        let main = root.path().join("code").join("api");
+        std::fs::create_dir_all(&main).expect("api");
+        run(
+            root.path(),
+            &[
+                "init",
+                "-q",
+                "-b",
+                "main",
+                "--separate-git-dir",
+                meta.join(".git").to_str().unwrap(),
+                main.to_str().unwrap(),
+            ],
+        );
+        run(&main, &["config", "user.email", "wt@example.invalid"]);
+        run(&main, &["config", "user.name", "worktree test"]);
+        std::fs::write(main.join(".gitignore"), "vendor/\n").expect("ignore");
+        run(&main, &["add", ".gitignore"]);
+        run(&main, &["commit", "-q", "-m", "init"]);
+        let workspace = meta.join("wt");
+        run(
+            &main,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "feature",
+                workspace.to_str().unwrap(),
+            ],
+        );
+        assert_eq!(
+            git::repo_of(&workspace),
+            Some(meta.clone()),
+            "git names the metadata parent as the main worktree"
+        );
+
+        // An ignored repository nested inside the real main checkout keeps the
+        // destination's deepest existing ancestor out of this repository, so
+        // only the main-checkout proof can refuse the location.
+        let nested = main.join("vendor").join("lib");
+        std::fs::create_dir_all(&nested).expect("nested repository");
+        init_repo(&nested);
+
+        let data = tempfile::tempdir().expect("data");
+        let error = create_blocking(
+            &workspace,
+            &WorktreeRequest::Named("nested/x".into()),
+            "nested",
+            &settings(Some(&nested)),
+            data.path(),
+            None,
+        )
+        .expect_err("the location is inside the real main checkout");
+        assert!(
+            error.contains("main checkout could not be found"),
+            "the refusal says the main checkout is unknown: {error}"
+        );
+        assert!(
+            !nested.join("meta").exists(),
+            "nothing was created under the location"
+        );
+        assert!(
+            git::run_with_timeout(
+                &main,
+                ["rev-parse", "--verify", "refs/heads/nested/x"],
+                CREATE_TIMEOUT,
+            )
+            .is_err(),
+            "no branch was made"
+        );
+    }
+
+    /// A repository whose `HEAD` tree is empty cannot prove its main checkout
+    /// from a linked worktree: no tracked path shows which folder holds the
+    /// working tree, and a metadata parent has the same `.git` shape. The
+    /// location is refused rather than guessed (docs/worktrees.md says so); one
+    /// tracked file is the proof that makes the same request work.
+    #[test]
+    fn an_empty_head_tree_refuses_a_location_until_the_repository_tracks_a_file() {
+        let root = tempfile::tempdir().expect("root");
+        let main = root.path().join("api");
+        std::fs::create_dir(&main).expect("api");
+        run(&main, &["init", "-q", "-b", "main"]);
+        run(&main, &["config", "user.email", "wt@example.invalid"]);
+        run(&main, &["config", "user.name", "worktree test"]);
+        run(&main, &["commit", "-q", "--allow-empty", "-m", "init"]);
+        let workspace = root.path().join("linked");
+        run(
+            &main,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "feature",
+                workspace.to_str().unwrap(),
+            ],
+        );
+        let location = tempfile::tempdir().expect("location");
+        let data = tempfile::tempdir().expect("data");
+
+        let error = create_blocking(
+            &workspace,
+            &WorktreeRequest::Named("empty/x".into()),
+            "empty",
+            &settings(Some(location.path())),
+            data.path(),
+            None,
+        )
+        .expect_err("an empty HEAD tree cannot prove the main checkout");
+        assert!(
+            error.contains("main checkout could not be found"),
+            "the refusal says the main checkout is unknown: {error}"
+        );
+        assert!(
+            !location.path().join("api").exists(),
+            "nothing was created under the location"
+        );
+
+        std::fs::write(main.join("README.md"), "hello\n").expect("readme");
+        run(&main, &["add", "README.md"]);
+        run(&main, &["commit", "-q", "-m", "readme"]);
+        let created = create_blocking(
+            &workspace,
+            &WorktreeRequest::Named("empty/x".into()),
+            "empty",
+            &settings(Some(location.path())),
+            data.path(),
+            None,
+        )
+        .expect("the tracked file proves the main checkout");
+        assert_eq!(
+            created.path,
+            checkout_path(location.path(), "api", "empty/x")
+        );
+        created.keep();
+    }
+
     /// A `--separate-git-dir` repository whose metadata dir sits under an
     /// unrelated parent, seen from a linked worktree, leaves nothing that
     /// proves which folder is the main checkout. h4rn refuses every location
@@ -4266,6 +4451,164 @@ mod tests {
                 .is_none(),
             "the record is retired"
         );
+    }
+
+    /// A create killed before it registered anything leaves a record proved only
+    /// by the claim token. With no admin dir and an empty destination, the next
+    /// start finishes it: the branch h4rn made and the empty folder are removed,
+    /// and the record is retired instead of retrying forever.
+    #[test]
+    fn a_claim_proven_record_without_a_registration_finishes_at_the_next_start() {
+        let repo = repo();
+        let data = tempfile::tempdir().expect("data");
+        let created = create_blocking(
+            repo.path(),
+            &WorktreeRequest::Named("claimonly/x".into()),
+            "claim only",
+            &settings(None),
+            data.path(),
+            None,
+        )
+        .expect("create");
+        // What a kill inside a failed add's cleanup leaves: no registration and
+        // no checkout, but an empty folder and a claim that names the create.
+        run(
+            repo.path(),
+            &[
+                "worktree",
+                "remove",
+                "--force",
+                created.path.to_str().unwrap(),
+            ],
+        );
+        std::fs::create_dir(&created.path).expect("empty destination");
+        let pending = data.path().join("worktrees-pending");
+        let record_file = std::fs::read_dir(&pending)
+            .expect("pending dir")
+            .next()
+            .expect("a record")
+            .expect("record entry")
+            .path();
+        let mut record: PendingRecord =
+            serde_json::from_slice(&std::fs::read(&record_file).expect("read the record"))
+                .expect("parse the record");
+        assert!(
+            claim_names_owner(&record.path, &record.owner),
+            "the claim proves this create made the folder"
+        );
+        record.admin = None;
+        record.removing = false;
+        record.checkout_removed = false;
+        record.branch_removed = false;
+        write_pending_record(&record_file, &record).expect("record");
+
+        let swept = sweep_pending(data.path(), &[]);
+        assert_eq!(
+            swept,
+            vec![created.path.clone()],
+            "the branch deletion is real work"
+        );
+        assert!(!created.path.exists(), "the empty destination is removed");
+        assert!(
+            git::run_with_timeout(
+                repo.path(),
+                ["rev-parse", "--verify", "refs/heads/claimonly/x"],
+                CREATE_TIMEOUT,
+            )
+            .is_err(),
+            "the branch this create made is deleted"
+        );
+        assert!(
+            std::fs::read_dir(&pending)
+                .expect("pending dir")
+                .next()
+                .is_none(),
+            "the record is retired"
+        );
+    }
+
+    /// The owner token written into the destination's claim before
+    /// `git worktree add` is the proof a kill between the add and the
+    /// registration marker still has, so it must name the create's record.
+    #[test]
+    fn a_create_writes_its_owner_into_the_destination_claim() {
+        let repo = repo();
+        let data = tempfile::tempdir().expect("data");
+        let created = create_blocking(
+            repo.path(),
+            &WorktreeRequest::Named("claimed/x".into()),
+            "claimed",
+            &settings(None),
+            data.path(),
+            None,
+        )
+        .expect("create");
+        let record = created.record.as_ref().expect("a recovery record");
+        let folder = created.path.parent().expect("project folder");
+        let location = folder.parent().expect("location");
+        let project = folder
+            .file_name()
+            .expect("project name")
+            .to_str()
+            .expect("utf-8 project name");
+        let claim = claim_path(location, project, &created.path);
+        assert_eq!(
+            std::fs::read_to_string(&claim)
+                .expect("the claim file")
+                .trim(),
+            record.data.owner,
+            "the claim names the create that owns the folder"
+        );
+        created.keep();
+    }
+
+    /// The record marks the removal and names the admin dir before git runs, so
+    /// a kill between `git worktree remove` and the progress write still lets the
+    /// next start finish the branch step instead of retiring the record.
+    #[test]
+    fn a_rollback_records_the_removal_and_admin_before_git_removes_the_checkout() {
+        let repo = repo();
+        let data = tempfile::tempdir().expect("data");
+        let mut created = create_blocking(
+            repo.path(),
+            &WorktreeRequest::Named("marked/x".into()),
+            "marked",
+            &settings(None),
+            data.path(),
+            None,
+        )
+        .expect("create");
+        let admin = created.registration.clone().expect("a registration");
+        let record = created.record.as_mut().expect("a recovery record");
+        // Drop the admin the create learned, so only the removal write can put
+        // it back before git acts.
+        record.data.admin = None;
+        let record_path = record.path.clone();
+        write_pending_record(&record_path, &record.data).expect("record without an admin");
+
+        let paused = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let release = std::sync::Arc::new(std::sync::Barrier::new(2));
+        test_hooks::pause_before_cleanup_removal(
+            created.path.clone(),
+            paused.clone(),
+            release.clone(),
+        );
+        let path = created.path.clone();
+        let handle = std::thread::spawn(move || created.rollback());
+        paused.wait();
+        let record: PendingRecord =
+            serde_json::from_slice(&std::fs::read(&record_path).expect("read the record"))
+                .expect("parse the record");
+        assert!(record.removing, "the removal is marked before git runs");
+        assert_eq!(
+            record.admin.as_deref(),
+            Some(admin.as_path()),
+            "the record names the admin dir git is about to remove"
+        );
+        release.wait();
+        assert!(handle.join().expect("join"), "the rollback finishes");
+        test_hooks::clear_failed_add_hooks(&path);
+        assert!(!path.exists(), "the checkout is removed");
     }
 
     /// A branch deletion that fails keeps the record and the branch for a later

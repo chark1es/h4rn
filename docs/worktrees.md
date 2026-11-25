@@ -51,24 +51,33 @@ bare repository's git directory), wherever that is: h4rn resolves the checkout
 from `core.worktree`, from the directory whose `.git` file points at the common
 git directory, or from a nearby directory or registration whose own `.git` file
 proves it is that checkout. A folder that git reports as the main worktree only
-because its git directory is named `.git` counts only when the workspace is
-inside it or it really holds the checkout (its `.git` resolves to that git
-directory, or a file the repository tracks is there), and as a last check no
-folder on the destination's way up may belong to the same repository. Metadata
-directories such as `api.git` or an admin directory are never mistaken for a
-working tree, and a linked worktree is never accepted as the main one. When none
-of those can prove where the main checkout is, h4rn refuses the location
-instead of guessing; the refusal says the main checkout could not be found and
-never names the metadata directory. One reading of the repository decides both
-the project folder's name and the destination that is checked and created, so a
-location that passes the check is exactly the one a checkout goes into. The
-destination is refused inside the workspace, the main checkout, or any other
-linked worktree of the same repository, because a checkout there would make that
-working tree dirty. The check uses one complete
-worktree snapshot; if git cannot read an admin entry, the location is refused
-instead of guessing that the missing worktree is absent. All of these are
-refused when the setting is saved and when a worktree is created, because a
-person should learn about it while they can still change the location.
+because its git directory is named `.git` counts only when it really holds the
+checkout: the workspace's own git directory is that git directory, or a file
+the repository tracks is there. The workspace merely sitting inside the folder
+is not enough, because a linked worktree can sit inside the parent of a metadata
+directory named `.git`. As a last check no folder on the destination's way up
+may belong to the same repository. Metadata directories such as `api.git` or an
+admin directory are never mistaken for a working tree, and a linked worktree is
+never accepted as the main one. When none of those can prove where the main
+checkout is, h4rn refuses the location instead of guessing; the refusal says the
+main checkout could not be found and never names the metadata directory. One
+reading of the repository decides both the project folder's name and the
+destination that is checked and created, so a location that passes the check is
+exactly the one a checkout goes into. The destination is refused inside the
+workspace, the main checkout, or any other linked worktree of the same
+repository, because a checkout there would make that working tree dirty. The
+check uses one complete worktree snapshot; if git cannot read an admin entry,
+the location is refused instead of guessing that the missing worktree is absent.
+All of these are refused when the setting is saved and when a worktree is
+created, because a person should learn about it while they can still change the
+location.
+
+A repository whose `HEAD` tree has no files (only `--allow-empty` commits)
+cannot prove its main checkout from a linked worktree: no tracked file exists to
+show which folder holds the working tree, and a metadata directory's parent has
+the same `.git` shape as a checkout. Until the repository tracks a file (or
+names its main checkout with `core.worktree`), h4rn refuses every location for
+that project rather than guess. Commit one file and the same location works.
 
 **Settings → Worktrees → New worktrees → Location** sets another directory:
 
@@ -134,14 +143,18 @@ marker in the admin dir is still proved by it. A checkout folder that is gone
 while its admin dir and marker remain — deleted by hand, or a kill inside
 `git worktree remove` — is finished from the admin dir alone: its `gitdir` still
 names the path and its `HEAD` the branch, and git removes a registration whose
-folder no longer exists. Before `git worktree remove` runs, the record is marked
-as removing, so a kill between the removal and the write that records it still
-finishes the branch step instead of retiring the record and leaving the branch
-behind. Once the checkout has been removed and that step was recorded, the
-record itself is the proof, because it says this create removed its own
-checkout; the startup then deletes the branch h4rn made only if that branch is
-not registered, is not checked out anywhere, and still points at the commit the
-create started from, and retires the record. A record that cannot be
+folder no longer exists. A record the claim proves, with no admin dir at all and
+a destination that is gone or still empty, is finished the same way: the
+destination folder is removed if it is empty, the branch h4rn made is deleted
+under the usual guards, and the record is retired. Anything in the destination
+is left alone and the record waits. Before `git worktree remove` runs, the
+record is marked as removing, so a kill between the removal and the write that
+records it still finishes the branch step instead of retiring the record and
+leaving the branch behind. Once the checkout has been removed and that step was
+recorded, the record itself is the proof, because it says this create removed
+its own checkout; the startup then deletes the branch h4rn made only if that
+branch is not registered, is not checked out anywhere, and still points at the
+commit the create started from, and retires the record. A record that cannot be
 proved is kept and left alone. A record whose path a thread now uses is retired
 without touching the checkout; a thread working in a parent folder does not
 count as using the checkout, so an unused one is still cleaned up. Recovery
@@ -159,6 +172,15 @@ remove the checkout and put another one at the same path in the moments between
 that last check and `git worktree remove`. h4rn cannot hold that process off.
 It never acts on a path it has not checked in this way, and it never prunes
 registrations it did not make.
+
+The claim token has a limit of its own. It says which create last used the
+folder, but it cannot tell a checkout a person later made on the same branch at
+the same path apart from the interrupted create's checkout: both leave the same
+branch at the same path while the claim still names that create. Recovery uses
+the token only when the registration carries no owner marker, and it still
+requires the branch and path to match the record, but that combination is
+indistinguishable. The confusion lasts only while the folder's claim still names
+that create; the next create for the folder rewrites it.
 
 ## Tracking and clearing
 
