@@ -86,7 +86,7 @@ function desktopBridge(shell: TauriInternals): AppUpdateBridge {
 /** A stand-in with one pending release, for screenshots and the mock daemon. */
 function mockBridge(): AppUpdateBridge {
   let status: AppUpdateStatus = {
-    current_version: "1.0.1",
+    current_version: "1.1.0",
     available: { version: "1.1.0", notes: null },
     checked_at_ms: Date.now() - 4 * 60_000,
     auto_check: true,

@@ -3,7 +3,15 @@
 All notable changes to h4rn are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses semantic versioning.
 
-## Unreleased
+## 1.1.0 — 2026-11-26
+
+A feature release. The interface and phone alerts now come in Simplified Chinese, Spanish and
+Japanese as well as English. Threads can be rewound by editing an earlier prompt, forked, switched
+to another harness, run in their own git worktree, shared through a guest link and scheduled.
+Claude Code and Codex conversations can be imported. Android shows running agents as Live Updates,
+and both phone apps get agent alerts. Forges add Bitbucket Cloud and Azure DevOps, with issues
+from every forge and Linear. The daemon can run as a service and update itself. The daemon
+protocol version is still 1.
 
 ### Added
 
@@ -137,9 +145,8 @@ All notable changes to h4rn are recorded here. The format follows
   on screen loses its entry when you return to the app. Android 16 promotes the
   entry when the app has the promoted-notification permission and you allow
   it. The switch needs Device notifications on, and the phone app at 1.0.2 or
-  later: older builds are never sent the `working` state, so Live Updates
-  arrive only from the next mobile release (1.0.2 or later); today's 1.0.1
-  builds never receive them. Connect sends each account's notifications from
+  later: older builds are never sent the `working` state, so a 1.0.1 phone
+  app gets no Live Updates until it is updated to 1.1.0. Connect sends each account's notifications from
   its own queue, so a slow push provider never holds up the relay, a finish
   never arrives ahead of its own turn's start, and one failed delivery does not
   stop the rest. With the switch off, a new turn never clears the thread's

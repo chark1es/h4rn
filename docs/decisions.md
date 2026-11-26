@@ -2546,10 +2546,8 @@ sends the update only to Android registrations whose app version is at least
 tell the person a turn ended when it had only begun. An Android build from
 before Live Updates would show `working` as an ordinary alert, so a row with an
 older, missing or unreadable `app_version` is skipped: a missed ongoing entry is
-quiet, a stray alert on every turn start is not. The repository's own phone
-app is still at 1.0.1, so Live Updates reach a phone only once a mobile release
-at 1.0.2 or later ships; this gate is deliberate and the version is not bumped
-with the feature. Deliveries for one account go
+quiet, a stray alert on every turn start is not. The gate is deliberate, and the
+version was not bumped with the feature: the first phone app past it is 1.1.0. Deliveries for one account go
 out one at a time in the order Connect decided them, and a `working` frame
 first sends the group that was collecting when the frame arrived, if it holds a
 transition for the same thread. A queued message starts the next turn the

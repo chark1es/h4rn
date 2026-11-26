@@ -116,10 +116,9 @@ phone app at version 1.0.2 or later: Connect never sends the `working` state to
 an Android registration from an older (or unversioned) build, because that build
 would show "Working" as an ordinary alert on every turn start.
 
-**The next mobile release must be 1.0.2 or later for Live Updates to arrive.**
-The phone app in this repository is still versioned 1.0.1, so a build made from
-it today registers as 1.0.1 and is never sent `working`: the switch is there,
-but no running turn appears until a release at 1.0.2 or later is installed.
+Live Updates first arrive with the 1.1.0 phone app. A phone still on 1.0.1
+registers as 1.0.1 and is never sent `working`: the switch is there, but no
+running turn appears until the phone app is updated.
 
 The daemon publishes `working` once when a turn starts, never per token, per
 tool call or per summary update. The next state for that thread updates the same

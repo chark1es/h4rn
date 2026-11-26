@@ -7,7 +7,7 @@
     },
     "apps/desktop": {
       "name": "@h4rn/desktop",
-      "version": "1.0.1",
+      "version": "1.1.0",
       "dependencies": {
         "@tauri-apps/api": "2.12.4",
         "@tauri-apps/plugin-deep-link": "2.6.3",
@@ -20,7 +20,7 @@
     },
     "apps/mobile": {
       "name": "@h4rn/mobile",
-      "version": "1.0.1",
+      "version": "1.1.0",
       "dependencies": {
         "@tauri-apps/api": "2.12.4",
         "@tauri-apps/plugin-barcode-scanner": "2.5.3",
@@ -34,7 +34,7 @@
     },
     "apps/ui": {
       "name": "@h4rn/ui",
-      "version": "1.0.1",
+      "version": "1.1.0",
       "dependencies": {
         "@blobatar/react": "2.7.0",
         "@codemirror/commands": "^6.11.1",
@@ -98,7 +98,7 @@
     },
     "apps/web": {
       "name": "@h4rn/web",
-      "version": "1.0.1",
+      "version": "1.1.0",
     },
   },
   "packages": {
