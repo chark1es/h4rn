@@ -1,0 +1,177 @@
+{
+  "label": "Message composer",
+  "replyTo": "Reply to {{harness}}",
+  "replyToOn": "Reply to {{harness}} on {{host}}",
+  "disabled": {
+    "offline": "Your reply is saved as a draft and sends when {{host}} reconnects",
+    "unreachable": "{{host}} is unreachable. The draft stays here."
+  },
+  "send": {
+    "sendLabel": "Send reply",
+    "saveLabel": "Save queued message",
+    "saveTitle": "Save the queued message",
+    "steerTitle": "Steer into the running turn (Enter)",
+    "queueTitle": "Queue for the next turn (Enter)",
+    "sendTitle": "Send (Enter)"
+  },
+  "edit": {
+    "title": "Editing a queued message",
+    "titleNoSteer": "Editing a queued message · this agent cannot take it mid-turn"
+  },
+  "attach": {
+    "label": "Attach files",
+    "drop": "Drop files to attach",
+    "count_one": "{{count, number}} attached",
+    "count_other": "{{count, number}} attached"
+  },
+  "mention": "Mention a file",
+  "menu": {
+    "files": "Files",
+    "commands": "Commands",
+    "filesIn": "Files in {{workspace}}",
+    "searching": "Searching this workspace…",
+    "noFilesMatch": "No files match “{{query}}”.",
+    "noCommandsMatch": "No commands match “{{query}}”.",
+    "noFiles": "No files in {{workspace}}.",
+    "noCommands": "No commands are available for this thread.",
+    "capped_one": "Showing the first {{count, number}} file.",
+    "capped_other": "Showing the first {{count, number}} files.",
+    "cappedUnknown": "Showing only the files the index could reach.",
+    "keys": {
+      "move": "↑↓ move",
+      "choose": "↵ choose",
+      "close": "esc close"
+    },
+    "errors": {
+      "unexpected": "The daemon answered a file listing with something else.",
+      "unreadable": "The workspace could not be read."
+    }
+  },
+  "commands": {
+    "stop": {
+      "label": "Stop the turn",
+      "hint": "Interrupt what the agent is doing"
+    },
+    "changes": {
+      "label": "Open changes",
+      "hint": "Diff the files this thread touched"
+    },
+    "subagents": {
+      "label": "Open subagents",
+      "hint": "See delegated work and its budget"
+    },
+    "terminal": {
+      "open": "Open the terminal",
+      "hide": "Hide the terminal",
+      "hint": "The shell in this thread’s workspace"
+    },
+    "ide": {
+      "open": "Open the IDE",
+      "back": "Back to the thread",
+      "hint": "Edit {{project}}"
+    },
+    "newThread": {
+      "label": "New thread",
+      "hint": "Start one in {{project}}"
+    }
+  },
+  "controls": {
+    "label": "Thread settings",
+    "thread": "Thread",
+    "nextTurn": "{{harness}} · these apply to the next turn.",
+    "model": "Model",
+    "use": "Use",
+    "permissions": "Permissions",
+    "permissionMode": "Permission mode",
+    "agentManagesMode": "{{mode}} · the agent manages its own mode.",
+    "effort": "Reasoning effort",
+    "harnessDefault": "Harness default",
+    "harnessDefaultHint": "Use the harness’s own setting",
+    "speed": "Speed",
+    "fastHint": "Priority service tier, higher usage",
+    "noFastTier": "This model has no fast tier",
+    "unknownFastTier": "No fast tier is known for this model"
+  },
+  "attachments": {
+    "label": "Attachments",
+    "file": "File",
+    "remove": "Remove {{name}}",
+    "notAttached": "{{name}} was not attached.",
+    "status": {
+      "notAttached": "Not attached",
+      "waiting": "Waiting",
+      "reading": "Reading",
+      "uploading": "Uploading {{percent}}",
+      "finishing": "Finishing",
+      "done": "{{kind}} · {{size}}",
+      "failed": "Failed",
+      "cancelled": "Cancelled"
+    },
+    "blocked": {
+      "uploading": "Wait for the attachments to finish uploading.",
+      "failed": "Retry or remove the failed attachment.",
+      "tooMany_one": "A message can carry {{max}} attachments. Remove {{count, number}} before sending.",
+      "tooMany_other": "A message can carry {{max}} attachments. Remove {{count, number}} before sending."
+    },
+    "errors": {
+      "empty": "This file is empty.",
+      "emptyHint": "Pick a file with content, or remove it.",
+      "tooLarge": "{{name}} is {{size}}; the limit is {{limit}}.",
+      "tooLargeHint": "Compress it or split it into smaller files.",
+      "nameTooLong": "The file name is too long.",
+      "nameTooLongHint": "Rename it to {{max}} characters or fewer, then attach it again.",
+      "changed": "The file changed while it was being attached.",
+      "released": "The attachment bytes were released before the upload finished.",
+      "hashMissing": "The attachment hash is missing.",
+      "noStream": "The daemon did not open an upload stream.",
+      "incomplete": "The upload stream is incomplete.",
+      "notConfirmed": "The daemon did not confirm the upload.",
+      "stalled": "The daemon stopped acknowledging {{name}} at {{percent}}."
+    }
+  },
+  "queue": {
+    "queued": "Queued",
+    "maybeDelivered": "May have been delivered",
+    "hint": {
+      "maybeDelivered": "May have been delivered; sending again adds a second copy",
+      "steers": "Send now steers it into this turn",
+      "waits": "Waits for this turn to finish",
+      "next": "Send now starts it next"
+    },
+    "sendNow": "Send now",
+    "sendAgain": "Send again",
+    "sendAgainTitle": "Send this message again; it may already be in the turn",
+    "steerTitle": "Steer this message into the running turn",
+    "frontTitle": "Move this message to the front of the queue",
+    "editTitle": "Edit in the composer",
+    "discard": "Discard",
+    "discardTitle": "Discard this row",
+    "removeTitle": "Remove from the queue",
+    "moveUp": "Move up",
+    "moveDown": "Move down"
+  },
+  "toasts": {
+    "unrecorded": {
+      "title": "Delivered, but this thread couldn’t record it.",
+      "description": "{{host}} has your message; its transcript row is missing.",
+      "descriptionAnyHost": "The host has your message; its transcript row is missing."
+    },
+    "unclear": {
+      "title": "Delivered, or maybe not.",
+      "draft": "{{message}} Your draft stays in the composer until its queue row appears, then clears.",
+      "queue": "{{message}} Check the turn before trying again."
+    },
+    "sendFailed": {
+      "title": "Couldn’t send the reply to {{host}}.",
+      "titleAnyHost": "Couldn’t send the reply to the host.",
+      "description": "{{message}} Your draft is still in the composer."
+    },
+    "queueFailed": {
+      "edit": "Couldn’t edit the queued message.",
+      "remove": "Couldn’t remove the queued message.",
+      "move": "Couldn’t move the queued message.",
+      "send": "Couldn’t send the queued message.",
+      "steer": "Couldn’t steer the queued message."
+    }
+  }
+}

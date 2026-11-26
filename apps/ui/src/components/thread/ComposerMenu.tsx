@@ -1,3 +1,4 @@
+import type { TFunction } from "i18next";
 import {
   Code2Icon,
   FileDiffIcon,
@@ -8,6 +9,7 @@ import {
   WorkflowIcon,
 } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import type { ComposerCommandIcon } from "@/lib/composerCommands";
 import {
@@ -37,35 +39,29 @@ const COMMAND_ICONS = {
   terminal: TerminalIcon,
 } as const;
 
-/** A quiet count for the index footer: `3,000`, not `3000`. */
-function countLabel(count: number): string {
-  return new Intl.NumberFormat("en-US").format(count);
-}
-
-function cappedNote(indexed: number, truncated: boolean): string | null {
+function cappedNote(t: TFunction<["composer", "common"]>, indexed: number, truncated: boolean) {
   if (!truncated) return null;
-  return indexed > 0
-    ? `Showing the first ${countLabel(indexed)} files.`
-    : "Showing only the files the index could reach.";
+  return indexed > 0 ? t("menu.capped", { count: indexed }) : t("menu.cappedUnknown");
 }
 
 function emptyText(
+  t: TFunction<["composer", "common"]>,
   kind: "file" | "command",
   query: string,
   loading: boolean,
   error: string | null,
   workspaceName: string,
 ): string {
+  // The daemon's own reason for an unreadable workspace is shown as sent.
   if (kind === "file" && error) return error;
-  if (kind === "file" && loading) return "Searching this workspace…";
-  if (query.trim().length > 0) {
+  if (kind === "file" && loading) return t("menu.searching");
+  const needle = query.trim();
+  if (needle.length > 0) {
     return kind === "file"
-      ? `No files match “${query.trim()}”.`
-      : `No commands match “${query.trim()}”.`;
+      ? t("menu.noFilesMatch", { query: needle })
+      : t("menu.noCommandsMatch", { query: needle });
   }
-  return kind === "file"
-    ? `No files in ${workspaceName}.`
-    : "No commands are available for this thread.";
+  return kind === "file" ? t("menu.noFiles", { workspace: workspaceName }) : t("menu.noCommands");
 }
 
 function MenuRow({
@@ -159,9 +155,10 @@ export function ComposerMenu({
   onHighlight: (index: number) => void;
   onClose: () => void;
 }) {
-  const label = kind === "file" ? "Files" : "Commands";
-  const empty = emptyText(kind, query, loading, error, workspaceName);
-  const note = kind === "file" ? cappedNote(indexedCount, truncated) : null;
+  const { t } = useTranslation(["composer", "common"]);
+  const label = kind === "file" ? t("menu.files") : t("menu.commands");
+  const empty = emptyText(t, kind, query, loading, error, workspaceName);
+  const note = kind === "file" ? cappedNote(t, indexedCount, truncated) : null;
   const menuRef = useRef<HTMLDivElement | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
   const measured = useRef<PopoverPlacement | null>(null);
@@ -277,10 +274,10 @@ export function ComposerMenu({
       >
         <div className="q-grab" />
         <div className="q-comp-sheet-head">
-          <span>{kind === "file" ? `Files in ${workspaceName}` : "Commands"}</span>
+          <span>{kind === "file" ? t("menu.filesIn", { workspace: workspaceName }) : label}</span>
           <span className="grow" />
           <button type="button" className="q-comp-sheet-done" onClick={onClose}>
-            Done
+            {t("common:done")}
           </button>
         </div>
         <div
@@ -312,9 +309,9 @@ export function ComposerMenu({
       </div>
       {note ? <p className="q-comp-menu-note">{note}</p> : null}
       <div className="q-comp-menu-foot" aria-hidden>
-        <span>↑↓ move</span>
-        <span>↵ choose</span>
-        <span>esc close</span>
+        <span>{t("menu.keys.move")}</span>
+        <span>{t("menu.keys.choose")}</span>
+        <span>{t("menu.keys.close")}</span>
       </div>
     </div>
   );

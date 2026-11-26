@@ -103,6 +103,16 @@ describe("translation catalogues", () => {
           }
         });
 
+        // Converted areas format a shown count for the language ("12,000" /
+        // "12.000"); Settings predates the rule and is converted separately.
+        if (namespace !== "settings") {
+          it("formats every count as a number", () => {
+            for (const [key, value] of flat) {
+              expect(value, `${locale} ${key}`).not.toMatch(/\{\{\s*count\s*\}\}/);
+            }
+          });
+        }
+
         it("keeps the same placeholders and markup as English", () => {
           for (const [key, value] of flat) {
             const match = PLURAL.exec(key);

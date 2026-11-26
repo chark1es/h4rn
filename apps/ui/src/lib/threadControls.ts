@@ -8,23 +8,27 @@
  */
 
 import type { HarnessKind, HostId, RuntimeMode, ThreadSummary } from "@/gen";
+import { i18n } from "@/lib/i18n";
 import { HARNESS_MODELS } from "@/lib/models";
 
-export type ModeChoice = {
-  /** h4rn's permission mode. */
+type ModeEntry = {
+  /** h4rn's permission mode; its label is `common:permissionModes.<value>`. */
   value: RuntimeMode;
-  /** Label shown in the picker. */
-  label: string;
   /** The harness's own mode id, when it has one. */
   modeId: string;
 };
 
+export type ModeChoice = ModeEntry & {
+  /** Label shown in the picker, in the active language. */
+  label: string;
+};
+
 /** Every permission mode h4rn knows, with the id harnesses use for it. */
-export const MODE_CHOICES: ModeChoice[] = [
-  { value: "approval_required", label: "Approval required", modeId: "default" },
-  { value: "auto_accept_edits", label: "Auto-accept edits", modeId: "accept-edits" },
-  { value: "plan", label: "Plan", modeId: "plan" },
-  { value: "full_access", label: "Full access", modeId: "auto" },
+export const MODE_CHOICES: readonly ModeEntry[] = [
+  { value: "approval_required", modeId: "default" },
+  { value: "auto_accept_edits", modeId: "accept-edits" },
+  { value: "plan", modeId: "plan" },
+  { value: "full_access", modeId: "auto" },
 ];
 
 /**
@@ -62,8 +66,10 @@ const HARNESS_MODES: Record<HarnessKind, RuntimeMode[]> = {
   acp: ["approval_required", "auto_accept_edits", "plan", "full_access"],
 };
 
+/** A permission mode's name in the active language. */
 export function modeLabel(mode: RuntimeMode): string {
-  return MODE_CHOICES.find((choice) => choice.value === mode)?.label ?? "Approval required";
+  const known = MODE_CHOICES.some((choice) => choice.value === mode);
+  return i18n.t(`common:permissionModes.${known ? mode : "approval_required"}`);
 }
 
 /** The permission modes a thread's harness offers. */
@@ -72,8 +78,10 @@ export function threadModeChoices(
   advertisedAgentModes?: readonly string[],
 ): ModeChoice[] {
   const offered = HARNESS_MODES[harness];
+  const labelled = (entries: readonly ModeEntry[]): ModeChoice[] =>
+    entries.map((entry) => ({ ...entry, label: modeLabel(entry.value) }));
   if (harness !== "acp") {
-    return MODE_CHOICES.filter((choice) => offered.includes(choice.value));
+    return labelled(MODE_CHOICES.filter((choice) => offered.includes(choice.value)));
   }
   // A configured agent's catalogue is authoritative, and an empty or unknown
   // one is not a licence to offer everything: h4rn cannot map a mode it was not
@@ -86,8 +94,8 @@ export function threadModeChoices(
       .map(runtimeModeForModeId)
       .filter((mode): mode is RuntimeMode => mode !== undefined),
   );
-  return MODE_CHOICES.filter(
-    (choice) => offered.includes(choice.value) && mapped.has(choice.value),
+  return labelled(
+    MODE_CHOICES.filter((choice) => offered.includes(choice.value) && mapped.has(choice.value)),
   );
 }
 
@@ -164,20 +172,19 @@ export function newThreadFastSupported(
   return known?.fast_available === true;
 }
 
-/** A human label for one effort value. */
+const KNOWN_EFFORTS = ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"] as const;
+type KnownEffort = (typeof KNOWN_EFFORTS)[number];
+
+/**
+ * A human label for one effort value, in the active language. A value h4rn
+ * does not know (an ACP agent names its own) is shown as the agent sent it,
+ * capitalised.
+ */
 export function effortLabel(effort: string): string {
-  switch (effort) {
-    case "xhigh":
-      return "Extra high";
-    case "max":
-      return "Max";
-    case "ultra":
-      return "Ultra";
-    case "minimal":
-      return "Minimal";
-    default:
-      return effort.charAt(0).toUpperCase() + effort.slice(1);
+  if ((KNOWN_EFFORTS as readonly string[]).includes(effort)) {
+    return i18n.t(`common:efforts.${effort as KnownEffort}`);
   }
+  return effort.charAt(0).toUpperCase() + effort.slice(1);
 }
 
 /**
@@ -193,7 +200,7 @@ export function nonDefaultSettings(summary: ThreadSummary, defaultMode: RuntimeM
     parts.push(modeLabel(summary.runtime_mode ?? "approval_required"));
   }
   if (summary.reasoning_effort) parts.push(effortLabel(summary.reasoning_effort));
-  if (summary.fast) parts.push("Fast");
+  if (summary.fast) parts.push(i18n.t("common:fast"));
   return parts;
 }
 

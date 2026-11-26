@@ -1,5 +1,6 @@
 import { CheckIcon, ChevronDownIcon } from "lucide-react";
 import { useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { Popover } from "@/components/common/Popover";
 import { useHarnesses } from "@/features/harnesses/harnessStore";
@@ -64,6 +65,7 @@ function Choice({
  * row unless Fast is already on, so it can be turned off.
  */
 export function ThreadControls({ summary }: { summary: ThreadSummary }) {
+  const { t } = useTranslation(["composer", "common"]);
   useProxyCatalog();
   const agents = useHarnesses((value) => value.agents);
   const threadSettings = useThreadSettings();
@@ -107,7 +109,7 @@ export function ThreadControls({ summary }: { summary: ThreadSummary }) {
 
   return (
     <Popover
-      label="Thread settings"
+      label={t("controls.label")}
       align="end"
       width={320}
       placement="above"
@@ -132,12 +134,12 @@ export function ThreadControls({ summary }: { summary: ThreadSummary }) {
     >
       {() => (
         <div className="q-tctrl">
-          <div className="q-tctrl-head">Thread</div>
+          <div className="q-tctrl-head">{t("controls.thread")}</div>
           <p className="q-tctrl-note">
-            {harnessLabel(summary.harness)} · these apply to the next turn.
+            {t("controls.nextTurn", { harness: harnessLabel(summary.harness) })}
           </p>
 
-          <div className="q-tctrl-head">Model</div>
+          <div className="q-tctrl-head">{t("controls.model")}</div>
           <form
             className="q-tctrl-model"
             onSubmit={(event) => {
@@ -146,7 +148,7 @@ export function ThreadControls({ summary }: { summary: ThreadSummary }) {
             }}
           >
             <input
-              aria-label="Model"
+              aria-label={t("controls.model")}
               list={`h4rn-thread-models-${summary.thread_id}`}
               value={modelDraft}
               onChange={(event) => setModelDraft(event.target.value)}
@@ -162,14 +164,14 @@ export function ThreadControls({ summary }: { summary: ThreadSummary }) {
               className="q-btn secondary"
               disabled={modelDraft.trim() === summary.model}
             >
-              Use
+              {t("controls.use")}
             </button>
           </form>
 
           {modes.length > 0 ? (
             <>
-              <div className="q-tctrl-head">Permissions</div>
-              <div role="menu" aria-label="Permission mode" className="q-tctrl-list">
+              <div className="q-tctrl-head">{t("controls.permissions")}</div>
+              <div role="menu" aria-label={t("controls.permissionMode")} className="q-tctrl-list">
                 {modes.map((choice) => (
                   <Choice
                     key={choice.value}
@@ -186,15 +188,17 @@ export function ThreadControls({ summary }: { summary: ThreadSummary }) {
             </>
           ) : (
             <>
-              <div className="q-tctrl-head">Permissions</div>
-              <p className="q-tctrl-note">{modeLabel(mode)} · the agent manages its own mode.</p>
+              <div className="q-tctrl-head">{t("controls.permissions")}</div>
+              <p className="q-tctrl-note">
+                {t("controls.agentManagesMode", { mode: modeLabel(mode) })}
+              </p>
             </>
           )}
 
           {efforts.length > 0 ? (
             <>
-              <div className="q-tctrl-head">Reasoning effort</div>
-              <div role="menu" aria-label="Reasoning effort" className="q-tctrl-list">
+              <div className="q-tctrl-head">{t("controls.effort")}</div>
+              <div role="menu" aria-label={t("controls.effort")} className="q-tctrl-list">
                 {efforts.map((effort) => (
                   <Choice
                     key={effort}
@@ -210,8 +214,8 @@ export function ThreadControls({ summary }: { summary: ThreadSummary }) {
                 {summary.reasoning_effort ? (
                   <Choice
                     checked={false}
-                    label="Harness default"
-                    hint="Use the harness's own setting"
+                    label={t("controls.harnessDefault")}
+                    hint={t("controls.harnessDefaultHint")}
                     onSelect={() => {
                       void setThreadReasoningEffort(summary.thread_id, null).then((ok) => {
                         if (ok) setOpen(false);
@@ -223,23 +227,23 @@ export function ThreadControls({ summary }: { summary: ThreadSummary }) {
             </>
           ) : summary.reasoning_effort ? (
             <>
-              <div className="q-tctrl-head">Reasoning effort</div>
+              <div className="q-tctrl-head">{t("controls.effort")}</div>
               <p className="q-tctrl-note">{effortLabel(summary.reasoning_effort)}</p>
             </>
           ) : null}
 
           {fast || (summary.fast ?? false) ? (
             <>
-              <div className="q-tctrl-head">Speed</div>
+              <div className="q-tctrl-head">{t("controls.speed")}</div>
               <Choice
                 checked={summary.fast ?? false}
-                label="Fast"
+                label={t("common:fast")}
                 hint={
                   fast
-                    ? "Priority service tier, higher usage"
+                    ? t("controls.fastHint")
                     : summary.fast_available === false
-                      ? "This model has no fast tier"
-                      : "No fast tier is known for this model"
+                      ? t("controls.noFastTier")
+                      : t("controls.unknownFastTier")
                 }
                 onSelect={() => {
                   void setThreadFast(summary.thread_id, !(summary.fast ?? false)).then((ok) => {

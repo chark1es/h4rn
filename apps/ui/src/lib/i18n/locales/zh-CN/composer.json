@@ -1,0 +1,174 @@
+{
+  "label": "消息输入框",
+  "replyTo": "回复 {{harness}}",
+  "replyToOn": "在 {{host}} 上回复 {{harness}}",
+  "disabled": {
+    "offline": "你的回复已保存为草稿，{{host}} 重新连接后发送",
+    "unreachable": "无法连接 {{host}}。草稿会保留在这里。"
+  },
+  "send": {
+    "sendLabel": "发送回复",
+    "saveLabel": "保存排队的消息",
+    "saveTitle": "保存排队的消息",
+    "steerTitle": "引导到正在运行的回合（Enter）",
+    "queueTitle": "排队到下一回合（Enter）",
+    "sendTitle": "发送（Enter）"
+  },
+  "edit": {
+    "title": "正在编辑排队的消息",
+    "titleNoSteer": "正在编辑排队的消息 · 此智能体无法在回合中途接收"
+  },
+  "attach": {
+    "label": "附加文件",
+    "drop": "拖放文件以附加",
+    "count_other": "已附加 {{count, number}} 个"
+  },
+  "mention": "提及文件",
+  "menu": {
+    "files": "文件",
+    "commands": "命令",
+    "filesIn": "{{workspace}} 中的文件",
+    "searching": "正在搜索此工作区…",
+    "noFilesMatch": "没有与“{{query}}”匹配的文件。",
+    "noCommandsMatch": "没有与“{{query}}”匹配的命令。",
+    "noFiles": "{{workspace}} 中没有文件。",
+    "noCommands": "此对话没有可用的命令。",
+    "capped_other": "仅显示前 {{count, number}} 个文件。",
+    "cappedUnknown": "仅显示索引能访问到的文件。",
+    "keys": {
+      "move": "↑↓ 移动",
+      "choose": "↵ 选择",
+      "close": "esc 关闭"
+    },
+    "errors": {
+      "unexpected": "守护进程对文件列表请求返回了其他内容。",
+      "unreadable": "无法读取工作区。"
+    }
+  },
+  "commands": {
+    "stop": {
+      "label": "停止回合",
+      "hint": "中断智能体正在做的事"
+    },
+    "changes": {
+      "label": "打开更改",
+      "hint": "查看此对话改动的文件差异"
+    },
+    "subagents": {
+      "label": "打开子智能体",
+      "hint": "查看委派的工作及其预算"
+    },
+    "terminal": {
+      "open": "打开终端",
+      "hide": "隐藏终端",
+      "hint": "此对话工作区中的 shell"
+    },
+    "ide": {
+      "open": "打开 IDE",
+      "back": "返回对话",
+      "hint": "编辑 {{project}}"
+    },
+    "newThread": {
+      "label": "新对话",
+      "hint": "在 {{project}} 中开始一个"
+    }
+  },
+  "controls": {
+    "label": "对话设置",
+    "thread": "对话",
+    "nextTurn": "{{harness}} · 这些设置从下一回合起生效。",
+    "model": "模型",
+    "use": "使用",
+    "permissions": "权限",
+    "permissionMode": "权限模式",
+    "agentManagesMode": "{{mode}} · 由智能体自行管理模式。",
+    "effort": "推理强度",
+    "harnessDefault": "harness 默认",
+    "harnessDefaultHint": "使用 harness 自己的设置",
+    "speed": "速度",
+    "fastHint": "优先服务层级，用量更高",
+    "noFastTier": "此模型没有快速层级",
+    "unknownFastTier": "尚不清楚此模型是否有快速层级"
+  },
+  "attachments": {
+    "label": "附件",
+    "file": "文件",
+    "remove": "移除 {{name}}",
+    "notAttached": "{{name}} 未附加。",
+    "status": {
+      "notAttached": "未附加",
+      "waiting": "等待中",
+      "reading": "读取中",
+      "uploading": "正在上传 {{percent}}",
+      "finishing": "即将完成",
+      "done": "{{kind}} · {{size}}",
+      "failed": "失败",
+      "cancelled": "已取消"
+    },
+    "blocked": {
+      "uploading": "请等待附件上传完成。",
+      "failed": "请重试或移除失败的附件。",
+      "tooMany_other": "一条消息最多可带 {{max}} 个附件。发送前请移除 {{count, number}} 个。"
+    },
+    "errors": {
+      "empty": "此文件为空。",
+      "emptyHint": "请选择有内容的文件，或将其移除。",
+      "tooLarge": "{{name}} 大小为 {{size}}，上限为 {{limit}}。",
+      "tooLargeHint": "请压缩它，或拆分成更小的文件。",
+      "nameTooLong": "文件名过长。",
+      "nameTooLongHint": "请将其重命名为不超过 {{max}} 个字符，然后重新附加。",
+      "changed": "附加过程中文件发生了变化。",
+      "released": "上传完成前附件数据已被释放。",
+      "hashMissing": "缺少附件哈希。",
+      "noStream": "守护进程没有打开上传流。",
+      "incomplete": "上传流不完整。",
+      "notConfirmed": "守护进程没有确认上传。",
+      "stalled": "守护进程在 {{percent}} 处停止确认 {{name}}。"
+    }
+  },
+  "queue": {
+    "queued": "排队中",
+    "maybeDelivered": "可能已送达",
+    "hint": {
+      "maybeDelivered": "可能已送达；再次发送会多出一份",
+      "steers": "“立即发送”会将它引导到此回合",
+      "waits": "等待此回合结束",
+      "next": "“立即发送”会让它下一个开始"
+    },
+    "sendNow": "立即发送",
+    "sendAgain": "再次发送",
+    "sendAgainTitle": "再次发送此消息；它可能已在回合中",
+    "steerTitle": "将此消息引导到正在运行的回合",
+    "frontTitle": "将此消息移到队列最前面",
+    "editTitle": "在输入框中编辑",
+    "discard": "丢弃",
+    "discardTitle": "丢弃此行",
+    "removeTitle": "从队列中移除",
+    "moveUp": "上移",
+    "moveDown": "下移"
+  },
+  "toasts": {
+    "unrecorded": {
+      "title": "已送达，但此对话未能记录。",
+      "description": "{{host}} 已收到你的消息，但对话记录中缺少这一行。",
+      "descriptionAnyHost": "主机已收到你的消息，但对话记录中缺少这一行。"
+    },
+    "unclear": {
+      "title": "可能已送达，也可能没有。",
+      "draft": "{{message}} 你的草稿会留在输入框中，直到它的排队行出现后再清除。",
+      "queue": "{{message}} 请先检查该回合再重试。"
+    },
+    "sendFailed": {
+      "title": "无法将回复发送到 {{host}}。",
+      "titleAnyHost": "无法将回复发送到主机。",
+      "description": "{{message}} 你的草稿仍在输入框中。"
+    },
+    "queueFailed": {
+      "edit": "无法编辑排队的消息。",
+      "remove": "无法移除排队的消息。",
+      "move": "无法移动排队的消息。",
+      "send": "无法发送排队的消息。",
+      "steer": "无法引导排队的消息。"
+    }
+  }
+}

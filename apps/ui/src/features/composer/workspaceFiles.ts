@@ -10,6 +10,7 @@
  */
 import { createContext, useContext, useEffect, useState } from "react";
 import type { FsListing, HostId } from "@/gen";
+import { i18n } from "@/lib/i18n";
 import { getClient } from "@/lib/store/appStore";
 
 export type WorkspaceTarget = { host: HostId; workspace: string };
@@ -58,7 +59,7 @@ async function listFromDaemon(input: WorkspaceTarget & { path: string }): Promis
     path: input.path,
   });
   if (response.type !== "fs_listing") {
-    throw new Error("The daemon answered a file listing with something else.");
+    throw new Error(i18n.t("composer:menu.errors.unexpected"));
   }
   return response.listing;
 }
@@ -102,7 +103,7 @@ export async function walkWorkspace(
         if (directory?.path === "") {
           throw result?.reason instanceof Error
             ? result.reason
-            : new Error("The workspace could not be read.");
+            : new Error(i18n.t("composer:menu.errors.unreadable"));
         }
         truncated = true;
         continue;
@@ -256,7 +257,8 @@ export function useWorkspaceFiles(target: WorkspaceTarget, enabled: boolean): Wo
             files: [],
             truncated: false,
             loading: false,
-            error: error instanceof Error ? error.message : "The workspace could not be read.",
+            error:
+              error instanceof Error ? error.message : i18n.t("composer:menu.errors.unreadable"),
           },
         });
       });

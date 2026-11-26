@@ -1,6 +1,7 @@
 import type { Attachment, BlobInfo } from "@/gen";
 import type { H4rnClient } from "@/lib/client/client";
 import { toProtoError } from "@/lib/client/errors";
+import { formatNumber, i18n } from "@/lib/i18n";
 
 import { blake3Hex, chunkBytes, MAX_ATTACHMENT_BYTES } from "./chunker";
 import { BinaryKind, binaryRouter, encodeFrame } from "./frames";
@@ -14,10 +15,16 @@ export type UploadPhase =
   | "failed"
   | "cancelled";
 
-export type UploadFailure = {
-  message: string;
-  hint: string | null;
-};
+/**
+ * Why a file was not attached. A check the client makes keeps a kind and the
+ * tray words it in the active language; a failed upload carries the text it
+ * failed with (the daemon's own, or the client's, already translated).
+ */
+export type UploadFailure =
+  | { kind: "empty" }
+  | { kind: "tooLarge"; size: number; limit: number }
+  | { kind: "nameTooLong" }
+  | { kind: "error"; message: string; hint: string | null };
 
 export type UploadSnapshot = {
   phase: UploadPhase;
@@ -109,32 +116,54 @@ export function toAttachment(blob: BlobInfo): Attachment {
   };
 }
 
-/** Reasons a file never reaches the daemon, with copy a person can act on. */
+/** Reasons a file never reaches the daemon. */
 export function validateFile(file: File): UploadFailure | null {
-  if (file.size === 0) {
-    return { message: "This file is empty.", hint: "Pick a file with content, or remove it." };
-  }
+  if (file.size === 0) return { kind: "empty" };
   if (file.size > MAX_ATTACHMENT_BYTES) {
-    return {
-      message: `${file.name} is ${formatBytes(file.size)}; the limit is ${formatBytes(
-        MAX_ATTACHMENT_BYTES,
-      )}.`,
-      hint: "Compress it or split it into smaller files.",
-    };
+    return { kind: "tooLarge", size: file.size, limit: MAX_ATTACHMENT_BYTES };
   }
-  if (file.name.length > 255) {
-    return {
-      message: "The file name is too long.",
-      hint: "Rename it to 255 characters or fewer, then attach it again.",
-    };
-  }
+  if (file.name.length > 255) return { kind: "nameTooLong" };
   return null;
 }
 
+/** A failure as copy a person can act on, in the active language. */
+export function describeUploadFailure(
+  failure: UploadFailure,
+  name: string,
+): { message: string; hint: string | null } {
+  switch (failure.kind) {
+    case "empty":
+      return {
+        message: i18n.t("composer:attachments.errors.empty"),
+        hint: i18n.t("composer:attachments.errors.emptyHint"),
+      };
+    case "tooLarge":
+      return {
+        message: i18n.t("composer:attachments.errors.tooLarge", {
+          name,
+          size: formatBytes(failure.size),
+          limit: formatBytes(failure.limit),
+        }),
+        hint: i18n.t("composer:attachments.errors.tooLargeHint"),
+      };
+    case "nameTooLong":
+      return {
+        message: i18n.t("composer:attachments.errors.nameTooLong"),
+        hint: i18n.t("composer:attachments.errors.nameTooLongHint", {
+          max: formatNumber(255),
+        }),
+      };
+    case "error":
+      return { message: failure.message, hint: failure.hint };
+  }
+}
+
+/** A size in binary units, with the number in the active language's format. */
 export function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
+  if (bytes < 1024) return `${formatNumber(bytes)} B`;
+  const tenth = { minimumFractionDigits: 1, maximumFractionDigits: 1 };
+  if (bytes < 1024 * 1024) return `${formatNumber(bytes / 1024, tenth)} KiB`;
+  return `${formatNumber(bytes / (1024 * 1024), tenth)} MiB`;
 }
 
 type Listener = () => void;
@@ -228,16 +257,16 @@ export class AttachmentUploader {
           return null;
         }
         if (this.bytes.byteLength !== this.file.size) {
-          throw new Error("The file changed while it was being attached.");
+          throw new Error(i18n.t("composer:attachments.errors.changed"));
         }
         this.transition({ type: "hashed", digest: blake3Hex(this.bytes) });
       }
 
       if (!this.bytes) {
-        throw new Error("The attachment bytes were released before the upload finished.");
+        throw new Error(i18n.t("composer:attachments.errors.released"));
       }
       const digest = this.snapshot.digest;
-      if (!digest) throw new Error("The attachment hash is missing.");
+      if (!digest) throw new Error(i18n.t("composer:attachments.errors.hashMissing"));
 
       // Resume only when the daemon still knows this upload; a restart drops
       // the session and a fresh `BeginUpload` is the honest recovery.
@@ -277,7 +306,7 @@ export class AttachmentUploader {
           mime_hint: this.mime,
         });
         if (started.type !== "upload_started") {
-          throw new Error("The daemon did not open an upload stream.");
+          throw new Error(i18n.t("composer:attachments.errors.noStream"));
         }
         this.transition({
           type: "begun",
@@ -291,7 +320,7 @@ export class AttachmentUploader {
 
       const { uploadId, streamId, chunkSize } = this.snapshot;
       if (!uploadId || streamId === null || chunkSize <= 0) {
-        throw new Error("The upload stream is incomplete.");
+        throw new Error(i18n.t("composer:attachments.errors.incomplete"));
       }
 
       const startSeq = this.snapshot.nextSeq;
@@ -331,7 +360,7 @@ export class AttachmentUploader {
         blake3: digest,
       });
       if (committed.type !== "upload_committed") {
-        throw new Error("The daemon did not confirm the upload.");
+        throw new Error(i18n.t("composer:attachments.errors.notConfirmed"));
       }
       this.transition({ type: "committed", blob: committed.blob });
       return committed.blob;
@@ -344,6 +373,7 @@ export class AttachmentUploader {
       this.transition({
         type: "failed",
         failure: {
+          kind: "error",
           message: proto.message,
           hint: proto.hint,
         },
@@ -361,7 +391,14 @@ export class AttachmentUploader {
           99,
           Math.round((seq * this.snapshot.chunkSize * 100) / Math.max(1, this.file.size)),
         );
-        reject(new Error(`The daemon stopped acknowledging ${this.file.name} at ${percent}%.`));
+        reject(
+          new Error(
+            i18n.t("composer:attachments.errors.stalled", {
+              name: this.file.name,
+              percent: formatNumber(percent / 100, { style: "percent" }),
+            }),
+          ),
+        );
       }, 20_000);
       this.ackWaiters.set(key, () => {
         clearTimeout(timer);

@@ -36,7 +36,15 @@ const CONVERTED = [
   "src/components/shell/Sidebar.tsx",
   "src/components/shell/hostStatus.ts",
   "src/components/shell/snoozeWake.ts",
+  "src/components/thread/Composer.tsx",
+  "src/components/thread/ComposerMenu.tsx",
+  "src/components/thread/QueuedTurn.tsx",
+  "src/components/thread/ThreadControls.tsx",
   "src/features/access/AccessSettings.tsx",
+  "src/features/attachments/AttachmentTray.tsx",
+  "src/features/attachments/upload.ts",
+  "src/features/attachments/use-attachments.ts",
+  "src/features/composer/workspaceFiles.ts",
   "src/features/forge/ForgeSettings.tsx",
   "src/features/guest/GuestSettings.tsx",
   "src/features/harnesses/HarnessSettings.tsx",
@@ -59,7 +67,9 @@ const CONVERTED = [
   "src/features/usage/AutoResumeSettings.tsx",
   "src/features/worktrees/WorktreeSettings.tsx",
   "src/features/worktrees/worktreeStore.ts",
+  "src/lib/composerCommands.ts",
   "src/lib/settings.ts",
+  "src/lib/threadControls.ts",
 ];
 
 /** Names that read the same in every language. */

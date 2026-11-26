@@ -1,154 +1,23 @@
 import { useVirtualizer } from "@tanstack/react-virtual";
-import {
-  ChevronDownIcon,
-  ChevronUpIcon,
-  CircleCheckIcon,
-  CornerDownRightIcon,
-  PencilIcon,
-  XIcon,
-} from "lucide-react";
+import { CircleCheckIcon } from "lucide-react";
 import { useEffect, useMemo, useRef } from "react";
 
 import { MessageAttachments } from "@/features/attachments/MessageAttachments";
 import type { QueuedMessage, ThreadSummary } from "@/gen";
 import { useIsPhone } from "@/hooks/use-media-query";
-import { isTurnRunning } from "@/lib/agent";
 import { harnessLabel } from "@/lib/entities";
 import { absoluteTime, cost, duration, tokens } from "@/lib/format";
-import {
-  moveQueuedMessage,
-  removeQueuedMessage,
-  sendQueuedNow,
-  useApp,
-} from "@/lib/store/appStore";
+import { useApp } from "@/lib/store/appStore";
 import type { MessageItem, PendingMessage, StreamTurn } from "@/lib/store/projection";
 import { isRealTurn } from "@/lib/store/projection";
 import { cn } from "@/lib/utils";
+import { QueuedTurn } from "./QueuedTurn";
 import { TurnBlock } from "./TurnBlock";
 
 type Row =
   | { kind: "turn"; turn: StreamTurn; key: string }
   | { kind: "pending"; message: PendingMessage; key: string }
   | { kind: "queued"; message: QueuedMessage; key: string; index: number };
-
-/**
- * The copy for what Send now will really do with this row right now.
- *
- * The daemon publishes `steerable` per row: a message with its own permission
- * ceiling, or one that may already have been delivered, is moved to the front
- * instead. The hint says exactly that instead of promising a steer.
- */
-export function sendNowHint(summary: ThreadSummary, message: QueuedMessage): string {
-  if (message.delivery_unknown) {
-    return "May have been delivered; sending again adds a second copy";
-  }
-  if (isTurnRunning(summary)) {
-    return message.steerable
-      ? "Send now steers it into this turn"
-      : "Waits for this turn to finish";
-  }
-  return "Send now starts it next";
-}
-
-export function QueuedTurn({
-  threadId,
-  summary,
-  message,
-  index,
-  total,
-  editing,
-}: {
-  threadId: string;
-  summary: ThreadSummary;
-  message: QueuedMessage;
-  index: number;
-  /**
-   * How many messages wait in total.
-   *
-   * The rows are a bounded page, so the last visible row is not necessarily the
-   * queue's last; the caller knows the full count.
-   */
-  total: number;
-  editing: boolean;
-}) {
-  const steers = isTurnRunning(summary) && message.steerable;
-  return (
-    <div className="q-queued" data-editing={editing || undefined}>
-      <div className="q-queued-h">
-        <span className="q-queued-label">
-          {message.delivery_unknown ? "May have been delivered" : "Queued"}
-        </span>
-        <span className="q-faint">{sendNowHint(summary, message)}</span>
-      </div>
-      <div className="q-queued-text">{message.text}</div>
-      {message.attachments.length > 0 ? (
-        <MessageAttachments attachments={message.attachments} align="start" />
-      ) : null}
-      <div className="q-queued-a">
-        <button
-          type="button"
-          className="q-btn ghost"
-          onClick={() => void sendQueuedNow(threadId, message.message_id)}
-          title={
-            message.delivery_unknown
-              ? "Send this message again; it may already be in the turn"
-              : steers
-                ? "Steer this message into the running turn"
-                : "Move this message to the front of the queue"
-          }
-        >
-          <CornerDownRightIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
-          {message.delivery_unknown ? "Send again" : "Send now"}
-        </button>
-        <button
-          type="button"
-          className="q-btn ghost"
-          onClick={() =>
-            window.dispatchEvent(
-              new CustomEvent("h4rn:edit-queued", {
-                detail: { threadId, message },
-              }),
-            )
-          }
-          title="Edit in the composer"
-        >
-          <PencilIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
-          Edit
-        </button>
-        <button
-          type="button"
-          className="q-btn ghost"
-          onClick={() => void removeQueuedMessage(threadId, message.message_id)}
-          title={message.delivery_unknown ? "Discard this row" : "Remove from the queue"}
-        >
-          <XIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
-          {message.delivery_unknown ? "Discard" : "Remove"}
-        </button>
-        <span className="grow" />
-        <button
-          type="button"
-          className="q-ibtn"
-          disabled={index === 0}
-          aria-label="Move up"
-          title="Move up"
-          onClick={() => void moveQueuedMessage(threadId, message.message_id, "up")}
-        >
-          <ChevronUpIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
-        </button>
-        <button
-          type="button"
-          className="q-ibtn"
-          disabled={index === total - 1}
-          aria-label="Move down"
-          title="Move down"
-          onClick={() => void moveQueuedMessage(threadId, message.message_id, "down")}
-        >
-          <ChevronDownIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
-        </button>
-      </div>
-    </div>
-  );
-}
 
 /**
  * The row a turn shortcut moves to.

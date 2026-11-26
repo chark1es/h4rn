@@ -18,6 +18,12 @@ All notable changes to h4rn are recorded here. The format follows
   screen-reader labels follow the Language choice. Ages ("5m"), counts and
   times use the language's own formats, and a snoozed thread now says how long
   until it wakes instead of "now". The phone's thread list is translated too.
+- **The composer in Chinese, Spanish and Japanese.** The reply box, the
+  model, permission, effort and Fast picker, attachments and their errors, the
+  `/` and `@` menus, the queued messages under the composer and the send and
+  queue toasts follow the Language choice. A snooze with under a minute left
+  now reads "wakes soon", and the sidebar's host and thread counts use the
+  language's number format.
 - **Android Live Updates show a running agent.** A separate switch under
   Settings → Notifications → Phone alerts shows each running thread as an
   ongoing notification with its project and whether it is working, waiting for

@@ -9,6 +9,7 @@ import {
   XIcon,
 } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { AttachmentTray } from "@/features/attachments/AttachmentTray";
 import { FILE_ACCEPT } from "@/features/attachments/picker";
@@ -41,7 +42,7 @@ import {
   writeThreadDraft,
 } from "@/lib/drafts";
 import { harnessLabel } from "@/lib/entities";
-import { chordFromEvent, matchCommand } from "@/lib/keybindings";
+import { chordFromEvent, matchCommand, titleWithShortcut } from "@/lib/keybindings";
 import { openPhonePanel } from "@/lib/phonePanels";
 import {
   consumeComposerRestore,
@@ -127,6 +128,7 @@ function caretAnchor(
 }
 
 export function Composer({ summary }: { summary: ThreadSummary }) {
+  const { t } = useTranslation(["composer", "common"]);
   const focusNonce = useApp((state) => state.ui.focusComposerNonce);
   const connection = useApp((state) => state.connection.status);
   const hostOnline = useApp((state) => state.hosts[summary.host]?.online ?? false);
@@ -254,9 +256,9 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
   const online = connection === "online";
   const writable = online && hostOnline;
   const disabledReason = !online
-    ? `Your reply is saved as a draft and sends when ${hostName} reconnects`
+    ? t("disabled.offline", { host: hostName })
     : !hostOnline
-      ? `${hostName} is unreachable. The draft stays here.`
+      ? t("disabled.unreachable", { host: hostName })
       : null;
   const attachments = useAttachmentDrafts(summary.thread_id, {
     enabled: writable,
@@ -611,8 +613,8 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
     (text.trim().length > 0 || attachments.attachments.length > 0);
 
   const replyTo = isPhone
-    ? `Reply to ${harnessLabel(summary.harness)}`
-    : `Reply to ${harnessLabel(summary.harness)} on ${summary.host}`;
+    ? t("replyTo", { harness: harnessLabel(summary.harness) })
+    : t("replyToOn", { harness: harnessLabel(summary.harness), host: summary.host });
 
   const syncMenu = (value: string, caret: number | null) => {
     if (!writable) {
@@ -901,7 +903,7 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
       type="file"
       multiple
       accept={FILE_ACCEPT}
-      aria-label="Attach files"
+      aria-label={t("attach.label")}
       className="sr-only"
       tabIndex={-1}
       onChange={(event) => attachments.onInputChange(event.target.files)}
@@ -916,16 +918,16 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
       onClick={() => void (editing ? saveEdit() : submit())}
       title={
         editing
-          ? "Save the queued message"
+          ? t("send.saveTitle")
           : (attachments.blockedReason ??
             disabledReason ??
             (defaultAction === "steer" && running && canSteer
-              ? "Steer into the running turn (Enter)"
+              ? t("send.steerTitle")
               : running
-                ? "Queue for the next turn (Enter)"
-                : "Send (Enter)"))
+                ? t("send.queueTitle")
+                : t("send.sendTitle")))
       }
-      aria-label={editing ? "Save queued message" : "Send reply"}
+      aria-label={editing ? t("send.saveLabel") : t("send.sendLabel")}
       data-action={editing ? "save" : defaultAction}
     >
       {editing ? (
@@ -942,18 +944,15 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
 
   const editBar = editing ? (
     <div className="q-edit-bar">
-      <span className="t">
-        Editing a queued message
-        {running && !canSteer ? " · this agent cannot take it mid-turn" : ""}
-      </span>
+      <span className="t">{running && !canSteer ? t("edit.titleNoSteer") : t("edit.title")}</span>
       <span className="grow" />
       <button type="button" className="q-btn ghost" onClick={cancelEdit}>
         <XIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
-        Cancel
+        {t("common:cancel")}
       </button>
       <button type="button" className="q-btn ghost" onClick={() => void saveEdit()}>
         <CheckIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
-        Save
+        {t("common:save")}
       </button>
     </div>
   ) : null;
@@ -961,7 +960,7 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
   if (isPhone) {
     return (
       <fieldset
-        aria-label="Message composer"
+        aria-label={t("label")}
         className="q-ph-composer"
         style={{ margin: 0, minWidth: 0, position: "relative" }}
         onBlur={(event) => {
@@ -979,8 +978,8 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
             type="button"
             disabled={!writable}
             onClick={attachments.openPicker}
-            aria-label="Attach files"
-            title={disabledReason ?? "Attach files"}
+            aria-label={t("attach.label")}
+            title={disabledReason ?? t("attach.label")}
             className="q-ibtn"
             style={{ width: 40, height: 40, flex: "none" }}
           >
@@ -1022,7 +1021,7 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
   return (
     <>
       <fieldset
-        aria-label="Message composer"
+        aria-label={t("label")}
         className="q-composer"
         style={{ margin: 0, minWidth: 0, position: "relative" }}
         onBlur={(event) => {
@@ -1075,7 +1074,7 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
             }}
           >
             <p className="q-badge you" style={{ height: 26, padding: "0 10px" }}>
-              Drop files to attach
+              {t("attach.drop")}
             </p>
           </div>
         ) : null}
@@ -1087,8 +1086,8 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
             type="button"
             disabled={!writable}
             onClick={attachments.openPicker}
-            aria-label="Attach files"
-            title={disabledReason ?? "Attach files (Ctrl/Cmd U)"}
+            aria-label={t("attach.label")}
+            title={disabledReason ?? titleWithShortcut(t("attach.label"), "composer.attach")}
             className="q-ibtn"
           >
             <PaperclipIcon className="q-icon" strokeWidth={1.5} aria-hidden />
@@ -1097,8 +1096,8 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
             type="button"
             disabled={!writable}
             onClick={insertMention}
-            aria-label="Mention a file"
-            title="Mention a file"
+            aria-label={t("mention")}
+            title={t("mention")}
             className="q-ibtn"
           >
             <AtSignIcon className="q-icon" strokeWidth={1.5} aria-hidden />
@@ -1114,7 +1113,9 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
       {attachments.attachments.length > 0 ? (
         <div className="q-usage-foot">
           <span className="grow" />
-          <span className="q-num">{attachments.attachments.length} attached</span>
+          <span className="q-num">
+            {t("attach.count", { count: attachments.attachments.length })}
+          </span>
         </div>
       ) : null}
     </>

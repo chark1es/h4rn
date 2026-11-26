@@ -7,9 +7,13 @@
  * out because the phone shell never renders that view. Harness slash commands
  * and skills are absent on purpose: h4rn does not expose a harness command
  * surface to the UI, and it defines no invocation syntax of its own for skills.
+ *
+ * Labels and hints follow the active language. The English keywords stay, so
+ * typing an English word still finds a command in any language.
  */
 import type { ThreadSummary } from "@/gen";
 import type { CommandSearchItem } from "@/lib/composerMenu";
+import { i18n } from "@/lib/i18n";
 import type { PhonePanelTab } from "@/lib/phonePanels";
 import {
   interruptThread,
@@ -58,8 +62,8 @@ export function composerCommands(
   if (summary.tab === "working") {
     commands.push({
       id: "thread.stop",
-      label: "Stop the turn",
-      hint: "Interrupt what the agent is doing",
+      label: i18n.t("composer:commands.stop.label"),
+      hint: i18n.t("composer:commands.stop.hint"),
       keywords: "interrupt cancel stop",
       icon: "stop",
       run: () => void interruptThread(summary.thread_id),
@@ -69,8 +73,8 @@ export function composerCommands(
   commands.push(
     {
       id: "panel.changes",
-      label: "Open changes",
-      hint: "Diff the files this thread touched",
+      label: i18n.t("composer:commands.changes.label"),
+      hint: i18n.t("composer:commands.changes.hint"),
       keywords: "diff files review",
       icon: "changes",
       // On a phone this opens the panel sheet; on desktop it is just a tab.
@@ -79,8 +83,8 @@ export function composerCommands(
     },
     {
       id: "panel.subagents",
-      label: "Open subagents",
-      hint: "See delegated work and its budget",
+      label: i18n.t("composer:commands.subagents.label"),
+      hint: i18n.t("composer:commands.subagents.hint"),
       keywords: "agents delegate tree",
       icon: "subagents",
       opensDialogOrSheet: options.phone === true,
@@ -88,16 +92,20 @@ export function composerCommands(
     },
     {
       id: "terminal.toggle",
-      label: options.terminalOpen ? "Hide the terminal" : "Open the terminal",
-      hint: "The shell in this thread's workspace",
+      label: options.terminalOpen
+        ? i18n.t("composer:commands.terminal.hide")
+        : i18n.t("composer:commands.terminal.open"),
+      hint: i18n.t("composer:commands.terminal.hint"),
       keywords: "shell command prompt drawer",
       icon: "terminal",
       run: toggleTerminal,
     },
     {
       id: "thread.new",
-      label: "New thread",
-      hint: `Start one in ${projectName(summary.workspace_path)}`,
+      label: i18n.t("composer:commands.newThread.label"),
+      hint: i18n.t("composer:commands.newThread.hint", {
+        project: projectName(summary.workspace_path),
+      }),
       keywords: "start create compose",
       icon: "new-thread",
       opensDialogOrSheet: true,
@@ -110,8 +118,11 @@ export function composerCommands(
   if (!options.phone) {
     commands.splice(commands.length - 1, 0, {
       id: "view.toggle",
-      label: options.view === "ide" ? "Back to the thread" : "Open the IDE",
-      hint: `Edit ${projectName(summary.workspace_path)}`,
+      label:
+        options.view === "ide"
+          ? i18n.t("composer:commands.ide.back")
+          : i18n.t("composer:commands.ide.open"),
+      hint: i18n.t("composer:commands.ide.hint", { project: projectName(summary.workspace_path) }),
       keywords: "editor code files project",
       icon: "ide",
       run: toggleView,

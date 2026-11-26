@@ -882,8 +882,7 @@ function SnoozedSection({
                 </span>
                 <span className="q-row-l2">
                   <span className="q-row-meta">
-                    {snoozeWakeLabel(thread.snoozed_until, now)} ·{" "}
-                    {harnessLabel(thread.harness)}
+                    {snoozeWakeLabel(thread.snoozed_until, now)} · {harnessLabel(thread.harness)}
                   </span>
                 </span>
               </span>
