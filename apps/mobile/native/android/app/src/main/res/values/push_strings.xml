@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Phone alert words (ADR-054). Connect sends the state, project, count and
+  raw thread titles, and the app words the alert from these, in the phone's
+  language. Each language has the same names here; PushResourcesTest checks
+  it. The glossary in docs/i18n.md applies.
+  The file is not strings.xml: the Tauri template owns that one, and
+  scripts/mobile-android.sh copies this overlay over the generated project.
+-->
+<resources>
+    <string name="push_with_project" translatable="false">%1$s · %2$s</string>
+    <string name="push_channel_name">Agent alerts</string>
+    <string name="push_channel_description">When an agent finishes, fails or needs you</string>
+    <string name="push_untitled_thread">A thread</string>
+    <string name="push_working">Working</string>
+    <string name="push_finished">Finished</string>
+    <string name="push_failed">Failed</string>
+    <string name="push_needs_approval">Needs approval</string>
+    <string name="push_asks_for_input">Asks for input</string>
+    <string name="push_stopped_at_limit">Stopped at a limit</string>
+    <string name="push_waiting_for_approval">Waiting for approval</string>
+    <string name="push_asked_a_question">Asked a question</string>
+    <plurals name="push_agents_need_attention">
+        <item quantity="one">%d agent needs attention</item>
+        <item quantity="other">%d agents need attention</item>
+    </plurals>
+    <plurals name="push_agents_finished">
+        <item quantity="one">%d agent finished</item>
+        <item quantity="other">%d agents finished</item>
+    </plurals>
+</resources>

@@ -2611,3 +2611,43 @@ failed or limit alert, which a new turn must not erase. Turning the switch off, 
 signing out cancel what is already showing. iOS is not offered the switch:
 showing a running turn there needs an ActivityKit widget extension, which this
 repository does not build.
+
+## ADR-054: The phone words its alerts, from fields Connect already had
+
+**Status:** Accepted
+
+The web UI follows the person's language, but Connect wrote every phone
+alert's title and body in English. Connect does not know the phone's language
+and should not: the account has no language setting, a person can use two
+phones in two languages, and the relay would have to carry a catalogue for
+every language the apps add.
+
+So the phone words the alert. Connect's FCM data message keeps everything it
+sent before, including the English `title` and `body`, and adds two fields:
+`thread_title`, the thread's title cleaned the same way as `title` but empty
+when the thread has none, and, for a grouped alert, `thread_titles`, each
+grouped thread's cleaned title in the body's order, one per line, empty for
+an untitled thread. With `state`, `project` and `count`, which it already
+carried, that is enough to word every alert. Both new fields are the same
+thread titles ADR-051 already discloses, so nothing new leaves the daemon or
+transits Google: no prompt, reply, tool output, path or credential.
+
+The Android app words the title and body from these fields with string
+resources in English, Simplified Chinese, Spanish and Japanese, and plurals for
+a group's count; the channel name and description come from resources too.
+Only the presence of `thread_title` switches the app to local wording, so an
+alert from a relay that predates it shows Connect's English as before, and an
+app that predates it ignores the new fields and shows the English. A state the
+app does not know yet keeps Connect's words. A grouped title list could repeat
+a long body and push the message past FCM's 4096-byte limit, which would lose
+the whole alert, so Connect leaves `thread_titles` out above 1 KiB and the
+phone falls back to the English list in `body`.
+
+iOS is unchanged and stays English. Its alert is shown by the system from
+`aps.alert` before any app code runs. Rewording it needs a Notification
+Service Extension, a separate Xcode target the generated iOS project cannot
+gain here (ADR-052), or `loc-key` strings in `.lproj` folders at the root of
+the app bundle. The repository has no step that adds files to the generated
+iOS project (`gen/apple` is recreated by `tauri ios init`), and neither could
+be checked without a Mac, so both are left as follow-up work. The iOS payload
+keeps ADR-052's custom keys and does not gain the new fields until then.

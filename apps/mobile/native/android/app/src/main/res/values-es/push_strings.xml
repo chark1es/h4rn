@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="push_channel_name">Avisos de agentes</string>
+    <string name="push_channel_description">Cuando un agente termina, falla o te necesita</string>
+    <string name="push_untitled_thread">Un hilo</string>
+    <string name="push_working">En curso</string>
+    <string name="push_finished">Terminado</string>
+    <string name="push_failed">Fallido</string>
+    <string name="push_needs_approval">Requiere aprobación</string>
+    <string name="push_asks_for_input">Pide una respuesta</string>
+    <string name="push_stopped_at_limit">Se detuvo en un límite</string>
+    <string name="push_waiting_for_approval">Esperando aprobación</string>
+    <string name="push_asked_a_question">Hizo una pregunta</string>
+    <plurals name="push_agents_need_attention">
+        <item quantity="one">%d agente necesita atención</item>
+        <item quantity="many">%d agentes necesitan atención</item>
+        <item quantity="other">%d agentes necesitan atención</item>
+    </plurals>
+    <plurals name="push_agents_finished">
+        <item quantity="one">%d agente terminó</item>
+        <item quantity="many">%d agentes terminaron</item>
+        <item quantity="other">%d agentes terminaron</item>
+    </plurals>
+</resources>

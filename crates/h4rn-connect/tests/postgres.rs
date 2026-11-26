@@ -2312,6 +2312,7 @@ async fn a_working_update_is_deduped_and_goes_to_android_only() {
             "project",
             "state",
             "thread_id",
+            "thread_title",
             "title"
         ],
         "an undocumented field reached the phone"

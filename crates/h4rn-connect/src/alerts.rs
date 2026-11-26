@@ -36,6 +36,13 @@ use crate::store::{PushDeviceRow, Store};
 /// The most title text one notification line carries.
 const MAX_LINE_CHARS: usize = 120;
 
+/// The most bytes a grouped alert's `thread_titles` field may add.
+///
+/// FCM refuses a message over 4096 bytes, and the English `body` already
+/// lists the same titles. A group too large for both drops this field, and the
+/// phone shows Connect's English body instead of losing the whole alert.
+const MAX_GROUP_TITLES_BYTES: usize = 1024;
+
 /// One notification Connect decided to send.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PushAlert {
@@ -58,12 +65,27 @@ pub struct PushAlert {
     pub project: String,
     /// Number of threads represented.
     pub count: usize,
+    /// The thread's own title, cleaned, or empty when it has none.
+    ///
+    /// `title` and `body` are English for app versions that show them as
+    /// sent; a phone that words alerts itself uses this, the state, the
+    /// project and the count instead, and says "A thread" in its own
+    /// language when this is empty. Empty for a grouped alert.
+    pub thread_title: String,
+    /// Each grouped thread's title, cleaned, in the body's order; an untitled
+    /// thread is an empty entry. Empty for a single alert.
+    pub thread_titles: Vec<String>,
 }
 
 impl PushAlert {
     /// The string-only data payload FCM carries.
+    ///
+    /// `title` and `body` are the English wording, kept for app versions that
+    /// show them as sent. The other fields let a newer phone word the alert in
+    /// its own language: no field here carries a prompt, reply, tool output,
+    /// path or credential (ADR-051, ADR-054).
     pub fn data(&self) -> BTreeMap<String, String> {
-        BTreeMap::from([
+        let mut data = BTreeMap::from([
             ("h4rn_alert".to_string(), "agent".to_string()),
             ("state".to_string(), self.state.as_str().to_string()),
             ("thread_id".to_string(), self.thread_id.clone()),
@@ -71,7 +93,17 @@ impl PushAlert {
             ("body".to_string(), self.body.clone()),
             ("project".to_string(), self.project.clone()),
             ("count".to_string(), self.count.to_string()),
-        ])
+            ("thread_title".to_string(), self.thread_title.clone()),
+        ]);
+        if self.count > 1 {
+            // A cleaned title has no line breaks, so one per line is
+            // unambiguous, and an empty line is an untitled thread.
+            let titles = self.thread_titles.join("\n");
+            if titles.len() <= MAX_GROUP_TITLES_BYTES {
+                data.insert("thread_titles".to_string(), titles);
+            }
+        }
+        data
     }
 }
 
@@ -137,6 +169,8 @@ fn single(activity: &AgentActivity, project: &str) -> PushAlert {
         thread_id: activity.thread_id.to_string(),
         project: project.to_string(),
         count: 1,
+        thread_title: clean(&activity.thread_title, ""),
+        thread_titles: Vec::new(),
     }
 }
 
@@ -145,10 +179,15 @@ fn grouped(activities: &[AgentActivity]) -> PushAlert {
         .iter()
         .all(|activity| activity.state.needs_attention());
     let mut titles: Vec<String> = Vec::new();
+    let mut thread_titles: Vec<String> = Vec::new();
     for activity in activities {
         let title = clean(&activity.thread_title, "A thread");
         if !titles.contains(&title) {
             titles.push(title);
+        }
+        let raw = clean(&activity.thread_title, "");
+        if !thread_titles.contains(&raw) {
+            thread_titles.push(raw);
         }
     }
     let count = activities.len();
@@ -197,6 +236,8 @@ fn grouped(activities: &[AgentActivity]) -> PushAlert {
         thread_id: String::new(),
         project: String::new(),
         count,
+        thread_title: String::new(),
+        thread_titles,
     }
 }
 
@@ -1056,12 +1097,66 @@ mod tests {
                 "project",
                 "state",
                 "thread_id",
+                "thread_title",
                 "title"
             ]
         );
         assert_eq!(data["h4rn_alert"], "agent");
         assert_eq!(data["state"], "completed");
         assert_eq!(data["project"], "proj");
+        assert_eq!(data["thread_title"], "one");
+    }
+
+    #[test]
+    fn a_phone_gets_the_raw_title_and_older_apps_keep_the_english_words() {
+        // An untitled thread sends an empty title, so the phone says "A
+        // thread" in its own language; the English fallback stays in `title`
+        // for an app that shows it as sent.
+        let alert = single(&activity(AgentAlertState::Approval, "  "), "proj");
+        let data = alert.data();
+        assert_eq!(data["thread_title"], "");
+        assert_eq!(data["title"], "A thread");
+        assert_eq!(data["body"], "Needs approval");
+        assert!(!data.contains_key("thread_titles"));
+
+        let titled = single(&activity(AgentAlertState::Input, " fix\n the  bug "), "");
+        assert_eq!(titled.data()["thread_title"], "fix the bug");
+    }
+
+    #[test]
+    fn a_group_lists_each_raw_title_once_in_the_body_order() {
+        let alerts = group_activities(&[
+            activity(AgentAlertState::Completed, "one"),
+            activity(AgentAlertState::Failed, ""),
+            activity(AgentAlertState::Completed, "one"),
+            activity(AgentAlertState::Completed, "two"),
+        ]);
+        assert_eq!(alerts.len(), 1);
+        let data = alerts[0].data();
+        assert_eq!(data["body"], "one · A thread · two");
+        assert_eq!(data["thread_titles"], "one\n\ntwo");
+        assert_eq!(data["thread_title"], "");
+        assert_eq!(data["count"], "4");
+        assert_eq!(data["state"], "failed");
+        assert_eq!(data["title"], "4 agents finished");
+    }
+
+    #[test]
+    fn a_group_too_large_for_fcm_keeps_only_the_english_body() {
+        let long = "x".repeat(MAX_LINE_CHARS);
+        let activities: Vec<AgentActivity> = (0..10)
+            .map(|index| activity(AgentAlertState::Completed, &format!("{index}{long}")))
+            .collect();
+        let alerts = group_activities(&activities);
+        let data = alerts[0].data();
+        assert!(
+            !data.contains_key("thread_titles"),
+            "a group past the budget still carried its titles twice"
+        );
+        assert!(data["body"].starts_with("0x"));
+        // A small group keeps them.
+        let small = group_activities(&activities[..2]);
+        assert!(small[0].data().contains_key("thread_titles"));
     }
 
     #[test]

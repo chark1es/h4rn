@@ -1,8 +1,6 @@
 package dev.h4rn.app
 
 import android.Manifest
-import android.app.NotificationChannel
-import android.app.NotificationManager
 import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
@@ -94,24 +92,9 @@ class PushPlugin(private val activity: android.app.Activity) : Plugin(activity) 
     return if (preferences.getBoolean(ASKED_KEY, false)) "denied" else "default"
   }
 
-  private fun ensureChannel() {
-    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
-    val manager = activity.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-    if (manager.getNotificationChannel(PushContent.CHANNEL_ID) != null) return
-    val channel = NotificationChannel(
-      PushContent.CHANNEL_ID,
-      PushContent.CHANNEL_NAME,
-      NotificationManager.IMPORTANCE_HIGH,
-    ).apply {
-      description = "When an agent finishes, fails or needs you"
-      setShowBadge(true)
-    }
-    manager.createNotificationChannel(channel)
-  }
-
   @Command
   fun pushStatus(invoke: Invoke) {
-    ensureChannel()
+    AlertChannel.ensure(activity)
     val result = JSObject()
     result.put("available", available())
     result.put("permission", permission())
