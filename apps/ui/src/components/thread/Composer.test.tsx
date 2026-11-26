@@ -358,6 +358,7 @@ beforeEach(() => {
     return rafQueue.length;
   });
   mock.state.logs = {};
+  mock.state.queues = {};
   mock.state.connection.status = "online";
   mock.state.ui.phone = false;
   mock.state.ui.layout = { terminalOpen: false, view: "thread" };
@@ -540,6 +541,83 @@ describe("Composer drafts and history", () => {
     await waitFor(() => expect(mock.sendMessage).toHaveBeenCalled());
     expect(input.value).toBe("maybe delivered");
     expect(readThreadDraft(HOST, THREAD)).toBe("maybe delivered");
+  });
+
+  it("clears the draft once the recovered row for an unconfirmed send appears", async () => {
+    mock.sendMessage.mockResolvedValue("unclear");
+    const view = renderComposer();
+    const input = textarea();
+
+    fireEvent.change(input, { target: { value: "maybe delivered" } });
+    flushDrafts();
+    fireEvent.click(screen.getByRole("button", { name: "Send reply" }));
+    await waitFor(() => expect(mock.sendMessage).toHaveBeenCalled());
+    expect(input.value).toBe("maybe delivered");
+
+    // The daemon's recovered row lands: the queue now holds the words, so the
+    // copy kept for the person must go instead of inviting a second send.
+    mock.state.queues = {
+      [THREAD]: {
+        queued: [
+          {
+            message_id: "qm_recovered",
+            text: "maybe delivered",
+            attachments: [],
+            queued_at: "2026-01-01T00:00:00.000Z",
+            steerable: false,
+            delivery_unknown: true,
+          },
+        ],
+        total: 1,
+        revision: 1,
+      },
+    };
+    view.rerender(
+      <WorkspaceFilesContext.Provider value={fileLister}>
+        <Composer summary={summary} />
+      </WorkspaceFilesContext.Provider>,
+    );
+
+    await waitFor(() => expect(input.value).toBe(""));
+    expect(readThreadDraft(HOST, THREAD)).toBe("");
+  });
+
+  it("keeps newer typing when the recovered row for an earlier send appears", async () => {
+    mock.sendMessage.mockResolvedValue("unclear");
+    const view = renderComposer();
+    const input = textarea();
+
+    fireEvent.change(input, { target: { value: "maybe delivered" } });
+    flushDrafts();
+    fireEvent.click(screen.getByRole("button", { name: "Send reply" }));
+    await waitFor(() => expect(mock.sendMessage).toHaveBeenCalled());
+
+    fireEvent.change(input, { target: { value: "a fresh draft" } });
+    flushDrafts();
+    mock.state.queues = {
+      [THREAD]: {
+        queued: [
+          {
+            message_id: "qm_recovered",
+            text: "maybe delivered",
+            attachments: [],
+            queued_at: "2026-01-01T00:00:00.000Z",
+            steerable: false,
+            delivery_unknown: true,
+          },
+        ],
+        total: 1,
+        revision: 1,
+      },
+    };
+    view.rerender(
+      <WorkspaceFilesContext.Provider value={fileLister}>
+        <Composer summary={summary} />
+      </WorkspaceFilesContext.Provider>,
+    );
+
+    expect(input.value).toBe("a fresh draft");
+    expect(readThreadDraft(HOST, THREAD)).toBe("a fresh draft");
   });
 
   it("leaves history mode when the user types after a recall", () => {

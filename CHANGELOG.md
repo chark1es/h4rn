@@ -839,14 +839,24 @@ All notable changes to h4rn are recorded here. The format follows
   adapter is no longer retried on a replacement session after a detach, and a
   rate-limit pause no longer parks such a prompt for the schedule to send
   again: it becomes the visible **May have been delivered** row the person
-  decides on. An ordinary send to an idle thread now keeps the same durable
-  delivery claim as a queued one, an accepted steer keeps its text when the
+  decides on. Every path that promotes the queue's oldest row — the normal
+  next turn, a new send that arrives while the thread is idle, and **Send
+  now** — treats that write the same way, so a daemon that restarts with a
+  message still queued cannot write it twice. An ordinary send to an idle
+  thread now keeps the same durable delivery claim as a queued one, and a
+  refusal does not also put it back in the queue: its text is already the
+  turn's prompt in the transcript. A claim written by an older daemon, which
+  did not record where the message came from, is restored as a queued message
+  instead of being dropped. An accepted steer keeps its text when the
   transcript append fails (the append is retried, then the text returns as a
-  visible row), a direct steer re-checks its outside grant under the session
-  lock, an unclear steer's row appears at once instead of only after a
-  restart, a refused promoted message goes back to its original place in
-  the queue, and an accepted prompt clears only the rewind handoff it
-  actually carried.
+  visible row, and a successful retry leaves no claim behind), a direct steer
+  re-checks its outside grant under the session lock, an unclear steer's row
+  appears at once instead of only after a restart, a refused promoted message
+  goes back to its original place in the queue, a Stop the person saw
+  acknowledged on a possibly-delivered prompt still ends the turn interrupted,
+  and an accepted prompt clears only the rewind handoff it actually carried.
+  The composer's draft for an unconfirmed send clears as soon as the matching
+  **May have been delivered** row appears, instead of inviting a second copy.
 - **A refused prompt survives a crash right after its turn is recorded.** A
   prompt the daemon refused because its outside grant was revoked could sit in
   neither the journal's claim nor the queue between the turn's settlement and

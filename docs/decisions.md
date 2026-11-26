@@ -1925,7 +1925,11 @@ message the daemon will move to the front instead.
 called, so a daemon that stops during or after that write recovers the prompt as the visible **May
 have been delivered** row instead of losing the record that it was being sent. A `claimed` one (the
 adapter was never called) is dropped at startup because the prompt is already the turn's journaled
-user item: restoring it as a queue row would send the same text a second time.
+user item: restoring it as a queue row would send the same text a second time. A `refused` one is
+dropped for the same reason — the refusal is already the turn's prompt and nothing was delivered —
+so a revoked grant before the write does not show the text in the transcript and in the queue at
+once. A claim written before the daemon recorded `from_queue` reads as a queue promotion, because
+every claim that build wrote for a turn's own prompt came from the queue.
 
 **A queued steer obeys the message's sender.** The stored ceiling and grant are read with the
 message: a message that carries a ceiling is never steered into a running turn, because a steer
@@ -1950,8 +1954,12 @@ message goes back to the queue as known unsent. A definite pre-write refusal (`N
 claim back to `claimed`; any other failure keeps `sending`, because a timeout after the frame was
 written may already be in the turn. A write whose outcome is unknown is never retried on a
 replacement session when the original one detaches, and a rate-limit pause never parks it: both
-would deliver the same text twice. Its settlement turns the claim into the visible **May have been
-delivered** row, and only the person resends or discards it. A direct steer writes the same claim
+would deliver the same text twice. Every path that promotes the oldest row — a settled turn's next
+step, a send to an idle thread, and **Send now** — marks the turn as that promotion, so the rule
+applies wherever the prompt came from. Its settlement turns the claim into the visible **May have
+been delivered** row, and only the person resends or discards it; a Stop the person already saw
+acknowledged settles that turn interrupted instead of as a rejected write. A direct steer writes the
+same claim
 before its adapter call even though it has no queue row, so an unclear result survives as a **May
 have been delivered** row. That claim becomes visible as soon as the outcome is unclear, not only
 after a restart. A parked prompt keeps its promoted claim: the parked record and the claim name the
@@ -1972,14 +1980,17 @@ state back, so there is no phantom Working turn and the message is still deliver
 A steer the harness already took is **reported as delivered even when its transcript row could not
 be written**: `MessageAccepted.unrecorded` says the words are in the turn and only the row is
 missing. Reporting that as a failure would invite a resend, and the running turn would hold the same
-words twice. The claim stays `sending` until that row is durable, and the append is retried; if
-every attempt fails the text comes back as the visible **May have been delivered** row a restart
-would recover, so it can never vanish from both the transcript and the queue. A direct steer writes
-the same `sending` claim before `guard.steer`, so the text has a durable copy even though it never
-had a queue row. It re-checks the sender's grant under the session lock immediately before the
-adapter call, exactly as a promoted write does. An unclear outcome is reported as
-`ProtoErrorCode::DeliveryUnclear` and is shown as the **May have been delivered** row at once, while
-the composer keeps the draft until that row exists instead of clearing the only other copy.
+words twice. The claim stays `sending` until that row is durable, and the append is retried; each
+attempt starts from no claim, so a retry that lands does not leave the delivered text looking unsure
+to a later restart. If every attempt fails the text comes back as the visible **May have been
+delivered** row a restart would recover, so it can never vanish from both the transcript and the
+queue. A direct steer writes the same `sending` claim before `guard.steer`, so the text has a
+durable copy even though it never had a queue row. It re-checks the sender's grant under the session
+lock immediately before the adapter call, exactly as a promoted write does. An unclear outcome is
+reported as `ProtoErrorCode::DeliveryUnclear` and is shown as the **May have been delivered** row at
+once. The composer keeps the draft until that row exists — clearing it earlier would lose the only
+other copy — and clears it as soon as the matching row appears, so it never invites a second send of
+the same words.
 
 
 Queue edits, removals, moves and Send now are one daemon request (`QueueMessage`). Every mutation

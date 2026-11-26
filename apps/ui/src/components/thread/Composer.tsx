@@ -191,6 +191,20 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
   const historyIndex = useRef(-1);
   /** The in-progress text captured before the first ArrowUp. */
   const historyDraft = useRef("");
+  /**
+   * The text of a send the daemon could not confirm.
+   *
+   * The restored row may arrive after the reply. Until it does the draft is the
+   * person's only copy, so it stays in the box; once the matching **May have
+   * been delivered** row appears, that row is the copy and the draft is cleared
+   * instead of inviting a second send of the same words.
+   */
+  const unclearSend = useRef<{
+    host: string;
+    threadId: string;
+    text: string;
+    revision: DraftRevision | null;
+  } | null>(null);
 
   const terminalOpen = useApp((state) => state.ui.layout.terminalOpen);
   const view = useApp((state) => state.ui.layout.view);
@@ -297,6 +311,29 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
       setMenu(null);
     });
   }, [summary.host, summary.thread_id, editing]);
+
+  // A send the daemon could not confirm left its draft here as the only copy.
+  // When the recovered **May have been delivered** row appears, the row holds
+  // the words, so the copy goes instead of inviting a second send.
+  useEffect(() => {
+    const pending = unclearSend.current;
+    if (!pending) return;
+    if (pending.host !== summary.host || pending.threadId !== summary.thread_id) return;
+    if (editing) return;
+    const row = queued?.find(
+      (message) => message.delivery_unknown && message.text === pending.text,
+    );
+    if (!row) return;
+    unclearSend.current = null;
+    // Newer typing is the person's own text: the row only replaces the copy
+    // that was sent.
+    if (text !== pending.text) return;
+    if (!clearThreadDraftIfRevision(pending.host, pending.threadId, pending.revision)) return;
+    historyIndex.current = -1;
+    historyDraft.current = "";
+    revision.current = null;
+    setText("");
+  }, [queued, text, editing, summary.host, summary.thread_id]);
 
   const composerRestore = useApp((state) => state.ui.composerRestore);
   // A restored prompt is adopted exactly once. React StrictMode runs effects
@@ -419,7 +456,18 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
     // A send the daemon could not confirm may already be in the turn. Keep the
     // draft until the recovered "May have been delivered" row appears, so the
     // person's text is never lost while they decide.
-    if (outcome === "failed" || outcome === "unclear") return;
+    if (outcome === "failed") return;
+    if (outcome === "unclear") {
+      // Remember the copy this send left behind: the row that restores it
+      // clears exactly this draft, never newer typing.
+      unclearSend.current = {
+        host: submittedHost,
+        threadId: submittedThread,
+        text: value.trim(),
+        revision: submitted,
+      };
+      return;
+    }
     // Clear only the draft that was sent. If this tab typed again, or another
     // tab saved newer text, that text stays in the box and in storage.
     const cleared = recalled
