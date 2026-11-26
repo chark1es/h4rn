@@ -1,5 +1,7 @@
 import type { LucideIcon } from "lucide-react";
 import type { ReactNode } from "react";
+import { Trans, useTranslation } from "react-i18next";
+
 import { cn } from "@/lib/utils";
 import { Kbd } from "./Kbd";
 
@@ -21,6 +23,7 @@ export function EmptyState({
   className?: string;
   compact?: boolean;
 }) {
+  const { t } = useTranslation("common");
   return (
     <div
       className={cn(
@@ -39,7 +42,7 @@ export function EmptyState({
       {action ? <div className="mt-1 flex items-center gap-2">{action}</div> : null}
       {shortcut ? (
         <p className="flex items-center gap-1 text-small text-fg-3">
-          or press <Kbd>{shortcut}</Kbd>
+          <Trans t={t} i18nKey="orPress" components={{ kbd: <Kbd>{shortcut}</Kbd> }} />
         </p>
       ) : null}
     </div>

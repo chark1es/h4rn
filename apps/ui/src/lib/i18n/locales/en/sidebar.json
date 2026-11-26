@@ -6,6 +6,7 @@
   "showNeedsYou_one": "Show sidebar. {{count, number}} thread needs you",
   "showNeedsYou_other": "Show sidebar. {{count, number}} threads need you",
   "newThread": "New thread",
+  "untitledThread": "New thread",
   "search": "Search or run",
   "resize": "Resize sidebar",
   "stateTabs": "Thread state",

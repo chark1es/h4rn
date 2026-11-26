@@ -44,5 +44,8 @@
     "working": "进行中",
     "done": "已完成",
     "settled": "已了结"
-  }
+  },
+  "orPress": "或按 <kbd/>",
+  "acpAgent": "ACP 智能体",
+  "choose": "请选择…"
 }

@@ -44,5 +44,8 @@
     "working": "作業中",
     "done": "完了",
     "settled": "整理済み"
-  }
+  },
+  "orPress": "または <kbd/> を押します",
+  "acpAgent": "ACP エージェント",
+  "choose": "選択…"
 }

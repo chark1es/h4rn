@@ -18,6 +18,8 @@
  * after boot update the cache immediately and persist in the background.
  */
 
+import { i18n } from "@/lib/i18n";
+
 const SERVICE = "h4rn";
 const DB_NAME = "h4rn-secrets";
 const DB_VERSION = 1;
@@ -380,15 +382,18 @@ function openWebDatabase(): Promise<IDBDatabase | null> {
 function requestResult<T>(request: IDBRequest<T>): Promise<T> {
   return new Promise((resolve, reject) => {
     request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error ?? new Error("IndexedDB request failed"));
+    request.onerror = () =>
+      reject(request.error ?? new Error(i18n.t("shell:secureStorage.requestFailed")));
   });
 }
 
 function transactionDone(transaction: IDBTransaction): Promise<void> {
   return new Promise((resolve, reject) => {
     transaction.oncomplete = () => resolve();
-    transaction.onerror = () => reject(transaction.error ?? new Error("IndexedDB write failed"));
-    transaction.onabort = () => reject(transaction.error ?? new Error("IndexedDB write aborted"));
+    transaction.onerror = () =>
+      reject(transaction.error ?? new Error(i18n.t("shell:secureStorage.writeFailed")));
+    transaction.onabort = () =>
+      reject(transaction.error ?? new Error(i18n.t("shell:secureStorage.writeAborted")));
   });
 }
 

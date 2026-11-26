@@ -120,6 +120,7 @@
   "rewind": {
     "notLoaded": "El hilo aún no se ha cargado.",
     "unsupported": "{{harness}} no puede quitar turnos de su propio historial.",
+    "unsupportedUnnamed": "Este agente no puede quitar turnos de su propio historial.",
     "approval": "Responde primero a la aprobación pendiente.",
     "delivery": "Puede que un mensaje haya llegado al agente. Reenvíalo o descártalo primero.",
     "queued": "Hay un mensaje esperando para ejecutarse. Deja que termine primero.",
@@ -195,7 +196,9 @@
     "downloadHint": "{{message}} Comprueba la conexión y vuelve a intentarlo.",
     "loading": "Cargando {{name}}…",
     "previewFailed": "{{message}} Comprueba la conexión o descarga el original.",
-    "loadFailed": "No se pudo cargar el archivo."
+    "loadFailed": "No se pudo cargar el archivo.",
+    "cancelled": "Se canceló la descarga.",
+    "stalled": "El daemon dejó de enviar el archivo."
   },
   "fork": {
     "open": "Abrir {{title}}",

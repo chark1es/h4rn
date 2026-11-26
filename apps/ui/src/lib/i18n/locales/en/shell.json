@@ -86,6 +86,7 @@
     "fellBackUnnamed": "The recorded rewind point could not be used. The next turn continues from a handoff of the kept conversation.",
     "done": "Thread rewound",
     "native": "{{harness}} dropped the removed turns from its own history.",
+    "nativeUnnamed": "This agent dropped the removed turns from its own history.",
     "handoff": "A fresh session will continue from the kept conversation.",
     "leftAlone": "Ignored files left as they are: {{files}}.",
     "failed": "Couldn't rewind {{title}}.",
@@ -155,7 +156,12 @@
   },
   "update": {
     "unreachable": "Couldn't reach the update server.",
-    "installFailed": "The update could not be installed."
+    "installFailed": "The update could not be installed.",
+    "available": "<b>h4rn {{version}}</b> is available",
+    "downloading": "Downloading h4rn {{version}}",
+    "installing": "<b>Installing h4rn {{version}}</b> · restarting",
+    "restart": "Restart to update",
+    "later": "Later"
   },
   "errors": {
     "notConnected": {
@@ -306,5 +312,26 @@
       "message": "Choose a commit to compare against first.",
       "hint": "Pick a commit from the source picker."
     }
+  },
+  "notifications": {
+    "untitledThread": "A thread",
+    "question": "A question is waiting.",
+    "wantsToRun": "Wants to run: {{command}}",
+    "wantsToRunCommand": "Wants to run a command.",
+    "wantsToChange": "Wants to change: {{files}}",
+    "wantsToChangeFiles": "Wants to change files.",
+    "needsApproval": "Needs an approval.",
+    "finished": "Finished: the turn is done.",
+    "failed": "Failed: {{error}}",
+    "failedUnknown": "Failed: the turn ended with an error.",
+    "interrupted": "Stopped: the turn was interrupted.",
+    "tokenLimit": "Stopped: the agent hit its token limit.",
+    "turnLimit": "Stopped: the agent hit its turn limit.",
+    "hostOffline": "Host offline: h4rn can no longer reach it."
+  },
+  "secureStorage": {
+    "requestFailed": "The IndexedDB request failed.",
+    "writeFailed": "The IndexedDB write failed.",
+    "writeAborted": "The IndexedDB write was aborted."
   }
 }

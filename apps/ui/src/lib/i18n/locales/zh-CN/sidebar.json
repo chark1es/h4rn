@@ -5,6 +5,7 @@
   "show": "显示侧边栏",
   "showNeedsYou_other": "显示侧边栏。{{count, number}} 个对话需要你处理",
   "newThread": "新建对话",
+  "untitledThread": "新对话",
   "search": "搜索或运行",
   "resize": "调整侧边栏宽度",
   "stateTabs": "对话状态",

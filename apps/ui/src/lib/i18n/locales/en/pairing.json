@@ -58,7 +58,8 @@
     "otherConnect": "This code belongs to {{url}}. Sign out and sign in there first.",
     "claimFailed": "Could not complete that pairing.",
     "notApproved": "{{name}} has not approved this device yet. Open Settings → Devices on {{name}}, confirm the same code, then try again.",
-    "codesDiffer": "The codes did not match, so this device was revoked. Pair again from a network you trust."
+    "codesDiffer": "The codes did not match, so this device was revoked. Pair again from a network you trust.",
+    "missingDaemonOrToken": "This pairing link has no daemon address or token. Copy the whole link from the host again."
   },
   "toasts": {
     "paired": "Paired with {{name}}."
@@ -71,5 +72,21 @@
     "emptyBody": "A host is a machine running the h4rn daemon. Pair this device or add a host on your tailnet to give agents somewhere to run.",
     "lastSeen": "last seen {{when}}",
     "note": "Presence is a dot plus a word. A WSL distribution is its own host, so pairing the Windows host does not grant the distribution."
+  },
+  "phoneShell": {
+    "title": "Connect this phone",
+    "intro": "Point h4rn at the daemon you already run. The token is the one `{{command}}` prints; it is stored in the Android Keystore, not in plain text.",
+    "daemonUrl": "Daemon URL",
+    "accessToken": "Access token",
+    "tokenPlaceholder": "64-character hex token",
+    "connect": "Connect",
+    "scan": "Scan QR",
+    "hint": "Emulator build: run `{{script}}`, which starts the daemon, wires `{{reverse}}` and passes this URL and token. Or paste the pairing link / direct QR shown on the host.",
+    "saving": "Saving the pairing…",
+    "connecting": "Connecting…",
+    "openingCamera": "Opening the camera…",
+    "typeInstead": "You can still type the URL and token.",
+    "enterUrl": "Enter a daemon URL.",
+    "badScheme": "The daemon URL must be ws:// or wss:// (http/https also work)."
   }
 }

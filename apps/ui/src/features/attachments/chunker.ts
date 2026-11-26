@@ -13,6 +13,7 @@ export const MAX_ATTACHMENTS = 10;
 /** Splits bytes into frames no larger than `chunkSize`. */
 export function chunkBytes(bytes: Uint8Array, chunkSize: number): Uint8Array[] {
   if (!Number.isInteger(chunkSize) || chunkSize <= 0) {
+    // i18n-ignore-next-line: the chunk size is a constant, so a bad one is a bug
     throw new Error(`chunk size must be a positive integer, got ${chunkSize}`);
   }
   const chunks: Uint8Array[] = [];

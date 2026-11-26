@@ -150,7 +150,8 @@
       "noSender": "Este servidor de Connect no tiene configurado un emisor de notificaciones push para este teléfono. Un operador debe añadir uno para que lleguen los avisos.",
       "senderUnknown": "No se pudo comprobar si este servidor de Connect puede enviar avisos."
     },
-    "agentAlertsFailed": "No se pudieron cambiar los avisos de agentes"
+    "agentAlertsFailed": "No se pudieron cambiar los avisos de agentes",
+    "phoneAppOnly": "Los avisos en el teléfono solo están disponibles en la app de h4rn para teléfono."
   },
   "chat": {
     "title": "Chat",
@@ -623,7 +624,8 @@
       "callbackState": "A la respuesta del inicio de sesión le falta su parámetro state.",
       "denied": "Se denegó el inicio de sesión.",
       "expired": "Ese código ha caducado.",
-      "noSignInWindow": "Esta aplicación no puede abrir una ventana de inicio de sesión."
+      "noSignInWindow": "Esta aplicación no puede abrir una ventana de inicio de sesión.",
+      "status": "h4rn-connect respondió {{status}}."
     }
   },
   "localMachine": {
@@ -1128,7 +1130,8 @@
     "outsideAgents": "Agentes externos",
     "outsideAgentsOAuth": "Agentes externos (OAuth)",
     "outsideAgentsHint": "Permite que Claude Code, Codex u otro cliente MCP local inicie sesión por OAuth y trabaje con tus proyectos e hilos. Desactivado de forma predeterminada. Desactivarlo revoca todas las autorizaciones y descarta los inicios de sesión que te esperan.",
-    "outsideOffNote": "Mientras esté desactivado, las rutas OAuth de h4rn no existen, se rechazan los tokens de agentes externos y no se puede crear ningún inicio de sesión. Los agentes que ejecuta h4rn conservan sus propias herramientas."
+    "outsideOffNote": "Mientras esté desactivado, las rutas OAuth de h4rn no existen, se rechazan los tokens de agentes externos y no se puede crear ningún inicio de sesión. Los agentes que ejecuta h4rn conservan sus propias herramientas.",
+    "rewindFilesFailed": "No se pudo cambiar el interruptor de rebobinar archivos"
   },
   "access": {
     "title": "Compartir y acceso",

@@ -19,6 +19,7 @@ const KINDS: RemoteError[] = [
   { kind: "otherConnect", params: { url: "https://relay.test" } },
   { kind: "notApproved", params: { name: "atlas" } },
   { kind: "codesDiffer" },
+  { kind: "connectStatus", params: { status: 502 } },
 ];
 
 describe("remote errors", () => {

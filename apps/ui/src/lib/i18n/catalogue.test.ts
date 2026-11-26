@@ -129,3 +129,23 @@ describe("translation catalogues", () => {
     }
   }
 });
+
+describe("strings that name another string", () => {
+  const text = (locale: string, namespace: string, key: string): string =>
+    flatten(load(locale, namespace)).get(key) ?? "";
+
+  for (const locale of LOCALES) {
+    it(`agree with what they name in ${locale}`, () => {
+      // The alert for a stopped turn says what the thread view says.
+      expect(text(locale, "shell", "notifications.tokenLimit")).toBe(
+        text(locale, "thread", "turn.stopped.token_limit"),
+      );
+      // The note under the switch names the switch it is about.
+      const label = text(locale, "settings", "notifications.phoneAlerts").toLocaleLowerCase(locale);
+      expect(label).not.toBe("");
+      expect(
+        text(locale, "settings", "notifications.phoneAppOnly").toLocaleLowerCase(locale),
+      ).toContain(label);
+    });
+  }
+});

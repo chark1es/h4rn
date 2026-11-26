@@ -75,10 +75,6 @@ export function elapsedSince(iso: string, now = Date.now()): string {
   return `${minutes.toString().padStart(2, "0")}:${(seconds % 60).toString().padStart(2, "0")}`;
 }
 
-export function titleFromPrompt(prompt: string): string {
-  return prompt.trim().split("\n")[0]?.slice(0, 72) || "New thread";
-}
-
 /** `/home/you/code/api` → `~/code/api`, the form the prototype prints folders in. */
 export function tildePath(path: string): string {
   return path.replace(/^\/(?:home|Users)\/[^/]+(?=\/|$)/, "~");

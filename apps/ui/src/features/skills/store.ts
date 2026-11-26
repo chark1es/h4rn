@@ -25,6 +25,7 @@ import type {
   SkillSyncStatus,
 } from "@/gen";
 import { clientProto, toProtoError } from "@/lib/client/errors";
+import { HARNESS_LABELS } from "@/lib/entities";
 import { i18n } from "@/lib/i18n";
 import { joinSentences } from "@/lib/i18n/sentences";
 import { getClient, getState, pushToast } from "@/lib/store/appStore";
@@ -330,7 +331,7 @@ export async function setSkillEnabled(
     set({ inventory: before });
     const skill = before.skills.find((entry) => entry.id === skillId);
     pushToast({
-      title: toggleFailedTitle(enabled, skill?.name, harnessLabel(harness)),
+      title: toggleFailedTitle(enabled, skill?.name, HARNESS_LABELS[harness]),
       description: joinSentences([proto.message, i18n.t("shell:skills.switchBack"), proto.hint]),
       variant: "error",
     });
@@ -530,21 +531,6 @@ export function applySkillEvent(event: Event): void {
   if (event.type === "sync_status") {
     set({ sync: event });
     if (event.conflicts > 0) void loadSkills({ force: true });
-  }
-}
-
-function harnessLabel(harness: HarnessKind): string {
-  switch (harness) {
-    case "claude_code":
-      return "Claude Code";
-    case "codex":
-      return "Codex";
-    case "opencode":
-      return "OpenCode";
-    case "antigravity":
-      return "Antigravity";
-    case "acp":
-      return "ACP agent";
   }
 }
 

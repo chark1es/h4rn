@@ -34,6 +34,7 @@ import {
 import { ensureDeviceIdentity } from "@/lib/client/secure";
 import { loadTransportWasm } from "@/lib/client/wasm";
 
+import { RemoteFailure } from "./remoteError";
 import { deleteSecret, getSecret, setSecret } from "./secretStore";
 
 const CREDENTIALS_KEY = "credentials";
@@ -92,7 +93,13 @@ export type RemoteCredentials = {
 export type ConnectError = Error & { code: string; hint: string | null };
 
 function errorFromBody(status: number, body: ConnectErrorBody | null): ConnectError {
-  const error = new Error(body?.message ?? `h4rn-connect answered ${status}.`) as ConnectError;
+  // The relay's own message is shown as sent; a bare status is the client's
+  // words, kept as a kind so a language switch relabels it.
+  const error = (
+    body?.message
+      ? new Error(body.message)
+      : new RemoteFailure({ kind: "connectStatus", params: { status } })
+  ) as ConnectError;
   error.code = body?.code ?? "connect_error";
   error.hint = body?.hint ?? null;
   return error;

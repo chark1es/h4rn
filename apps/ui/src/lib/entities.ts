@@ -1,4 +1,5 @@
 import type { HarnessKind, HostId, ThreadId } from "@/gen";
+import { i18n } from "@/lib/i18n";
 
 /**
  * Blobatar seed scheme (DESIGN.md):
@@ -24,12 +25,19 @@ export function userSeed(userId: string): string {
   return `user:${userId}`;
 }
 
+/**
+ * Each harness's name. Product names read the same in every language; the
+ * generic ACP harness is worded, through a getter, so every reader of this
+ * map gets the active language.
+ */
 export const HARNESS_LABELS: Record<HarnessKind, string> = {
   claude_code: "Claude Code",
   codex: "Codex",
   opencode: "OpenCode",
   antigravity: "Antigravity",
-  acp: "ACP agent",
+  get acp() {
+    return i18n.t("common:acpAgent");
+  },
 };
 
 export const HARNESS_SLUGS: Record<HarnessKind, string> = {
@@ -49,7 +57,7 @@ export function harnessLabel(harness: HarnessKind): string {
  * instance id, because "ACP" alone would hide which command is running.
  */
 export function threadHarnessLabel(harness: HarnessKind, agentId?: string | null): string {
-  if (harness === "acp") return agentId ? `ACP · ${agentId}` : "ACP agent";
+  if (harness === "acp") return agentId ? `ACP · ${agentId}` : HARNESS_LABELS.acp;
   return harnessLabel(harness);
 }
 

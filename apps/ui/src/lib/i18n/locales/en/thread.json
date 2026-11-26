@@ -120,6 +120,7 @@
   "rewind": {
     "notLoaded": "The thread is not loaded yet.",
     "unsupported": "{{harness}} cannot drop turns from its own history.",
+    "unsupportedUnnamed": "This agent cannot drop turns from its own history.",
     "approval": "Answer the pending approval first.",
     "delivery": "A message may have reached the agent. Resend or discard it first.",
     "queued": "A message is waiting to run. Let it finish first.",
@@ -192,7 +193,9 @@
     "downloadHint": "{{message}} Check the connection, then try again.",
     "loading": "Loading {{name}}…",
     "previewFailed": "{{message}} Check the connection, or download the original.",
-    "loadFailed": "The file could not be loaded."
+    "loadFailed": "The file could not be loaded.",
+    "cancelled": "The download was cancelled.",
+    "stalled": "The daemon stopped sending the file."
   },
   "fork": {
     "open": "Open {{title}}",

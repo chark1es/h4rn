@@ -7,6 +7,7 @@
   "showNeedsYou_many": "Mostrar barra lateral. {{count, number}} hilos te necesitan",
   "showNeedsYou_other": "Mostrar barra lateral. {{count, number}} hilos te necesitan",
   "newThread": "Nuevo hilo",
+  "untitledThread": "Nuevo hilo",
   "search": "Buscar o ejecutar",
   "resize": "Cambiar el ancho de la barra lateral",
   "stateTabs": "Estado del hilo",

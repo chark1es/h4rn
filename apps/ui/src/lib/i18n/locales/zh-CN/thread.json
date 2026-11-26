@@ -120,6 +120,7 @@
   "rewind": {
     "notLoaded": "对话尚未加载。",
     "unsupported": "{{harness}} 无法从自己的历史中删除回合。",
+    "unsupportedUnnamed": "该智能体无法从自己的历史中删除回合。",
     "approval": "请先处理待审批的请求。",
     "delivery": "有一条消息可能已送达智能体。请先重新发送或丢弃它。",
     "queued": "有一条消息正在等待运行。请先等它完成。",
@@ -189,7 +190,9 @@
     "downloadHint": "{{message}} 请检查连接后重试。",
     "loading": "正在加载 {{name}}…",
     "previewFailed": "{{message}} 请检查连接，或下载原文件。",
-    "loadFailed": "无法加载该文件。"
+    "loadFailed": "无法加载该文件。",
+    "cancelled": "下载已取消。",
+    "stalled": "守护进程已停止发送该文件。"
   },
   "fork": {
     "open": "打开 {{title}}",

@@ -267,6 +267,7 @@ describe("createThread draft handoff", () => {
     fake.response.current = null;
     seedHosts(["handoff_host"]);
   });
+  afterEach(() => setLocalePreference("en"));
 
   it("moves the temporary thread's draft to the id the daemon returns", async () => {
     const realId = "thread_after_create";
@@ -293,6 +294,21 @@ describe("createThread draft handoff", () => {
 
     expect(readThreadDraft("handoff_host", tempId)).toBe("");
     expect(readThreadDraft("handoff_host", realId)).toBe("typed while starting");
+  });
+
+  it("titles an empty prompt's temporary thread with a noun, not the button's verb", async () => {
+    fake.response.current = null;
+    await setLocalePreference("zh-CN");
+    const created = createThread({
+      host: "handoff_host",
+      harness: "claude_code",
+      workspacePath: "~/code",
+      model: "claude-sonnet-4-5",
+      prompt: "",
+    });
+    const tempId = getState().pendingCreates.at(-1)?.tempId ?? "";
+    expect(getState().threads[tempId]?.title).toBe("新对话");
+    await created;
   });
 
   it("drops the temporary thread's draft when the create fails", async () => {
@@ -507,6 +523,7 @@ describe("rewindThread", () => {
     fake.request.mockClear();
     seedHosts([]);
   });
+  afterEach(() => setLocalePreference("en"));
 
   it("reports the method the daemon really used", async () => {
     fake.response.current = {
@@ -524,6 +541,37 @@ describe("rewindThread", () => {
     const prompt = await rewindThread("th_rewind", "item_user_1", false);
     expect(prompt?.method).toBe("handoff");
     expect(getState().toasts.at(-1)?.description).toContain("fresh session");
+  });
+
+  it("words a generic agent's native rewind without a name slot", async () => {
+    const state = getState();
+    store.setState({
+      ...state,
+      threads: {
+        ...state.threads,
+        th_rewind_acp: {
+          ...threadSummary({ threadId: "th_rewind_acp", host: "atlas" }),
+          harness: "acp",
+        },
+      },
+    });
+    fake.response.current = {
+      type: "rewound",
+      prompt: {
+        thread_id: "th_rewind_acp",
+        before_item_id: "item_user_1",
+        prompt: "try again",
+        attachments: [],
+        files_restored: false,
+        left_alone: [],
+        method: "native",
+      },
+    };
+    await setLocalePreference("zh-CN");
+    await rewindThread("th_rewind_acp", "item_user_1", false);
+    expect(getState().toasts.at(-1)?.description).toBe(
+      "该智能体已从自己的历史中删除被移除的回合。",
+    );
   });
 
   it("lists the files it left alone the way the dialog did", async () => {

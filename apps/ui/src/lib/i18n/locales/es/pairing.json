@@ -59,7 +59,8 @@
     "otherConnect": "Este código pertenece a {{url}}. Cierra sesión e inicia sesión allí primero.",
     "claimFailed": "No se pudo completar la vinculación.",
     "notApproved": "{{name}} aún no ha aprobado este dispositivo. Abre Ajustes → Dispositivos en {{name}}, confirma el mismo código y vuelve a intentarlo.",
-    "codesDiffer": "Los códigos no coincidían, así que se revocó este dispositivo. Vuelve a vincularlo desde una red de confianza."
+    "codesDiffer": "Los códigos no coincidían, así que se revocó este dispositivo. Vuelve a vincularlo desde una red de confianza.",
+    "missingDaemonOrToken": "A este enlace de vinculación le falta la dirección del daemon o el token. Vuelve a copiar el enlace completo desde el host."
   },
   "toasts": {
     "paired": "Vinculado con {{name}}."
@@ -72,5 +73,21 @@
     "emptyBody": "Un host es una máquina que ejecuta el daemon de h4rn. Vincula este dispositivo o añade un host de tu tailnet para que los agentes tengan dónde ejecutarse.",
     "lastSeen": "visto por última vez {{when}}",
     "note": "La presencia es un punto más una palabra. Una distribución WSL es su propio host, así que vincular el host Windows no da acceso a la distribución."
+  },
+  "phoneShell": {
+    "title": "Conecta este teléfono",
+    "intro": "Apunta h4rn al daemon que ya ejecutas. El token es el que imprime `{{command}}`; se guarda en el Android Keystore, no en texto plano.",
+    "daemonUrl": "URL del daemon",
+    "accessToken": "Token de acceso",
+    "tokenPlaceholder": "Token hexadecimal de 64 caracteres",
+    "connect": "Conectar",
+    "scan": "Escanear QR",
+    "hint": "Compilación para emulador: ejecuta `{{script}}`, que inicia el daemon, configura `{{reverse}}` y pasa esta URL y este token. O pega el enlace de vinculación o el QR directo que muestra el host.",
+    "saving": "Guardando la vinculación…",
+    "connecting": "Conectando…",
+    "openingCamera": "Abriendo la cámara…",
+    "typeInstead": "Aún puedes escribir la URL y el token.",
+    "enterUrl": "Escribe la URL del daemon.",
+    "badScheme": "La URL del daemon debe ser ws:// o wss:// (http/https también sirven)."
   }
 }

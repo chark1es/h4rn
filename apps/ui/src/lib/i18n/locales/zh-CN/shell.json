@@ -86,6 +86,7 @@
     "fellBackUnnamed": "无法使用记录的回退点。下一个回合将从保留对话的交接继续。",
     "done": "对话已回退",
     "native": "{{harness}} 已从自己的历史中删除被移除的回合。",
+    "nativeUnnamed": "该智能体已从自己的历史中删除被移除的回合。",
     "handoff": "新的会话将从保留的对话继续。",
     "leftAlone": "被忽略的文件保持原样：{{files}}。",
     "failed": "无法回退 {{title}}。",
@@ -155,7 +156,12 @@
   },
   "update": {
     "unreachable": "无法连接更新服务器。",
-    "installFailed": "无法安装更新。"
+    "installFailed": "无法安装更新。",
+    "available": "<b>h4rn {{version}}</b> 已可用",
+    "downloading": "正在下载 h4rn {{version}}",
+    "installing": "<b>正在安装 h4rn {{version}}</b> · 即将重启",
+    "restart": "重启以更新",
+    "later": "稍后"
   },
   "errors": {
     "notConnected": {
@@ -306,5 +312,26 @@
       "message": "请先选择一个要比较的提交。",
       "hint": "从来源选择器中选择一个提交。"
     }
+  },
+  "notifications": {
+    "untitledThread": "对话",
+    "question": "有一个问题在等待回答。",
+    "wantsToRun": "想要运行：{{command}}",
+    "wantsToRunCommand": "想要运行一条命令。",
+    "wantsToChange": "想要修改：{{files}}",
+    "wantsToChangeFiles": "想要修改文件。",
+    "needsApproval": "需要审批。",
+    "finished": "已完成：本回合已结束。",
+    "failed": "失败：{{error}}",
+    "failedUnknown": "失败：本回合因错误而结束。",
+    "interrupted": "已停止：本回合被中断。",
+    "tokenLimit": "已停止：智能体达到了 token 上限。",
+    "turnLimit": "已停止：智能体达到了回合上限。",
+    "hostOffline": "主机离线：h4rn 已无法连接到它。"
+  },
+  "secureStorage": {
+    "requestFailed": "IndexedDB 请求失败。",
+    "writeFailed": "IndexedDB 写入失败。",
+    "writeAborted": "IndexedDB 写入被中止。"
   }
 }

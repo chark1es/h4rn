@@ -8,6 +8,8 @@
  * here branches on the platform beyond detecting it.
  */
 
+import { i18n } from "@/lib/i18n";
+
 type TauriInternals = {
   invoke<T>(command: string, args?: Record<string, unknown>): Promise<T>;
 };
@@ -97,7 +99,7 @@ export async function nativeRequestPushPermission(): Promise<void> {
 export async function nativePushToken(): Promise<string> {
   const api = internals();
   if (!api || !deviceAlertsShell()) {
-    throw new Error("Device alerts are only available in the h4rn phone app.");
+    throw new Error(i18n.t("settings:notifications.phoneAppOnly"));
   }
   try {
     return await api.invoke<string>("push_token");

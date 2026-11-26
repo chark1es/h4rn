@@ -167,9 +167,7 @@ describe("the thread view in another language", () => {
     expect(markup(turn({ status: "failed" }))).toContain(
       "ターンが失敗しました。これ以降は実行されていません。",
     );
-    expect(stoppedNotice("token_limit")).toBe(
-      "停止しました：エージェントがトークン上限に達しました。",
-    );
+    expect(stoppedNotice("token_limit")).toBe("停止：エージェントがトークン上限に達しました。");
 
     const limited = markup(
       turn({

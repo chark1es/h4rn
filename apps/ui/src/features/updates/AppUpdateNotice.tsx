@@ -1,5 +1,8 @@
 import { DownloadIcon } from "lucide-react";
 import { useEffect } from "react";
+import { Trans, useTranslation } from "react-i18next";
+
+import { formatNumber } from "@/lib/i18n";
 
 import {
   installAppUpdate,
@@ -16,6 +19,7 @@ import {
  * not something an agent is waiting on, so it does not borrow the accent.
  */
 export function AppUpdateNotice({ inline = false }: { inline?: boolean }) {
+  const { t } = useTranslation(["shell", "common"]);
   useEffect(() => {
     void startAppUpdates();
   }, []);
@@ -43,20 +47,17 @@ export function AppUpdateNotice({ inline = false }: { inline?: boolean }) {
       </span>
       <span className="grow">
         {progress?.phase === "failed" ? (
-          progress.message
+          // The shell's own sentence is shown as sent; null is the client's.
+          (progress.message ?? t("update.installFailed"))
         ) : progress?.phase === "installing" ? (
-          <>
-            <b>Installing h4rn {version}</b> · restarting
-          </>
+          <Trans t={t} i18nKey="update.installing" values={{ version }} components={{ b: <b /> }} />
         ) : busy ? (
           <>
-            <b>Downloading h4rn {version}</b>
-            {percent !== null ? ` · ${percent}%` : ""}
+            <b>{t("update.downloading", { version })}</b>
+            {percent !== null ? ` · ${formatNumber(percent / 100, { style: "percent" })}` : ""}
           </>
         ) : (
-          <>
-            <b>h4rn {version}</b> is available
-          </>
+          <Trans t={t} i18nKey="update.available" values={{ version }} components={{ b: <b /> }} />
         )}
       </span>
       {progress?.phase === "downloading" && percent !== null ? (
@@ -67,10 +68,10 @@ export function AppUpdateNotice({ inline = false }: { inline?: boolean }) {
       {busy ? null : (
         <>
           <button type="button" className="q-btn secondary" onClick={() => void installAppUpdate()}>
-            {progress?.phase === "failed" ? "Try again" : "Restart to update"}
+            {progress?.phase === "failed" ? t("common:tryAgain") : t("update.restart")}
           </button>
           <button type="button" className="q-btn ghost" onClick={snoozeAppUpdate}>
-            Later
+            {t("update.later")}
           </button>
         </>
       )}

@@ -44,5 +44,8 @@
     "working": "Working",
     "done": "Done",
     "settled": "Settled"
-  }
+  },
+  "orPress": "or press <kbd/>",
+  "acpAgent": "ACP agent",
+  "choose": "Choose…"
 }
