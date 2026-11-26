@@ -144,6 +144,7 @@ describe("usage presentation formatting", () => {
     expect(firstToken(0)).toBe("—");
     expect(firstToken(420)).toBe("420ms");
     expect(firstToken(1_700)).toBe("1.7s");
+    expect(firstToken(999.6)).toBe("1.0s");
   });
 
   it("clamps percentages into a renderable range", () => {

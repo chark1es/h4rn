@@ -138,6 +138,7 @@ describe("plurals and formatting", () => {
 
     await setLocalePreference("ja");
     expect(formatRelativeTime(now - 5 * 60_000, now)).toBe("5 分前");
+    expect(formatDuration(6 * 3_600_000 + 30 * 60_000)).toBe("6時間30分");
     await setLocalePreference("es");
     expect(formatNumber(12345.5)).toBe("12.345,5");
   });

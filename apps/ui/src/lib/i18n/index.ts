@@ -347,7 +347,13 @@ export function formatDuration(ms: number): string {
     [total % 60, "second"],
   ];
   const shown = parts.filter(([amount]) => amount > 0).slice(0, 2);
-  const units = (shown.length ? shown : [[0, "second"] as const]).map(([amount, unit]) =>
+  const picked = shown.length ? shown : [[0, "second"] as const];
+  // Intl's short units put a space before each Japanese unit and none after
+  // it ("6 時間30 分"); Japanese takes its unit words from CLOCK_UNITS instead.
+  if (activeLocale() === "ja") {
+    return picked.map(([amount, unit]) => formatClockUnit(amount, unit)).join("");
+  }
+  const units = picked.map(([amount, unit]) =>
     formatNumber(amount, { style: "unit", unit, unitDisplay: "short" }),
   );
   return new Intl.ListFormat(activeLocale(), { style: "narrow", type: "unit" }).format(units);

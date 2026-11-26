@@ -165,7 +165,7 @@
     "hitLimitAt": "{{harness}} alcanzó un límite a las {{time}}. h4rn reanuda el turno a las {{resumeAt}} con su contexto guardado.",
     "hitLimitAtUnknown": "El harness alcanzó un límite a las {{time}}. h4rn reanuda el turno a las {{resumeAt}} con su contexto guardado.",
     "autoResumesAt": "Reanudación automática: {{time}}",
-    "untilAutoResume": "para reanudar",
+    "untilAutoResume": "hasta la reanudación automática",
     "lastFailed": "Falló el último intento: {{error}}",
     "failOver": "Conmutar…",
     "failingOver": "Conmutando…",

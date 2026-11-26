@@ -28,7 +28,9 @@ export function formatSpan(ms: number): string {
 /** Milliseconds below a second, seconds with one decimal above it. */
 export function firstToken(ms: number): string {
   if (!Number.isFinite(ms) || ms <= 0) return "—";
-  if (ms < 1000) return formatClockUnit(Math.round(ms), "millisecond");
+  // Rounded first, so 999.6 ms reads "1.0s", never "1,000ms".
+  const whole = Math.round(ms);
+  if (whole < 1000) return formatClockUnit(whole, "millisecond");
   return formatClockUnit(ms / 1000, "second", {
     minimumFractionDigits: 1,
     maximumFractionDigits: 1,

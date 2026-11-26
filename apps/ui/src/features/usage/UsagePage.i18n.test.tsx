@@ -257,6 +257,15 @@ describe("the usage page in another language", () => {
     expect(screen.queryByText(/あと 今/)).toBeNull();
   });
 
+  it("says a limit resets now at the exact reset moment", async () => {
+    mock.responses.get_limits = {
+      type: "limits",
+      report: { limits: [{ ...limit, reset_at: new Date(NOW).toISOString() }] },
+    };
+    await renderPage();
+    expect(screen.getByText("Resets now")).toBeTruthy();
+  });
+
   it("rewords the open page, its tables and its figures when the language changes", async () => {
     await renderPage();
     expect(screen.getByRole("columnheader", { name: "Active" })).toBeTruthy();
