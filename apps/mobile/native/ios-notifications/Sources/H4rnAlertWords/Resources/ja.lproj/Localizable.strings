@@ -1,0 +1,7 @@
+"push_untitled_thread" = "スレッド";
+"push_working" = "作業中";
+"push_finished" = "完了";
+"push_failed" = "失敗";
+"push_needs_approval" = "承認が必要";
+"push_asks_for_input" = "回答を求めています";
+"push_stopped_at_limit" = "上限で停止しました";

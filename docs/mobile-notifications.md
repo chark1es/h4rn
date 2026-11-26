@@ -185,11 +185,24 @@ The words live in Android string resources (`push_strings.xml`), described in
 [i18n.md](i18n.md#phone-alerts).
 
 **iOS** receives an APNs alert. The `aps` block carries Connect's English
-title and body, `sound`, and `mutable-content: 1`; the only custom keys
-are the fixed record's `h4rn_alert`, `state`, `thread_id` and `count`. The title
-and body are not repeated as custom data. A grouped alert has an empty
-`thread_id`, so a tap opens h4rn. `apns-expiration` gives the alert the same
-300-second lifetime as the Android message.
+title and body, `sound`, and `mutable-content: 1`. The custom keys are the
+fixed record's `h4rn_alert`, `state`, `thread_id` and `count`, plus the
+`project`, `thread_title` and `thread_titles` Android words its alerts from.
+The title and body are not repeated as custom data. A grouped alert has an
+empty `thread_id`, so a tap opens h4rn. `apns-expiration` gives the alert the
+same 300-second lifetime as the Android message.
+
+`mutable-content` makes iOS hand each alert to the app's Notification Service
+Extension before showing it. The extension words the title and body in the
+phone's language with the same rules and words as Android ("h4rn · 已完成",
+"Requiere aprobación", "エージェント 3 件が対応待ち") and keeps everything
+else. iOS shows Connect's English instead when the app predates the extension,
+when the extension fails, or when it has not answered by the time iOS's limit
+for it runs out. APNs refuses a payload over 4096 bytes, so when the extra
+keys would not fit, Connect drops `thread_titles` first (the phone then words
+the group's title and shows the English list of titles), then `thread_title`
+and `project` (the phone shows the English alert). The English alert itself is
+never dropped for them (ADR-055).
 
 ## Operator setup: Connect
 
@@ -323,29 +336,66 @@ What the build still needs from the owner is Apple's usual signing material:
    relay.
 
 CI compiles the simulator build with no Apple credentials at all; it only
-verifies the Swift and Rust compile. The Swift package's XCTest target
+verifies the Swift and Rust compile. The `native/ios` package's XCTest target
 (`Tests/H4rnPushTests`) is checked in but no workflow runs it yet, so treat
-those tests as unverified until a macOS job runs `swift test` or an
-`xcodebuild test` against a simulator.
+those tests as unverified until a macOS job runs an `xcodebuild test` against
+a simulator: the package needs UIKit and the Tauri API that `build.rs` stages
+during an iOS build, so `swift test` cannot build it. The alert words'
+package (`native/ios-notifications`) has no such dependency, and CI runs its
+tests with `swift test`.
 
-**No Notification Service Extension ships yet.** iOS cannot run app code for an
-alert while the app is suspended, so the extension that would re-check the
-local switch before showing a suspended app's alert is not part of this
-release: adding one needs its own Xcode target, and the generated iOS project
-is not something this repository can add a target to. The switch-off removal
-from Connect is therefore the guarantee while the app is suspended, and it
-holds only once the removal reaches Connect: a switched-off or signed-out
-iPhone that cannot reach the relay may still show alerts until the pending
-removal succeeds at the next sign-in. The in-app delegate enforces the same
-rule (switch off, exact thread open, grouped alert) whenever the app is
-running. Do not rely on the local flag alone to silence a phone whose removal
-never reached Connect.
+### The Notification Service Extension
+
+The extension, `H4rnNotifications`, is what words an alert in the phone's
+language (ADR-055). Its code and words are in
+`apps/mobile/native/ios-notifications`; `tauri ios init` does not know about
+it, so `scripts/mobile-ios-notifications.sh` adds it to the generated project
+after every init. CI and the release workflow run the script; a local build
+must too:
+
+```sh
+bun run --cwd apps/mobile tauri ios init
+scripts/mobile-ios-notifications.sh
+bun run --cwd apps/mobile tauri ios build      # or: tauri ios dev / open in Xcode
+```
+
+What the owner creates in the Apple Developer account, once:
+
+1. An **App ID** for the extension: `dev.h4rn.app.notifications` (the app's
+   id plus `.notifications`), with no capabilities. The extension does not
+   need Push Notifications; the app's own App ID keeps it.
+2. A **provisioning profile** for that App ID next to the app's, of the same
+   kind (development for a device build from Xcode, App Store for
+   TestFlight). With automatic signing (Xcode signed in to the team, or
+   `tauri ios build` with an App Store Connect API key) Xcode makes it;
+   set `APPLE_DEVELOPMENT_TEAM` when running the script so the extension
+   signs with the same team as the app. Tauri's manual signing
+   (`IOS_CERTIFICATE` and `IOS_MOBILE_PROVISION`) sets a profile only on the
+   app target, so a release built that way must set the extension's profile
+   too, in Xcode or in the generated project.
+3. **No App Group.** The extension reads nothing the app wrote; it only
+   rewords the alert it was handed.
+
+Nothing here goes in the repository: no profile, certificate, team id or key.
+
+**The extension does not hide alerts.** iOS cannot run app code for an alert
+while the app is suspended, except an extension like this one, and an
+extension may only drop an alert with Apple's
+`com.apple.developer.usernotifications.filtering` entitlement, which Apple
+grants on request, plus an App Group to read the app's switch. Neither is
+part of this release. The switch-off removal from Connect is therefore the
+guarantee while the app is suspended, and it holds only once the removal
+reaches Connect: a switched-off or signed-out iPhone that cannot reach the
+relay may still show alerts until the pending removal succeeds at the next
+sign-in. The in-app delegate enforces the same rule (switch off, exact thread
+open, grouped alert) whenever the app is running. Do not rely on the local
+flag alone to silence a phone whose removal never reached Connect.
 
 ## Limits
 
 - Live Updates are Android only. iOS would need an ActivityKit widget extension
-  with its own Xcode target, which the generated iOS project cannot gain here,
-  so the iPhone app offers no equivalent and is not sent the `working` record.
+  with its own Xcode target, which this repository does not build, so the
+  iPhone app offers no equivalent and is not sent the `working` record.
 - An Android ongoing notification is removed by its final alert, by the app's
   thread list, or by the switch-off/sign-out cancel. If the app is not running
   and the turn ends without an alert (a Stop, or a grouped finish), the entry
@@ -355,11 +405,11 @@ never reached Connect.
   kept, and goes away with that thread's next final alert, with the switch, or
   on sign-out.
 - Android needs Google Play services. A device without them cannot receive FCM.
-- iOS alerts are in English whatever the phone's language. The system shows
-  the `aps` alert before any h4rn code runs, and wording it on the phone needs
-  a Notification Service Extension (its own Xcode target) or localized strings
-  at the root of the app bundle. The repository has no step that adds either to
-  the generated iOS project yet (ADR-054).
+- An iPhone alert is in English when the app predates the Notification
+  Service Extension, when the extension fails or runs out of time, or when
+  the relay predates the wording fields. The extension's wording and its
+  timeout path have been checked by tests and by reading, not yet on a device;
+  confirm them on a real iPhone before a release.
 - iOS needs a signed build with the push entitlement, installed on a real
   device, and an operator-configured APNs key on the relay. A simulator cannot
   receive a remote push, and a development build must use the sandbox APNs host.
@@ -371,10 +421,11 @@ never reached Connect.
   the daemon switch stops publishing for every phone at once. Revoking the
   phone from the desktop removes its registration too.
 - On iOS, an alert delivered while the app is suspended is shown by the system
-  before any h4rn code runs. Without a Notification Service Extension the local
-  switch cannot suppress it; removal from Connect, and the in-app delegate, are
-  what keep a switched-off phone quiet. So a signed-out or switched-off iPhone
-  that cannot reach Connect may still show alerts while suspended, until the
+  before any h4rn code runs, apart from the extension, which only rewords it.
+  The local switch cannot suppress it; removal from Connect, and the in-app
+  delegate, are what keep a switched-off phone quiet. So a signed-out or
+  switched-off iPhone that cannot reach Connect may still show alerts while
+  suspended, until the
   pending removal succeeds at the next sign-in. There is no lock-screen
   guarantee for that case on iOS; the equivalent guarantee is Android-only.
 - On iOS, a tap that launches the app is buffered by the native delegate,
@@ -390,4 +441,4 @@ never reached Connect.
   approvals are.
 - Connect keeps no conversation history for push, and the notification text is
   produced from the six fields above, by Connect in English and by the Android
-  app in the phone's language.
+  app and the iOS extension in the phone's language.

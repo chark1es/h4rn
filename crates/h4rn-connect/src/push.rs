@@ -138,14 +138,19 @@ impl PushMessage<'_> {
         body
     }
 
-    /// The APNs payload (ADR-052).
+    /// The APNs payload (ADR-052, ADR-055).
     ///
-    /// The alert block carries Connect's English title and body, which iOS
-    /// shows as sent (ADR-054), and the custom keys are the documented record
-    /// fields only: no prompt, reply, tool output, path or credential can ride
-    /// along.
-    /// `mutable-content` lets a Notification Service Extension re-check the
-    /// phone's flag before the alert is shown.
+    /// The alert block carries Connect's English title and body. iOS shows
+    /// them when the app has no Notification Service Extension, or when the
+    /// extension fails or runs out of time. The custom keys are the documented
+    /// record fields only: no prompt, reply, tool output, path or credential
+    /// can ride along.
+    ///
+    /// `mutable-content` wakes the extension, which words the alert in the
+    /// phone's language from [`IOS_WORDING_FIELDS`]. Those fields are
+    /// optional: when they would push the payload past Apple's 4096-byte
+    /// limit, the group's title list goes first and then the rest, so the
+    /// English alert is never lost to them (ADR-055).
     pub fn apns_payload(&self) -> serde_json::Value {
         let mut payload = serde_json::json!({
             "aps": {
@@ -162,16 +167,41 @@ impl PushMessage<'_> {
                 payload[*key] = value.clone().into();
             }
         }
+        // All of the wording fields, then without the group's title list (the
+        // phone falls back to the English list in the body), then none (the
+        // phone shows the English alert as sent).
+        let stages: [&[&str]; 2] = [IOS_WORDING_FIELDS, &IOS_WORDING_FIELDS[..2]];
+        for keys in stages {
+            let mut candidate = payload.clone();
+            for key in keys {
+                if let Some(value) = self.data.get(*key) {
+                    candidate[*key] = value.clone().into();
+                }
+            }
+            if candidate.to_string().len() <= APNS_MAX_PAYLOAD_BYTES {
+                return candidate;
+            }
+        }
         payload
     }
 }
 
-/// The only custom keys an iOS payload may carry (ADR-052).
+/// Apple's limit for a remote notification's JSON payload, in bytes.
+pub const APNS_MAX_PAYLOAD_BYTES: usize = 4096;
+
+/// The record keys every iOS payload carries (ADR-052).
 ///
-/// `title` and `body` are not repeated: they are the alert itself. Everything
-/// else in [`PushMessage::data`], including the raw thread titles Android words
-/// its alerts from, exists for Android's local rendering.
+/// `title` and `body` are not repeated: they are the alert itself.
 pub const IOS_CUSTOM_FIELDS: &[&str] = &["h4rn_alert", "state", "thread_id", "count"];
+
+/// The keys the iOS extension words an alert from (ADR-054, ADR-055).
+///
+/// They are the project name and thread titles ADR-051 already discloses and
+/// Android already gets, so they are part of every iOS payload that fits
+/// them, beside [`IOS_CUSTOM_FIELDS`]. The order is the order they are dropped in, last first, when the
+/// payload would be too large: the group's title list, then the thread title
+/// and project, which the extension needs to word anything at all.
+pub const IOS_WORDING_FIELDS: &[&str] = &["project", "thread_title", "thread_titles"];
 
 /// The FCM sender and its cached OAuth2 token.
 pub struct FcmClient {
@@ -476,8 +506,45 @@ mod tests {
                 ("title".to_string(), "Fix the thing".to_string()),
                 ("body".to_string(), "h4rn · Needs approval".to_string()),
                 ("count".to_string(), "1".to_string()),
+                ("project".to_string(), "h4rn".to_string()),
+                ("thread_title".to_string(), "Fix the thing".to_string()),
             ]),
         }
+    }
+
+    /// A grouped alert's data, shaped like `PushAlert::data` builds it.
+    fn group(titles: &[String], body: String) -> PushMessage<'static> {
+        PushMessage {
+            token: "device-token",
+            platform: PushPlatform::Ios,
+            package_name: None,
+            data: BTreeMap::from([
+                ("h4rn_alert".to_string(), "agent".to_string()),
+                ("state".to_string(), "completed".to_string()),
+                ("thread_id".to_string(), String::new()),
+                (
+                    "title".to_string(),
+                    format!("{} agents finished", titles.len()),
+                ),
+                ("body".to_string(), body),
+                ("project".to_string(), String::new()),
+                ("count".to_string(), titles.len().to_string()),
+                ("thread_title".to_string(), String::new()),
+                ("thread_titles".to_string(), titles.join("\n")),
+            ]),
+        }
+    }
+
+    fn custom_keys(payload: &serde_json::Value) -> Vec<&str> {
+        let mut keys: Vec<&str> = payload
+            .as_object()
+            .expect("payload object")
+            .keys()
+            .map(String::as_str)
+            .filter(|key| *key != "aps")
+            .collect();
+        keys.sort_unstable();
+        keys
     }
 
     #[test]
@@ -504,25 +571,117 @@ mod tests {
         assert_eq!(payload["aps"]["sound"], "default");
         assert_eq!(payload["aps"]["mutable-content"], 1);
 
-        // The custom keys are exactly the documented record plus the marker.
-        let mut keys: Vec<&str> = payload
-            .as_object()
-            .expect("payload object")
-            .keys()
-            .map(String::as_str)
-            .filter(|key| *key != "aps")
-            .collect();
-        keys.sort_unstable();
+        // The custom keys are exactly the documented record, the marker and
+        // the fields the extension words the alert from.
         let mut expected = IOS_CUSTOM_FIELDS.to_vec();
+        expected.extend(["project", "thread_title"]);
         expected.sort_unstable();
-        assert_eq!(keys, expected, "an undocumented field reached the payload");
+        assert_eq!(
+            custom_keys(&payload),
+            expected,
+            "an undocumented field reached the payload"
+        );
         assert_eq!(payload["thread_id"], "th_one");
         assert_eq!(payload["count"], "1");
         assert_eq!(payload["state"], "approval");
         assert_eq!(payload["h4rn_alert"], "agent");
+        assert_eq!(payload["project"], "h4rn");
+        assert_eq!(payload["thread_title"], "Fix the thing");
         // The title and body are not duplicated as custom data.
         assert!(payload.get("title").is_none());
         assert!(payload.get("body").is_none());
+    }
+
+    #[test]
+    fn an_ios_group_carries_its_raw_titles_for_the_extension() {
+        let titles = vec!["one".to_string(), String::new(), "two".to_string()];
+        let payload = group(&titles, "one · A thread · two".to_string()).apns_payload();
+        let mut expected = [IOS_CUSTOM_FIELDS, IOS_WORDING_FIELDS].concat();
+        expected.sort_unstable();
+        assert_eq!(custom_keys(&payload), expected);
+        assert_eq!(payload["thread_titles"], "one\n\ntwo");
+        assert_eq!(payload["thread_title"], "");
+        // The English alert is still there for an app without the extension.
+        assert_eq!(payload["aps"]["alert"]["title"], "3 agents finished");
+        assert_eq!(payload["aps"]["alert"]["body"], "one · A thread · two");
+        assert_eq!(payload["aps"]["mutable-content"], 1);
+    }
+
+    #[test]
+    fn an_ios_group_too_large_for_its_titles_keeps_the_english_body() {
+        // The 1 KiB cap in `PushAlert::data` counts raw bytes, but JSON writes
+        // a control character as six. Four full-length titles of them are
+        // under the cap and fit as the English body, but not twice.
+        let title = "\u{1}".repeat(120);
+        let titles: Vec<String> = (0..4).map(|_| title.clone()).collect();
+        assert!(titles.join("\n").len() <= 1024);
+        let body = titles.join(" · ");
+        let full = group(&titles, body.clone());
+        let payload = full.apns_payload();
+        assert!(payload.to_string().len() <= APNS_MAX_PAYLOAD_BYTES);
+        assert!(
+            payload.get("thread_titles").is_none(),
+            "the title list should have been dropped to fit"
+        );
+        // The extension still words the group's title, and shows the English
+        // list of titles from the body.
+        assert_eq!(payload["thread_title"], "");
+        assert_eq!(payload["aps"]["alert"]["body"], body);
+
+        // The same group with printable titles fits whole.
+        let plain: Vec<String> = (0..8)
+            .map(|index| format!("{index}{}", "x".repeat(119)))
+            .collect();
+        let payload = group(&plain, plain.join(" · ")).apns_payload();
+        assert!(payload.to_string().len() <= APNS_MAX_PAYLOAD_BYTES);
+        assert!(payload.get("thread_titles").is_some());
+    }
+
+    #[test]
+    fn an_ios_alert_that_cannot_fit_its_wording_fields_is_the_english_alert() {
+        // A project name is not shortened, and a finished alert's English body
+        // already repeats it, so a very long one fits once but not twice. The
+        // phone then shows the English alert as sent.
+        let mut message = message(PushPlatform::Ios);
+        let project = "p".repeat(2_000);
+        message
+            .data
+            .insert("body".to_string(), format!("{project} · Finished"));
+        message.data.insert("project".to_string(), project);
+        let payload = message.apns_payload();
+        assert!(payload.to_string().len() <= APNS_MAX_PAYLOAD_BYTES);
+        let mut expected = IOS_CUSTOM_FIELDS.to_vec();
+        expected.sort_unstable();
+        assert_eq!(custom_keys(&payload), expected);
+
+        // Without the wording fields it is exactly the payload from before
+        // the extension, so nothing is lost compared with that shape.
+        let mut legacy = message.clone();
+        for key in IOS_WORDING_FIELDS {
+            legacy.data.remove(*key);
+        }
+        assert_eq!(payload, legacy.apns_payload());
+    }
+
+    #[test]
+    fn an_ios_payload_at_exactly_the_limit_keeps_every_field() {
+        // Grow the English body until the full payload is exactly 4096 bytes:
+        // the limit is inclusive.
+        let titles = vec!["one".to_string(), "two".to_string()];
+        let base = group(&titles, String::new())
+            .apns_payload()
+            .to_string()
+            .len();
+        let body = "b".repeat(APNS_MAX_PAYLOAD_BYTES - base);
+        let payload = group(&titles, body.clone()).apns_payload();
+        assert_eq!(payload.to_string().len(), APNS_MAX_PAYLOAD_BYTES);
+        assert_eq!(payload["thread_titles"], "one\ntwo");
+
+        // One byte more and the title list is the first to go.
+        let payload = group(&titles, format!("{body}b")).apns_payload();
+        assert!(payload.get("thread_titles").is_none());
+        assert_eq!(payload["thread_title"], "");
+        assert_eq!(payload["project"], "");
     }
 
     #[tokio::test]

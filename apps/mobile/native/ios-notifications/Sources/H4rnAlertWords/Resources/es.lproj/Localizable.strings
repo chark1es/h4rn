@@ -1,0 +1,7 @@
+"push_untitled_thread" = "Un hilo";
+"push_working" = "En curso";
+"push_finished" = "Terminado";
+"push_failed" = "Fallido";
+"push_needs_approval" = "Requiere aprobación";
+"push_asks_for_input" = "Pide una respuesta";
+"push_stopped_at_limit" = "Se detuvo al llegar a un límite";

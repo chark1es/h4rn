@@ -2520,6 +2520,11 @@ row on that would silence a phone because of an operator misconfiguration. Only
 `410` and an explicit `Unregistered` reason remove the row, the same caution
 ADR-051 applies to FCM's 404.
 
+**Update (ADR-055):** the app now has a Notification Service Extension, but
+only to word the alert in the phone's language. It does not hide alerts, so the
+guarantee above is unchanged, and the payload gains the `project`,
+`thread_title` and `thread_titles` keys Android already had.
+
 ## ADR-053: A running turn is an Android Live Update built from the same record
 
 **Status:** Accepted
@@ -2651,3 +2656,77 @@ the app bundle. The repository has no step that adds files to the generated
 iOS project (`gen/apple` is recreated by `tauri ios init`), and neither could
 be checked without a Mac, so both are left as follow-up work. The iOS payload
 keeps ADR-052's custom keys and does not gain the new fields until then.
+
+**Update (ADR-055):** iOS now words its alerts too, in a Notification Service
+Extension, and its payload carries the same fields.
+
+## ADR-055: iOS words its alerts in a Notification Service Extension
+
+**Status:** Accepted
+
+ADR-054 left iPhone alerts in English: iOS shows `aps.alert` before any app
+code runs, and nothing added a target to the Xcode project that `tauri ios
+init` recreates. The iOS app now ships a Notification Service Extension,
+`H4rnNotifications`, with the bundle id `<app id>.notifications`
+(`dev.h4rn.app.notifications`). The payload already sets `mutable-content: 1`,
+so iOS hands each alert to the extension first. The extension replaces only
+the title and body, with Android's rules (ADR-054): the thread title or "A
+thread", the state word after the project, a group's count with its plural,
+and the group's titles. The words are in `.lproj` folders in the extension's
+own bundle, in English, Simplified Chinese, Spanish and Japanese, and iOS picks
+one from the phone's preferred languages, English for any other.
+
+Connect adds `project`, `thread_title` and `thread_titles` to the APNs custom
+keys. They are the project name and thread titles that the English alert
+already shows and that ADR-054 sends to Android, so nothing new leaves the
+daemon or reaches Apple. `aps.alert` keeps Connect's English title and body,
+which iOS shows when the app has no extension (a build from before this
+change), when the extension fails, and when it runs out of time: on
+`serviceExtensionTimeWillExpire` it hands back the alert as it arrived. An
+alert without `thread_title` (a relay from before ADR-054) and a state the app
+does not know keep the English too.
+
+APNs refuses a payload over 4096 bytes, like FCM. `thread_titles` keeps
+ADR-054's 1 KiB cap, but that cap counts raw bytes, and JSON writes a control
+character as six. So Connect also measures the encoded payload: when the new
+keys would push it over the limit, it drops `thread_titles` first (the phone
+words the group's title and shows Connect's English list), then `thread_title`
+and `project` (the phone shows the English alert). The new keys can never cost
+the alert itself.
+
+`loc-key` and `loc-args` with strings at the root of the app bundle were the
+other way. They replace the English alert for every build, so an app from
+before this change would show raw keys, and they would need the same
+project-generation step anyway. The extension leaves Connect's English as it
+is and words the alert only where the code to do so is installed.
+
+The wording is a small Swift type with no UIKit, UserNotifications or Tauri
+dependency, in its own package (`apps/mobile/native/ios-notifications`), so CI
+runs its tests with `swift test` on the macOS runner. The extension compiles
+the same source files and `.lproj` folders. It is not part of the
+`native/ios` package, which cannot build without UIKit and the Tauri API that
+`build.rs` stages during an iOS build. A test checks every word against
+Android's `push_strings.xml`, so the two apps cannot drift apart.
+
+`tauri ios init` writes `gen/apple` from Tauri's XcodeGen template, so
+`scripts/mobile-ios-notifications.sh` runs after every init: it writes an
+XcodeGen spec for the extension next to the generated `project.yml`, includes
+it from there and runs XcodeGen again. XcodeGen appends arrays when it merges
+an included spec, so the app target gains the extension as a dependency and
+embeds it without the script editing Tauri's template. CI runs the script
+before the simulator build, which compiles the extension, and the release
+workflow runs it before both of its builds. Tauri's `bundle.iOS.template`
+setting was the other way in; it replaces the whole template, so the repository
+would carry a copy of Tauri's template and have to follow every CLI release.
+The extension's name has no `_iOS` in it, because `tauri ios build` finds the
+app target's build settings by that suffix.
+
+The extension does not hide alerts. Hiding one from an extension needs Apple's
+`com.apple.developer.usernotifications.filtering` entitlement, which Apple
+grants on request, and an App Group to read the app's switch. Neither is part
+of this change, so ADR-052's guarantee stays as written, and no App Group is
+needed. Signing stays out of the repository: the extension needs its own App ID
+(`dev.h4rn.app.notifications`, no capabilities) and a provisioning profile.
+Automatic signing makes the profile for it. Tauri's manual signing sets a
+profile only on the app target, so a release built that way must give the
+extension its profile too.

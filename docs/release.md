@@ -354,7 +354,12 @@ artifact is collected. It is skipped when `PLAY_STORE_JSON_KEY` is empty.
 `packaging/fastlane/ios` lane `beta` uploads `H4RN_IPA_PATH` to TestFlight and
 is skipped unless the Apple signing secrets exist. The job always builds the
 simulator target, which compiles `apps/mobile/native/ios` (the Swift Keychain
-plugin) through `apps/mobile/src-tauri/build.rs`.
+plugin) through `apps/mobile/src-tauri/build.rs`. After `tauri ios init` it runs
+`scripts/mobile-ios-notifications.sh`, which adds the Notification Service
+Extension (`dev.h4rn.app.notifications`) that words alerts in the phone's
+language; `APPLE_TEAM_ID` becomes the extension's signing team. A signed build
+needs an App ID and a provisioning profile for the extension as well as for the
+app (see [mobile-notifications.md](mobile-notifications.md#the-notification-service-extension)).
 
 ## 6. Relay image and chart
 

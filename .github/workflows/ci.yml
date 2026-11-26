@@ -195,9 +195,15 @@ jobs:
         with:
           bun-version: 1.4.4
       - run: bun install --frozen-lockfile
+      # The alert words and their rules are plain Foundation, so they run as a
+      # host Swift package; the plural tests need Darwin's .stringsdict support.
+      - run: swift test --package-path apps/mobile/native/ios-notifications
       # Simulator builds need no Apple credentials and are therefore the part
       # CI can verify. TestFlight signing requirements are in docs/mobile.md.
       - run: bun run --cwd apps/mobile tauri ios init --ci
+      # Adds the Notification Service Extension target to the generated
+      # project, so the simulator build compiles it too (ADR-055).
+      - run: scripts/mobile-ios-notifications.sh
       - run: bun run --cwd apps/mobile tauri ios build --debug --ci --target aarch64-sim
 
   packaging:
@@ -220,6 +226,7 @@ jobs:
       - name: Shell syntax and YAML parse
         run: |
           bash -n scripts/mobile-android.sh
+          bash -n scripts/mobile-ios-notifications.sh
           for script in packaging/scripts/*.sh packaging/daemon/launchd/install.sh; do
             bash -n "${script}"
           done

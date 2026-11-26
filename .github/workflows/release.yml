@@ -334,6 +334,10 @@ jobs:
           fi
       - name: Initialise the iOS project
         run: bun run --cwd apps/mobile tauri ios init --ci
+      - name: Add the Notification Service Extension
+        env:
+          APPLE_DEVELOPMENT_TEAM: ${{ secrets.APPLE_TEAM_ID }}
+        run: scripts/mobile-ios-notifications.sh
       - name: Compile for the simulator (also verifies the Swift Keychain plugin)
         run: bun run --cwd apps/mobile tauri ios build --debug --ci --target aarch64-sim
       - name: Write the App Store Connect API key

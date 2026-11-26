@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>push_agents_need_attention</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@agents@</string>
+		<key>agents</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>ld</string>
+			<key>one</key>
+			<string>%ld agent needs attention</string>
+			<key>other</key>
+			<string>%ld agents need attention</string>
+		</dict>
+	</dict>
+	<key>push_agents_finished</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@agents@</string>
+		<key>agents</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>ld</string>
+			<key>one</key>
+			<string>%ld agent finished</string>
+			<key>other</key>
+			<string>%ld agents finished</string>
+		</dict>
+	</dict>
+</dict>
+</plist>
