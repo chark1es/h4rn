@@ -68,6 +68,14 @@ All notable changes to h4rn are recorded here. The format follows
   with no published key or a shell that cannot open a sign-in window are
   translated. Japanese and Chinese no longer put a space after 。 between
   two sentences in Settings → Worktrees.
+- **Dialogs and confirmations in Chinese, Spanish and Japanese.** New thread,
+  rename, edit from here (rewind), the branch and pull request dialogs, Share
+  with guest, Delegate a subagent, Add project and its import pane, and the
+  MCP server and skill dialogs follow the Language choice, as do every
+  confirmation's Cancel and every dialog's close button. Thread titles,
+  branches, paths, commit messages, server and skill names and the daemon's
+  own errors are shown as they are; a guest link's expiry, sizes and dates use
+  the language's own formats.
 - **Android Live Updates show a running agent.** A separate switch under
   Settings → Notifications → Phone alerts shows each running thread as an
   ongoing notification with its project and whether it is working, waiting for

@@ -10,6 +10,7 @@ import {
   HomeIcon,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -29,31 +30,12 @@ import { addProject, browseDirectories, shortPath } from "./store";
 
 type Mode = "open" | "new" | "clone" | "import";
 
-const MODES: Array<{ value: Mode; label: string; hint: string; icon: typeof FolderIcon }> = [
-  {
-    value: "open",
-    label: "Open folder",
-    hint: "A folder already on the host",
-    icon: FolderOpenIcon,
-  },
-  {
-    value: "new",
-    label: "New folder",
-    hint: "Create an empty project",
-    icon: FolderPlusIcon,
-  },
-  {
-    value: "clone",
-    label: "Clone repository",
-    hint: "From a git URL",
-    icon: GitBranchIcon,
-  },
-  {
-    value: "import",
-    label: "Import",
-    hint: "From Claude Code or Codex",
-    icon: ArrowDownToLineIcon,
-  },
+/** Each way to add a project; its label and hint are `addProject.modes.<value>`. */
+const MODES: Array<{ value: Mode; icon: typeof FolderIcon }> = [
+  { value: "open", icon: FolderOpenIcon },
+  { value: "new", icon: FolderPlusIcon },
+  { value: "clone", icon: GitBranchIcon },
+  { value: "import", icon: ArrowDownToLineIcon },
 ];
 
 /** The folder `git clone` would create for a URL or `owner/repo`. */
@@ -83,6 +65,7 @@ function FolderBrowser({
   error: string | null;
   onOpen: (path: string | null) => void;
 }) {
+  const { t } = useTranslation("dialogs");
   const [draft, setDraft] = useState("");
   const home = listing?.home ?? null;
   useEffect(() => {
@@ -95,8 +78,8 @@ function FolderBrowser({
         <button
           type="button"
           className="q-ibtn"
-          aria-label="Up one folder"
-          title="Up one folder"
+          aria-label={t("addProject.upFolder")}
+          title={t("addProject.upFolder")}
           disabled={!listing?.parent}
           onClick={() => onOpen(listing?.parent ?? null)}
         >
@@ -105,15 +88,15 @@ function FolderBrowser({
         <button
           type="button"
           className="q-ibtn"
-          aria-label="Home folder"
-          title="Home folder"
+          aria-label={t("addProject.homeFolder")}
+          title={t("addProject.homeFolder")}
           onClick={() => onOpen("~")}
         >
           <HomeIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
         </button>
         <input
           className="q-input q-mono"
-          aria-label="Folder path"
+          aria-label={t("addProject.folderPath")}
           value={draft}
           spellCheck={false}
           onChange={(event) => setDraft(event.target.value)}
@@ -129,13 +112,18 @@ function FolderBrowser({
           }}
         />
       </div>
-      <div className="q-fb-list" role="listbox" aria-label="Folders" aria-busy={loading}>
+      <div
+        className="q-fb-list"
+        role="listbox"
+        aria-label={t("addProject.folders")}
+        aria-busy={loading}
+      >
         {error ? (
           <div className="q-fb-msg err">{error}</div>
         ) : loading && !listing ? (
-          <div className="q-fb-msg">Reading folders…</div>
+          <div className="q-fb-msg">{t("addProject.readingFolders")}</div>
         ) : listing && listing.entries.length === 0 ? (
-          <div className="q-fb-msg">No folders inside.</div>
+          <div className="q-fb-msg">{t("addProject.noFolders")}</div>
         ) : (
           listing?.entries.map((entry) => (
             <button
@@ -197,6 +185,7 @@ function useFolderBrowser(open: boolean) {
  * one (optionally with `git init`), or clone a repository, all on the host.
  */
 export function AddProjectDialog() {
+  const { t } = useTranslation(["dialogs", "common"]);
   const open = useApp((state) => state.ui.addProjectOpen);
   const localHostId = useApp((state) => state.localHostId);
   const hostName = useApp((state) =>
@@ -233,16 +222,22 @@ export function AddProjectDialog() {
 
   const summary = useMemo(() => {
     if (!listing) return null;
-    if (mode === "open") return `Adds ${current}${listing.git ? " (a git repository)" : ""}.`;
+    if (mode === "open") {
+      return t(listing.git ? "addProject.summary.openGit" : "addProject.summary.open", {
+        path: current,
+      });
+    }
     if (mode === "new") {
       return name.trim()
-        ? `Creates ${joinPath(current, name.trim())}${gitInit ? " and runs git init" : ""}.`
-        : `Goes in ${current}.`;
+        ? t(gitInit ? "addProject.summary.newGit" : "addProject.summary.new", {
+            path: joinPath(current, name.trim()),
+          })
+        : t("addProject.summary.newIn", { path: current });
     }
     return cloneName
-      ? `Clones into ${joinPath(current, cloneName)}.`
-      : `Clones into a folder in ${current}.`;
-  }, [listing, mode, current, name, gitInit, cloneName]);
+      ? t("addProject.summary.clone", { path: joinPath(current, cloneName) })
+      : t("addProject.summary.cloneIn", { path: current });
+  }, [listing, mode, current, name, gitInit, cloneName, t]);
 
   const offline = connection !== "online" || !localHostId;
   const ready =
@@ -284,43 +279,47 @@ export function AddProjectDialog() {
     const project = result.project;
     closeAddProject();
     pushToast({
-      title: `Added ${project.name}.`,
-      description: `${shortPath(project.path, home)} is in the sidebar, ready for its first thread.`,
+      title: t("addProject.added", { name: project.name }),
+      description: t("addProject.addedBody", { path: shortPath(project.path, home) }),
       variant: "success",
     });
   };
 
+  const openName = listing?.path.split("/").filter(Boolean).pop();
   const submitLabel =
     mode === "import"
       ? importStarting || importRunning
-        ? "Importing…"
+        ? t("addProject.submit.importing")
         : importSelected > 0
-          ? `Import ${importSelected} ${importSelected === 1 ? "project" : "projects"}`
-          : "Import"
+          ? t("addProject.submit.importCount", { count: importSelected })
+          : t("addProject.submit.import")
       : busy
         ? mode === "clone"
-          ? "Cloning…"
+          ? t("addProject.submit.cloning")
           : mode === "new"
-            ? "Creating…"
-            : "Adding…"
+            ? t("addProject.submit.creating")
+            : t("addProject.submit.adding")
         : mode === "open"
-          ? `Add ${listing ? (listing.path.split("/").filter(Boolean).pop() ?? "folder") : "folder"}`
+          ? openName
+            ? t("addProject.submit.addNamed", { name: openName })
+            : t("addProject.submit.addFolder")
           : mode === "new"
-            ? "Create project"
-            : "Clone";
+            ? t("addProject.submit.create")
+            : t("addProject.submit.clone");
 
   return (
     <Dialog open={open} onOpenChange={(value) => (value ? undefined : closeAddProject())}>
       <DialogContent className="gap-4 sm:max-w-[600px]">
         <DialogHeader>
-          <DialogTitle>Add project</DialogTitle>
+          <DialogTitle>{t("addProject.title")}</DialogTitle>
           <DialogDescription>
-            A project is a folder on {hostName ?? "a host"}. Threads you start there are listed
-            under it.
+            {hostName
+              ? t("addProject.description", { host: hostName })
+              : t("addProject.descriptionNoHost")}
           </DialogDescription>
         </DialogHeader>
 
-        <div className="q-addp-modes" role="radiogroup" aria-label="How to add the project">
+        <div className="q-addp-modes" role="radiogroup" aria-label={t("addProject.howTo")}>
           {MODES.map((option) => (
             // biome-ignore lint/a11y/useSemanticElements: a card-style radio needs a button
             <button
@@ -335,8 +334,8 @@ export function AddProjectDialog() {
               }}
             >
               <option.icon className="q-icon" strokeWidth={1.5} aria-hidden />
-              <span className="q-addp-mode-t">{option.label}</span>
-              <span className="q-addp-mode-s">{option.hint}</span>
+              <span className="q-addp-mode-t">{t(`addProject.modes.${option.value}.label`)}</span>
+              <span className="q-addp-mode-s">{t(`addProject.modes.${option.value}.hint`)}</span>
               {mode === option.value ? (
                 <CheckIcon className="q-icon s12 tick" strokeWidth={2} aria-hidden />
               ) : null}
@@ -350,11 +349,11 @@ export function AddProjectDialog() {
           <>
             {mode === "clone" ? (
               <label className="q-addp-field">
-                <span className="lab">Repository</span>
+                <span className="lab">{t("fields.repository")}</span>
                 <input
                   className="q-input q-mono"
                   value={url}
-                  placeholder="https://github.com/owner/repo, git@…, or owner/repo"
+                  placeholder={t("addProject.repoPlaceholder")}
                   spellCheck={false}
                   autoComplete="off"
                   onChange={(event) => setUrl(event.target.value)}
@@ -364,7 +363,7 @@ export function AddProjectDialog() {
 
             {mode === "new" ? (
               <label className="q-addp-field">
-                <span className="lab">Name</span>
+                <span className="lab">{t("fields.name")}</span>
                 <input
                   className="q-input"
                   value={name}
@@ -383,9 +382,7 @@ export function AddProjectDialog() {
             ) : null}
 
             <div className="q-addp-field">
-              <span className="lab">
-                {mode === "open" ? "Folder" : mode === "new" ? "Create in" : "Clone into"}
-              </span>
+              <span className="lab">{t(`addProject.folderLabel.${mode}`)}</span>
               <FolderBrowser
                 listing={listing}
                 loading={browser.loading}
@@ -396,7 +393,7 @@ export function AddProjectDialog() {
 
             {mode === "clone" ? (
               <label className="q-addp-field">
-                <span className="lab">Folder name</span>
+                <span className="lab">{t("addProject.folderName")}</span>
                 <input
                   className="q-input q-mono"
                   value={folderName}
@@ -419,7 +416,7 @@ export function AddProjectDialog() {
                 <span className={cn("q-check", gitInit && "on")} aria-hidden>
                   {gitInit ? <CheckIcon className="q-icon s12" strokeWidth={2} /> : null}
                 </span>
-                Initialize a git repository
+                {t("addProject.gitInit")}
               </label>
             ) : null}
 
@@ -431,7 +428,9 @@ export function AddProjectDialog() {
             ) : null}
             {busy && mode === "clone" ? (
               <p className="q-faint" style={{ margin: 0, fontSize: 12 }}>
-                Cloning on {hostName ?? "the host"}. A large repository can take a few minutes.
+                {hostName
+                  ? t("addProject.cloning", { host: hostName })
+                  : t("addProject.cloningNoHost")}
               </p>
             ) : null}
           </>
@@ -439,7 +438,7 @@ export function AddProjectDialog() {
 
         <DialogFooter>
           <Button variant="ghost" onClick={closeAddProject}>
-            Cancel
+            {t("common:cancel")}
           </Button>
           <Button onClick={() => void submit()} disabled={!ready}>
             {submitLabel}

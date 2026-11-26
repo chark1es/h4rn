@@ -2,6 +2,8 @@
 
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+// Starts i18n with the English catalogue, as main.tsx does in the app.
+import "@/lib/i18n";
 
 const renameThread = vi.hoisted(() => vi.fn(async () => true));
 

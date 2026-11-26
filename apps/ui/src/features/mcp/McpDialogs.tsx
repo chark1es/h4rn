@@ -1,5 +1,6 @@
 import { PlusIcon, Trash2Icon } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { ChipSelect } from "@/components/common/ChipSelect";
 
 import { Button } from "@/components/ui/button";
@@ -26,6 +27,7 @@ import type {
   McpTransportView,
 } from "@/gen";
 import { HARNESS_LABELS } from "@/lib/entities";
+import { formatNumber } from "@/lib/i18n";
 import { useApp } from "@/lib/store/appStore";
 import { type ConflictChoice, conflictResolution } from "./labels";
 import {
@@ -60,6 +62,11 @@ function FieldLabel({
 }
 
 const NO_TOOLS: McpToolInfo[] = [];
+
+/** Example values for the placeholders: code, so the same in every language. */
+const EXAMPLE_ARGS = "-y\n@modelcontextprotocol/server-github";
+const EXAMPLE_ALLOWED_TOOLS = "search, read_file";
+const EXAMPLE_CONFIRM_TOOLS = "write_file, run";
 
 type SecretRow = { id: string; name: string; value: string };
 
@@ -102,9 +109,12 @@ export function McpServerDialog({
   const [args, setArgs] = useState("");
   const [cwd, setCwd] = useState("");
   const [url, setUrl] = useState("");
+  const { t } = useTranslation(["dialogs", "common"]);
   const [secrets, setSecrets] = useState<SecretRow[]>([newSecretRow()]);
   const [saving, setSaving] = useState(false);
-  const [problem, setProblem] = useState<string | null>(null);
+  const [problem, setProblem] = useState<
+    "nameRequired" | "urlRequired" | "commandRequired" | "refused" | null
+  >(null);
 
   useEffect(() => {
     if (!open) return;
@@ -121,20 +131,20 @@ export function McpServerDialog({
   }, [open, server]);
 
   const isStdio = kind === "stdio";
-  const secretHeading = isStdio ? "Environment variables" : "Headers";
+  const secretKind = isStdio ? "env" : "headers";
 
   const submit = async () => {
     const trimmed = name.trim();
     if (!trimmed) {
-      setProblem("A name is required; it becomes the tool namespace.");
+      setProblem("nameRequired");
       return;
     }
     if (!isStdio && !url.trim()) {
-      setProblem("An HTTP or SSE server needs a URL.");
+      setProblem("urlRequired");
       return;
     }
     if (isStdio && !command.trim()) {
-      setProblem("A stdio server needs a command.");
+      setProblem("commandRequired");
       return;
     }
     const rows = secrets.filter((row) => row.name.trim());
@@ -170,23 +180,22 @@ export function McpServerDialog({
     const saved = await upsertMcpServer(input);
     setSaving(false);
     if (saved) onClose();
-    else setProblem("The daemon refused the configuration. The previous one is unchanged.");
+    else setProblem("refused");
   };
 
   return (
     <Dialog open={open} onOpenChange={(value) => (value ? undefined : onClose())}>
       <DialogContent className="gap-3 sm:max-w-[620px]">
         <DialogHeader>
-          <DialogTitle>{server ? `Edit ${server.name}` : "Add MCP server"}</DialogTitle>
-          <DialogDescription>
-            Secret values are write-only. Existing values stay on this machine and are never shown
-            again.
-          </DialogDescription>
+          <DialogTitle>
+            {server ? t("mcp.server.titleEdit", { name: server.name }) : t("mcp.server.titleAdd")}
+          </DialogTitle>
+          <DialogDescription>{t("mcp.server.description")}</DialogDescription>
         </DialogHeader>
 
         <div className="grid gap-3">
           <div className="flex flex-col gap-1">
-            <FieldLabel htmlFor="mcp-name">Name</FieldLabel>
+            <FieldLabel htmlFor="mcp-name">{t("fields.name")}</FieldLabel>
             <Input
               id="mcp-name"
               value={name}
@@ -198,8 +207,8 @@ export function McpServerDialog({
           </div>
 
           <div className="flex flex-col gap-1">
-            <FieldLabel>Transport</FieldLabel>
-            <div className="q-seg inline" role="tablist" aria-label="Transport">
+            <FieldLabel>{t("mcp.server.transport")}</FieldLabel>
+            <div className="q-seg inline" role="tablist" aria-label={t("mcp.server.transport")}>
               {(["stdio", "http", "sse"] as const).map((option) => (
                 <button
                   key={option}
@@ -217,7 +226,7 @@ export function McpServerDialog({
           {isStdio ? (
             <>
               <div className="flex flex-col gap-1">
-                <FieldLabel htmlFor="mcp-command">Command</FieldLabel>
+                <FieldLabel htmlFor="mcp-command">{t("mcp.server.command")}</FieldLabel>
                 <Input
                   id="mcp-command"
                   value={command}
@@ -227,21 +236,21 @@ export function McpServerDialog({
                 />
               </div>
               <div className="flex flex-col gap-1">
-                <FieldLabel htmlFor="mcp-args" hint="One per line">
-                  Arguments
+                <FieldLabel htmlFor="mcp-args" hint={t("mcp.server.argsHint")}>
+                  {t("fields.arguments")}
                 </FieldLabel>
                 <Textarea
                   id="mcp-args"
                   value={args}
                   onChange={(event) => setArgs(event.target.value)}
-                  placeholder={"-y\n@modelcontextprotocol/server-github"}
+                  placeholder={EXAMPLE_ARGS}
                   spellCheck={false}
                   className="min-h-[64px] font-mono text-[12px]"
                 />
               </div>
               <div className="flex flex-col gap-1">
-                <FieldLabel htmlFor="mcp-cwd" hint="Optional">
-                  Working directory
+                <FieldLabel htmlFor="mcp-cwd" hint={t("fields.optional")}>
+                  {t("mcp.server.cwd")}
                 </FieldLabel>
                 <Input
                   id="mcp-cwd"
@@ -254,7 +263,7 @@ export function McpServerDialog({
             </>
           ) : (
             <div className="flex flex-col gap-1">
-              <FieldLabel htmlFor="mcp-url">Endpoint URL</FieldLabel>
+              <FieldLabel htmlFor="mcp-url">{t("mcp.server.url")}</FieldLabel>
               <Input
                 id="mcp-url"
                 value={url}
@@ -266,13 +275,15 @@ export function McpServerDialog({
           )}
 
           <div className="flex flex-col gap-1">
-            <FieldLabel hint="Values are stored as secrets">{secretHeading}</FieldLabel>
+            <FieldLabel hint={t("mcp.server.secretsHint")}>
+              {t(`mcp.server.${secretKind}.heading`)}
+            </FieldLabel>
             <div className="flex flex-col gap-1.5">
               {secrets.map((row, index) => (
                 <div key={row.id} className="flex items-center gap-1.5">
                   <Input
                     value={row.name}
-                    aria-label={`${secretHeading} name ${index + 1}`}
+                    aria-label={t(`mcp.server.${secretKind}.name`, { index: index + 1 })}
                     placeholder="GITHUB_TOKEN"
                     spellCheck={false}
                     onChange={(event) =>
@@ -286,8 +297,10 @@ export function McpServerDialog({
                   <Input
                     value={row.value}
                     type="password"
-                    aria-label={`${secretHeading} value ${index + 1}`}
-                    placeholder={row.name && server ? "Unchanged" : "Value"}
+                    aria-label={t(`mcp.server.${secretKind}.value`, { index: index + 1 })}
+                    placeholder={
+                      row.name && server ? t("mcp.server.unchanged") : t("mcp.server.value")
+                    }
                     autoComplete="new-password"
                     onChange={(event) =>
                       setSecrets((current) =>
@@ -300,7 +313,7 @@ export function McpServerDialog({
                   <button
                     type="button"
                     className="q-ibtn"
-                    aria-label={`Remove ${secretHeading} row ${index + 1}`}
+                    aria-label={t(`mcp.server.${secretKind}.remove`, { index: index + 1 })}
                     onClick={() =>
                       setSecrets((current) =>
                         current.length === 1
@@ -319,20 +332,22 @@ export function McpServerDialog({
                 style={{ alignSelf: "flex-start" }}
                 onClick={() => setSecrets((current) => [...current, newSecretRow()])}
               >
-                <PlusIcon className="q-icon s14" aria-hidden /> Add row
+                <PlusIcon className="q-icon s14" aria-hidden /> {t("mcp.server.addRow")}
               </button>
             </div>
           </div>
 
-          {problem ? <div className="q-banner err">{problem}</div> : null}
+          {problem ? (
+            <div className="q-banner err">{t(`mcp.server.problems.${problem}`)}</div>
+          ) : null}
         </div>
 
         <DialogFooter>
           <Button variant="ghost" onClick={onClose}>
-            Cancel
+            {t("common:cancel")}
           </Button>
           <Button onClick={() => void submit()} disabled={saving}>
-            {saving ? "Saving…" : server ? "Save changes" : "Add server"}
+            {saving ? t("common:saving") : server ? t("common:saveChanges") : t("mcp.server.add")}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -360,9 +375,10 @@ export function McpImportDialog({
   const [preview, setPreview] = useState<McpImportPreview | null>(null);
   const [selected, setSelected] = useState<Record<string, boolean>>({});
   const [resolutions, setResolutions] = useState<Record<string, string>>({});
+  const { t } = useTranslation(["dialogs", "common"]);
   const [renames, setRenames] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
-  const [problem, setProblem] = useState<string | null>(null);
+  const [problem, setProblem] = useState<"unreadable" | "partial" | null>(null);
 
   useEffect(() => {
     if (!open) return;
@@ -383,7 +399,7 @@ export function McpImportDialog({
     const result = await previewMcpImport(harness, workspace.trim() || null);
     setBusy(false);
     if (!result) {
-      setProblem("That harness config could not be read.");
+      setProblem("unreadable");
       return;
     }
     setPreview(result);
@@ -422,7 +438,7 @@ export function McpImportDialog({
     }
     setBusy(false);
     if (ok && conflictOk) onClose();
-    else setProblem("Some entries were not imported. The preview still lists what remains.");
+    else setProblem("partial");
   };
 
   const candidates = preview?.candidates ?? [];
@@ -432,28 +448,25 @@ export function McpImportDialog({
     <Dialog open={open} onOpenChange={(value) => (value ? undefined : onClose())}>
       <DialogContent className="gap-3 sm:max-w-[640px]">
         <DialogHeader>
-          <DialogTitle>Import from a harness</DialogTitle>
-          <DialogDescription>
-            h4rn reads the harness&apos;s own files and shows a preview. Nothing is written until
-            you import, and conflicts need an explicit answer.
-          </DialogDescription>
+          <DialogTitle>{t("mcp.import.title")}</DialogTitle>
+          <DialogDescription>{t("mcp.import.description")}</DialogDescription>
         </DialogHeader>
 
         <div className="grid gap-3 sm:grid-cols-2">
           <div className="flex flex-col gap-1">
-            <FieldLabel htmlFor="mcp-import-harness">Harness</FieldLabel>
+            <FieldLabel htmlFor="mcp-import-harness">{t("fields.harness")}</FieldLabel>
             <ChipSelect
               id="mcp-import-harness"
               block
-              label="Harness"
+              label={t("fields.harness")}
               value={harness}
               options={HARNESSES.map((entry) => ({ value: entry, label: HARNESS_LABELS[entry] }))}
               onChange={setHarness}
             />
           </div>
           <div className="flex flex-col gap-1">
-            <FieldLabel htmlFor="mcp-import-workspace" hint="Optional">
-              Workspace
+            <FieldLabel htmlFor="mcp-import-workspace" hint={t("fields.optional")}>
+              {t("fields.workspace")}
             </FieldLabel>
             <Input
               id="mcp-import-workspace"
@@ -467,11 +480,11 @@ export function McpImportDialog({
 
         <div className="flex items-center gap-2">
           <Button variant="secondary" onClick={() => void read()} disabled={busy}>
-            {busy ? "Reading…" : "Read config"}
+            {busy ? t("mcp.import.reading") : t("mcp.import.read")}
           </Button>
           {preview ? (
             <span className="q-faint" style={{ fontSize: 12 }}>
-              {preview.origins.join(" · ") || "No config files found"}
+              {preview.origins.join(" · ") || t("mcp.import.noFiles")}
             </span>
           ) : null}
         </div>
@@ -479,15 +492,17 @@ export function McpImportDialog({
         {preview ? (
           <>
             <div className="q-sec-h" style={{ marginTop: 4 }}>
-              <h2>Entries</h2>
+              <h2>{t("mcp.import.entries")}</h2>
               <span className="aside">
-                {chosen} selected · {preview.conflicts.length} conflicts
+                {t("mcp.import.summary", { selected: chosen, count: preview.conflicts.length })}
               </span>
             </div>
             <div className="q-list">
               {candidates.length === 0 ? (
                 <div className="q-li">
-                  <span className="q-faint">No servers found in {HARNESS_LABELS[harness]}.</span>
+                  <span className="q-faint">
+                    {t("mcp.import.noServers", { harness: HARNESS_LABELS[harness] })}
+                  </span>
                 </div>
               ) : (
                 candidates.map((candidate) => (
@@ -503,7 +518,7 @@ export function McpImportDialog({
                             [candidate.name]: event.target.checked,
                           }))
                         }
-                        aria-label={`Import ${candidate.name}`}
+                        aria-label={t("mcp.import.importOne", { name: candidate.name })}
                       />
                     </span>
                     <div className="grow">
@@ -513,7 +528,9 @@ export function McpImportDialog({
                         <span className="q-mono">{origin(candidate.transport)}</span>
                       </div>
                     </div>
-                    {candidate.existing ? <span className="q-badge">Already added</span> : null}
+                    {candidate.existing ? (
+                      <span className="q-badge">{t("mcp.import.alreadyAdded")}</span>
+                    ) : null}
                   </label>
                 ))
               )}
@@ -524,20 +541,22 @@ export function McpImportDialog({
                 {preview.conflicts.map((conflict) => (
                   <div key={conflict.name} className="q-conflict">
                     <div className="grow">
-                      <div className="t">{conflict.name} already exists</div>
+                      <div className="t">
+                        {t("mcp.import.conflictTitle", { name: conflict.name })}
+                      </div>
                       <div className="q-muted" style={{ fontSize: 12, marginTop: 2 }}>
-                        h4rn has a different configuration for this name. Pick which one to keep.
+                        {t("mcp.import.conflictBody")}
                       </div>
                       <div className="flex items-center gap-1.5" style={{ marginTop: 8 }}>
                         <ChipSelect
-                          label={`Resolution for ${conflict.name}`}
+                          label={t("mcp.import.resolutionFor", { name: conflict.name })}
                           width={160}
                           value={resolutions[conflict.name] ?? "keep_mine"}
                           options={[
-                            { value: "keep_mine", label: "Keep mine" },
-                            { value: "use_theirs", label: "Use theirs" },
-                            { value: "rename", label: "Rename theirs" },
-                            { value: "skip", label: "Skip" },
+                            { value: "keep_mine", label: t("mcp.import.keepMine") },
+                            { value: "use_theirs", label: t("mcp.import.useTheirs") },
+                            { value: "rename", label: t("mcp.import.renameTheirs") },
+                            { value: "skip", label: t("mcp.import.skip") },
                           ]}
                           onChange={(value) =>
                             setResolutions((current) => ({
@@ -555,8 +574,8 @@ export function McpImportDialog({
                                 [conflict.name]: event.target.value,
                               }))
                             }
-                            placeholder="new name"
-                            aria-label={`New name for ${conflict.name}`}
+                            placeholder={t("mcp.import.newName")}
+                            aria-label={t("mcp.import.newNameFor", { name: conflict.name })}
                           />
                         ) : null}
                       </div>
@@ -568,19 +587,19 @@ export function McpImportDialog({
           </>
         ) : null}
 
-        {problem ? <div className="q-banner err">{problem}</div> : null}
+        {problem ? <div className="q-banner err">{t(`mcp.import.problems.${problem}`)}</div> : null}
 
         <DialogFooter>
           <Button variant="ghost" onClick={onClose}>
-            Cancel
+            {t("common:cancel")}
           </Button>
           <Button onClick={() => void apply()} disabled={busy || !preview}>
-            {busy ? "Importing…" : `Import ${chosen} ${chosen === 1 ? "server" : "servers"}`}
+            {busy ? t("mcp.import.importing") : t("mcp.import.submit", { count: chosen })}
           </Button>
         </DialogFooter>
         {host ? (
           <div className="q-faint" style={{ fontSize: 11.5 }}>
-            Reading on {host.name}. Secrets move into the host&apos;s secret store.
+            {t("mcp.import.readingOn", { host: host.name })}
           </div>
         ) : null}
       </DialogContent>
@@ -610,9 +629,10 @@ export function McpShareDialog({
   const [machine, setMachine] = useState<HostId>("");
   const [allowed, setAllowed] = useState("");
   const [confirmTools, setConfirmTools] = useState("");
+  const { t } = useTranslation(["dialogs", "common"]);
   const [confirmAll, setConfirmAll] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [problem, setProblem] = useState<string | null>(null);
+  const [problem, setProblem] = useState<"pickMachine" | "refused" | null>(null);
 
   const choices = useMemo(
     () =>
@@ -635,7 +655,7 @@ export function McpShareDialog({
   const submit = async () => {
     if (!server) return;
     if (!machine) {
-      setProblem("Pick a machine to share with.");
+      setProblem("pickMachine");
       return;
     }
     const policy: McpSharePolicy = {
@@ -648,54 +668,53 @@ export function McpShareDialog({
     const ok = await shareMcpServer(server.name, machine, policy);
     setBusy(false);
     if (ok) onClose();
-    else setProblem("The daemon refused the grant. Nothing was shared.");
+    else setProblem("refused");
   };
 
   return (
     <Dialog open={open} onOpenChange={(value) => (value ? undefined : onClose())}>
       <DialogContent className="gap-3 sm:max-w-[560px]">
         <DialogHeader>
-          <DialogTitle>Share {server?.name ?? "server"}</DialogTitle>
-          <DialogDescription>
-            The other machine proxies the server; this machine still runs it, enforces the policy
-            and keeps the credentials.
-          </DialogDescription>
+          <DialogTitle>
+            {server ? t("mcp.share.title", { name: server.name }) : t("mcp.share.titleFallback")}
+          </DialogTitle>
+          <DialogDescription>{t("mcp.share.description")}</DialogDescription>
         </DialogHeader>
 
         <div className="grid gap-3">
           <div className="flex flex-col gap-1">
-            <FieldLabel htmlFor="mcp-share-machine">Machine</FieldLabel>
+            <FieldLabel htmlFor="mcp-share-machine">{t("mcp.share.machine")}</FieldLabel>
             <ChipSelect
               id="mcp-share-machine"
               block
-              label="Machine"
-              placeholder="No other machine"
+              label={t("mcp.share.machine")}
+              placeholder={t("mcp.share.noMachine")}
               value={machine}
               options={choices.map((host) => ({ value: host.host_id, label: host.name }))}
               onChange={setMachine}
             />
           </div>
           <div className="flex flex-col gap-1">
-            <FieldLabel htmlFor="mcp-share-allowed" hint="Blank allows every tool">
-              Tools allowed
+            <FieldLabel htmlFor="mcp-share-allowed" hint={t("mcp.share.allowedHint")}>
+              {t("mcp.share.allowed")}
             </FieldLabel>
             <Input
               id="mcp-share-allowed"
               value={allowed}
               onChange={(event) => setAllowed(event.target.value)}
-              placeholder="search, read_file"
+              placeholder={EXAMPLE_ALLOWED_TOOLS}
               spellCheck={false}
             />
           </div>
           <div className="flex flex-col gap-1">
-            <FieldLabel htmlFor="mcp-share-confirm" hint="Comma separated">
-              Confirm before each call
+            <FieldLabel htmlFor="mcp-share-confirm" hint={t("mcp.share.confirmHint")}>
+              {t("mcp.share.confirm")}
             </FieldLabel>
             <Input
               id="mcp-share-confirm"
               value={confirmTools}
               onChange={(event) => setConfirmTools(event.target.value)}
-              placeholder="write_file, run"
+              placeholder={EXAMPLE_CONFIRM_TOOLS}
               spellCheck={false}
             />
           </div>
@@ -705,18 +724,18 @@ export function McpShareDialog({
               checked={confirmAll}
               onChange={(event) => setConfirmAll(event.target.checked)}
             />
-            Ask on this machine before every call
+            {t("mcp.share.confirmAll")}
           </label>
         </div>
 
-        {problem ? <div className="q-banner err">{problem}</div> : null}
+        {problem ? <div className="q-banner err">{t(`mcp.share.problems.${problem}`)}</div> : null}
 
         <DialogFooter>
           <Button variant="ghost" onClick={onClose}>
-            Cancel
+            {t("common:cancel")}
           </Button>
           <Button onClick={() => void submit()} disabled={busy || choices.length === 0}>
-            {busy ? "Sharing…" : "Share"}
+            {busy ? t("mcp.share.sharing") : t("mcp.share.share")}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -741,9 +760,10 @@ export function McpToolsDialog({
   const tools = server ? (toolMap[server.name] ?? NO_TOOLS) : NO_TOOLS;
   const [tool, setTool] = useState("");
   const [args, setArgs] = useState("{}");
+  const { t } = useTranslation(["dialogs", "common"]);
   const [result, setResult] = useState<McpTestCallResult | null>(null);
   const [busy, setBusy] = useState(false);
-  const [problem, setProblem] = useState<string | null>(null);
+  const [problem, setProblem] = useState<"badJson" | "failed" | null>(null);
 
   useEffect(() => {
     if (!open || !server) return;
@@ -760,7 +780,7 @@ export function McpToolsDialog({
     try {
       parsed = JSON.parse(args || "{}");
     } catch {
-      setProblem("Arguments must be valid JSON.");
+      setProblem("badJson");
       return;
     }
     setBusy(true);
@@ -768,29 +788,28 @@ export function McpToolsDialog({
     const outcome = await testMcpTool(server.name, tool, parsed);
     setBusy(false);
     if (outcome) setResult(outcome);
-    else setProblem("The call failed. The server status and arguments are unchanged.");
+    else setProblem("failed");
   };
 
   return (
     <Dialog open={open} onOpenChange={(value) => (value ? undefined : onClose())}>
       <DialogContent className="gap-3 sm:max-w-[680px]">
         <DialogHeader>
-          <DialogTitle>{server?.name ?? "Server"} tools</DialogTitle>
-          <DialogDescription>
-            Listing starts the server if needed. A test call uses your local authority and is
-            recorded on this machine.
-          </DialogDescription>
+          <DialogTitle>
+            {server ? t("mcp.tools.title", { name: server.name }) : t("mcp.tools.titleFallback")}
+          </DialogTitle>
+          <DialogDescription>{t("mcp.tools.description")}</DialogDescription>
         </DialogHeader>
 
         <div className="grid gap-2">
           <div className="q-sec-h">
-            <h2>Tools</h2>
-            <span className="aside">{tools.length} available</span>
+            <h2>{t("mcp.tools.heading")}</h2>
+            <span className="aside">{t("mcp.tools.available", { count: tools.length })}</span>
           </div>
           <div className="q-list" style={{ maxHeight: 220, overflow: "auto" }}>
             {tools.length === 0 ? (
               <div className="q-li">
-                <span className="q-faint">No tools reported yet.</span>
+                <span className="q-faint">{t("mcp.tools.none")}</span>
               </div>
             ) : (
               tools.map((entry) => (
@@ -806,17 +825,19 @@ export function McpToolsDialog({
                     {entry.tool}
                   </span>
                   <div className="grow">
-                    <div className="s">{entry.description ?? "No description"}</div>
+                    <div className="s">{entry.description ?? t("mcp.tools.noDescription")}</div>
                   </div>
-                  {entry.read_only ? <span className="q-badge ok">read-only</span> : null}
+                  {entry.read_only ? (
+                    <span className="q-badge ok">{t("mcp.tools.readOnly")}</span>
+                  ) : null}
                 </button>
               ))
             )}
           </div>
 
           <div className="flex flex-col gap-1">
-            <FieldLabel htmlFor="mcp-call-args" hint="JSON">
-              Arguments
+            <FieldLabel htmlFor="mcp-call-args" hint={t("mcp.tools.argsHint")}>
+              {t("fields.arguments")}
             </FieldLabel>
             <Textarea
               id="mcp-call-args"
@@ -830,22 +851,25 @@ export function McpToolsDialog({
           {result ? (
             <div className="q-code" style={{ padding: 10, whiteSpace: "pre-wrap", maxHeight: 200 }}>
               <span className={result.is_error ? "q-danger" : "q-ok"}>
-                {result.is_error ? "Tool error" : "OK"} · {Number(result.duration_ms)} ms
-                {result.truncated ? " · output truncated" : ""}
+                {result.is_error ? t("mcp.tools.toolError") : t("mcp.tools.ok")} ·{" "}
+                {formatNumber(Number(result.duration_ms), { style: "unit", unit: "millisecond" })}
+                {result.truncated ? ` · ${t("mcp.tools.truncated")}` : null}
               </span>
               {"\n"}
-              {result.content || "(no content)"}
+              {result.content || t("mcp.tools.noContent")}
             </div>
           ) : null}
-          {problem ? <div className="q-banner err">{problem}</div> : null}
+          {problem ? (
+            <div className="q-banner err">{t(`mcp.tools.problems.${problem}`)}</div>
+          ) : null}
         </div>
 
         <DialogFooter>
           <Button variant="ghost" onClick={onClose}>
-            Close
+            {t("common:close")}
           </Button>
           <Button onClick={() => void call()} disabled={busy || !tool}>
-            {busy ? "Calling…" : "Test call"}
+            {busy ? t("mcp.tools.calling") : t("mcp.tools.testCall")}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -868,13 +892,14 @@ export function McpRemoveDialog({
   onClose: () => void;
   onRemoved: () => void;
 }) {
+  const { t } = useTranslation(["dialogs", "common"]);
   const [busy, setBusy] = useState(false);
-  const [problem, setProblem] = useState<string | null>(null);
+  const [problem, setProblem] = useState(false);
 
   useEffect(() => {
     if (!open) return;
     setBusy(false);
-    setProblem(null);
+    setProblem(false);
   }, [open]);
 
   const remove = async () => {
@@ -886,7 +911,7 @@ export function McpRemoveDialog({
       onRemoved();
       onClose();
     } else {
-      setProblem("The daemon did not remove the server. It is still configured.");
+      setProblem(true);
     }
   };
 
@@ -894,19 +919,18 @@ export function McpRemoveDialog({
     <Dialog open={open} onOpenChange={(value) => (value ? undefined : onClose())}>
       <DialogContent className="gap-3 sm:max-w-[460px]">
         <DialogHeader>
-          <DialogTitle>Remove {server?.name ?? "server"}?</DialogTitle>
-          <DialogDescription>
-            Its configuration and every secret value stored for it are deleted from this machine.
-            Harness sessions that are already running keep their copy until they restart.
-          </DialogDescription>
+          <DialogTitle>
+            {server ? t("mcp.remove.title", { name: server.name }) : t("mcp.remove.titleFallback")}
+          </DialogTitle>
+          <DialogDescription>{t("mcp.remove.description")}</DialogDescription>
         </DialogHeader>
-        {problem ? <div className="q-banner err">{problem}</div> : null}
+        {problem ? <div className="q-banner err">{t("mcp.remove.problem")}</div> : null}
         <DialogFooter>
           <Button variant="ghost" onClick={onClose}>
-            Cancel
+            {t("common:cancel")}
           </Button>
           <Button variant="destructive" onClick={() => void remove()} disabled={busy || !server}>
-            {busy ? "Removing…" : "Remove server"}
+            {busy ? t("removing") : t("mcp.remove.button")}
           </Button>
         </DialogFooter>
       </DialogContent>

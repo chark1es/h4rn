@@ -1,5 +1,6 @@
 import { CheckIcon, FolderIcon, GitBranchIcon, Trash2Icon, TriangleAlertIcon } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { ChipSelect } from "@/components/common/ChipSelect";
 
 import { Button } from "@/components/ui/button";
@@ -22,7 +23,7 @@ import type {
   SkillSummary,
 } from "@/gen";
 import { HARNESS_LABELS } from "@/lib/entities";
-import { absoluteDateTime, relativeAge } from "@/lib/format";
+import { formatDateTime, formatNumber, formatRelativeTime, i18n } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 import {
   addSkill,
@@ -37,9 +38,8 @@ import {
 
 const ALL_HARNESSES: HarnessKind[] = ["claude_code", "codex", "opencode", "antigravity"];
 const NO_AVAILABILITY: never[] = [];
-
-const SECRET_REFUSAL =
-  "h4rn scans every file in a skill and refuses bundles that contain credentials. Remove the secret (or read it from an environment variable at run time) and add it again.";
+/** An example repository for the placeholder: a URL, the same in every language. */
+const EXAMPLE_REPO = "git@github.com:acme/skills.git";
 
 function FieldLabel({
   children,
@@ -58,22 +58,29 @@ function FieldLabel({
   );
 }
 
+/** A size with one decimal in the active language's digits; the unit stays B, KB or MB. */
 function bytes(count: number): string {
-  if (count >= 1_048_576) return `${(count / 1_048_576).toFixed(1)} MB`;
-  if (count >= 1024) return `${(count / 1024).toFixed(1)} KB`;
-  return `${count} B`;
+  const tenth = { minimumFractionDigits: 1, maximumFractionDigits: 1 };
+  if (count >= 1_048_576) return `${formatNumber(count / 1_048_576, tenth)} MB`;
+  if (count >= 1024) return `${formatNumber(count / 1024, tenth)} KB`;
+  return `${formatNumber(count)} B`;
 }
 
 export function sourceLabel(source: SkillSource): string {
   switch (source.type) {
     case "local_folder":
-      return `Folder · ${source.path}`;
+      return i18n.t("dialogs:skills.source.folder", { path: source.path });
     case "git":
-      return `Git · ${source.url}${source.commit && source.commit !== "HEAD" ? ` @ ${source.commit.slice(0, 7)}` : ""}`;
+      return source.commit && source.commit !== "HEAD"
+        ? i18n.t("dialogs:skills.source.gitAt", {
+            url: source.url,
+            commit: source.commit.slice(0, 7),
+          })
+        : i18n.t("dialogs:skills.source.git", { url: source.url });
     case "harness_dir":
-      return `Imported from ${HARNESS_LABELS[source.harness]}`;
+      return i18n.t("dialogs:skills.source.harness", { harness: HARNESS_LABELS[source.harness] });
     case "connect":
-      return "Synced registry";
+      return i18n.t("dialogs:skills.source.connect");
   }
 }
 
@@ -89,9 +96,12 @@ export function SkillAddDialog({ open, onClose }: { open: boolean; onClose: () =
   const [commit, setCommit] = useState("");
   const [subdir, setSubdir] = useState("");
   const [name, setName] = useState("");
+  const { t } = useTranslation(["dialogs", "common"]);
   const [harnesses, setHarnesses] = useState<HarnessKind[]>(ALL_HARNESSES);
   const [busy, setBusy] = useState(false);
-  const [problem, setProblem] = useState<string | null>(null);
+  const [problem, setProblem] = useState<"noHarness" | "noFolder" | "noRepo" | "secret" | null>(
+    null,
+  );
 
   useEffect(() => {
     if (!open) return;
@@ -122,15 +132,15 @@ export function SkillAddDialog({ open, onClose }: { open: boolean; onClose: () =
 
   const submit = async () => {
     if (harnesses.length === 0) {
-      setProblem("Pick at least one harness. A skill is only useful where a harness can read it.");
+      setProblem("noHarness");
       return;
     }
     if (mode === "local_folder" && !path.trim()) {
-      setProblem("Enter the folder that contains SKILL.md.");
+      setProblem("noFolder");
       return;
     }
     if (mode === "git" && !url.trim()) {
-      setProblem("Enter a git repository URL.");
+      setProblem("noRepo");
       return;
     }
     const source: SkillSource =
@@ -151,31 +161,28 @@ export function SkillAddDialog({ open, onClose }: { open: boolean; onClose: () =
     });
     setBusy(false);
     if (added) onClose();
-    else setProblem(SECRET_REFUSAL);
+    else setProblem("secret");
   };
 
   return (
     <Dialog open={open} onOpenChange={(value) => (value ? undefined : onClose())}>
       <DialogContent className="gap-3 sm:max-w-[600px]">
         <DialogHeader>
-          <DialogTitle>Add a skill</DialogTitle>
-          <DialogDescription>
-            h4rn copies the bundle into each harness&apos;s skill directory and keeps the registry
-            row. The original folder is never modified.
-          </DialogDescription>
+          <DialogTitle>{t("skills.add.title")}</DialogTitle>
+          <DialogDescription>{t("skills.add.description")}</DialogDescription>
         </DialogHeader>
 
         <div className="grid gap-3">
           <div className="flex flex-col gap-1">
-            <FieldLabel>Source</FieldLabel>
-            <div className="q-seg inline" role="tablist" aria-label="Skill source">
+            <FieldLabel>{t("skills.add.source")}</FieldLabel>
+            <div className="q-seg inline" role="tablist" aria-label={t("skills.add.sourceLabel")}>
               <button
                 type="button"
                 role="tab"
                 aria-selected={mode === "local_folder"}
                 onClick={() => setMode("local_folder")}
               >
-                <FolderIcon className="q-icon s14" aria-hidden /> Folder
+                <FolderIcon className="q-icon s14" aria-hidden /> {t("skills.add.folder")}
               </button>
               <button
                 type="button"
@@ -183,14 +190,14 @@ export function SkillAddDialog({ open, onClose }: { open: boolean; onClose: () =
                 aria-selected={mode === "git"}
                 onClick={() => setMode("git")}
               >
-                <GitBranchIcon className="q-icon s14" aria-hidden /> Git
+                <GitBranchIcon className="q-icon s14" aria-hidden /> {t("skills.add.git")}
               </button>
             </div>
           </div>
 
           {mode === "local_folder" ? (
             <div className="flex flex-col gap-1">
-              <FieldLabel htmlFor="skill-path">Skill folder</FieldLabel>
+              <FieldLabel htmlFor="skill-path">{t("skills.add.folderField")}</FieldLabel>
               <Input
                 id="skill-path"
                 value={path}
@@ -199,27 +206,25 @@ export function SkillAddDialog({ open, onClose }: { open: boolean; onClose: () =
                 spellCheck={false}
                 autoComplete="off"
               />
-              <span className="text-[11.5px] text-[var(--fg-3)]">
-                The folder must contain SKILL.md.
-              </span>
+              <span className="text-[11.5px] text-[var(--fg-3)]">{t("skills.add.folderHint")}</span>
             </div>
           ) : (
             <>
               <div className="flex flex-col gap-1">
-                <FieldLabel htmlFor="skill-url">Repository</FieldLabel>
+                <FieldLabel htmlFor="skill-url">{t("fields.repository")}</FieldLabel>
                 <Input
                   id="skill-url"
                   value={url}
                   onChange={(event) => setUrl(event.target.value)}
-                  placeholder="git@github.com:acme/skills.git"
+                  placeholder={EXAMPLE_REPO}
                   spellCheck={false}
                   autoComplete="off"
                 />
               </div>
               <div className="grid gap-3 sm:grid-cols-2">
                 <div className="flex flex-col gap-1">
-                  <FieldLabel htmlFor="skill-commit" hint="Defaults to HEAD">
-                    Commit
+                  <FieldLabel htmlFor="skill-commit" hint={t("skills.add.commitHint")}>
+                    {t("skills.add.commit")}
                   </FieldLabel>
                   <Input
                     id="skill-commit"
@@ -231,8 +236,8 @@ export function SkillAddDialog({ open, onClose }: { open: boolean; onClose: () =
                   />
                 </div>
                 <div className="flex flex-col gap-1">
-                  <FieldLabel htmlFor="skill-subdir" hint="Optional">
-                    Subdirectory
+                  <FieldLabel htmlFor="skill-subdir" hint={t("fields.optional")}>
+                    {t("skills.add.subdir")}
                   </FieldLabel>
                   <Input
                     id="skill-subdir"
@@ -248,8 +253,8 @@ export function SkillAddDialog({ open, onClose }: { open: boolean; onClose: () =
           )}
 
           <div className="flex flex-col gap-1">
-            <FieldLabel htmlFor="skill-name" hint="Optional">
-              Name override
+            <FieldLabel htmlFor="skill-name" hint={t("fields.optional")}>
+              {t("skills.add.nameOverride")}
             </FieldLabel>
             <Input
               id="skill-name"
@@ -262,7 +267,7 @@ export function SkillAddDialog({ open, onClose }: { open: boolean; onClose: () =
           </div>
 
           <div className="flex flex-col gap-1.5">
-            <span className="text-[12px] text-[var(--fg-3)]">Install for</span>
+            <span className="text-[12px] text-[var(--fg-3)]">{t("skills.add.installFor")}</span>
             <div className="grid grid-cols-2 gap-1.5">
               {ALL_HARNESSES.map((harness) => {
                 const state = availability.find((entry) => entry.harness === harness);
@@ -270,17 +275,21 @@ export function SkillAddDialog({ open, onClose }: { open: boolean; onClose: () =
                 return (
                   <label
                     key={harness}
-                    className="flex items-center gap-2 rounded-[6px] bg-bg-raised px-2 py-1.5 text-[12.5px] text-fg shadow-[inset_0_0_0_1px_var(--line-2)]"
+                    className="flex flex-wrap items-center gap-x-2 rounded-[6px] bg-bg-raised px-2 py-1.5 text-[12.5px] text-fg shadow-[inset_0_0_0_1px_var(--line-2)]"
                   >
                     <input
                       type="checkbox"
                       checked={checked}
                       onChange={() => toggle(harness)}
-                      aria-label={`Install for ${HARNESS_LABELS[harness]}`}
+                      aria-label={t("skills.add.installForOne", {
+                        harness: HARNESS_LABELS[harness],
+                      })}
                     />
                     <span className="grow">{HARNESS_LABELS[harness]}</span>
                     {state && !state.detected ? (
-                      <span className="text-[11px] text-[var(--fg-3)]">not detected</span>
+                      <span className="text-[11px] text-[var(--fg-3)]">
+                        {t("skills.add.notDetected")}
+                      </span>
                     ) : null}
                   </label>
                 );
@@ -288,15 +297,21 @@ export function SkillAddDialog({ open, onClose }: { open: boolean; onClose: () =
             </div>
           </div>
 
-          {problem ? <div className="q-banner err">{problem}</div> : null}
+          {problem ? (
+            <div className="q-banner err">
+              {problem === "secret"
+                ? t("skills.secretRefusal")
+                : t(`skills.add.problems.${problem}`)}
+            </div>
+          ) : null}
         </div>
 
         <DialogFooter>
           <Button variant="ghost" onClick={onClose}>
-            Cancel
+            {t("common:cancel")}
           </Button>
           <Button onClick={() => void submit()} disabled={busy}>
-            {busy ? "Adding…" : "Add skill"}
+            {busy ? t("skills.add.adding") : t("skills.add.submit")}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -316,12 +331,18 @@ function candidateKind(candidate: SkillImportCandidate): CandidateKind {
   return candidate.duplicate ? "unmanaged" : "new";
 }
 
-const KIND_BADGE: Record<CandidateKind, { label: string; tone?: "warn" | "ok" }> = {
-  new: { label: "New" },
-  unmanaged: { label: "In h4rn, not managed" },
-  managed: { label: "Managed", tone: "ok" },
-  conflict: { label: "Conflict", tone: "warn" },
+/** Each kind's badge tone; its label is `skills.import.kinds.<kind>`. */
+const KIND_TONE: Record<CandidateKind, "warn" | "ok" | undefined> = {
+  new: undefined,
+  unmanaged: undefined,
+  managed: "ok",
+  conflict: "warn",
 };
+
+type ImportProblem =
+  | { kind: "scanFailed"; message: string }
+  | { kind: "scanFailedRetry" }
+  | { kind: "partial" };
 
 /**
  * Brings skills a harness already has into h4rn. New skills join the
@@ -331,9 +352,10 @@ const KIND_BADGE: Record<CandidateKind, { label: string; tone?: "warn" | "ok" }>
 export function SkillImportDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
   const [preview, setPreview] = useState<SkillImportPreview | null>(null);
   const [selected, setSelected] = useState<Record<string, boolean>>({});
+  const { t } = useTranslation(["dialogs", "common"]);
   const [manage, setManage] = useState(true);
   const [busy, setBusy] = useState(false);
-  const [problem, setProblem] = useState<string | null>(null);
+  const [problem, setProblem] = useState<ImportProblem | null>(null);
 
   useEffect(() => {
     if (!open) return;
@@ -354,10 +376,15 @@ export function SkillImportDialog({ open, onClose }: { open: boolean; onClose: (
       setBusy(false);
       setPreview(result);
       if (!result) {
+        // The daemon's own message and hint are shown as sent.
+        const failure = reason as ProtoError | null;
         setProblem(
-          reason
-            ? `The scan did not finish: ${reason.message}${reason.hint ? ` ${reason.hint}` : ""}`
-            : "The scan did not finish. Try again.",
+          failure
+            ? {
+                kind: "scanFailed",
+                message: failure.hint ? `${failure.message} ${failure.hint}` : failure.message,
+              }
+            : { kind: "scanFailedRetry" },
         );
         return;
       }
@@ -390,24 +417,21 @@ export function SkillImportDialog({ open, onClose }: { open: boolean; onClose: (
     );
     setBusy(false);
     if (ok) onClose();
-    else setProblem("Some skills were not brought in. Rescan and try the remaining ones.");
+    else setProblem({ kind: "partial" });
   };
 
   const actionLabel = busy
-    ? "Working…"
+    ? t("skills.import.working")
     : managing > 0 && adding === 0
-      ? `Manage ${managing} ${managing === 1 ? "skill" : "skills"}`
-      : `Add ${chosen.length} ${chosen.length === 1 ? "skill" : "skills"}`;
+      ? t("skills.import.manage", { count: managing })
+      : t("skills.import.add", { count: chosen.length });
 
   return (
     <Dialog open={open} onOpenChange={(value) => (value ? undefined : onClose())}>
       <DialogContent className="gap-3 sm:max-w-[680px]">
         <DialogHeader>
-          <DialogTitle>Skills already on this machine</DialogTitle>
-          <DialogDescription>
-            h4rn scanned each harness's skill folder. Adding a skill puts it in your registry, which
-            syncs to your other machines through h4rn-connect.
-          </DialogDescription>
+          <DialogTitle>{t("skills.import.title")}</DialogTitle>
+          <DialogDescription>{t("skills.import.description")}</DialogDescription>
         </DialogHeader>
 
         <label className="q-skill-manage">
@@ -421,22 +445,21 @@ export function SkillImportDialog({ open, onClose }: { open: boolean; onClose: (
             {manage ? <CheckIcon className="q-icon s12" strokeWidth={2} /> : null}
           </span>
           <span>
-            <span className="q-skill-manage-t">Let h4rn manage these folders</span>
-            <span className="q-skill-manage-s">
-              h4rn marks each folder as its own without changing the skill's files. A newer version
-              synced from another machine then replaces it, and removing the skill in h4rn deletes
-              the folder. Off, the folders stay yours and only the registry copy syncs.
-            </span>
+            <span className="q-skill-manage-t">{t("skills.import.manageTitle")}</span>
+            <span className="q-skill-manage-s">{t("skills.import.manageBody")}</span>
           </span>
         </label>
 
         <div className="q-sec-h">
-          <h2>Found</h2>
+          <h2>{t("skills.import.found")}</h2>
           <span className="aside">
             {busy && !preview
-              ? "Scanning…"
+              ? t("skills.import.scanning")
               : preview
-                ? `${pending} to bring in · ${candidates.length - pending} already handled`
+                ? t("skills.import.summary", {
+                    pending,
+                    handled: candidates.length - pending,
+                  })
                 : null}
           </span>
         </div>
@@ -444,21 +467,21 @@ export function SkillImportDialog({ open, onClose }: { open: boolean; onClose: (
         <div className="q-list" style={{ maxHeight: 320, overflow: "auto" }}>
           {busy && !preview ? (
             <div className="q-li">
-              <span className="q-faint">Scanning the harness folders…</span>
+              <span className="q-faint">{t("skills.import.scanningFolders")}</span>
             </div>
           ) : !preview ? (
             <div className="q-li">
-              <span className="q-faint">No results. The reason is below.</span>
+              <span className="q-faint">{t("skills.import.noResults")}</span>
             </div>
           ) : candidates.length === 0 ? (
             <div className="q-li">
-              <span className="q-faint">No skills found in the harness folders.</span>
+              <span className="q-faint">{t("skills.import.none")}</span>
             </div>
           ) : (
             candidates.map((candidate) => {
               const kind = candidateKind(candidate);
               const enabled = selectable(candidate);
-              const badge = KIND_BADGE[kind];
+              const tone = KIND_TONE[kind];
               const on = enabled && Boolean(selected[candidate.id]);
               return (
                 <label
@@ -477,7 +500,7 @@ export function SkillImportDialog({ open, onClose }: { open: boolean; onClose: (
                         [candidate.id]: event.target.checked,
                       }))
                     }
-                    aria-label={`Bring in ${candidate.name}`}
+                    aria-label={t("skills.import.bringIn", { name: candidate.name })}
                   />
                   <span className={cn("q-check", on && "on")} aria-hidden>
                     {on ? <CheckIcon className="q-icon s12" strokeWidth={2} /> : null}
@@ -498,22 +521,28 @@ export function SkillImportDialog({ open, onClose }: { open: boolean; onClose: (
                           style={{ flex: "none", marginTop: 2 }}
                           aria-hidden
                         />
-                        <span>{candidate.conflict}. Settle it under Conflicts first.</span>
+                        <span>{t("skills.import.conflict", { conflict: candidate.conflict })}</span>
                       </div>
                     ) : null}
                   </div>
-                  <span className={cn("q-badge", badge.tone)}>{badge.label}</span>
+                  <span className={cn("q-badge", tone)}>{t(`skills.import.kinds.${kind}`)}</span>
                 </label>
               );
             })
           )}
         </div>
 
-        {problem ? <div className="q-banner err">{problem}</div> : null}
+        {problem ? (
+          <div className="q-banner err">
+            {problem.kind === "scanFailed"
+              ? t("skills.import.problems.scanFailed", { message: problem.message })
+              : t(`skills.import.problems.${problem.kind}`)}
+          </div>
+        ) : null}
 
         <DialogFooter>
           <Button variant="ghost" onClick={onClose}>
-            Cancel
+            {t("common:cancel")}
           </Button>
           <Button onClick={() => void importNow()} disabled={busy || chosen.length === 0}>
             {actionLabel}
@@ -528,10 +557,6 @@ export function SkillImportDialog({ open, onClose }: { open: boolean; onClose: (
 // Details, versions and diff
 // ---------------------------------------------------------------------------
 
-function changeLabel(change: "added" | "removed" | "modified"): string {
-  return change === "added" ? "Added" : change === "removed" ? "Removed" : "Modified";
-}
-
 export function SkillDetailsDialog({
   open,
   skill,
@@ -545,8 +570,9 @@ export function SkillDetailsDialog({
   const [to, setTo] = useState("");
   const [diff, setDiff] = useState<SkillDiff | null>(null);
   const [busy, setBusy] = useState(false);
+  const { t } = useTranslation(["dialogs", "common"]);
   const [confirmRemove, setConfirmRemove] = useState(false);
-  const [problem, setProblem] = useState<string | null>(null);
+  const [problem, setProblem] = useState<"compare" | "remove" | null>(null);
 
   const versions = useMemo(() => {
     if (!skill) return [];
@@ -576,7 +602,7 @@ export function SkillDetailsDialog({
     const result = await diffSkill(skill.id, from || null, to || skill.version);
     setBusy(false);
     if (result) setDiff(result);
-    else setProblem("These versions could not be compared.");
+    else setProblem("compare");
   };
 
   const remove = async () => {
@@ -584,7 +610,7 @@ export function SkillDetailsDialog({
     const ok = await removeSkill(skill.id);
     setBusy(false);
     if (ok) onClose();
-    else setProblem("The skill is still in the registry.");
+    else setProblem("remove");
   };
 
   return (
@@ -597,34 +623,34 @@ export function SkillDetailsDialog({
 
         <div className="grid gap-1 text-[12.5px]">
           <div className="flex items-baseline gap-2">
-            <span className="w-24 text-[var(--fg-3)]">Version</span>
+            <span className="w-24 text-[var(--fg-3)]">{t("skills.details.version")}</span>
             <span className="q-mono">{skill.version.slice(0, 12)}</span>
             <span className="q-faint">· {bytes(skill.total_bytes)}</span>
           </div>
           <div className="flex items-baseline gap-2">
-            <span className="w-24 text-[var(--fg-3)]">Source</span>
+            <span className="w-24 text-[var(--fg-3)]">{t("skills.details.source")}</span>
             <span className="q-mono break-all">{sourceLabel(skill.source)}</span>
           </div>
           <div className="flex items-baseline gap-2">
-            <span className="w-24 text-[var(--fg-3)]">Updated</span>
+            <span className="w-24 text-[var(--fg-3)]">{t("skills.details.updated")}</span>
             <span>
-              {absoluteDateTime(skill.updated_at)}{" "}
-              <span className="q-faint">({relativeAge(skill.updated_at)} ago)</span>
+              {formatDateTime(skill.updated_at)}{" "}
+              <span className="q-faint">({formatRelativeTime(skill.updated_at)})</span>
             </span>
           </div>
         </div>
 
         <div className="q-sec-h" style={{ marginTop: 4 }}>
-          <h2>Installs</h2>
-          <span className="aside">This machine</span>
+          <h2>{t("skills.details.installs")}</h2>
+          <span className="aside">{t("skills.details.thisMachine")}</span>
         </div>
         <table className="q-tbl">
           <thead>
             <tr>
-              <th style={{ width: "22%" }}>Harness</th>
-              <th style={{ width: "18%" }}>Version</th>
-              <th style={{ width: "16%" }}>State</th>
-              <th>Path</th>
+              <th style={{ width: "22%" }}>{t("fields.harness")}</th>
+              <th style={{ width: "18%" }}>{t("skills.details.version")}</th>
+              <th style={{ width: "16%" }}>{t("skills.details.state")}</th>
+              <th>{t("skills.details.path")}</th>
             </tr>
           </thead>
           <tbody>
@@ -635,11 +661,12 @@ export function SkillDetailsDialog({
                 <td>
                   {install.installed ? (
                     <span className={install.enabled ? "q-ok" : "q-faint"}>
-                      {install.enabled ? "Enabled" : "Disabled"}
-                      {install.managed ? " · managed" : " · user copy"}
+                      {install.enabled ? t("skills.details.enabled") : t("skills.details.disabled")}
+                      {" · "}
+                      {install.managed ? t("skills.details.managed") : t("skills.details.userCopy")}
                     </span>
                   ) : (
-                    <span className="q-faint">Not installed</span>
+                    <span className="q-faint">{t("skills.details.notInstalled")}</span>
                   )}
                 </td>
                 <td className="q-mono q-faint" style={{ maxWidth: 280, overflow: "hidden" }}>
@@ -651,30 +678,30 @@ export function SkillDetailsDialog({
         </table>
 
         <div className="q-sec-h" style={{ marginTop: 4 }}>
-          <h2>Compare versions</h2>
-          <span className="aside">Path-by-path digest diff</span>
+          <h2>{t("skills.details.compareTitle")}</h2>
+          <span className="aside">{t("skills.details.compareAside")}</span>
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <ChipSelect
-            label="From version"
+            label={t("skills.details.fromVersion")}
             width={200}
             value={from}
             options={[
-              { value: "", label: "New skill (no prior version)" },
+              { value: "", label: t("skills.details.newSkill") },
               ...versions.map((version) => ({ value: version, label: version.slice(0, 12) })),
             ]}
             onChange={setFrom}
           />
           <span className="q-faint">→</span>
           <ChipSelect
-            label="To version"
+            label={t("skills.details.toVersion")}
             width={200}
             value={to}
             options={versions.map((version) => ({ value: version, label: version.slice(0, 12) }))}
             onChange={setTo}
           />
           <Button variant="secondary" onClick={() => void compare()} disabled={busy}>
-            {busy ? "Comparing…" : "Compare"}
+            {busy ? t("skills.details.comparing") : t("skills.details.compare")}
           </Button>
         </div>
 
@@ -682,7 +709,7 @@ export function SkillDetailsDialog({
           <div className="q-list" style={{ maxHeight: 190, overflow: "auto" }}>
             {diff.files.length === 0 ? (
               <div className="q-li">
-                <span className="q-faint">These versions contain the same files.</span>
+                <span className="q-faint">{t("skills.details.same")}</span>
               </div>
             ) : (
               diff.files.map((file) => (
@@ -694,7 +721,7 @@ export function SkillDetailsDialog({
                       file.change === "removed" && "danger",
                     )}
                   >
-                    {changeLabel(file.change)}
+                    {t(`skills.details.change.${file.change}`)}
                   </span>
                   <span className="grow q-mono" style={{ fontSize: 12 }}>
                     {file.path}
@@ -709,23 +736,24 @@ export function SkillDetailsDialog({
           </div>
         ) : null}
 
-        {problem ? <div className="q-banner err">{problem}</div> : null}
+        {problem ? (
+          <div className="q-banner err">{t(`skills.details.problems.${problem}`)}</div>
+        ) : null}
 
         {confirmRemove ? (
           <div className="q-conflict">
             <TriangleAlertIcon className="q-icon q-warn" aria-hidden />
             <div className="grow">
-              <div className="t">Remove {skill.name}?</div>
+              <div className="t">{t("skills.details.removeTitle", { name: skill.name })}</div>
               <div className="q-muted" style={{ fontSize: 12, marginTop: 2 }}>
-                The registry row and every h4rn-managed copy are deleted. A user-owned copy with the
-                same name stays where it is.
+                {t("skills.details.removeBody")}
               </div>
             </div>
             <Button variant="ghost" size="sm" onClick={() => setConfirmRemove(false)}>
-              Cancel
+              {t("common:cancel")}
             </Button>
             <Button variant="destructive" size="sm" onClick={() => void remove()} disabled={busy}>
-              {busy ? "Removing…" : "Remove"}
+              {busy ? t("removing") : t("common:remove")}
             </Button>
           </div>
         ) : null}
@@ -733,12 +761,12 @@ export function SkillDetailsDialog({
         <DialogFooter>
           {confirmRemove ? null : (
             <Button variant="ghost" onClick={() => setConfirmRemove(true)}>
-              <Trash2Icon className="q-icon s14" aria-hidden /> Remove skill
+              <Trash2Icon className="q-icon s14" aria-hidden /> {t("skills.details.removeSkill")}
             </Button>
           )}
           <span className="grow" />
           <Button variant="secondary" onClick={onClose}>
-            Close
+            {t("common:close")}
           </Button>
         </DialogFooter>
       </DialogContent>

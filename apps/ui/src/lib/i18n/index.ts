@@ -5,6 +5,7 @@ import { initReactI18next } from "react-i18next";
 import enCommands from "./locales/en/commands.json";
 import enCommon from "./locales/en/common.json";
 import enComposer from "./locales/en/composer.json";
+import enDialogs from "./locales/en/dialogs.json";
 import enIssues from "./locales/en/issues.json";
 import enPairing from "./locales/en/pairing.json";
 import enPullRequests from "./locales/en/pullRequests.json";
@@ -33,6 +34,7 @@ export const NAMESPACES = [
   "common",
   "commands",
   "composer",
+  "dialogs",
   "issues",
   "pairing",
   "pullRequests",
@@ -57,6 +59,7 @@ export const englishResources = {
   common: enCommon,
   commands: enCommands,
   composer: enComposer,
+  dialogs: enDialogs,
   issues: enIssues,
   pairing: enPairing,
   pullRequests: enPullRequests,

@@ -1,5 +1,6 @@
 import { LoaderIcon } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { ChipSelect } from "@/components/common/ChipSelect";
 import {
   Dialog,
@@ -53,6 +54,7 @@ function parseCount(value: string): number | null {
  * defaults, which are not "unlimited".
  */
 export function DelegateDialog({ thread }: { thread: ThreadSummary }) {
+  const { t } = useTranslation(["dialogs", "common"]);
   const open = useSubagentStore((state) => state.delegateOpen);
   const spawning = useSubagentStore((state) => state.spawning);
   const hosts = useApp((state) => state.hosts);
@@ -141,22 +143,19 @@ export function DelegateDialog({ thread }: { thread: ThreadSummary }) {
     <Dialog open={open} onOpenChange={(value) => (value ? undefined : closeDelegate())}>
       <DialogContent className="gap-3 sm:max-w-[560px]">
         <DialogHeader>
-          <DialogTitle>Delegate a subagent</DialogTitle>
-          <DialogDescription>
-            The child gets its own thread on this thread's host and reports to this one. Approvals
-            still come to this thread.
-          </DialogDescription>
+          <DialogTitle>{t("delegate.title")}</DialogTitle>
+          <DialogDescription>{t("delegate.description")}</DialogDescription>
         </DialogHeader>
 
         <div className="flex flex-col gap-1">
           <label htmlFor="delegate-task" className="text-[12px] text-[var(--fg-3)]">
-            Task
+            {t("fields.task")}
           </label>
           <Textarea
             id="delegate-task"
             value={task}
             autoFocus
-            placeholder="Reproduce the failing auth test and report the race."
+            placeholder={t("delegate.taskPlaceholder")}
             className="min-h-[84px] resize-none"
             onChange={(event) => setTask(event.target.value)}
           />
@@ -165,19 +164,15 @@ export function DelegateDialog({ thread }: { thread: ThreadSummary }) {
         <div className="grid gap-3 sm:grid-cols-3">
           <div className="flex flex-col gap-1">
             <label htmlFor="delegate-host" className="text-[12px] text-[var(--fg-3)]">
-              Host
+              {t("fields.host")}
             </label>
             <ChipSelect
               id="delegate-host"
-              label="Host"
+              label={t("fields.host")}
               value={host}
-              placeholder="No online hosts"
+              placeholder={t("fields.noOnlineHosts")}
               width={160}
-              options={localOnlyHostOptions(
-                onlineHosts,
-                thread.host,
-                "Not yet: delegation runs on this thread's host",
-              )}
+              options={localOnlyHostOptions(onlineHosts, thread.host, t("delegate.hostLocalOnly"))}
               onChange={(next) => {
                 setHost(next);
                 const options = hosts[next]?.harnesses.filter(
@@ -193,11 +188,11 @@ export function DelegateDialog({ thread }: { thread: ThreadSummary }) {
           </div>
           <div className="flex flex-col gap-1">
             <label htmlFor="delegate-harness" className="text-[12px] text-[var(--fg-3)]">
-              Harness
+              {t("fields.harness")}
             </label>
             <ChipSelect
               id="delegate-harness"
-              label="Harness"
+              label={t("fields.harness")}
               value={harness}
               width={160}
               options={harnessChoices.map((option) => ({
@@ -215,7 +210,7 @@ export function DelegateDialog({ thread }: { thread: ThreadSummary }) {
           </div>
           <div className="flex flex-col gap-1">
             <label htmlFor="delegate-model" className="text-[12px] text-[var(--fg-3)]">
-              Model
+              {t("fields.model")}
             </label>
             <Input
               id="delegate-model"
@@ -229,23 +224,23 @@ export function DelegateDialog({ thread }: { thread: ThreadSummary }) {
         <div className="grid gap-3 sm:grid-cols-3">
           <div className="flex flex-col gap-1">
             <label htmlFor="delegate-isolation" className="text-[12px] text-[var(--fg-3)]">
-              Workspace
+              {t("fields.workspace")}
             </label>
             <ChipSelect<SubagentIsolation>
               id="delegate-isolation"
-              label="Workspace"
+              label={t("fields.workspace")}
               value={isolation}
               width={160}
               options={[
-                { value: "worktree", label: "Isolated worktree" },
-                { value: "shared", label: "Shared workspace" },
+                { value: "worktree", label: t("delegate.isolated") },
+                { value: "shared", label: t("delegate.shared") },
               ]}
               onChange={setIsolation}
             />
           </div>
           <div className="flex flex-col gap-1">
             <label htmlFor="delegate-turns" className="text-[12px] text-[var(--fg-3)]">
-              Max turns
+              {t("delegate.maxTurns")}
             </label>
             <Input
               id="delegate-turns"
@@ -257,7 +252,7 @@ export function DelegateDialog({ thread }: { thread: ThreadSummary }) {
           </div>
           <div className="flex flex-col gap-1">
             <label htmlFor="delegate-minutes" className="text-[12px] text-[var(--fg-3)]">
-              Max minutes
+              {t("delegate.maxMinutes")}
             </label>
             <Input
               id="delegate-minutes"
@@ -272,7 +267,7 @@ export function DelegateDialog({ thread }: { thread: ThreadSummary }) {
         <div className="grid gap-3 sm:grid-cols-2">
           <div className="flex flex-col gap-1">
             <label htmlFor="delegate-tokens" className="text-[12px] text-[var(--fg-3)]">
-              Max tokens
+              {t("delegate.maxTokens")}
             </label>
             <Input
               id="delegate-tokens"
@@ -284,26 +279,22 @@ export function DelegateDialog({ thread }: { thread: ThreadSummary }) {
           </div>
           <div className="flex flex-col gap-1">
             <label htmlFor="delegate-summary" className="text-[12px] text-[var(--fg-3)]">
-              Context summary
+              {t("delegate.summary")}
             </label>
             <Input
               id="delegate-summary"
-              placeholder="Optional handoff"
+              placeholder={t("delegate.summaryPlaceholder")}
               value={summary}
               onChange={(event) => setSummary(event.target.value)}
             />
           </div>
         </div>
 
-        <p className="text-[11.5px] leading-[16px] text-[var(--fg-3)]">
-          Cross-host delegation is not implemented yet: the child runs on this thread's host. Blank
-          limits use the daemon defaults (20 turns, 15 minutes, 50k tokens). Cancelling the child
-          cleans up its worktree.
-        </p>
+        <p className="text-[11.5px] leading-[16px] text-[var(--fg-3)]">{t("delegate.note")}</p>
 
         <DialogFooter>
           <button type="button" className="q-btn ghost" onClick={closeDelegate}>
-            Cancel
+            {t("common:cancel")}
           </button>
           <button
             type="button"
@@ -314,7 +305,7 @@ export function DelegateDialog({ thread }: { thread: ThreadSummary }) {
             {spawning ? (
               <LoaderIcon className="q-icon s14 q-spin" strokeWidth={1.5} aria-hidden />
             ) : null}
-            Delegate
+            {t("delegate.submit")}
           </button>
         </DialogFooter>
       </DialogContent>
