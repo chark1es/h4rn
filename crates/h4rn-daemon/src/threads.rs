@@ -3264,9 +3264,11 @@ impl ThreadRecord {
     /// the adapter write from losing the only copy. A parked resume already
     /// holds the same prompt for its turn, so its promoted claim is kept with
     /// that parked dispatch (not shown as a second queue row, and not dropped):
-    /// a crash between the release and the write still has a record.
+    /// a crash between the release and the write still has a record. The one
+    /// exception is a queue promotion whose write had already started, which is
+    /// unknown delivery and becomes a visible row instead.
     ///
-    /// Returns whether the queue changed.
+    /// Returns whether recovery changed the record.
     fn recover_claimed_messages(&mut self) -> bool {
         if self.meta.claimed.is_empty() {
             return false;
@@ -3279,6 +3281,19 @@ impl ThreadRecord {
             // the claim belongs to it: keep it rather than restore a second row
             // or drop the only record a crash between the release and the write
             // would leave. The release write carries both changes together.
+            //
+            // An ordinary send's claim can say `sending` here and still be safe
+            // to deliver again: its failed write was proven unaccepted before
+            // the prompt was parked. A promotion from the queue is different:
+            // this build never parks one whose claim is `sending` (the park
+            // guard refuses it), so that state comes from a build that could.
+            // The adapter may already hold the text, and rebuilding the
+            // dispatch would send it again when the schedule fires. It is
+            // unknown delivery, so it becomes the visible **May have been
+            // delivered** row and the park is dropped so neither the firing nor
+            // a Send can replay it. The pause keeps its schedule; its firing
+            // then applies the policy's continue prompt, which the person can
+            // supersede by resending the row.
             if claim.promoted
                 && self
                     .meta
@@ -3286,7 +3301,25 @@ impl ThreadRecord {
                     .as_ref()
                     .is_some_and(|parked| parked.turn_id == claim.turn_id)
             {
-                self.meta.claimed.push(claim);
+                if !claim.from_queue
+                    || matches!(
+                        claim.state,
+                        QueuedClaimState::Claimed | QueuedClaimState::Refused
+                    )
+                {
+                    self.meta.claimed.push(claim);
+                    continue;
+                }
+                if claim.state == QueuedClaimState::Sending {
+                    let mut message = claim.message;
+                    message.message.delivery_unknown = true;
+                    let index = (claim.index as usize).min(self.meta.queued.len());
+                    self.meta.queued.insert(index, message);
+                }
+                // A `delivered` claim already has its transcript row, so
+                // nothing goes back to the queue.
+                self.meta.parked = None;
+                restored = true;
                 continue;
             }
             let index = (claim.index as usize).min(self.meta.queued.len());
@@ -31555,6 +31588,131 @@ mod tests {
         pause.resume.notify_one();
         manager.shutdown().await;
     }
+
+    /// An upgrade never sends a parked prompt whose write had already started.
+    ///
+    /// A build before the park guard could park a promoted prompt while its
+    /// claim still said `sending`, so the adapter may already hold the text. A
+    /// restart must not rebuild the parked dispatch: the schedule's firing would
+    /// hand the same text to a fresh session. The claim becomes the visible
+    /// **May have been delivered** row instead, and the pause keeps its schedule;
+    /// its firing then applies the policy's continue prompt, so the thread is
+    /// not left paused with no delivery owner.
+    #[tokio::test]
+    async fn an_upgraded_parked_prompt_whose_write_started_is_never_sent_again() {
+        let reset_at = chrono::Utc::now() + chrono::Duration::minutes(20);
+        let journal: Arc<dyn Journal> =
+            Arc::new(SqliteJournal::in_memory().await.expect("journal"));
+        let meter = Arc::new(h4rn_meter::MeterHub::in_memory().await.expect("meter"));
+        let parked = park_requeued_turn_on(
+            Some(reset_at),
+            Arc::clone(&journal),
+            Arc::clone(&meter),
+            None,
+        )
+        .await;
+        let thread_id = parked.thread_id.clone();
+        let parked_turn = parked.second.turn_id.clone();
+        assert_eq!(
+            parked.sends.get(),
+            2,
+            "the parked prompt was written again before the restart"
+        );
+
+        parked.manager.shutdown().await;
+        drop(parked.manager);
+
+        // The image the previous build left: the prompt is parked, and its
+        // promoted claim already says the adapter call had started.
+        let mut meta = persisted_meta(&journal, &thread_id).await;
+        let claim = meta
+            .claimed
+            .iter_mut()
+            .find(|claim| claim.promoted && claim.turn_id == parked_turn)
+            .expect("the parked prompt's promoted claim");
+        claim.from_queue = true;
+        claim.state = QueuedClaimState::Sending;
+        journal
+            .upsert_thread(&meta)
+            .await
+            .expect("the upgrade image");
+
+        let (fresh, restarted_sends) = FakeHarness::new().with_send_count();
+        let (fresh, sent_prompts) = fresh.with_sent_prompts();
+        let restarted =
+            open_test_manager_with_journal(fresh, HostId::new("host_test"), Arc::clone(&journal))
+                .await;
+        restarted.set_meter(Arc::clone(&meter));
+        restarted.resync_meter_state().await;
+
+        // No parked dispatch is rebuilt to write the text again; the claim is
+        // the visible unsure row the person decides on.
+        let meta = restarted
+            .thread_meta(&thread_id)
+            .await
+            .expect("thread meta");
+        assert!(
+            meta.parked.is_none(),
+            "the restart rebuilt a dispatch that would send the text again"
+        );
+        assert!(
+            meta.claimed.is_empty(),
+            "the unsure claim outlived its recovery"
+        );
+        let queue = restarted
+            .thread_queue(&thread_id, 0)
+            .await
+            .expect("queue after the restart");
+        assert_eq!(
+            queue
+                .queued
+                .iter()
+                .map(|message| (message.text.as_str(), message.delivery_unknown))
+                .collect::<Vec<_>>(),
+            [("second", true)],
+            "the upgrade lost the unsure prompt or called it known unsent"
+        );
+        assert_eq!(
+            restarted_sends.get(),
+            0,
+            "the restart sent the unsure prompt on its own"
+        );
+
+        // The pause's firing delivers the policy's continue prompt, never the
+        // text that may already be in the provider conversation.
+        restarted
+            .resume_now(&thread_id)
+            .await
+            .expect("the restored schedule fires");
+        assert!(
+            wait_until(|| restarted_sends.get() >= 1).await,
+            "the fired schedule never started a turn"
+        );
+        assert_eq!(
+            sent_prompts.get(),
+            [
+                "The usage limit reset. Continue the work from where you stopped; do not repeat completed steps."
+            ],
+            "the firing replayed the parked prompt"
+        );
+        let handle = restarted
+            .inner
+            .handle(&thread_id)
+            .await
+            .expect("thread handle");
+        assert!(
+            wait_until(|| {
+                handle.try_lock().is_ok_and(|record| {
+                    record.state.phase != h4rn_core::Phase::RateLimited
+                        && record.scheduled_limit.is_none()
+                })
+            })
+            .await,
+            "the thread stayed paused after its schedule fired"
+        );
+        restarted.shutdown().await;
+    }
+
     ///
     /// The schedule and the prompt saved on the thread row used to be written
     /// in one step taken before the ledger answered. When the ledger refused,
@@ -32841,10 +32999,6 @@ mod tests {
         manager.shutdown().await;
     }
 
-    /// Claude's stream-json stdin is a queue of turns, not a mid-turn channel:
-    /// whether a steer is folded into the running turn or becomes a second turn
-    /// is unknowable from its result stream, so the daemon refuses instead of
-    /// settling the wrong turn.
     /// A direct steer re-checks the sender's grant under the session lock.
     ///
     /// The text must never reach a running turn for a family that was revoked
@@ -32903,6 +33057,10 @@ mod tests {
         manager.shutdown().await;
     }
 
+    /// Claude's stream-json stdin is a queue of turns, not a mid-turn channel:
+    /// whether a steer is folded into the running turn or becomes a second turn
+    /// is unknowable from its result stream, so the daemon refuses instead of
+    /// settling the wrong turn.
     #[tokio::test]
     async fn a_harness_without_attributable_mid_turn_input_refuses_a_steer() {
         let workspace = tempfile::tempdir().expect("tempdir");

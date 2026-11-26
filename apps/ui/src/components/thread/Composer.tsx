@@ -326,8 +326,9 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
     if (!row) return;
     unclearSend.current = null;
     // Newer typing is the person's own text: the row only replaces the copy
-    // that was sent.
-    if (text !== pending.text) return;
+    // that was sent. The daemon's row and the remembered copy are trimmed, so
+    // a draft that differs only in surrounding whitespace is the same send.
+    if (text.trim() !== pending.text) return;
     if (!clearThreadDraftIfRevision(pending.host, pending.threadId, pending.revision)) return;
     historyIndex.current = -1;
     historyDraft.current = "";

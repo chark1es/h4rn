@@ -880,7 +880,12 @@ All notable changes to h4rn are recorded here. The format follows
   acknowledged on a possibly-delivered prompt still ends the turn interrupted,
   and an accepted prompt clears only the rewind handoff it actually carried.
   The composer's draft for an unconfirmed send clears as soon as the matching
-  **May have been delivered** row appears, instead of inviting a second copy.
+  **May have been delivered** row appears, instead of inviting a second copy,
+  and a draft that differs from the row only in surrounding whitespace counts
+  as the same send. A journal written by a build that parked a queue
+  promotion whose write had already started recovers that text as the visible
+  row too, and the pause's firing applies the policy's continue prompt instead
+  of sending the parked text again.
 - **A refused prompt survives a crash right after its turn is recorded.** A
   prompt the daemon refused because its outside grant was revoked could sit in
   neither the journal's claim nor the queue between the turn's settlement and

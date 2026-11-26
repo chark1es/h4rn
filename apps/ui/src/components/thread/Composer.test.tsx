@@ -582,6 +582,45 @@ describe("Composer drafts and history", () => {
     expect(readThreadDraft(HOST, THREAD)).toBe("");
   });
 
+  it("clears the draft when only its trimmed text matches the recovered row", async () => {
+    mock.sendMessage.mockResolvedValue("unclear");
+    const view = renderComposer();
+    const input = textarea();
+
+    fireEvent.change(input, { target: { value: "maybe delivered\n" } });
+    flushDrafts();
+    fireEvent.click(screen.getByRole("button", { name: "Send reply" }));
+    await waitFor(() => expect(mock.sendMessage).toHaveBeenCalled());
+    expect(input.value).toBe("maybe delivered\n");
+
+    // The daemon's row holds the trimmed text; the draft's trailing newline is
+    // not a newer edit, so the row replaces it.
+    mock.state.queues = {
+      [THREAD]: {
+        queued: [
+          {
+            message_id: "qm_recovered",
+            text: "maybe delivered",
+            attachments: [],
+            queued_at: "2026-01-01T00:00:00.000Z",
+            steerable: false,
+            delivery_unknown: true,
+          },
+        ],
+        total: 1,
+        revision: 1,
+      },
+    };
+    view.rerender(
+      <WorkspaceFilesContext.Provider value={fileLister}>
+        <Composer summary={summary} />
+      </WorkspaceFilesContext.Provider>,
+    );
+
+    await waitFor(() => expect(input.value).toBe(""));
+    expect(readThreadDraft(HOST, THREAD)).toBe("");
+  });
+
   it("keeps newer typing when the recovered row for an earlier send appears", async () => {
     mock.sendMessage.mockResolvedValue("unclear");
     const view = renderComposer();

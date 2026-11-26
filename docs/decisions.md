@@ -1987,7 +1987,12 @@ before its adapter call even though it has no queue row, so an unclear result su
 have been delivered** row. That claim becomes visible as soon as the outcome is unclear, not only
 after a restart. A parked prompt keeps its promoted claim: the parked record and the claim name the
 same dispatch, and the write that releases the pause carries both changes, so a crash between the
-release and the write still recovers the text.
+release and the write still recovers the text. The one exception is a parked queue promotion whose
+claim already says `sending` (a journal written by a build before the park guard): the adapter may
+already hold the text, so a restart never rebuilds that dispatch, the text becomes the visible
+**May have been delivered** row, and the pause's firing applies the policy's continue prompt, which
+the person can supersede by resending the row. An ordinary send's parked claim keeps its restore
+even in `sending`, because its failed write was proven unaccepted before it was parked.
 
 **An uncertain row does not block the queue.** Only the person's Send now or Steer may retry a row
 marked **May have been delivered**; automatic promotion skips past such rows and starts the next
