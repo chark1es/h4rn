@@ -31,7 +31,7 @@ import type { ConnectionSnapshot, EventEnvelope } from "@/lib/client/types";
 import { drafts, moveLocalThreadDraft } from "@/lib/drafts";
 import { pushRoute, type Route, readRoute, replaceRoute, routePath } from "@/lib/router";
 import { applyTerminalTheme } from "@/lib/terminalTheme";
-import { createThreadLog, foldEvent, type ThreadLog } from "./projection";
+import { createThreadLog, foldEvent, isRealTurn, type ThreadLog } from "./projection";
 
 export type Theme = "light" | "dark" | "system";
 
@@ -1701,7 +1701,17 @@ export function filesRewindAvailable(
     turn.items.some((item) => item.kind === "message" && item.itemId === beforeItemId),
   );
   if (index < 0) return false;
-  return log.turns.slice(index).every((turn) => turn.changes?.complete === true);
+  // The row holding the message is its cue, a synthetic row that never carries
+  // a change set (`changes: null`), and its own daemon turn usually started
+  // before it. The removed turns are that daemon turn and every real turn
+  // after the cue; only they can report a checkpoint.
+  const cue = log.turns[index];
+  const removed = log.turns.slice(index).filter(isRealTurn);
+  const own = cue?.forkTurnId
+    ? log.turns.find((turn) => turn.id === cue.forkTurnId && isRealTurn(turn))
+    : undefined;
+  if (own && !removed.includes(own)) removed.unshift(own);
+  return removed.length > 0 && removed.every((turn) => turn.changes?.complete === true);
 }
 
 function harnessName(harness: ThreadSummary["harness"]): string {

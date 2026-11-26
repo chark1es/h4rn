@@ -876,7 +876,7 @@ fn write_record(
                     .store_blob(bytes)
                     .map_err(|error| format!("could not keep {} for rollback: {error}", ops[index].path))?,
                 mode: Some(*mode),
-                executable: mode & 0o111 != 0,
+                executable: mode & 0o100 != 0,
             },
             Backup::Symlink(target) => BackupRecord::Symlink {
                 target: target.to_str().map(str::to_owned).ok_or_else(|| {
@@ -974,6 +974,30 @@ fn rollback_record(store: &SnapshotStore, record: &RestoreRecord) -> Result<(), 
 /// the way, the nearest folder the write or remove goes through must still
 /// canonicalise inside the root.
 fn preflight_target(root: &Path, relative: &Path, label: &str) -> Result<(), String> {
+    // The root itself is checked too: a journal's recorded root that has since
+    // become a link would otherwise canonicalise to its target, and every
+    // check below would pass inside the wrong folder.
+    match root.symlink_metadata() {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            return Err(format!(
+                "the worktree root {} is now a symlink; refusing to restore {label} through it",
+                root.display()
+            ));
+        }
+        Ok(meta) if !meta.is_dir() => {
+            return Err(format!(
+                "the worktree root {} is no longer a folder, so {label} cannot be restored",
+                root.display()
+            ));
+        }
+        Ok(_) => {}
+        Err(error) => {
+            return Err(format!(
+                "could not inspect the worktree root {} before restoring {label}: {error}",
+                root.display()
+            ));
+        }
+    }
     let mut current = root.to_path_buf();
     let components: Vec<Component<'_>> = relative.components().collect();
     for (index, component) in components.iter().enumerate() {
@@ -1084,10 +1108,11 @@ fn mode_of(_meta: &fs::Metadata) -> u32 {
     0
 }
 
-/// Whether the file is executable.
+/// Whether git calls the file executable: the owner's execute bit, as git
+/// itself tests it. A group or other bit alone is not enough.
 #[cfg(unix)]
 fn is_executable(meta: &fs::Metadata) -> bool {
-    mode_of(meta) & 0o111 != 0
+    mode_of(meta) & 0o100 != 0
 }
 
 /// Whether the file is executable.
@@ -2438,8 +2463,9 @@ mod tests {
     #[test]
     fn info_attributes_never_convert_the_checkpoint() {
         let fixture = Fixture::new(&[("README.md", "hi\n")]);
-        // `.git/info/attributes` outranks the empty `--attr-source` tree, so
-        // it used to convert what `git add -A` stored.
+        // `.git/info/attributes` outranks `.gitattributes`, so it would
+        // convert what `git add -A` stored; the plumbing builder never reads
+        // it.
         write(
             &fixture.repo,
             ".git/info/attributes",
@@ -2458,41 +2484,10 @@ mod tests {
         );
     }
 
-    /// The daemon's git calls drop an inherited `GIT_CONFIG_GLOBAL`, so the
-    /// child also gets `XDG_CONFIG_HOME` (and `HOME`) pointing at the same
-    /// temporary global config. Nothing outside the temp dir is read or
-    /// written.
     #[test]
     fn a_global_attributes_file_never_converts_the_checkpoint() {
-        let scratch = tempfile::tempdir().unwrap();
-        let config_home = scratch.path().join("xdg");
-        fs::create_dir_all(config_home.join("git")).unwrap();
-        let attributes = scratch.path().join("global-attributes");
-        fs::write(&attributes, "*.txt text eol=crlf\n").unwrap();
-        let global = config_home.join("git/config");
-        fs::write(
-            &global,
-            format!("[core]\n\tattributesFile = {}\n", attributes.display()),
-        )
-        .unwrap();
-
-        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
-        command.args([
-            "--exact",
-            "rewind::tests::a_global_attributes_file_is_never_applied_to_the_checkpoint",
-            "--ignored",
-            "--test-threads=1",
-        ]);
-        command.env("GIT_CONFIG_GLOBAL", &global);
-        command.env("GIT_CONFIG_NOSYSTEM", "1");
-        command.env("XDG_CONFIG_HOME", &config_home);
-        command.env("HOME", scratch.path());
-        let output = command.output().expect("run the child test");
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(
-            output.status.success() && stdout.contains("1 passed"),
-            "{stdout}\n{}",
-            String::from_utf8_lossy(&output.stderr)
+        run_with_global_crlf_attributes(
+            "a_global_attributes_file_is_never_applied_to_the_checkpoint",
         );
     }
 
@@ -2932,6 +2927,311 @@ mod tests {
     }
 
     #[test]
+    fn a_path_ending_in_a_carriage_return_gets_its_own_bytes_back() {
+        // Git's line reader drops a trailing `\r`, so in a `--stdin-paths`
+        // batch `a.txt\r` would be hashed as `a.txt`.
+        let fixture = Fixture::new(&[("a.txt", "plain before"), ("a.txt\r", "cr before")]);
+        fixture.checkpoint("turn_1");
+        write(&fixture.repo, "a.txt", "plain after");
+        write(&fixture.repo, "a.txt\r", "cr after");
+
+        let prepared = fixture.prepare(&["turn_1"]).expect("prepare");
+        let outcome = run_restore(&prepared);
+        assert_eq!(read(&fixture.repo, "a.txt"), "plain before");
+        assert_eq!(
+            read(&fixture.repo, "a.txt\r"),
+            "cr before",
+            "the path with a carriage return gets its own bytes, not a.txt's"
+        );
+        assert_eq!(outcome.files, 2);
+    }
+
+    #[test]
+    fn a_change_to_only_the_carriage_return_path_is_undone() {
+        let fixture = Fixture::new(&[("a.txt", "plain before"), ("a.txt\r", "cr before")]);
+        fixture.checkpoint("turn_1");
+        write(&fixture.repo, "a.txt\r", "cr after");
+
+        let prepared = fixture.prepare(&["turn_1"]).expect("prepare");
+        let outcome = run_restore(&prepared);
+        assert_eq!(
+            read(&fixture.repo, "a.txt\r"),
+            "cr before",
+            "a change to the carriage-return path alone is seen and undone"
+        );
+        assert_eq!(read(&fixture.repo, "a.txt"), "plain before");
+        assert_eq!(outcome.files, 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_file_makes_the_checkpoint_incomplete_and_is_never_deleted() {
+        use std::os::unix::fs::PermissionsExt;
+        let fixture = Fixture::new(&[("README.md", "hi\n")]);
+        let key = fixture.repo.join("private.key");
+        fs::write(&key, "secret\n").unwrap();
+        fs::set_permissions(&key, fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::File::open(&key).is_ok() {
+            fs::set_permissions(&key, fs::Permissions::from_mode(0o644)).unwrap();
+            eprintln!(
+                "skipped: this user can read a mode-000 file (running as root?), \
+                 so an unreadable file cannot be set up"
+            );
+            return;
+        }
+
+        // What a turn's start does with the capture (see threads.rs).
+        let turn = TurnId::new("turn_1");
+        match crate::worktrees::git::checkpoint_commit(&fixture.repo) {
+            Ok(Some(checkpoint)) => fixture
+                .store
+                .record_checkpoint(
+                    &fixture.repo,
+                    &fixture.thread,
+                    &turn,
+                    &checkpoint.tree,
+                    &checkpoint.ignored,
+                )
+                .unwrap(),
+            Ok(None) => {}
+            Err(reason) => {
+                assert!(reason.contains("private.key"), "{reason}");
+                fixture
+                    .store
+                    .record_checkpoint_incomplete(&fixture.repo, &fixture.thread, &turn, &reason)
+                    .unwrap();
+            }
+        }
+        // The turn makes the key readable and changes nothing else.
+        fs::set_permissions(&key, fs::Permissions::from_mode(0o644)).unwrap();
+
+        let prepared = fixture.prepare(&["turn_1"]);
+        if let Ok(prepared) = &prepared {
+            run_restore(prepared);
+        }
+        assert_eq!(
+            read(&fixture.repo, "private.key"),
+            "secret\n",
+            "a file the checkpoint could not read is never deleted"
+        );
+        let refused = prepared.expect_err("the restore refuses");
+        assert!(refused.contains("no complete file checkpoint"), "{refused}");
+        assert!(refused.contains("private.key"), "{refused}");
+    }
+
+    /// Takes `turn`'s checkpoint as a turn's start does (see threads.rs): a
+    /// reason the capture cannot be complete is recorded, and returned.
+    ///
+    /// Only the Unix permission tests use it, so it is Unix-only too.
+    #[cfg(unix)]
+    fn capture_turn(fixture: &Fixture, turn: &str) -> Option<String> {
+        let turn = TurnId::new(turn);
+        match crate::worktrees::git::checkpoint_commit(&fixture.repo) {
+            Ok(Some(checkpoint)) => {
+                fixture
+                    .store
+                    .record_checkpoint(
+                        &fixture.repo,
+                        &fixture.thread,
+                        &turn,
+                        &checkpoint.tree,
+                        &checkpoint.ignored,
+                    )
+                    .unwrap();
+                None
+            }
+            Ok(None) => None,
+            Err(reason) => {
+                fixture
+                    .store
+                    .record_checkpoint_incomplete(&fixture.repo, &fixture.thread, &turn, &reason)
+                    .unwrap();
+                Some(reason)
+            }
+        }
+    }
+
+    /// A folder set to mode 000 that goes back to 0755 when dropped, so the
+    /// temporary directory can always be removed. `None` (with a note) when
+    /// this user can list it anyway (running as root): the test cannot be set
+    /// up.
+    #[cfg(unix)]
+    struct LockedFolder(PathBuf);
+
+    #[cfg(unix)]
+    impl LockedFolder {
+        fn lock(path: &Path) -> Option<Self> {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o000)).unwrap();
+            let locked = Self(path.to_owned());
+            if fs::read_dir(path).is_ok() {
+                eprintln!(
+                    "skipped: this user can list a mode-000 folder (running as root?), \
+                     so an unreadable folder cannot be set up"
+                );
+                return None;
+            }
+            Some(locked)
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for LockedFolder {
+        fn drop(&mut self) {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o755));
+        }
+    }
+
+    /// Checkpoints turn_1 with `folder` locked, lets the "turn" unlock it, and
+    /// checks that the restore refuses naming `named` and deletes none of
+    /// `kept` (path, text).
+    #[cfg(unix)]
+    fn locked_folder_refuses(fixture: &Fixture, folder: &str, named: &str, kept: &[(&str, &str)]) {
+        let Some(locked) = LockedFolder::lock(&fixture.repo.join(folder)) else {
+            return;
+        };
+        if let Some(reason) = capture_turn(fixture, "turn_1") {
+            assert!(reason.contains(named), "{reason}");
+        }
+        // The turn runs `chmod 755` on the folder and changes nothing else.
+        drop(locked);
+
+        let prepared = fixture.prepare(&["turn_1"]);
+        if let Ok(prepared) = &prepared {
+            run_restore(prepared);
+        }
+        for (path, text) in kept {
+            assert!(
+                fixture.repo.join(path).exists(),
+                "{path} must not be deleted by the restore"
+            );
+            assert_eq!(read(&fixture.repo, path), *text);
+        }
+        let refused = prepared.expect_err("the restore refuses");
+        assert!(refused.contains("no complete file checkpoint"), "{refused}");
+        assert!(refused.contains(named), "{refused}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_folder_with_tracked_and_untracked_files_refuses_and_deletes_nothing() {
+        let fixture = Fixture::new(&[("README.md", "hi\n"), ("sec/tracked.key", "tracked\n")]);
+        write(&fixture.repo, "sec/untracked.key", "untracked\n");
+        locked_folder_refuses(
+            &fixture,
+            "sec",
+            "sec/",
+            &[
+                ("sec/tracked.key", "tracked\n"),
+                ("sec/untracked.key", "untracked\n"),
+            ],
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_folder_of_untracked_files_refuses_and_deletes_nothing() {
+        // `ls-files` warns that it cannot open the folder and exits 0; only
+        // that warning shows the listing missed these files.
+        let fixture = Fixture::new(&[("README.md", "hi\n")]);
+        write(&fixture.repo, "sec/untracked.key", "untracked\n");
+        write(&fixture.repo, "sec/other.key", "other\n");
+        locked_folder_refuses(
+            &fixture,
+            "sec",
+            "sec/",
+            &[
+                ("sec/untracked.key", "untracked\n"),
+                ("sec/other.key", "other\n"),
+            ],
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_tracked_file_in_an_unreadable_ignored_folder_refuses_and_is_kept() {
+        // `ls-files` never opens an ignored folder, so it prints no warning;
+        // only the tracked file's own failed lookup shows it cannot be seen.
+        let fixture = Fixture::new(&[("README.md", "hi\n"), (".gitignore", "sec/\n")]);
+        write(&fixture.repo, "sec/tracked.key", "tracked\n");
+        git(&fixture.repo, &["add", "-f", "sec/tracked.key"]);
+        git(&fixture.repo, &["commit", "-q", "-m", "force-add"]);
+        locked_folder_refuses(
+            &fixture,
+            "sec",
+            "sec/tracked.key",
+            &[("sec/tracked.key", "tracked\n")],
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_ignored_file_in_a_folder_git_cannot_list_is_never_deleted() {
+        use std::os::unix::fs::PermissionsExt;
+        // An ignored folder that also holds a tracked file is walked by the
+        // ignored listing. At mode 0100 the tracked file can still be read,
+        // but the folder cannot be listed, so `secret.key` would go
+        // unrecorded as ignored.
+        let fixture = Fixture::new(&[("README.md", "hi\n"), (".gitignore", "sec/\n")]);
+        write(&fixture.repo, "sec/tracked.txt", "tracked\n");
+        git(&fixture.repo, &["add", "-f", "sec/tracked.txt"]);
+        git(&fixture.repo, &["commit", "-q", "-m", "force-add"]);
+        write(&fixture.repo, "sec/secret.key", "secret\n");
+        let Some(locked) = LockedFolder::lock(&fixture.repo.join("sec")) else {
+            return;
+        };
+        fs::set_permissions(fixture.repo.join("sec"), fs::Permissions::from_mode(0o100)).unwrap();
+        if let Some(reason) = capture_turn(&fixture, "turn_1") {
+            assert!(reason.contains("sec/"), "{reason}");
+        }
+        // The turn opens the folder up and stops ignoring it.
+        drop(locked);
+        write(&fixture.repo, ".gitignore", "");
+
+        let prepared = fixture.prepare(&["turn_1"]);
+        if let Ok(prepared) = &prepared {
+            run_restore(prepared);
+        }
+        assert!(
+            fixture.repo.join("sec/secret.key").exists(),
+            "an ignored file git could not list is never deleted"
+        );
+        let refused = prepared.expect_err("the restore refuses");
+        assert!(refused.contains("no complete file checkpoint"), "{refused}");
+        assert!(refused.contains("sec/"), "{refused}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_file_unreadable_only_now_is_named_as_the_worktree_now() {
+        use std::os::unix::fs::PermissionsExt;
+        let fixture = Fixture::new(&[("README.md", "hi\n"), ("notes.txt", "before\n")]);
+        fixture.checkpoint("turn_1");
+        // The turn locks the file the checkpoint read without trouble.
+        let notes = fixture.repo.join("notes.txt");
+        fs::set_permissions(&notes, fs::Permissions::from_mode(0o000)).unwrap();
+        let readable = fs::File::open(&notes).is_ok();
+        let refused = fixture.prepare(&["turn_1"]).map(|_| ());
+        fs::set_permissions(&notes, fs::Permissions::from_mode(0o644)).unwrap();
+        if readable {
+            eprintln!(
+                "skipped: this user can read a mode-000 file (running as root?), \
+                 so an unreadable file cannot be set up"
+            );
+            return;
+        }
+        let refused = refused.expect_err("the plan cannot see notes.txt");
+        assert!(
+            refused.starts_with("the worktree as it is now: "),
+            "{refused}"
+        );
+        assert!(refused.contains("notes.txt"), "{refused}");
+        assert!(!refused.contains("checkpoint"), "{refused}");
+        assert_eq!(read(&fixture.repo, "notes.txt"), "before\n");
+    }
+
+    #[test]
     fn an_untracked_nested_repository_is_left_out_of_the_plan() {
         let fixture = Fixture::new(&[("README.md", "hi\n")]);
         // The nested repository is part of the checkpoint, so only the
@@ -3137,6 +3437,300 @@ mod tests {
             pending_restore_ids(&fixture.store),
             vec![restore_id],
             "the journal stays until the rollback is on disk"
+        );
+    }
+
+    // ---- 10d: the plan is attribute-free, fast and git's own rules ---------
+
+    #[test]
+    fn info_attributes_never_hide_a_line_ending_change_from_the_plan() {
+        let fixture = Fixture::new(&[("notes.txt", "a\nb\n")]);
+        // Under this rule git's own diff normalises the turn's CRLF back to
+        // the checkpoint's LF and calls the file unchanged.
+        write(
+            &fixture.repo,
+            ".git/info/attributes",
+            "*.txt text eol=crlf\n",
+        );
+        fixture.checkpoint("turn_1");
+        write(&fixture.repo, "notes.txt", "a\r\nb\r\n");
+
+        let prepared = fixture.prepare(&["turn_1"]).expect("prepare");
+        let outcome = run_restore(&prepared);
+        assert_eq!(
+            fs::read(fixture.repo.join("notes.txt")).unwrap(),
+            b"a\nb\n",
+            "a line-ending change under a local attribute rule is put back"
+        );
+        assert_eq!(outcome.files, 1);
+    }
+
+    /// Runs one ignored child test with a temporary global config whose
+    /// `core.attributesFile` says `*.txt text eol=crlf`.
+    ///
+    /// The daemon's git calls drop an inherited `GIT_CONFIG_GLOBAL`, so the
+    /// child also gets `XDG_CONFIG_HOME` (and `HOME`) pointing at the same
+    /// temporary config. Nothing outside the temp dir is read or written.
+    fn run_with_global_crlf_attributes(test: &str) {
+        let scratch = tempfile::tempdir().unwrap();
+        let config_home = scratch.path().join("xdg");
+        fs::create_dir_all(config_home.join("git")).unwrap();
+        let attributes = scratch.path().join("global-attributes");
+        fs::write(&attributes, "*.txt text eol=crlf\n").unwrap();
+        let global = config_home.join("git/config");
+        fs::write(
+            &global,
+            format!("[core]\n\tattributesFile = {}\n", attributes.display()),
+        )
+        .unwrap();
+
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command.args([
+            "--exact",
+            &format!("rewind::tests::{test}"),
+            "--ignored",
+            "--test-threads=1",
+        ]);
+        command.env("GIT_CONFIG_GLOBAL", &global);
+        command.env("GIT_CONFIG_NOSYSTEM", "1");
+        command.env("XDG_CONFIG_HOME", &config_home);
+        command.env("HOME", scratch.path());
+        let output = command.output().expect("run the child test");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("1 passed"),
+            "{stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn a_global_attributes_file_never_hides_a_line_ending_change_from_the_plan() {
+        run_with_global_crlf_attributes(
+            "a_global_attributes_file_never_hides_a_line_ending_change_child",
+        );
+    }
+
+    #[test]
+    #[ignore = "run by a_global_attributes_file_never_hides_a_line_ending_change_from_the_plan"]
+    fn a_global_attributes_file_never_hides_a_line_ending_change_child() {
+        let fixture = Fixture::new(&[("notes.txt", "a\nb\n")]);
+        fixture.checkpoint("turn_1");
+        write(&fixture.repo, "notes.txt", "a\r\nb\r\n");
+
+        let prepared = fixture.prepare(&["turn_1"]).expect("prepare");
+        let outcome = run_restore(&prepared);
+        assert_eq!(
+            fs::read(fixture.repo.join("notes.txt")).unwrap(),
+            b"a\nb\n",
+            "a line-ending change under a global attribute rule is put back"
+        );
+        assert_eq!(outcome.files, 1);
+    }
+
+    #[test]
+    fn a_checkpoint_of_thousands_of_files_is_fast() {
+        const FILES: usize = 3_000;
+        let fixture = Fixture::new(&[("README.md", "hi\n")]);
+        for index in 0..FILES {
+            write(
+                &fixture.repo,
+                &format!("src/d{}/f{index:05}.txt", index % 30),
+                &format!("file {index}\n"),
+            );
+        }
+        git(&fixture.repo, &["add", "-A"]);
+        git(&fixture.repo, &["commit", "-q", "-m", "many"]);
+        // Half the files change, so the hashing is real work and not only
+        // objects git already has.
+        for index in (0..FILES).step_by(2) {
+            write(
+                &fixture.repo,
+                &format!("src/d{}/f{index:05}.txt", index % 30),
+                &format!("changed {index}\n"),
+            );
+        }
+
+        let started = std::time::Instant::now();
+        let checkpoint = crate::worktrees::git::checkpoint_commit(&fixture.repo)
+            .expect("checkpoint")
+            .expect("checkpoint tree");
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(10),
+            "a {FILES}-file checkpoint took {elapsed:?}"
+        );
+        let listed = git_output(
+            &fixture.repo,
+            &["ls-tree", "-r", "--name-only", &checkpoint.tree],
+        );
+        assert_eq!(
+            listed.lines().count(),
+            FILES + 1,
+            "every file is in the tree"
+        );
+        assert_eq!(
+            git_output(
+                &fixture.repo,
+                &[
+                    "cat-file",
+                    "blob",
+                    &format!("{}:src/d0/f00000.txt", checkpoint.tree)
+                ],
+            ),
+            "changed 0"
+        );
+    }
+
+    #[test]
+    fn a_path_hash_object_cannot_read_by_line_still_gets_its_own_bytes() {
+        let fixture = Fixture::new(&[("README.md", "hi\n")]);
+        write(&fixture.repo, "\"quoted\".txt", "quoted bytes\n");
+        #[cfg(unix)]
+        write(&fixture.repo, "two\nlines.txt", "newline bytes\n");
+        let checkpoint = crate::worktrees::git::checkpoint_commit(&fixture.repo)
+            .expect("checkpoint")
+            .expect("checkpoint tree");
+        assert_eq!(
+            git_output(
+                &fixture.repo,
+                &[
+                    "cat-file",
+                    "blob",
+                    &format!("{}:\"quoted\".txt", checkpoint.tree)
+                ],
+            ),
+            "quoted bytes"
+        );
+        #[cfg(unix)]
+        assert_eq!(
+            git_output(
+                &fixture.repo,
+                &[
+                    "cat-file",
+                    "blob",
+                    &format!("{}:two\nlines.txt", checkpoint.tree)
+                ],
+            ),
+            "newline bytes"
+        );
+    }
+
+    /// Adds a gitlink at `sub` to the index with an empty folder, as a clone
+    /// leaves a submodule nobody ran `git submodule update` for.
+    fn add_uninitialised_submodule(fixture: &Fixture) -> String {
+        let pointer = git_output(&fixture.repo, &["rev-parse", "HEAD"]);
+        git(
+            &fixture.repo,
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                &format!("160000,{pointer},sub"),
+            ],
+        );
+        git(&fixture.repo, &["commit", "-q", "-m", "submodule"]);
+        fs::create_dir_all(fixture.repo.join("sub")).unwrap();
+        pointer
+    }
+
+    #[test]
+    fn an_uninitialised_submodule_does_not_block_a_restore() {
+        let fixture = Fixture::new(&[("a.txt", "before\n")]);
+        let pointer = add_uninitialised_submodule(&fixture);
+        let tree = fixture.checkpoint("turn_1");
+        assert_eq!(
+            git_output(&fixture.repo, &["rev-parse", &format!("{tree}:sub")]),
+            pointer,
+            "the checkpoint records the index's gitlink, not the parent's HEAD"
+        );
+        // The turn edits a file and commits, so the parent's HEAD moves.
+        write(&fixture.repo, "a.txt", "after\n");
+        git(&fixture.repo, &["commit", "-q", "-am", "turn"]);
+
+        let prepared = fixture.prepare(&["turn_1"]).expect("prepare");
+        run_restore(&prepared);
+        assert_eq!(read(&fixture.repo, "a.txt"), "before\n");
+        assert!(
+            fixture.repo.join("sub").is_dir(),
+            "the submodule is left alone"
+        );
+    }
+
+    #[cfg(unix)]
+    fn chmod(path: &Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn only_the_owner_bit_makes_a_checkpointed_file_executable() {
+        let fixture = Fixture::new(&[("README.md", "hi\n")]);
+        write(&fixture.repo, "group.sh", "echo group\n");
+        chmod(&fixture.repo.join("group.sh"), 0o654);
+        let checkpoint = crate::worktrees::git::checkpoint_commit(&fixture.repo)
+            .expect("checkpoint")
+            .expect("checkpoint tree");
+        let entry = git_output(&fixture.repo, &["ls-tree", &checkpoint.tree, "group.sh"]);
+        assert!(
+            entry.starts_with("100644 "),
+            "git records a file without the owner bit as 100644: {entry}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_restore_puts_back_the_owner_executable_bit() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let fixture = Fixture::new(&[("README.md", "hi\n")]);
+        write(&fixture.repo, "run.sh", "echo run\n");
+        chmod(&fixture.repo.join("run.sh"), 0o755);
+        git(&fixture.repo, &["add", "-A"]);
+        git(&fixture.repo, &["commit", "-q", "-m", "exec"]);
+        fixture.checkpoint("turn_1");
+        // Group and others keep their bit; git calls this not executable.
+        chmod(&fixture.repo.join("run.sh"), 0o655);
+
+        let prepared = fixture.prepare(&["turn_1"]).expect("prepare");
+        let outcome = run_restore(&prepared);
+        let mode = fs::metadata(fixture.repo.join("run.sh"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_ne!(mode & 0o100, 0, "the owner bit is back: {mode:o}");
+        assert_eq!(outcome.files, 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recovery_refuses_a_root_that_became_a_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let fixture = Fixture::new(&[("a.txt", "before\n")]);
+        fixture.checkpoint("turn_1");
+        write(&fixture.repo, "a.txt", "after\n");
+        let prepared = fixture.prepare(&["turn_1"]).expect("prepare");
+        let restore_id = prepared.restore_id().to_owned();
+
+        // The checkout moved and a link to it took its place.
+        let moved = fixture.dir.path().join("moved");
+        fs::rename(&fixture.repo, &moved).unwrap();
+        symlink(&moved, &fixture.repo).unwrap();
+
+        let pending = read_pending_restore(&fixture.store, &restore_id).expect("read");
+        let error = recover_restore(&fixture.store, &pending, false).unwrap_err();
+        assert!(error.contains("symlink"), "{error}");
+        assert_eq!(
+            read(&moved, "a.txt"),
+            "after\n",
+            "recovery never writes through a linked root"
+        );
+        assert_eq!(
+            pending_restore_ids(&fixture.store),
+            vec![restore_id],
+            "the journal is kept"
         );
     }
 }

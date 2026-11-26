@@ -62,8 +62,8 @@ All notable changes to h4rn are recorded here. The format follows
   dialog and answer name the ignored paths the turn touched that stayed as they
   were. Bytes go in and out raw, so a CRLF file or one under a filter attribute
   comes back exactly as it was, and a recreated private file keeps its bits. A
-  checkpoint with more than 10,000 ignored paths, or one taken with a git older
-  than 2.40, is incomplete and refuses the restore with that reason. Checkpoints
+  checkpoint with more than 10,000 ignored paths is incomplete and refuses the
+  restore with that reason. Checkpoints
   are only captured while the switch
   is on, so a turn sent while it was off only rewinds its conversation. A
   rewind is refused while a turn runs, a message is
@@ -843,6 +843,7 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Fixed
 
+- **Revert files too notices a line-ending change, takes its checkpoint in a fraction of a second, and works next to an uninitialised submodule.** The plan compares two trees built the same raw way instead of reading the worktree through `.git/info/attributes` or a global attributes file, a 3,000-file checkpoint dropped from about 62 s to under half a second, an empty submodule folder no longer blocks every restore, the executable bit follows git's owner-bit rule, recovery refuses a root that became a symlink, a live subagent session gets no prompt while a restore commits, and the dialog's reason reads the removed turns instead of the message's own row. A file that is there but cannot be read, or a folder git cannot open (its files would go unlisted), makes the checkpoint incomplete (the restore refuses and names it) instead of looking absent and being deleted; an error found in the worktree as it is now says so rather than blaming the checkpoint, and a path ending in a carriage return gets its own bytes back rather than those of the same name without it. It still needs the Labs switch.
 - **A burst of finishing agents after a turn start stays one phone alert.**
   When a turn start sent the collecting alert group early, that group's timer
   could still fire and send the next group before its own window closed, so

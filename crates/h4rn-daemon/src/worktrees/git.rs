@@ -1169,24 +1169,22 @@ pub struct Checkpoint {
 /// path from one the tree simply never saw, so the checkpoint is refused.
 pub const MAX_CHECKPOINT_IGNORED: usize = 10_000;
 
-/// The oldest git whose `--attr-source` keeps a checkpoint byte-exact.
-const ATTR_SOURCE_GIT: (u32, u32) = (2, 40);
-
 /// The whole worktree at this instant, as a checkpoint.
 ///
-/// The tree is built with plumbing in a fresh scratch index, so it covers every
-/// tracked file and every untracked file git does not ignore, keeps git's modes
-/// (the executable bit, a symlink's target) and already records a rename as the
-/// old path restored plus the new path removed. The real index and its lock are
-/// never touched. `Ok(None)` when the repository has no commit yet or git
-/// fails: such a turn has no complete checkpoint to rewind to.
+/// The tree is built with plumbing in a fresh scratch index (see
+/// [`worktree_tree`]), so it covers every tracked file and every untracked file
+/// git does not ignore, keeps git's modes (the executable bit, a symlink's
+/// target) and already records a rename as the old path restored plus the new
+/// path removed. The real index and its lock are never touched. `Ok(None)` when
+/// the repository has no commit yet or git fails: such a turn has no complete
+/// checkpoint to rewind to.
 ///
-/// Each path is hashed with `hash-object --no-filters` and entered with
-/// `update-index --cacheinfo`, so no attribute source can convert the stored
-/// bytes: not `.gitattributes`, not `.git/info/attributes`, and not the global
-/// `core.attributesFile`. A clean filter and `core.autocrlf` never run either.
-/// `Err` names why a checkpoint cannot be complete — an older git without
-/// `--attr-source`, or more ignored paths than [`MAX_CHECKPOINT_IGNORED`] — and
+/// No attribute source can convert the stored bytes: not `.gitattributes`, not
+/// `.git/info/attributes`, and not the global `core.attributesFile`. A clean
+/// filter and `core.autocrlf` never run either. `Err` names why a checkpoint
+/// cannot be complete — more ignored paths than [`MAX_CHECKPOINT_IGNORED`], a
+/// file that is there but cannot be read, a folder git could not open (its
+/// untracked files would go unlisted), or a worktree git cannot list — and
 /// the caller records that reason so a restore refuses with it.
 ///
 /// Ignored files are outside the tree by design (they are build output, not
@@ -1200,21 +1198,39 @@ pub fn checkpoint_commit(workspace: &Path) -> Result<Option<Checkpoint>, String>
     {
         return Ok(None);
     }
-    // The plan's diff reads attributes from an empty tree too, so the version
-    // that understands `--attr-source` is still required.
-    checkpoint_attr_source(workspace)?;
     let Some(repo) = toplevel(workspace) else {
         return Ok(None);
     };
-    let Ok(scratch) = tempfile::Builder::new()
-        .prefix("h4rn-checkpoint-")
-        .tempdir()
-    else {
+    // A file that is there but cannot be read, or a folder git could not
+    // list, makes the checkpoint incomplete: recording what is inside as
+    // absent would let a restore delete it.
+    let Some(tree) = worktree_tree(&repo)? else {
         return Ok(None);
     };
-    let staged = scratch.path().join("index");
-    let Ok(listed) = run_bytes_with_timeout(
-        &repo,
+    let ignored = ignored_paths(workspace)
+        .map_err(|error| format!("git could not list this checkout's ignored paths: {error}"))?;
+    Ok(Some(Checkpoint { tree, ignored }))
+}
+
+/// The tree of the whole worktree at `repo` as it is now, written with
+/// plumbing into a fresh scratch index.
+///
+/// Every path is hashed with `hash-object --no-filters` and entered with
+/// `update-index --index-info`, so the stored bytes are exactly the bytes on
+/// disk whatever the attributes say. The checkpoint and the restore plan both
+/// use this one builder, so the plan compares two trees made the same way and
+/// never reads the working tree through git's conversion rules.
+///
+/// Regular files are hashed in one `--stdin-paths` process; a path that
+/// protocol cannot carry (one with a newline, or starting with a quote) and
+/// every symlink target get their own. `Ok(None)` when the tree could not be
+/// written. `Err` when git could not list the whole worktree (a folder it
+/// could not open), or when a path that is still there could not be read:
+/// leaving it out would record it as absent, and a restore would then delete
+/// it. The reason names the path and is the caller's to place in time.
+fn worktree_tree(repo: &Path) -> Result<Option<String>, String> {
+    let (status, listed, stderr) = run_raw(
+        repo,
         [
             "ls-files",
             "-z",
@@ -1224,47 +1240,98 @@ pub fn checkpoint_commit(workspace: &Path) -> Result<Option<Checkpoint>, String>
             "--full-name",
         ],
         OBSERVATION_GIT_TIMEOUT,
-    ) else {
-        return Ok(None);
-    };
-    let Ok(paths) = nul_paths(&listed) else {
-        return Ok(None);
-    };
+    )?;
+    if !status.success() {
+        return Err(failure_message(status, &stderr));
+    }
+    // `ls-files` warns and still exits 0 when it cannot open a folder (or a
+    // folder's `.gitignore`), and the untracked files inside are simply not
+    // listed. A tree without them would record them as absent.
+    if let Some(reason) = unlisted_folder(&stderr) {
+        return Err(reason);
+    }
+    let paths = nul_paths(&listed)?;
     // `core.filemode=false` makes git ignore the executable bit; the tree must
     // record what git would have recorded.
     let filemode = run_with_timeout(
-        &repo,
+        repo,
         ["config", "--bool", "core.filemode"],
         OBSERVATION_GIT_TIMEOUT,
     )
     .map_or(true, |value| value != "false");
+    let indexed = indexed_gitlinks(repo)?;
     let unique: std::collections::BTreeSet<&str> = paths.iter().map(String::as_str).collect();
-    let mut index_info = Vec::new();
+    let mut entries: Vec<(&str, u32, String)> = Vec::with_capacity(unique.len());
+    let mut files: Vec<(&str, u32)> = Vec::new();
     for path in unique {
-        let Some((mode, object)) = checkpoint_entry(&repo, path, filemode) else {
-            continue;
-        };
         // `ls-files` names an untracked nested repository with a trailing
         // slash; the tree entry is the repository itself.
         let tree_path = path.strip_suffix('/').unwrap_or(path);
         if tree_path.is_empty() {
             continue;
         }
+        let absolute = repo.join(tree_path);
+        // A path that disappeared while the tree was being built is left out:
+        // `git add -A` would have recorded it as removed. Any other error (a
+        // folder on the way that cannot be searched) leaves the path's state
+        // unknown, and recording it as absent would let a restore delete it.
+        let meta = match absolute.symlink_metadata() {
+            Ok(meta) => meta,
+            Err(error) if is_absent(&error) => continue,
+            Err(error) => return Err(format!("{tree_path} could not be read: {error}")),
+        };
+        if meta.file_type().is_symlink() {
+            let target = match std::fs::read_link(&absolute) {
+                Ok(target) => target,
+                Err(error) if is_absent(&error) => continue,
+                Err(error) => return Err(format!("{tree_path} could not be read: {error}")),
+            };
+            let object = hash_bytes(repo, &path_to_bytes(&target))
+                .map_err(|error| format!("{tree_path} could not be recorded: {error}"))?;
+            entries.push((tree_path, MODE_SYMLINK, object));
+        } else if meta.is_file() {
+            let mode = if filemode && is_executable(&meta) {
+                MODE_EXECUTABLE
+            } else {
+                0o100644
+            };
+            files.push((tree_path, mode));
+        } else if meta.is_dir() {
+            if let Some(object) = gitlink_object(&absolute, tree_path, &indexed) {
+                entries.push((tree_path, MODE_GITLINK, object));
+            }
+        }
+    }
+    for ((path, mode), object) in files.iter().copied().zip(hash_files(repo, &files)?) {
+        if let Some(object) = object {
+            entries.push((path, mode, object));
+        }
+    }
+    let mut index_info = Vec::new();
+    for (path, mode, object) in &entries {
         index_info.extend_from_slice(format!("{mode:o} {object}\t").as_bytes());
-        index_info.extend_from_slice(tree_path.as_bytes());
+        index_info.extend_from_slice(path.as_bytes());
         index_info.push(0);
     }
-    let staged_ok = run_bytes_with_index_input(
-        &repo,
+    let Ok(scratch) = tempfile::Builder::new()
+        .prefix("h4rn-checkpoint-")
+        .tempdir()
+    else {
+        return Ok(None);
+    };
+    let staged = scratch.path().join("index");
+    if run_bytes_with_index_input(
+        repo,
         &staged,
         &["update-index", "-z", "--index-info"],
         Some(&index_info),
         OBSERVATION_GIT_TIMEOUT,
-    );
-    if staged_ok.is_err() {
+    )
+    .is_err()
+    {
         return Ok(None);
     }
-    let Ok(tree) = run_bytes_with_index(&repo, &staged, &["write-tree"], OBSERVATION_GIT_TIMEOUT)
+    let Ok(tree) = run_bytes_with_index(repo, &staged, &["write-tree"], OBSERVATION_GIT_TIMEOUT)
     else {
         return Ok(None);
     };
@@ -1272,47 +1339,174 @@ pub fn checkpoint_commit(workspace: &Path) -> Result<Option<Checkpoint>, String>
         return Ok(None);
     };
     let tree = tree.trim().to_owned();
-    let ignored = ignored_paths(workspace)
-        .map_err(|error| format!("git could not list this checkout's ignored paths: {error}"))?;
-    Ok((!tree.is_empty()).then_some(Checkpoint { tree, ignored }))
+    Ok((!tree.is_empty()).then_some(tree))
 }
 
-/// One worktree path's tree mode and object, hashed without any filter.
+/// Whether an I/O error means the path is simply not there: it was removed, or
+/// a folder on the way became a file.
+fn is_absent(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+    )
+}
+
+/// The reason a worktree listing is incomplete, from `ls-files`' stderr.
 ///
-/// `None` skips a path that is not a file, link or nested repository, or one
-/// that disappeared while the checkpoint was being taken: `git add -A` would
-/// have recorded it as removed.
-fn checkpoint_entry(repo: &Path, path: &str, filemode: bool) -> Option<(u32, String)> {
-    let absolute = repo.join(path);
-    let meta = absolute.symlink_metadata().ok()?;
-    if meta.file_type().is_symlink() {
-        let target = std::fs::read_link(&absolute).ok()?;
-        let object = hash_bytes(repo, &path_to_bytes(&target)).ok()?;
-        return Some((MODE_SYMLINK, object));
-    }
-    if meta.is_file() {
-        let object = run_with_timeout(
-            repo,
-            ["hash-object", "-w", "--no-filters", "--", path],
-            OBSERVATION_GIT_TIMEOUT,
-        )
-        .ok()?;
-        let mode = if filemode && is_executable(&meta) {
-            MODE_EXECUTABLE
+/// Git exits 0 after `could not open directory 'x/'` (the untracked files in
+/// `x/` are not listed) and after `unable to access 'x/.gitignore'` (what that
+/// folder ignores is unknown). Either way the listing cannot be trusted to name
+/// every file, so the folder is named and the tree is not written. Git runs
+/// with `LC_ALL=C` (see [`sanitize`]), so the wording is stable.
+fn unlisted_folder(stderr: &[u8]) -> Option<String> {
+    let stderr = String::from_utf8_lossy(stderr);
+    stderr.lines().find_map(|line| {
+        let line = line.trim();
+        let rest = line.strip_prefix("warning: ").unwrap_or(line);
+        if let Some(rest) = rest.strip_prefix("could not open directory '") {
+            let (folder, cause) = rest.rsplit_once("': ").unwrap_or((rest, "unknown error"));
+            Some(format!(
+                "git could not open the folder {folder}, so the files in it could not be listed: {cause}"
+            ))
+        } else if let Some(rest) = rest.strip_prefix("unable to access '") {
+            let (file, cause) = rest.rsplit_once("': ").unwrap_or((rest, "unknown error"));
+            Some(format!(
+                "git could not read {file}, so which files it ignores is unknown: {cause}"
+            ))
         } else {
-            0o100644
-        };
-        return Some((mode, object));
+            None
+        }
+    })
+}
+
+/// The gitlink a folder in the worktree stands for, if any.
+///
+/// A folder is its own repository only when `rev-parse --show-toplevel` run
+/// inside it names the folder itself; an uninitialised submodule is an empty
+/// folder, and git run there walks up to the parent repository. Then the real
+/// index's gitlink is the pointer, as `git add -A` would keep it. A plain
+/// folder with neither is not a tree entry.
+fn gitlink_object(
+    absolute: &Path,
+    tree_path: &str,
+    indexed: &HashMap<String, String>,
+) -> Option<String> {
+    let own_repository = toplevel(absolute).is_some_and(|top| top == norm(absolute));
+    if own_repository {
+        if let Ok(head) = run_with_timeout(absolute, ["rev-parse", "HEAD"], OBSERVATION_GIT_TIMEOUT)
+        {
+            if is_object_id(&head) {
+                return Some(head);
+            }
+        }
     }
-    if meta.is_dir() {
-        // An untracked nested repository is listed with a trailing slash and a
-        // tracked submodule without one; both are a gitlink pointing at the
-        // nested checkout's HEAD.
-        let object =
-            run_with_timeout(&absolute, ["rev-parse", "HEAD"], OBSERVATION_GIT_TIMEOUT).ok()?;
-        return Some((MODE_GITLINK, object));
+    indexed.get(tree_path).cloned()
+}
+
+/// One blob id per file, in order, each hashed with no conversion or filter.
+///
+/// One `hash-object --stdin-paths` process hashes every path it can read by
+/// line. A path the line protocol would change is hashed by itself: one with a
+/// newline, one starting with a quote (which it would unquote), and one with a
+/// carriage return (git's line reader drops a trailing `\r`, so `a.txt\r`
+/// would be hashed as `a.txt`). If the batch fails, every path falls back to
+/// its own process. A path that is gone by then is left out, as `git add -A`
+/// would record it removed; one that is still there but cannot be read is an
+/// `Err` naming it, so the checkpoint is incomplete instead of wrong.
+fn hash_files(repo: &Path, files: &[(&str, u32)]) -> Result<Vec<Option<String>>, String> {
+    let by_line = |path: &str| !path.contains(['\n', '\r']) && !path.starts_with('"');
+    let mut input = Vec::new();
+    for (path, _) in files {
+        if by_line(path) {
+            input.extend_from_slice(path.as_bytes());
+            input.push(b'\n');
+        }
     }
-    None
+    let batch = if input.is_empty() {
+        Some(Vec::new())
+    } else {
+        let mut command = command(repo);
+        command.args(["hash-object", "-w", "--no-filters", "--stdin-paths"]);
+        run_raw_command_with_input(&mut command, Some(&input), OBSERVATION_GIT_TIMEOUT)
+            .ok()
+            .filter(|(status, _, _)| status.success())
+            .and_then(|(_, stdout, _)| String::from_utf8(stdout).ok())
+            .map(|stdout| stdout.lines().map(str::to_owned).collect::<Vec<_>>())
+    };
+    let expected = files.iter().filter(|(path, _)| by_line(path)).count();
+    let mut batch = batch
+        .filter(|objects| objects.len() == expected && objects.iter().all(|id| is_object_id(id)))
+        .map(Vec::into_iter);
+    if batch.is_none() {
+        // An unreadable file is the usual reason the batch failed. Opening
+        // every file first names it without one `hash-object` per file.
+        for (path, _) in files {
+            still_readable(repo, path)?;
+        }
+    }
+    files
+        .iter()
+        .map(|(path, _)| match batch.as_mut() {
+            Some(objects) if by_line(path) => Ok(objects.next()),
+            _ => hash_one_file(repo, path),
+        })
+        .collect()
+}
+
+/// One file's blob id, hashed by its own `hash-object` process: `Ok(None)` when
+/// the file is gone, `Err` when it is there but could not be hashed.
+fn hash_one_file(repo: &Path, path: &str) -> Result<Option<String>, String> {
+    if !still_readable(repo, path)? {
+        return Ok(None);
+    }
+    let error = match run_with_timeout(
+        repo,
+        ["hash-object", "-w", "--no-filters", "--", path],
+        OBSERVATION_GIT_TIMEOUT,
+    ) {
+        Ok(object) if is_object_id(&object) => return Ok(Some(object)),
+        Ok(object) => format!("git printed {object:?} instead of an object id"),
+        Err(error) => error,
+    };
+    if still_readable(repo, path)? {
+        Err(format!("{path} could not be read: {error}"))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Whether a file the listing named can still be opened: `Ok(false)` when it
+/// is gone, `Err` naming it when it is there but cannot be read.
+///
+/// The open never follows a symlink and never blocks: a file swapped for a
+/// link, or for a FIFO with no writer, while the tree was being built is
+/// reported at once instead of followed or waited on forever.
+fn still_readable(repo: &Path, path: &str) -> Result<bool, String> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let file = match options.open(repo.join(path)) {
+        Ok(file) => file,
+        Err(error) if is_absent(&error) => return Ok(false),
+        #[cfg(unix)]
+        Err(error) if error.raw_os_error() == Some(libc::ELOOP) => {
+            return Err(format!(
+                "{path} became a symbolic link while it was being read"
+            ));
+        }
+        Err(error) => return Err(format!("{path} could not be read: {error}")),
+    };
+    match file.metadata() {
+        Ok(meta) if meta.is_file() => Ok(true),
+        Ok(_) => Err(format!(
+            "{path} stopped being a regular file while it was being read"
+        )),
+        Err(error) => Err(format!("{path} could not be read: {error}")),
+    }
 }
 
 /// A blob written from `bytes` with no conversion or filter.
@@ -1342,52 +1536,18 @@ fn path_to_bytes(path: &Path) -> Vec<u8> {
     }
 }
 
-/// The empty tree a checkpoint reads attributes from, after checking that this
-/// git understands `--attr-source`.
-fn checkpoint_attr_source(workspace: &Path) -> Result<String, String> {
-    let printed = run_with_timeout(workspace, ["--version"], OBSERVATION_GIT_TIMEOUT)?;
-    check_git_version(&printed)?;
-    let mut command = command(workspace);
-    command.arg("mktree").stdin(Stdio::null());
-    let (status, stdout, stderr) = run_raw_command(&mut command, OBSERVATION_GIT_TIMEOUT)?;
-    if !status.success() {
-        return Err(format!(
-            "could not name an empty attribute tree: {}",
-            failure_message(status, &stderr)
-        ));
-    }
-    String::from_utf8(stdout)
-        .map(|tree| tree.trim().to_owned())
-        .map_err(|_| "git printed an empty-tree id that is not valid UTF-8".to_owned())
-}
-
-/// Refuses a git older than the one `--attr-source` needs, naming its version.
-fn check_git_version(printed: &str) -> Result<(), String> {
-    let version = printed.strip_prefix("git version ").unwrap_or(printed);
-    let mut numbers = version.split(|character: char| !character.is_ascii_digit());
-    let major = numbers.next().and_then(|number| number.parse::<u32>().ok());
-    let minor = numbers.next().and_then(|number| number.parse::<u32>().ok());
-    match (major, minor) {
-        (Some(major), Some(minor)) if (major, minor) >= ATTR_SOURCE_GIT => Ok(()),
-        (Some(major), Some(minor)) => Err(format!(
-            "git {major}.{minor} is older than {}.{}, which is needed to checkpoint a worktree's exact bytes, so this message's files cannot be restored",
-            ATTR_SOURCE_GIT.0, ATTR_SOURCE_GIT.1
-        )),
-        _ => Err(format!(
-            "the git version could not be read from {version:?}, so this message's files cannot be restored"
-        )),
-    }
-}
-
 /// Repository-relative paths git ignores in this worktree, sorted.
 ///
 /// `--directory` collapses an ignored folder to one entry ending in `/`, so a
 /// build directory with thousands of objects costs one line. Names only: the
 /// checkpoint must not depend on reading the ignored content. Past
 /// [`MAX_CHECKPOINT_IGNORED`] the listing is refused: a partial one cannot tell
-/// a missing ignored path from one that was never listed.
+/// a missing ignored path from one that was never listed. So is one where git
+/// could not open a folder: a fully ignored folder is listed without being
+/// opened, but one that also holds tracked files is walked, and the ignored
+/// files inside would go unrecorded (see [`unlisted_folder`]).
 fn ignored_paths(workspace: &Path) -> Result<Vec<String>, String> {
-    let raw = run_bytes_with_timeout(
+    let (status, raw, stderr) = run_raw(
         workspace,
         [
             "ls-files",
@@ -1400,6 +1560,12 @@ fn ignored_paths(workspace: &Path) -> Result<Vec<String>, String> {
         ],
         OBSERVATION_GIT_TIMEOUT,
     )?;
+    if !status.success() {
+        return Err(failure_message(status, &stderr));
+    }
+    if let Some(reason) = unlisted_folder(&stderr) {
+        return Err(reason);
+    }
     let mut paths = nul_paths(&raw)?;
     if paths.len() > MAX_CHECKPOINT_IGNORED {
         return Err(format!(
@@ -1461,88 +1627,52 @@ pub fn checkpoint_changes(
     workspace: &Path,
     checkpoint: &str,
 ) -> Result<Vec<CheckpointChange>, String> {
+    let repo = toplevel(workspace)
+        .ok_or_else(|| format!("{} is not inside a git worktree", workspace.display()))?;
+    // The worktree as it is now, built by the same attribute-free plumbing as
+    // the checkpoint. `git diff <checkpoint>` would read the working tree
+    // through `.git/info/attributes` and the global `core.attributesFile`, so
+    // a turn that only changed a file's line endings could look unchanged.
+    // Two trees built the same way are compared by their raw bytes.
+    // A reason from this tree is about the worktree now, not the checkpoint.
+    let now = worktree_tree(&repo)
+        .map_err(|error| format!("the worktree as it is now: {error}"))?
+        .ok_or_else(|| "git could not record the worktree as it is now".to_owned())?;
     // Rename detection would report a staged rename as only its new path, and
     // restoring that path would delete the file without putting the old one
     // back. Asking for every path on both sides undoes a rename as the old path
     // restored plus the new path removed.
-    //
-    // The comparison reads the working tree with the same conversion-free
-    // settings the checkpoint was taken with, so a CRLF file or a file under a
-    // text attribute is compared by its bytes and not by a converted form.
-    let attr_source = checkpoint_attr_source(workspace)?;
     let changed = run_bytes_with_timeout(
-        workspace,
+        &repo,
         [
-            "-c",
-            "core.autocrlf=false",
-            "-c",
-            "core.safecrlf=false",
-            &format!("--attr-source={attr_source}"),
-            "-c",
-            "diff.renames=false",
-            "diff",
+            "diff-tree",
+            "-r",
             "--no-renames",
-            "--name-only",
             "-z",
             checkpoint,
+            &now,
             "--",
         ],
         OBSERVATION_GIT_TIMEOUT,
     )?;
-    // An untracked nested repository is a directory to git, recorded in the
-    // checkpoint as a gitlink the real index does not have. It is not the
-    // person's work and cannot be put back, so it stays out of the plan: a
-    // gitlink the real index does name still refuses, because its pointer
-    // really did change.
-    let indexed_gitlinks = indexed_gitlinks(workspace)?;
-    let untracked = run_bytes_with_timeout(
-        workspace,
-        [
-            "ls-files",
-            "-z",
-            "--others",
-            "--exclude-standard",
-            "--full-name",
-        ],
-        OBSERVATION_GIT_TIMEOUT,
-    )?;
-    let tree = tree_entries(workspace, checkpoint)?;
+    // An untracked nested repository is a gitlink in both trees that the real
+    // index does not have. It is not the person's work and cannot be put back,
+    // so it stays out of the plan: a gitlink the real index does name still
+    // refuses, because its pointer really did change.
+    let indexed = indexed_gitlinks(&repo)?;
     let mut plan: BTreeMap<String, Option<CheckpointValue>> = BTreeMap::new();
-    for path in nul_paths(&changed)? {
-        let Some(entry) = tree.get(&path) else {
-            plan.insert(path, None);
-            continue;
-        };
-        if entry.mode == MODE_GITLINK && !indexed_gitlinks.contains(&path) {
+    for change in raw_tree_changes(&changed)? {
+        let untracked_gitlink =
+            |mode: u32| mode == MODE_GITLINK && !indexed.contains_key(&change.path);
+        if untracked_gitlink(change.before.mode) || untracked_gitlink(change.after_mode) {
             continue;
         }
-        plan.insert(
-            path.clone(),
-            Some(checkpoint_value(workspace, &path, entry)?),
-        );
-    }
-    for path in nul_paths(&untracked)? {
-        // `ls-files` names an untracked directory (a nested repository git
-        // will not descend into) with a trailing slash. It is not a file the
-        // turn created, and removing it would swallow the repository.
-        if path.ends_with('/') {
-            continue;
-        }
-        if let Some(entry) = tree.get(&path) {
-            if entry.mode == MODE_GITLINK && !indexed_gitlinks.contains(&path) {
-                continue;
-            }
-            // Git reports a path in the tree but untracked in the checkout as
-            // deleted even when its bytes still match. Only a real difference
-            // belongs in the plan.
-            if plan.contains_key(&path) || same_as_checkpoint(workspace, &path, entry)? {
-                continue;
-            }
-            let value = Some(checkpoint_value(workspace, &path, entry)?);
-            plan.insert(path, value);
+        let value = if change.before.mode == 0 {
+            None
         } else {
-            plan.entry(path).or_insert(None);
-        }
+            Some(checkpoint_value(&repo, &change.path, &change.before)?)
+        };
+        plan.insert(change.path, value);
     }
     Ok(plan
         .into_iter()
@@ -1550,18 +1680,71 @@ pub fn checkpoint_changes(
         .collect())
 }
 
-/// Repository-relative paths the checkout's real index records as gitlinks.
+/// One path `diff-tree` reported between the checkpoint and the worktree now.
+struct TreeChange {
+    path: String,
+    /// The checkpoint's entry; mode 0 when the path was absent then.
+    before: TreeEntry,
+    /// The mode now; 0 when the path is gone.
+    after_mode: u32,
+}
+
+/// Parses `diff-tree -r -z` raw output: `:<old mode> <new mode> <old id> <new
+/// id> <status>` then the path, each ending in NUL.
+fn raw_tree_changes(raw: &[u8]) -> Result<Vec<TreeChange>, String> {
+    let mut changes = Vec::new();
+    let mut fields = raw.split(|byte| *byte == 0);
+    while let Some(header) = fields.next() {
+        if header.is_empty() {
+            continue;
+        }
+        let header = std::str::from_utf8(header)
+            .map_err(|_| "git diff-tree printed a header that is not valid UTF-8".to_owned())?;
+        let mut parts = header.trim_start_matches(':').split(' ');
+        let mut mode = || {
+            parts
+                .next()
+                .and_then(|mode| u32::from_str_radix(mode, 8).ok())
+                .ok_or_else(|| format!("git diff-tree printed an unreadable record: {header}"))
+        };
+        let before_mode = mode()?;
+        let after_mode = mode()?;
+        let before_object = parts
+            .next()
+            .ok_or_else(|| format!("git diff-tree printed an unreadable record: {header}"))?;
+        let path = fields
+            .next()
+            .filter(|path| !path.is_empty())
+            .ok_or_else(|| "git diff-tree printed a record without a path".to_owned())?;
+        let path = std::str::from_utf8(path).map_err(|_| {
+            "a changed path is not valid UTF-8, so it cannot be restored".to_owned()
+        })?;
+        changes.push(TreeChange {
+            path: path.to_owned(),
+            before: TreeEntry {
+                object: before_object.to_owned(),
+                mode: before_mode,
+            },
+            after_mode,
+        });
+    }
+    Ok(changes)
+}
+
+/// The gitlinks the checkout's real index records, by repository-relative
+/// path, with the commit each points at.
 ///
 /// Only these are submodules the person really has. A nested repository the
-/// turn happens to contain is a gitlink in the checkpoint tree only, and the
-/// restore leaves it alone instead of refusing.
-fn indexed_gitlinks(workspace: &Path) -> Result<HashSet<String>, String> {
+/// turn happens to contain is a gitlink in the trees only, and the restore
+/// leaves it alone instead of refusing. The pointer is also what a checkpoint
+/// records for an uninitialised submodule, whose empty folder has no HEAD.
+fn indexed_gitlinks(repo: &Path) -> Result<HashMap<String, String>, String> {
     let raw = run_bytes_with_timeout(
-        workspace,
+        repo,
         ["ls-files", "-s", "-z", "--full-name"],
         OBSERVATION_GIT_TIMEOUT,
     )?;
-    let mut links = HashSet::new();
+    let mut links = HashMap::new();
     for record in raw.split(|byte| *byte == 0) {
         if record.is_empty() {
             continue;
@@ -1569,65 +1752,21 @@ fn indexed_gitlinks(workspace: &Path) -> Result<HashSet<String>, String> {
         let Some(tab) = record.iter().position(|byte| *byte == b'\t') else {
             return Err("git ls-files printed a record without a path".to_owned());
         };
-        let mode = std::str::from_utf8(&record[..tab])
-            .map_err(|_| "git ls-files printed a mode that is not valid UTF-8".to_owned())?
-            .split(' ')
-            .next()
-            .unwrap_or_default();
-        if mode != "160000" {
+        let header = std::str::from_utf8(&record[..tab])
+            .map_err(|_| "git ls-files printed a mode that is not valid UTF-8".to_owned())?;
+        let mut fields = header.split(' ');
+        if fields.next() != Some("160000") {
             continue;
         }
+        let object = fields
+            .next()
+            .ok_or_else(|| "git ls-files printed a gitlink without an object id".to_owned())?;
         let path = std::str::from_utf8(&record[tab + 1..])
             .map_err(|_| "an indexed path is not valid UTF-8".to_owned())?
             .to_owned();
-        links.insert(path);
+        links.insert(path, object.to_owned());
     }
     Ok(links)
-}
-
-/// The checkpoint tree's entries, keyed by repository-relative path.
-fn tree_entries(workspace: &Path, checkpoint: &str) -> Result<BTreeMap<String, TreeEntry>, String> {
-    let raw = run_bytes_with_timeout(
-        workspace,
-        ["ls-tree", "-r", "-z", "--full-tree", checkpoint],
-        OBSERVATION_GIT_TIMEOUT,
-    )?;
-    let mut entries = BTreeMap::new();
-    for record in raw.split(|byte| *byte == 0) {
-        if record.is_empty() {
-            continue;
-        }
-        let tab = record
-            .iter()
-            .position(|byte| *byte == b'\t')
-            .ok_or_else(|| "git ls-tree printed a record without a path".to_owned())?;
-        let header = std::str::from_utf8(&record[..tab])
-            .map_err(|_| "git ls-tree printed a header that is not valid UTF-8".to_owned())?;
-        let mut fields = header.split(' ');
-        let mode = fields
-            .next()
-            .and_then(|mode| u32::from_str_radix(mode, 8).ok())
-            .ok_or_else(|| "git ls-tree printed an unreadable mode".to_owned())?;
-        let _kind = fields
-            .next()
-            .ok_or_else(|| "git ls-tree printed an unreadable object type".to_owned())?;
-        let object = fields
-            .next()
-            .ok_or_else(|| "git ls-tree printed an unreadable object id".to_owned())?;
-        let path = std::str::from_utf8(&record[tab + 1..])
-            .map_err(|_| {
-                "a checkpoint path is not valid UTF-8, so its files cannot be restored".to_owned()
-            })?
-            .to_owned();
-        entries.insert(
-            path,
-            TreeEntry {
-                object: object.to_owned(),
-                mode,
-            },
-        );
-    }
-    Ok(entries)
 }
 
 /// The checkpoint's state for one tree entry.
@@ -1663,46 +1802,12 @@ fn checkpoint_value(
     })
 }
 
-/// Whether the path on disk still matches the checkpoint entry.
-fn same_as_checkpoint(workspace: &Path, path: &str, entry: &TreeEntry) -> Result<bool, String> {
-    let absolute = workspace.join(path);
-    let meta = match std::fs::symlink_metadata(&absolute) {
-        Ok(meta) => meta,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(format!("could not inspect {path}: {error}")),
-    };
-    if entry.mode == MODE_SYMLINK {
-        if !meta.file_type().is_symlink() {
-            return Ok(false);
-        }
-        let Ok(target) = std::fs::read_link(&absolute) else {
-            return Ok(false);
-        };
-        let CheckpointValue::Symlink { target: expected } =
-            checkpoint_value(workspace, path, entry)?
-        else {
-            return Ok(false);
-        };
-        return Ok(target == expected);
-    }
-    if !meta.is_file() {
-        return Ok(false);
-    }
-    let CheckpointValue::File { bytes, executable } = checkpoint_value(workspace, path, entry)?
-    else {
-        return Ok(false);
-    };
-    let Ok(current) = std::fs::read(&absolute) else {
-        return Ok(false);
-    };
-    Ok(current == bytes && is_executable(&meta) == executable)
-}
-
-/// Whether the file on disk is executable.
+/// Whether git records the file on disk as executable: the owner's execute
+/// bit, as git itself tests it, never a group or other bit.
 #[cfg(unix)]
 fn is_executable(meta: &std::fs::Metadata) -> bool {
     use std::os::unix::fs::PermissionsExt;
-    meta.permissions().mode() & 0o111 != 0
+    meta.permissions().mode() & 0o100 != 0
 }
 
 /// Whether the file on disk is executable.
@@ -2886,20 +2991,57 @@ pub fn mentions_worktree(input: &Value) -> bool {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::check_git_version;
+#[cfg(all(test, unix))]
+mod still_readable_tests {
+    use super::still_readable;
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    use std::path::Path;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    fn mkfifo(path: &Path) {
+        let name = CString::new(path.as_os_str().as_bytes()).unwrap();
+        // SAFETY: `name` is a valid NUL-terminated path for this call.
+        let made = unsafe { libc::mkfifo(name.as_ptr(), 0o600) };
+        assert_eq!(made, 0, "mkfifo: {}", std::io::Error::last_os_error());
+    }
+
+    /// `still_readable(repo, path)` on its own thread, which must answer within
+    /// a few seconds: a blocking open would never come back.
+    fn answer_promptly(repo: &Path, path: &str) -> Result<bool, String> {
+        let (repo, path) = (repo.to_owned(), path.to_owned());
+        let (send, receive) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = send.send(still_readable(&repo, &path));
+        });
+        receive
+            .recv_timeout(Duration::from_secs(5))
+            .expect("still_readable must not block on a FIFO")
+    }
 
     #[test]
-    fn an_older_git_cannot_take_an_exact_byte_checkpoint() {
-        assert!(check_git_version("git version 2.40.0").is_ok());
-        assert!(check_git_version("git version 2.47.3 (Apple Git-152)").is_ok());
+    fn a_fifo_or_a_link_to_one_is_reported_at_once_and_never_waited_on() {
+        let dir = tempfile::tempdir().unwrap();
+        mkfifo(&dir.path().join("pipe"));
+        std::os::unix::fs::symlink("pipe", dir.path().join("link")).unwrap();
 
-        let error = check_git_version("git version 2.39.5").unwrap_err();
-        assert!(error.contains("git 2.39"), "{error}");
-        assert!(error.contains("older than 2.40"), "{error}");
+        let linked = answer_promptly(dir.path(), "link").expect_err("a link is not followed");
+        assert!(linked.contains("link"), "{linked}");
+        assert!(linked.contains("symbolic link"), "{linked}");
 
-        let error = check_git_version("not a version").unwrap_err();
-        assert!(error.contains("could not be read"), "{error}");
+        let pipe = answer_promptly(dir.path(), "pipe").expect_err("a FIFO is not a file");
+        assert!(pipe.contains("pipe"), "{pipe}");
+        assert!(pipe.contains("regular file"), "{pipe}");
+    }
+
+    #[test]
+    fn a_regular_file_is_readable_and_a_missing_one_is_gone() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "a").unwrap();
+        assert_eq!(still_readable(dir.path(), "a.txt"), Ok(true));
+        assert_eq!(still_readable(dir.path(), "missing.txt"), Ok(false));
+        // A folder on the way that is now a file: the path is gone too.
+        assert_eq!(still_readable(dir.path(), "a.txt/inner"), Ok(false));
     }
 }

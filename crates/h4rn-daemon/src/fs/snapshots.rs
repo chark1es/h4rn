@@ -81,8 +81,8 @@ struct Manifest {
     #[serde(default)]
     ignored: Vec<String>,
     /// Why this turn's checkpoint cannot be complete, when the capture could
-    /// not be taken (an older git, too many ignored paths). The restore names
-    /// this instead of a generic refusal.
+    /// not be taken (too many ignored paths, or a git-version refusal an older
+    /// daemon recorded). The restore names this instead of a generic refusal.
     #[serde(default)]
     checkpoint_reason: Option<String>,
     files: BTreeMap<String, SnapshotEntry>,
