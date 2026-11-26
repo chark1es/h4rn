@@ -48,6 +48,14 @@ All notable changes to h4rn are recorded here. The format follows
   follow the Language choice; agent output, tool output, file names and diffs
   stay as written. Token counts, costs and durations use the language's own
   formats, and palette rows that open a dialog now end in "…".
+- **The usage page in Chinese, Spanish and Japanese.** The page, its chart,
+  tables, limits and reset history, the auto-resume cards and the usage footer
+  under the composer follow the Language choice. Token counts, costs,
+  percentages, durations and dates use the language's own formats (the footer
+  now writes tokens like the receipt, "12.4K"; Chinese and Japanese durations
+  read "2分05秒" with no stray spaces; costs keep a plain "$" in every
+  language). A limit whose reset time has passed says "Resets now". Model ids,
+  harness names and provider messages stay as sent.
 - **Phone pairing and the phone tab bar in Chinese, Spanish and Japanese.**
   The pairing screen, its code check, the scopes it shows, pairing errors and
   the "Paired with" toast follow the Language choice, and the tab bar uses the

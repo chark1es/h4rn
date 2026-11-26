@@ -1,8 +1,9 @@
 // @vitest-environment jsdom
 
-import { renderHook } from "@testing-library/react";
+import { act, renderHook } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import type { ThreadSummary } from "@/gen";
+import { setLocalePreference } from "@/lib/i18n";
 import { usePanelChanges } from "./usePanelChanges";
 
 const mock = vi.hoisted(() => ({
@@ -71,6 +72,19 @@ describe("usePanelChanges", () => {
       unmount();
     } finally {
       log.turns = original;
+    }
+  });
+
+  it("rewords the turn labels when the language changes, without a new log", async () => {
+    const thread = { thread_id: "th_1" } as ThreadSummary;
+    const { result, unmount } = renderHook(() => usePanelChanges(thread));
+    try {
+      expect(result.current.turns.map((turn) => turn.label)).toEqual(["Turn 1", "Turn 2"]);
+      await act(() => setLocalePreference("ja"));
+      expect(result.current.turns.map((turn) => turn.label)).toEqual(["ターン 1", "ターン 2"]);
+    } finally {
+      unmount();
+      await act(() => setLocalePreference("en"));
     }
   });
 });

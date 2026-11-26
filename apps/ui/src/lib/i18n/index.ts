@@ -13,6 +13,7 @@ import enSettings from "./locales/en/settings.json";
 import enShell from "./locales/en/shell.json";
 import enSidebar from "./locales/en/sidebar.json";
 import enThread from "./locales/en/thread.json";
+import enUsage from "./locales/en/usage.json";
 
 /**
  * UI translations.
@@ -42,6 +43,7 @@ export const NAMESPACES = [
   "shell",
   "sidebar",
   "thread",
+  "usage",
 ] as const;
 export type Namespace = (typeof NAMESPACES)[number];
 
@@ -67,6 +69,7 @@ export const englishResources = {
   shell: enShell,
   sidebar: enSidebar,
   thread: enThread,
+  usage: enUsage,
 } as const;
 
 const STORAGE_KEY = "h4rn.locale";
@@ -350,10 +353,68 @@ export function formatDuration(ms: number): string {
     [total % 60, "second"],
   ];
   const shown = parts.filter(([amount]) => amount > 0).slice(0, 2);
-  const units = (shown.length ? shown : [[0, "second"] as const]).map(([amount, unit]) =>
+  const picked = shown.length ? shown : [[0, "second"] as const];
+  // Intl's short units put a space before each Japanese unit and none after
+  // it ("6 時間30 分"); Japanese takes its unit words from CLOCK_UNITS instead.
+  if (activeLocale() === "ja") {
+    return picked.map(([amount, unit]) => formatClockUnit(amount, unit)).join("");
+  }
+  const units = picked.map(([amount, unit]) =>
     formatNumber(amount, { style: "unit", unit, unitDisplay: "short" }),
   );
   return new Intl.ListFormat(activeLocale(), { style: "narrow", type: "unit" }).format(units);
+}
+
+export type ClockUnit = "millisecond" | "second" | "minute" | "hour";
+
+/**
+ * How Chinese and Japanese write a clock figure's units: the unit word sits
+ * right after the number, with no space on either side ("2分05秒",
+ * "1時間30分"). Intl's narrow units fall back to Latin letters in Japanese
+ * ("2m05s") and its short units add a space before each unit ("2 分05 秒"),
+ * so these languages take their units from here. Every other language uses
+ * Intl's narrow units ("2m 05s", "2min 05s"). A setting in code, not in the
+ * catalogue, so a translated value can never change how the code reads it.
+ */
+const CLOCK_UNITS: Partial<Record<Locale, Record<ClockUnit, string>>> = {
+  "zh-CN": { millisecond: "毫秒", second: "秒", minute: "分", hour: "小时" },
+  ja: { millisecond: "ミリ秒", second: "秒", minute: "分", hour: "時間" },
+};
+
+/**
+ * One amount of a clock unit in the active language: "450ms", "1.7s" in
+ * English, "450毫秒" in Chinese, "1.7秒" in Japanese.
+ */
+export function formatClockUnit(
+  value: number,
+  unit: ClockUnit,
+  options: Intl.NumberFormatOptions = {},
+): string {
+  const words = CLOCK_UNITS[activeLocale()];
+  if (words) return `${formatNumber(value, options)}${words[unit]}`;
+  return formatNumber(value, { ...options, style: "unit", unit, unitDisplay: "narrow" });
+}
+
+/**
+ * A length of time for a ticking figure or a table cell, as at most two units
+ * with the second padded so the width holds: "9s", "2m 05s", "1h 30m" in
+ * English, "2分05秒" and "1小时30分" in Chinese, "1時間30分" in Japanese.
+ */
+export function formatClock(seconds: number): string {
+  const total = Number.isFinite(seconds) && seconds > 0 ? Math.round(seconds) : 0;
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const rest = total % 60;
+  const pad = { minimumIntegerDigits: 2 };
+  const pair = (major: string, minor: string) =>
+    CLOCK_UNITS[activeLocale()] ? `${major}${minor}` : formatList([major, minor], "unit", "narrow");
+  if (hours > 0) {
+    return pair(formatClockUnit(hours, "hour"), formatClockUnit(minutes, "minute", pad));
+  }
+  if (minutes > 0) {
+    return pair(formatClockUnit(minutes, "minute"), formatClockUnit(rest, "second", pad));
+  }
+  return formatClockUnit(rest, "second");
 }
 
 /**

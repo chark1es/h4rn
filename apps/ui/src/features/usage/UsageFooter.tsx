@@ -1,8 +1,10 @@
+import { useTranslation } from "react-i18next";
+
 import { useIsPhone } from "@/hooks/use-media-query";
-import { cost, duration, tokens, tokensPerSecond } from "@/lib/format";
+import { formatCost, formatTokens } from "@/lib/format";
 import { useApp } from "@/lib/store/appStore";
 
-import { firstToken } from "./presentation";
+import { firstToken, formatPercent, formatRate, formatSpan } from "./presentation";
 import { useUsage } from "./usageStore";
 
 /**
@@ -14,6 +16,7 @@ export function UsageFooter({ threadId }: { threadId: string }) {
   const summary = useApp((state) => state.threads[threadId]);
   const live = useUsage((state) => state.live[threadId]);
   const isPhone = useIsPhone();
+  const { t } = useTranslation("usage");
 
   const usage = live?.usage ?? summary?.usage;
   if (!usage) return null;
@@ -26,18 +29,18 @@ export function UsageFooter({ threadId }: { threadId: string }) {
 
   return (
     <div className="q-usage-foot q-num">
-      <span>{tokens(total)} tokens</span>
-      <span>{cost(usage.cost_micros)} est.</span>
-      <span>{tokensPerSecond(tps)} tok/s</span>
-      {isPhone ? null : <span>TTFT {firstToken(ttft)}</span>}
-      {isPhone ? null : <span>{duration(active)} active</span>}
+      <span>{t("footer.tokens", { tokens: formatTokens(total) })}</span>
+      <span>{t("footer.cost", { cost: formatCost(usage.cost_micros) })}</span>
+      <span>{t("footer.rate", { rate: formatRate(tps) })}</span>
+      {isPhone ? null : <span>{t("footer.ttft", { time: firstToken(ttft) })}</span>}
+      {isPhone ? null : <span>{t("footer.active", { duration: formatSpan(active) })}</span>}
       {isPhone ? null : <span className="grow" />}
       {filled !== null ? (
         <span>
           <span className="q-ctxbar" aria-hidden>
             <i style={{ width: `${filled}%` }} />
           </span>
-          {filled}% context
+          {t("footer.context", { percent: formatPercent(filled) })}
         </span>
       ) : null}
     </div>

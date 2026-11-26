@@ -157,7 +157,7 @@
       "failed": "失败",
       "unreachable": "主机无法连接",
       "queued": "排队中",
-      "scheduled": "已安排自动继续",
+      "scheduled": "已安排自动恢复",
       "limited": "受限",
       "limitedNeedsYou": "受限 · 需要你处理",
       "settled": "已了结",

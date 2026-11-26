@@ -1,7 +1,7 @@
 {
   "glyph": {
     "queued": "排队中",
-    "scheduled": "已安排自动继续",
+    "scheduled": "已安排自动恢复",
     "unreachable": "主机无法连接",
     "thinking": "思考中",
     "searching": "搜索中",
@@ -29,7 +29,7 @@
     "toggleTerminal": "切换终端",
     "terminal": "终端",
     "rightPanel": "右侧面板",
-    "doneAge": "已完成 · {{age}}",
+    "doneAge": "已完成 · {{when}}",
     "actions": "对话操作",
     "back": "返回收件箱",
     "inbox": "收件箱",
@@ -111,10 +111,10 @@
     },
     "limit": {
       "title": "已达到用量上限。",
-      "armed": "自动继续已开启。",
-      "armedIn": "自动继续已开启，将在 {{time}} 后继续。",
-      "off": "自动继续已关闭。请手动继续。",
-      "offAfter": "自动继续已关闭。请在 {{time}} 后手动继续。"
+      "armed": "自动恢复已开启。",
+      "armedIn": "自动恢复已开启，将在 {{time}}后恢复。",
+      "off": "自动恢复已关闭。请手动恢复。",
+      "offAfter": "自动恢复已关闭。请在 {{time}}后手动恢复。"
     }
   },
   "rewind": {
@@ -124,7 +124,7 @@
     "delivery": "有一条消息可能已送达智能体。请先重新发送或丢弃它。",
     "queued": "有一条消息正在等待运行。请先等它完成。",
     "running": "请等待当前回合完成，或先停止它。",
-    "resume": "请先取消自动继续。"
+    "resume": "请先取消自动恢复。"
   },
   "tool": {
     "status": {
@@ -203,7 +203,7 @@
     "trigger": "切换 harness：",
     "title": "切换 harness",
     "close": "关闭切换 harness",
-    "noOther": "此主机上没有安装其他 harness。请在“设置 → Harnesses”中安装一个，然后再回来。",
+    "noOther": "此主机上没有安装其他 harness。请在“设置 → Harness”中安装一个，然后再回来。",
     "note": "对话会保留其历史、工作区以及新 harness 支持的所有设置，并从对话的交接内容继续。",
     "harness": "Harness",
     "model": "模型",
