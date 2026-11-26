@@ -1,4 +1,5 @@
 import { XIcon } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 import { cn } from "@/lib/utils";
 import { type IdeTab, isDirty } from "./tabs";
@@ -21,10 +22,11 @@ export function TabStrip({
   onClose,
   onReorder,
 }: TabStripProps) {
+  const { t } = useTranslation("ide");
   if (tabs.length === 0) return null;
 
   return (
-    <div role="tablist" aria-label="Open files" className="q-etabs">
+    <div role="tablist" aria-label={t("tabs.label")} className="q-etabs">
       {tabs.map((tab, index) => {
         const active = tab.path === activePath;
         const dirty = isDirty(tab);
@@ -64,15 +66,15 @@ export function TabStrip({
               {dirty ? (
                 <span
                   role="img"
-                  aria-label="Unsaved changes"
-                  title="Unsaved changes"
+                  aria-label={t("tabs.unsaved")}
+                  title={t("tabs.unsaved")}
                   className="dirty"
                 />
               ) : null}
             </button>
             <button
               type="button"
-              aria-label={`Close ${tab.name}`}
+              aria-label={t("tabs.close", { name: tab.name })}
               onClick={() => onClose(tab.path)}
               className="q-ttab-x"
             >

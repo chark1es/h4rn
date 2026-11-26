@@ -1,0 +1,47 @@
+{
+  "preview": "Vista previa",
+  "reload": "Recargar",
+  "reloadPreview": "Recargar la vista previa",
+  "openFullWidth": "Abrir a ancho completo",
+  "openFullWidthLabel": "Abrir la vista previa a ancho completo",
+  "close": "Cerrar la vista previa",
+  "backToThread": "Volver al hilo",
+  "returnToPanel": "Volver al panel",
+  "returnToPanelLabel": "Devolver la vista previa al panel",
+  "loading": "Cargando la vista previa",
+  "frameTitle": "Vista previa de {{name}}",
+  "empty": {
+    "title": "No hay ninguna vista previa abierta",
+    "body": "Elige un archivo HTML en Archivos y abre su vista previa. La página se ejecuta aislada y no puede tocar h4rn, sus cookies ni su almacenamiento.",
+    "showFiles": "Mostrar archivos"
+  },
+  "missing_one": "{{count, number}} archivo no se cargó: falta, está fuera del espacio de trabajo o supera el límite de tamaño.",
+  "missing_many": "{{count, number}} archivos no se cargaron: faltan, están fuera del espacio de trabajo o superan el límite de tamaño.",
+  "missing_other": "{{count, number}} archivos no se cargaron: faltan, están fuera del espacio de trabajo o superan el límite de tamaño.",
+  "link": {
+    "ask": "¿Abrir <host>{{host}}</host> en tu navegador?",
+    "open": "Abrir"
+  },
+  "scripts": {
+    "deviceTitle": "Este dispositivo no puede ejecutar scripts en una vista previa.",
+    "deviceBody": "Su WebView bloquea los scripts propios de una página aislada, así que la vista previa se desactivó en lugar de mostrar la página sin ellos. Actualiza Android System WebView y recarga.",
+    "blockedTitle": "Los scripts de la vista previa no se iniciaron.",
+    "unknownBody": "La app no pudo leer el informe de capacidades de este WebView, así que no puede confirmar que los scripts de la página se ejecuten. Recarga para comprobarlo de nuevo.",
+    "blockedBody": "La página se cargó, pero el script que mantiene seguros sus enlaces nunca se ejecutó. Recarga la vista previa; puede deberse a un comentario que nunca se cierra o a una política que bloquea los scripts."
+  },
+  "failure": {
+    "goneTitle": "Este archivo ya no está en el espacio de trabajo.",
+    "documentTooLargeTitle": "Este archivo es demasiado grande para la vista previa.",
+    "documentTooLarge": "La vista previa lee como máximo {{limit}}; este archivo ocupa {{size}}. Ábrelo en un navegador.",
+    "documentTooLargeEscaped": "Este archivo ocupa {{size}}, pero una vez escapado su texto para el envío es demasiado grande para la vista previa. Ábrelo en un navegador.",
+    "pageTooLargeTitle": "Esta página es demasiado grande para la vista previa.",
+    "pageTooLarge": "La página preparada ocupa {{size}}; la vista previa incrusta hasta {{limit}} del espacio de trabajo.",
+    "notTextTitle": "Este archivo no es texto UTF-8.",
+    "binary": "Solo se pueden previsualizar archivos HTML de texto.",
+    "undecodable": "El daemon no pudo decodificarlo como texto.",
+    "loadFailedTitle": "La vista previa no se cargó.",
+    "noFile": "El daemon no devolvió ningún archivo.",
+    "kib": "{{size}} KiB",
+    "mib": "{{size}} MiB"
+  }
+}

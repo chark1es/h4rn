@@ -1433,28 +1433,6 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
 
 export type IdeSession = ReturnType<typeof useIdeSession>;
 
-export function languageLabel(path: string | null | undefined): string {
-  if (!path) return "Plain text";
-  const extension = path.split(".").at(-1)?.toLowerCase();
-  const labels: Record<string, string> = {
-    ts: "TypeScript",
-    tsx: "TypeScript React",
-    js: "JavaScript",
-    jsx: "JavaScript React",
-    rs: "Rust",
-    py: "Python",
-    go: "Go",
-    json: "JSON",
-    md: "Markdown",
-    css: "CSS",
-    html: "HTML",
-    yaml: "YAML",
-    yml: "YAML",
-    toml: "TOML",
-  };
-  return (extension && labels[extension]) || "Plain text";
-}
-
 export function gitBadge(status: GitFileStatus | null): { letter: string; tone: string } | null {
   if (!status) return null;
   switch (status) {

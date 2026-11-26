@@ -7,7 +7,6 @@ import type { FsDiff, FsDiffFiles, ThreadId } from "@/gen";
 
 import { DiffView } from "./DiffView";
 import { addReviewComment, listReviewComments, resetReviewComments } from "./reviewComments";
-import { sourceDescription } from "./sources";
 
 const thread = "th_1" as ThreadId;
 
@@ -67,7 +66,7 @@ function view(overrides: Partial<Parameters<typeof DiffView>[0]> = {}) {
       host={null}
       harness={null}
       threadId={thread}
-      sourceLabel="uncommitted (HEAD)"
+      scopeLabel="HEAD"
       changeTitle={null}
       onSelectFile={() => undefined}
       onOpenFile={() => undefined}
@@ -152,7 +151,8 @@ describe("diff review", () => {
       lines: [{ number: 2, sign: "+", text: "B" }],
       text: "Keep the original name.",
       scope: "head",
-      source: "uncommitted (HEAD)",
+      source: "head",
+      sourceLabel: "HEAD",
     });
     const onSendComments = vi.fn();
     render(view({ onSendComments }));
@@ -169,7 +169,7 @@ describe("diff review", () => {
       view({
         source: "branch",
         files,
-        sourceLabel: "branch vs main",
+        scopeLabel: "vs main",
         diff: { ...diff, against: { kind: "base", base: "main" }, label: "vs main" },
         onSelectFile,
       }),
@@ -191,7 +191,7 @@ describe("diff review", () => {
       view({
         source: "branch",
         files,
-        sourceLabel: "branch vs main",
+        scopeLabel: "vs main",
         diff: {
           ...diff,
           against: { kind: "base", base: "main" },
@@ -217,7 +217,7 @@ describe("diff review", () => {
       view({
         source: "branch",
         files,
-        sourceLabel: "branch vs main",
+        scopeLabel: "vs main",
         diff: { ...diff, against: { kind: "base", base: "main" }, label: "vs main", binary: true },
       }),
     );
@@ -231,7 +231,7 @@ describe("diff review", () => {
     render(
       view({
         source: "branch",
-        sourceLabel: "branch vs base",
+        scopeLabel: null,
         diff: null,
         files: null,
         filesError: {
@@ -256,9 +256,10 @@ describe("diff review", () => {
       lines: [{ number: 2, sign: "+", text: "B" }],
       text: "Written against the branch.",
       scope: "base:main",
-      source: "branch vs main",
+      source: "branch",
+      sourceLabel: "vs main",
     });
-    render(view({ sourceLabel: "uncommitted (HEAD)" }));
+    render(view({ scopeLabel: "HEAD" }));
     const lines = screen.getByRole("region", { name: "Diff lines" });
     expect(within(lines).queryByText("Written against the branch.")).toBeNull();
     expect(screen.getByText("Written against the branch.")).toBeTruthy();
@@ -271,7 +272,7 @@ describe("diff review", () => {
       view({
         source: "branch",
         files,
-        sourceLabel: "branch vs main",
+        scopeLabel: "vs main",
         diff: { ...diff, against: { kind: "base", base: null }, label: "vs main" },
       }),
     );
@@ -291,7 +292,7 @@ describe("diff review", () => {
       view({
         source: "branch",
         files,
-        sourceLabel: "branch vs main",
+        scopeLabel: "vs main",
         diff: { ...diff, against: { kind: "base", base: "main" }, label: "vs main" },
       }),
     );
@@ -311,13 +312,14 @@ describe("diff review", () => {
       lines: [{ number: 2, sign: "+", text: "B" }],
       text: "Keep the base honest.",
       scope: "base:main",
-      source: "branch vs main",
+      source: "branch",
+      sourceLabel: "vs main",
     });
     render(
       view({
         source: "branch",
         files,
-        sourceLabel: "branch vs main",
+        scopeLabel: "vs main",
         diff: { ...diff, against: { kind: "base", base: null }, label: "vs main" },
       }),
     );
@@ -341,12 +343,13 @@ describe("diff review", () => {
       lines: [{ number: 2, sign: "+", text: "B" }],
       text: "Written during the first turn.",
       scope: `turn:${thread}:${first}`,
-      source: sourceDescription("agent", label),
+      source: "agent",
+      sourceLabel: label,
     });
     render(
       view({
         source: "agent",
-        sourceLabel: sourceDescription("agent", label),
+        scopeLabel: label,
         diff: {
           ...diff,
           against: {
@@ -391,7 +394,7 @@ describe("diff review", () => {
             },
           ],
         },
-        sourceLabel: "branch vs main",
+        scopeLabel: "vs main",
         diff: { ...diff, against: { kind: "base", base: "main" }, label: "vs main" },
       }),
     );

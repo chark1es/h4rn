@@ -6,8 +6,10 @@ import enCommands from "./locales/en/commands.json";
 import enCommon from "./locales/en/common.json";
 import enComposer from "./locales/en/composer.json";
 import enDialogs from "./locales/en/dialogs.json";
+import enIde from "./locales/en/ide.json";
 import enIssues from "./locales/en/issues.json";
 import enPairing from "./locales/en/pairing.json";
+import enPreview from "./locales/en/preview.json";
 import enPullRequests from "./locales/en/pullRequests.json";
 import enSettings from "./locales/en/settings.json";
 import enShell from "./locales/en/shell.json";
@@ -36,8 +38,10 @@ export const NAMESPACES = [
   "commands",
   "composer",
   "dialogs",
+  "ide",
   "issues",
   "pairing",
+  "preview",
   "pullRequests",
   "settings",
   "shell",
@@ -62,8 +66,10 @@ export const englishResources = {
   commands: enCommands,
   composer: enComposer,
   dialogs: enDialogs,
+  ide: enIde,
   issues: enIssues,
   pairing: enPairing,
+  preview: enPreview,
   pullRequests: enPullRequests,
   settings: enSettings,
   shell: enShell,
@@ -273,8 +279,25 @@ export function useActiveLocale(): Locale {
 // Formatting. Dates, times and numbers go through Intl with the active
 // language, never through string building.
 
+/**
+ * Number formatters by language and options. Lists and diffs format a figure
+ * per row, and building an `Intl.NumberFormat` is far slower than using one.
+ * The language is part of the key, so a language switch gets a new formatter.
+ */
+const numberFormats = new Map<string, Intl.NumberFormat>();
+
+function numberFormat(locale: Locale, options?: Intl.NumberFormatOptions): Intl.NumberFormat {
+  const key = `${locale}\u0000${JSON.stringify(options ?? {})}`;
+  let format = numberFormats.get(key);
+  if (!format) {
+    format = new Intl.NumberFormat(locale, options);
+    numberFormats.set(key, format);
+  }
+  return format;
+}
+
 export function formatNumber(value: number, options?: Intl.NumberFormatOptions): string {
-  return new Intl.NumberFormat(activeLocale(), options).format(value);
+  return numberFormat(activeLocale(), options).format(value);
 }
 
 export function formatDateTime(

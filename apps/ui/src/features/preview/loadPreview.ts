@@ -17,8 +17,33 @@ import {
   scanPreviewReferences,
 } from "./htmlPreview";
 
-/** A plain, user-facing reason the preview could not be prepared. */
-export type PreviewFailure = { title: string; detail: string };
+/**
+ * Why the preview could not be prepared, as a kind the panel words in the
+ * active language (`describePreviewFailure`). A `detail` is the daemon's or
+ * the browser's own error text, shown as sent; `null` there means the daemon
+ * answered without a file.
+ */
+export type PreviewFailure =
+  | { kind: "gone"; detail: string | null }
+  | { kind: "documentTooLarge"; size: number; limit: number }
+  | { kind: "pageTooLarge"; size: number; limit: number }
+  | { kind: "notText"; binary: boolean; hint: string | null }
+  | { kind: "loadFailed"; detail: string | null };
+
+/** A read the daemon answered with something other than a file. */
+export class PreviewNoFileError extends Error {
+  constructor() {
+    // i18n-ignore-next-line: the panel words this kind itself; the message is only for logs
+    super("no file in the reply");
+    this.name = "PreviewNoFileError";
+  }
+}
+
+/** The error's own text, or `null` for a reply that carried no file. */
+export function previewFailureDetail(cause: unknown): string | null {
+  if (cause instanceof PreviewNoFileError) return null;
+  return cause instanceof Error ? cause.message : String(cause);
+}
 
 /** One workspace read, injected so the loader is testable without a daemon. */
 export type PreviewReader = (
@@ -34,32 +59,12 @@ export type PreviewLoad = {
   watched: string[];
 };
 
-function megabytes(bytes: number): string {
-  return (bytes / 1_048_576).toFixed(1);
-}
-
-function kilobytes(bytes: number): string {
-  return `${Math.ceil(bytes / 1024)} KiB`;
-}
-
 function documentTooLarge(size: number): PreviewFailure {
-  return {
-    title: "This file is too large to preview.",
-    detail: `The preview reads at most ${kilobytes(
-      PREVIEW_MAX_DOCUMENT_BYTES,
-    )} of text so one response fits a transport frame. This file is ${kilobytes(
-      size,
-    )}, or needs more than that once its text is escaped for the wire. Open it in a terminal or split the report.`,
-  };
+  return { kind: "documentTooLarge", size, limit: PREVIEW_MAX_DOCUMENT_BYTES };
 }
 
-function pageTooLarge(size: number): PreviewFailure {
-  return {
-    title: "This page is too large to preview.",
-    detail: `The prepared page is ${megabytes(size)} MiB; the preview embeds up to ${megabytes(
-      PREVIEW_MAX_TOTAL_BYTES,
-    )} MiB from the workspace.`,
-  };
+function pageTooLarge(size: number, limit: number): PreviewFailure {
+  return { kind: "pageTooLarge", size, limit };
 }
 
 /**
@@ -98,10 +103,7 @@ export async function loadPreview(options: {
   } catch (cause) {
     return {
       document: null,
-      failure: {
-        title: "This file is no longer in the workspace.",
-        detail: cause instanceof Error ? cause.message : String(cause),
-      },
+      failure: { kind: "gone", detail: previewFailureDetail(cause) },
       watched: [path],
     };
   }
@@ -116,12 +118,7 @@ export async function loadPreview(options: {
   if (file.content === null) {
     return {
       document: null,
-      failure: {
-        title: "This file isn’t UTF-8 text.",
-        detail: file.binary
-          ? "Only text HTML files can be previewed."
-          : (file.hint ?? "The daemon could not decode it as text."),
-      },
+      failure: { kind: "notText", binary: file.binary, hint: file.hint },
       watched: [path],
     };
   }
@@ -226,7 +223,7 @@ export async function loadPreview(options: {
   });
   const size = new TextEncoder().encode(built.srcdoc).length;
   if (size > cap) {
-    return { document: null, failure: pageTooLarge(size), watched: [...watched] };
+    return { document: null, failure: pageTooLarge(size, cap), watched: [...watched] };
   }
   return { document: built, failure: null, watched: [...watched] };
 }

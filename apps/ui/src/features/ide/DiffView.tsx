@@ -7,6 +7,7 @@ import {
   TriangleAlertIcon,
 } from "lucide-react";
 import { Fragment, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import { Trans, useTranslation } from "react-i18next";
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
 import { ChipSelect } from "@/components/common/ChipSelect";
 import type {
@@ -24,6 +25,7 @@ import type {
 import { useIsPhone } from "@/hooks/use-media-query";
 import { harnessLabel, harnessSeed } from "@/lib/entities";
 import { absoluteTime } from "@/lib/format";
+import { formatNumber, i18n } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 import { collapseDiff, computeDiff, type DiffLine, diffStats } from "./diff";
 import {
@@ -34,7 +36,7 @@ import {
   updateReviewComment,
   useReviewComments,
 } from "./reviewComments";
-import { type DiffSource, diffScopeKey, resolvedAgainst } from "./sources";
+import { type DiffSource, describeSource, diffScopeKey, resolvedAgainst } from "./sources";
 
 type DiffViewProps = {
   path: string | null;
@@ -51,8 +53,11 @@ type DiffViewProps = {
   host: HostId | null;
   harness: HarnessKind | null;
   threadId: ThreadId | null;
-  /** "branch vs main", "commit 1a2b3c4", "uncommitted (HEAD)". */
-  sourceLabel: string;
+  /**
+   * The daemon's label for the diff on screen ("vs main", "Commit 1a2b3c4"),
+   * stored with a new comment so it can name its diff later.
+   */
+  scopeLabel: string | null;
   changeTitle: string | null;
   changeAt?: string | null;
   onSelectFile: (path: string) => void;
@@ -141,15 +146,25 @@ export function highlightCode(text: string): ReactNode[] {
   return nodes;
 }
 
-const STATUS: Record<GitFileStatus, { letter: string; tone: string; label: string }> = {
-  added: { letter: "A", tone: "q-add", label: "added" },
-  modified: { letter: "M", tone: "q-warn", label: "modified" },
-  deleted: { letter: "D", tone: "q-del", label: "deleted" },
-  renamed: { letter: "R", tone: "q-warn", label: "renamed" },
-  untracked: { letter: "U", tone: "q-faint", label: "untracked" },
-  conflicted: { letter: "!", tone: "q-del", label: "conflicted" },
-  type_changed: { letter: "T", tone: "q-warn", label: "type changed" },
+const STATUS: Record<GitFileStatus, { letter: string; tone: string }> = {
+  added: { letter: "A", tone: "q-add" },
+  modified: { letter: "M", tone: "q-warn" },
+  deleted: { letter: "D", tone: "q-del" },
+  renamed: { letter: "R", tone: "q-warn" },
+  untracked: { letter: "U", tone: "q-faint" },
+  conflicted: { letter: "!", tone: "q-del" },
+  type_changed: { letter: "T", tone: "q-warn" },
 };
+
+/** `+18 −4`, with each count written the active language's way. */
+function counts(added: number, removed: number): string {
+  return `+${formatNumber(added)} −${formatNumber(removed)}`;
+}
+
+/** A line number in prose ("Comment on line 1204"), without grouping. */
+function lineNumber(value: number): string {
+  return formatNumber(value, { useGrouping: false });
+}
 
 function splitPath(path: string): { dir: string; name: string } {
   const slash = path.lastIndexOf("/");
@@ -159,13 +174,35 @@ function splitPath(path: string): { dir: string; name: string } {
 }
 
 function fileTitle(file: FsDiffFile): string {
-  const status = STATUS[file.status]?.label ?? file.status;
-  const rename = file.old_path ? ` (was ${file.old_path})` : "";
-  const counts = file.binary ? " · binary" : file.counts_omitted ? " · line counts not read" : "";
-  return `${file.path} · ${status}${rename}${counts}`;
+  const known = file.status in STATUS;
+  const word = known ? i18n.t(`ide:files.status.${file.status}`) : file.status;
+  const status = file.old_path
+    ? i18n.t("ide:files.statusWas", { status: word, path: file.old_path })
+    : word;
+  const note = file.binary
+    ? i18n.t("ide:files.binary")
+    : file.counts_omitted
+      ? i18n.t("ide:files.noCountsLong")
+      : null;
+  return [file.path, status, note].filter(Boolean).join(" · ");
 }
 
 type LineSelection = { anchor: number; focus: number };
+
+/** The new comment's heading: "New lines 3–5 · branch vs main". */
+function draftLabel(
+  range: { start: number; end: number; side: string } | null,
+  source: string,
+): string {
+  if (!range) return source;
+  const lines =
+    range.end === range.start
+      ? lineNumber(range.start)
+      : `${lineNumber(range.start)}–${lineNumber(range.end)}`;
+  return range.side === "new"
+    ? i18n.t("ide:comments.newLines", { lines, source })
+    : i18n.t("ide:comments.oldLines", { lines, source });
+}
 
 function rangeLabel(
   visible: DiffLine[],
@@ -190,6 +227,7 @@ function CommentEditor({
   onSubmit: (text: string) => void;
   onCancel: () => void;
 }) {
+  const { t } = useTranslation(["ide", "common"]);
   const [text, setText] = useState("");
   const ref = useRef<HTMLTextAreaElement | null>(null);
   useEffect(() => {
@@ -202,7 +240,7 @@ function CommentEditor({
   return (
     <form
       className="q-review-note editing"
-      aria-label={`New review comment on ${label}`}
+      aria-label={t("comments.newOn", { label })}
       onSubmit={(event) => {
         event.preventDefault();
         submit();
@@ -213,8 +251,8 @@ function CommentEditor({
         ref={ref}
         value={text}
         rows={2}
-        aria-label="Review comment"
-        placeholder="What should the agent change here?"
+        aria-label={t("comments.field")}
+        placeholder={t("comments.placeholder")}
         onChange={(event) => setText(event.target.value)}
         onKeyDown={(event) => {
           if (event.key === "Escape") {
@@ -229,7 +267,7 @@ function CommentEditor({
       />
       <div className="q-review-actions">
         <button type="button" className="q-btn ghost" onClick={onCancel}>
-          Cancel
+          {t("common:cancel")}
         </button>
         <button
           type="button"
@@ -237,7 +275,7 @@ function CommentEditor({
           disabled={text.trim().length === 0}
           onClick={submit}
         >
-          Add comment
+          {t("comments.add")}
         </button>
       </div>
     </form>
@@ -253,24 +291,28 @@ function CommentNote({
   onUpdate: (text: string) => void;
   onDelete: () => void;
 }) {
+  const { t } = useTranslation(["ide", "common"]);
   const [editing, setEditing] = useState(false);
   const [text, setText] = useState(comment.text);
   const range =
     comment.startLine === comment.endLine
-      ? `line ${comment.startLine}`
-      : `lines ${comment.startLine}–${comment.endLine}`;
+      ? t("comments.line", { line: lineNumber(comment.startLine) })
+      : t("comments.range", {
+          start: lineNumber(comment.startLine),
+          end: lineNumber(comment.endLine),
+        });
   return (
-    <div className="q-review-note" role="note" aria-label={`Review comment on ${range}`}>
+    <div className="q-review-note" role="note" aria-label={t("comments.on", { range })}>
       <div className="q-review-meta">
         <MessageSquareIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
-        {range} · {comment.source}
+        {range} · {describeSource(comment.source, comment.sourceLabel)}
       </div>
       {editing ? (
         <>
           <textarea
             value={text}
             rows={2}
-            aria-label="Edit review comment"
+            aria-label={t("comments.editField")}
             onChange={(event) => setText(event.target.value)}
             onKeyDown={(event) => {
               if (event.key === "Escape") {
@@ -294,7 +336,7 @@ function CommentNote({
                 setEditing(false);
               }}
             >
-              Cancel
+              {t("common:cancel")}
             </button>
             <button
               type="button"
@@ -305,7 +347,7 @@ function CommentNote({
                 setEditing(false);
               }}
             >
-              Save
+              {t("common:save")}
             </button>
           </div>
         </>
@@ -314,10 +356,10 @@ function CommentNote({
           <p className="q-review-text">{comment.text}</p>
           <div className="q-review-actions">
             <button type="button" className="q-btn ghost" onClick={onDelete}>
-              Delete
+              {t("common:delete")}
             </button>
             <button type="button" className="q-btn ghost" onClick={() => setEditing(true)}>
-              Edit
+              {t("common:edit")}
             </button>
           </div>
         </>
@@ -340,7 +382,7 @@ export function DiffView({
   host,
   harness,
   threadId,
-  sourceLabel,
+  scopeLabel,
   changeTitle,
   changeAt = null,
   onSelectFile,
@@ -350,8 +392,10 @@ export function DiffView({
   onCompareHead,
   onRefresh,
 }: DiffViewProps) {
+  const { t } = useTranslation(["ide", "common"]);
   const isPhone = useIsPhone();
   const context = source === "agent" ? 10 : 3;
+  const sourceText = describeSource(source, scopeLabel);
   const flat = useMemo(() => computeDiff(diff?.before ?? "", diff?.after ?? ""), [diff]);
   const rows = useMemo(() => {
     let index = 0;
@@ -437,7 +481,8 @@ export function DiffView({
       lines: selected.lines,
       text,
       scope: scopeKey,
-      source: sourceLabel,
+      source,
+      sourceLabel: scopeLabel,
     });
     setDraft(null);
   };
@@ -458,11 +503,16 @@ export function DiffView({
 
   if (loading) {
     return (
-      <div className="q-center-empty" role="status" aria-label="Loading diff" style={{ flex: 1 }}>
+      <div
+        className="q-center-empty"
+        role="status"
+        aria-label={t("diff.loading")}
+        style={{ flex: 1 }}
+      >
         <div className="q-empty" style={{ padding: 0 }}>
           <p style={{ margin: 0, display: "flex", alignItems: "center", gap: 8 }}>
             <Loader2Icon className="q-icon s14 animate-spin" aria-hidden />
-            Loading diff…
+            {t("diff.loadingText")}
           </p>
         </div>
       </div>
@@ -487,7 +537,7 @@ export function DiffView({
               style={{ color: "var(--danger)" }}
               aria-hidden
             />
-            The diff did not load.
+            {t("diff.failed")}
           </p>
           <p style={{ margin: "4px 0 0" }}>{error.message}</p>
           {error.hint ? (
@@ -500,7 +550,7 @@ export function DiffView({
               style={{ marginTop: 12, height: 26 }}
               onClick={onCompareHead}
             >
-              Compare with HEAD
+              {t("diff.compareHead")}
             </button>
           ) : null}
         </div>
@@ -516,13 +566,13 @@ export function DiffView({
         <div
           className="q-center-empty"
           role="status"
-          aria-label="Loading changed files"
+          aria-label={t("diff.listing")}
           style={{ flex: 1 }}
         >
           <div className="q-empty" style={{ padding: 0 }}>
             <p style={{ margin: 0, display: "flex", alignItems: "center", gap: 8 }}>
               <Loader2Icon className="q-icon s14 animate-spin" aria-hidden />
-              Listing changed files…
+              {t("diff.listingText")}
             </p>
           </div>
         </div>
@@ -531,9 +581,7 @@ export function DiffView({
     if (filesError) {
       return (
         <div className="q-scroll" style={{ flex: 1, padding: 16, fontSize: 12 }}>
-          <p style={{ margin: 0, fontWeight: 500, color: "var(--fg)" }}>
-            The file list did not load.
-          </p>
+          <p style={{ margin: 0, fontWeight: 500, color: "var(--fg)" }}>{t("diff.listFailed")}</p>
           <p style={{ margin: "4px 0 0", color: "var(--fg-2)" }}>{filesError.message}</p>
           {source === "branch" ? (
             <button
@@ -542,7 +590,7 @@ export function DiffView({
               style={{ marginTop: 12, height: 26 }}
               onClick={onCompareHead}
             >
-              Compare with HEAD
+              {t("diff.compareHead")}
             </button>
           ) : null}
         </div>
@@ -554,12 +602,16 @@ export function DiffView({
           <FileTextIcon className="q-icon s18 q-faint" aria-hidden />
           <h3 style={{ fontSize: 13.5 }}>
             {emptyBranch
-              ? `No changes against ${files?.base ?? "the base"}.`
+              ? files?.base
+                ? t("diff.noBranchChanges", { base: files.base })
+                : t("diff.noBranchChangesDefault")
               : emptyCommit
-                ? "This commit changed no files."
+                ? t("diff.emptyCommit")
                 : emptyRange
-                  ? `No commits beyond ${commits?.base ?? "the base"}.`
-                  : "Open a file to compare it."}
+                  ? commits?.base
+                    ? t("diff.noCommits", { base: commits.base })
+                    : t("diff.noCommitsDefault")
+                  : t("diff.openFile")}
           </h3>
         </div>
       </div>
@@ -568,21 +620,19 @@ export function DiffView({
   // A binary or oversized file says so in the diff body. The file list, the
   // source bar and the comment bar stay: another file or source is one click
   // away, and comments already written for this file remain reachable.
-  const blocked = diff.too_large
-    ? "This file is too large to diff. Open it in your editor or a terminal instead."
-    : diff.binary
-      ? "Both sides are binary, so there is no text diff to show."
-      : null;
+  const blocked = diff.too_large ? t("diff.tooLarge") : diff.binary ? t("diff.binary") : null;
 
   const range = rangeLabel(visible, selection);
   const draftRange = rangeLabel(visible, draft);
   const showFileList = source === "branch" || source === "commit";
 
   const fileList = (
-    <aside className="q-diff-files" aria-label="Changed files">
+    <aside className="q-diff-files" aria-label={t("files.label")}>
       <div className="q-diff-files-head">
-        <span>{scopeRows.length} files</span>
-        {files?.truncated ? <span className="q-faint">first {scopeRows.length}</span> : null}
+        <span>{t("files.count", { count: scopeRows.length })}</span>
+        {files?.truncated ? (
+          <span className="q-faint">{t("files.first", { count: scopeRows.length })}</span>
+        ) : null}
       </div>
       {scopeRows.map((file) => {
         const status = STATUS[file.status] ?? STATUS.modified;
@@ -607,13 +657,13 @@ export function DiffView({
             </span>
             <span className="counts">
               {file.binary ? (
-                <span className="q-faint">binary</span>
+                <span className="q-faint">{t("files.binary")}</span>
               ) : file.counts_omitted ? (
-                <span className="q-faint">no counts</span>
+                <span className="q-faint">{t("files.noCounts")}</span>
               ) : (
                 <>
-                  <span className="q-add">+{file.added}</span>{" "}
-                  <span className="q-del">−{file.removed}</span>
+                  <span className="q-add">+{formatNumber(file.added)}</span>{" "}
+                  <span className="q-del">−{formatNumber(file.removed)}</span>
                 </>
               )}
             </span>
@@ -621,15 +671,13 @@ export function DiffView({
         );
       })}
       {files?.truncated ? (
-        <p className="q-diff-files-note">
-          The list stops at {scopeRows.length} files. Review the rest from a terminal.
-        </p>
+        <p className="q-diff-files-note">{t("files.truncated", { count: scopeRows.length })}</p>
       ) : null}
     </aside>
   );
 
   return (
-    <section aria-label="Diff" className="q-main" style={{ flex: 1, minHeight: 0 }}>
+    <section aria-label={t("diff.label")} className="q-main" style={{ flex: 1, minHeight: 0 }}>
       {isPhone && showFileList && scopeRows.length > 0 ? (
         <div
           style={{
@@ -645,7 +693,7 @@ export function DiffView({
         >
           <FileDiffIcon className="q-icon s14 q-faint" aria-hidden />
           <ChipSelect
-            label="File"
+            label={t("diff.file")}
             block
             className="q-mono"
             value={path ?? ""}
@@ -653,10 +701,10 @@ export function DiffView({
               value: file.path,
               label: file.path,
               hint: file.binary
-                ? "binary"
+                ? t("files.binary")
                 : file.counts_omitted
-                  ? "no counts"
-                  : `+${file.added} −${file.removed}`,
+                  ? t("files.noCounts")
+                  : counts(file.added, file.removed),
             }))}
             onChange={onSelectFile}
           />
@@ -677,14 +725,14 @@ export function DiffView({
         >
           <FileDiffIcon className="q-icon s14 q-faint" aria-hidden />
           <ChipSelect
-            label="File"
+            label={t("diff.file")}
             block
             className="q-mono"
             value={path ?? ""}
             options={(changes?.files ?? []).map((file) => ({
               value: file.path,
               label: file.path,
-              hint: `+${file.added} −${file.removed}`,
+              hint: counts(file.added, file.removed),
             }))}
             onChange={onSelectFile}
           />
@@ -714,13 +762,21 @@ export function DiffView({
             size={14}
           />
           <span>
-            Changes by {harnessLabel(harness)} in{" "}
-            <b style={{ fontWeight: 500, color: "var(--fg)" }}>{changeTitle ?? "this turn"}</b>
-            {changeAt ? <> since {absoluteTime(changeAt)}</> : null}
+            <Trans
+              t={t}
+              i18nKey={changeAt ? "diff.bannerSince" : "diff.banner"}
+              values={{
+                harness: harnessLabel(harness),
+                title: changeTitle ?? t("diff.thisTurn"),
+                ...(changeAt ? { time: absoluteTime(changeAt) } : {}),
+              }}
+              components={{ b: <b style={{ fontWeight: 500, color: "var(--fg)" }} /> }}
+            />
           </span>
           <span className="grow" />
           <span className="q-num">
-            <span className="q-add">+{added}</span> <span className="q-del">−{removed}</span>
+            <span className="q-add">+{formatNumber(added)}</span>{" "}
+            <span className="q-del">−{formatNumber(removed)}</span>
           </span>
           {diff.before !== null && path ? (
             <button
@@ -729,7 +785,7 @@ export function DiffView({
               style={{ height: 24 }}
               onClick={() => onRevert(path, diff.before ?? "")}
             >
-              Revert file
+              {t("diff.revertFile")}
             </button>
           ) : null}
           {path ? (
@@ -739,7 +795,7 @@ export function DiffView({
               style={{ height: 24 }}
               onClick={() => onOpenFile(path)}
             >
-              Accept
+              {t("diff.accept")}
             </button>
           ) : null}
         </div>
@@ -747,21 +803,19 @@ export function DiffView({
       <div className="q-diff-bar">
         <span className="q-diff-scope">
           {diff.label}
-          {activeFile?.old_path ? ` · was ${activeFile.old_path}` : ""}
+          {activeFile?.old_path ? ` · ${t("diff.was", { path: activeFile.old_path })}` : ""}
         </span>
         {source === "commit" && commits?.base ? (
           // Commit mode keeps the base picked for Branch (or the repository
           // default): the commit list is everything since that base. Say which
           // one, so the range is never implicit.
-          <span
-            className="q-faint"
-            title={`Commits are listed since the merge base with ${commits.base}.`}
-          >
-            since {commits.base}
+          <span className="q-faint" title={t("diff.sinceHint", { base: commits.base })}>
+            {t("diff.since", { base: commits.base })}
           </span>
         ) : null}
         <span className="q-num">
-          <span className="q-add">+{added}</span> <span className="q-del">−{removed}</span>
+          <span className="q-add">+{formatNumber(added)}</span>{" "}
+          <span className="q-del">−{formatNumber(removed)}</span>
         </span>
         <span className="grow" />
         {source === "branch" || source === "commit" ? (
@@ -769,12 +823,12 @@ export function DiffView({
             type="button"
             className="q-btn ghost"
             style={{ height: 24 }}
-            title="Read the branch and commit lists again"
-            aria-label="Refresh the branch and commit lists"
+            title={t("diff.refreshHint")}
+            aria-label={t("diff.refreshLabel")}
             onClick={onRefresh}
           >
             <RefreshCwIcon className="q-icon s12" aria-hidden />
-            {isPhone ? null : "Refresh"}
+            {isPhone ? null : t("common:refresh")}
           </button>
         ) : null}
         {range ? (
@@ -786,22 +840,24 @@ export function DiffView({
               setDraft({ anchor: selection?.anchor ?? 0, focus: selection?.focus ?? 0 })
             }
           >
-            Comment on line {range.start}
-            {range.end === range.start ? "" : `–${range.end}`}
+            {range.end === range.start
+              ? t("comments.commentOn", { line: lineNumber(range.start) })
+              : t("comments.commentOnRange", {
+                  start: lineNumber(range.start),
+                  end: lineNumber(range.end),
+                })}
           </button>
         ) : null}
-        <span className="q-diff-comments">
-          {comments.length} {comments.length === 1 ? "comment" : "comments"}
-        </span>
+        <span className="q-diff-comments">{t("comments.count", { count: comments.length })}</span>
         <button
           type="button"
           className="q-btn secondary"
           style={{ height: 24 }}
           disabled={comments.length === 0}
-          title="Adds these comments to the thread's composer draft. Nothing sends until you press Send."
+          title={t("comments.sendHint")}
           onClick={() => onSendComments(comments)}
         >
-          Send to agent
+          {t("comments.send")}
         </button>
       </div>
       <div className="q-diff-body">
@@ -814,7 +870,7 @@ export function DiffView({
               </p>
             </div>
           ) : (
-            <section className="q-diff-lines" aria-label="Diff lines">
+            <section className="q-diff-lines" aria-label={t("diff.lines")}>
               {rows.map(({ key, row, visibleIndex }) => {
                 if (row.kind === "hunk") {
                   return (
@@ -839,7 +895,11 @@ export function DiffView({
                         else rowRefs.current.delete(lineIndex);
                       }}
                       aria-pressed={selected}
-                      aria-label={`Line ${number}: ${row.text || "blank line"}`}
+                      aria-label={
+                        row.text
+                          ? t("diff.line", { number, text: row.text })
+                          : t("diff.blankLine", { number })
+                      }
                       tabIndex={
                         selection
                           ? selection.focus === lineIndex
@@ -914,11 +974,7 @@ export function DiffView({
                     {draft && draft.focus === lineIndex ? (
                       <div className="q-review-row">
                         <CommentEditor
-                          label={
-                            draftRange
-                              ? `${draftRange.side === "new" ? "New" : "Old"} lines ${draftRange.start}${draftRange.end === draftRange.start ? "" : `–${draftRange.end}`} · ${sourceLabel}`
-                              : sourceLabel
-                          }
+                          label={draftLabel(draftRange, sourceText)}
                           onSubmit={(text) => addComment(draft, text)}
                           onCancel={() => setDraft(null)}
                         />
@@ -933,11 +989,7 @@ export function DiffView({
             <div className="q-review-hidden">
               {lineComments.elsewhere.length > 0 ? (
                 <p className="q-review-meta">
-                  {lineComments.elsewhere.length}{" "}
-                  {lineComments.elsewhere.length === 1 ? "comment belongs" : "comments belong"} to
-                  another diff source, so{" "}
-                  {lineComments.elsewhere.length === 1 ? "it is" : "they are"} listed here with the
-                  source each was written in.
+                  {t("comments.elsewhere", { count: lineComments.elsewhere.length })}
                 </p>
               ) : null}
               {lineComments.elsewhere.map((comment) => (
@@ -951,9 +1003,7 @@ export function DiffView({
               ))}
               {lineComments.hidden.length > 0 ? (
                 <p className="q-review-meta">
-                  {lineComments.hidden.length}{" "}
-                  {lineComments.hidden.length === 1 ? "comment is" : "comments are"} on lines hidden
-                  by collapsed context.
+                  {t("comments.hidden", { count: lineComments.hidden.length })}
                 </p>
               ) : null}
               {lineComments.hidden.map((comment) => (

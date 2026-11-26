@@ -18,6 +18,7 @@ import {
   lineNumbers,
 } from "@codemirror/view";
 import { useEffect, useRef } from "react";
+import { useTranslation } from "react-i18next";
 
 import { h4rnEditorTheme, h4rnHighlighting } from "./theme";
 
@@ -76,6 +77,12 @@ export function CodeEditor({
   const view = useRef<EditorView | null>(null);
   const language = useRef(new Compartment());
   const readOnlyCompartment = useRef(new Compartment());
+  // The editor's accessible name follows the active language; the compartment
+  // swaps it without rebuilding the editor.
+  const { t } = useTranslation("ide");
+  const label = t("editor");
+  const labelCompartment = useRef(new Compartment());
+  const labelRef = useRef(label);
   const callbacks = useRef({ onChange, onSave, onCursor });
   callbacks.current = { onChange, onSave, onCursor };
   const contentRef = useRef(content);
@@ -126,8 +133,10 @@ export function CodeEditor({
             });
           }
         }),
+        labelCompartment.current.of(
+          EditorView.contentAttributes.of({ "aria-label": labelRef.current }),
+        ),
         EditorView.contentAttributes.of({
-          "aria-label": "Code editor",
           "aria-multiline": "true",
           spellcheck: "false",
           autocapitalize: "off",
@@ -170,6 +179,16 @@ export function CodeEditor({
       effects: readOnlyCompartment.current.reconfigure(EditorState.readOnly.of(readOnly)),
     });
   }, [readOnly]);
+
+  useEffect(() => {
+    if (labelRef.current === label) return;
+    labelRef.current = label;
+    view.current?.dispatch({
+      effects: labelCompartment.current.reconfigure(
+        EditorView.contentAttributes.of({ "aria-label": label }),
+      ),
+    });
+  }, [label]);
 
   useEffect(() => {
     const instance = view.current;

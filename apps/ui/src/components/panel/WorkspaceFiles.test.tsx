@@ -114,12 +114,11 @@ describe("PreviewPanel", () => {
   it("renders a plain failure message without crashing", () => {
     const markup = renderToStaticMarkup(
       <PreviewFailure
-        title="This file is missing."
-        detail="The file was deleted."
+        failure={{ kind: "gone", detail: "The file was deleted." }}
         onReload={() => undefined}
       />,
     );
-    expect(markup).toContain("This file is missing.");
+    expect(markup).toContain("This file is no longer in the workspace.");
     expect(markup).toContain("The file was deleted.");
     expect(markup).toContain("Reload");
   });
