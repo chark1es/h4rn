@@ -2535,15 +2535,21 @@ app is still at 1.0.1, so Live Updates reach a phone only once a mobile release
 at 1.0.2 or later ships; this gate is deliberate and the version is not bumped
 with the feature. Deliveries for one account go
 out one at a time in the order Connect decided them, and a `working` frame
-first sends any collecting group that holds a transition for the same thread. A
-queued message starts the next turn the moment the previous one finishes, so
-without that the previous finish, still waiting out the group window, would
-arrive second and replace the new turn's ongoing entry. That order is kept by
-one delivery worker per account: a queue drained in arrival order by its own
-task, which receives both the group flushes and the `working` frames. The
-relay's socket read loop only records the transition and enqueues it, so a slow
-FCM or APNs response never stops Connect reading a machine's socket. A worker
-exits, and its entry is removed, as soon as its queue is empty.
+first sends the group that was collecting when the frame arrived, if it holds a
+transition for the same thread. A queued message starts the next turn the
+moment the previous one finishes, so without that the previous finish, still
+waiting out the group window, would arrive second and replace the new turn's
+ongoing entry. That order is kept by one delivery worker per account: a queue
+drained in arrival order by its own task, which receives both the group flushes
+and the `working` frames. Each queued job carries the transitions it sends,
+taken when it is queued, and never looks at what is collecting when it runs: a
+worker can be behind a slow push provider, and a finish that arrived after a
+queued `working` frame must not be sent ahead of it, or the turn's entry would
+show "Working" after the turn ended. A panic in one delivery is caught and
+logged, and the worker carries on with the rest of the queue. The relay's
+socket read loop only records the transition and enqueues it, so a slow FCM or
+APNs response never stops Connect reading a machine's socket. A worker exits,
+and its entry is removed, as soon as its queue is empty.
 
 The Android app shows a running turn, a waiting approval or a question as an
 ongoing notification: `setOngoing(true)`, the project and state words, and
@@ -2583,7 +2589,10 @@ needs the existing alert switch and a signed-in phone as well, and Settings
 keeps it disabled until **Device notifications** is on. The flag is
 mirrored to the Android notification service, which shows no ongoing entry
 while it is off, while the phone is signed out, or for the thread already on
-screen in the foreground. Turning the switch off, turning alerts off and
+screen in the foreground. With the switch off, a `working` frame clears only a
+Live Update the phone is still tracking for that thread; otherwise it changes
+nothing, because the thread's notification id may hold its last finished,
+failed or limit alert, which a new turn must not erase. Turning the switch off, turning alerts off and
 signing out cancel what is already showing. iOS is not offered the switch:
 showing a running turn there needs an ActivityKit widget extension, which this
 repository does not build.

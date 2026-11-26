@@ -109,6 +109,18 @@ data class PushContent(
     fun staleLiveThreads(tracked: Set<String>, stopped: Set<String>): Set<String> =
       tracked intersect stopped
 
+    /**
+     * Whether a turn start that is not shown as a Live Update clears the
+     * thread's notification.
+     *
+     * Only a Live Update this app is tracking is cleared: it belongs to a turn
+     * that has ended. Otherwise the thread's notification id may hold its last
+     * Finished, Failed or limit alert, which the person has not read yet, so the
+     * frame is dropped without touching the tray.
+     */
+    fun turnStartClearsEntry(threadId: String?, tracked: Set<String>): Boolean =
+      threadId != null && threadId in tracked
+
     /** The deep link a tap opens. */
     fun deepLink(threadId: String): String = "h4rn://thread/$threadId"
 

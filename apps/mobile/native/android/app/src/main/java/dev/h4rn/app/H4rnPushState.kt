@@ -50,6 +50,17 @@ object H4rnLiveNotifications {
       .apply()
   }
 
+  /**
+   * Cancels a thread's Live Update only when one is tracked.
+   *
+   * A thread with no tracked Live Update may have its finished, failed or
+   * limit alert under the same notification id, so it is left alone.
+   */
+  fun cancelIfTracked(context: Context, threadId: String?) {
+    if (!PushContent.turnStartClearsEntry(threadId, ids(context))) return
+    threadId?.let { cancel(context, it) }
+  }
+
   /** Cancels one thread's Live Update and forgets it. */
   fun cancel(context: Context, threadId: String) {
     manager(context).cancel(PushContent.notificationId(threadId, 0))

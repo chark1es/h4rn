@@ -127,9 +127,12 @@ goes back to **Working**. A finish, failure or
 limit replaces the ongoing notification with the normal alert, because both use
 the thread's own notification id. When a queued message starts the next turn
 straight away, Connect sends the previous turn's finish before the new turn's
-`working` frame, so the finish never replaces the running turn's entry. Connect
-sends from a queue per account, so a slow push provider delays only that
-account's notifications, never Connect reading the machine's connection.
+`working` frame, so the finish never replaces the running turn's entry. The
+reverse holds too: a finish that reaches Connect after a turn start is always
+sent after it, so the phone never shows **Working** for a turn that has ended.
+Connect sends from a queue per account, so a slow push provider delays only that
+account's notifications, never Connect reading the machine's connection, and
+one delivery that fails outright does not stop the ones queued behind it.
 
 A turn stopped by the person has no alert, and a grouped finish names no
 thread. Every time the app receives the daemon's thread list, the first one
@@ -143,7 +146,9 @@ or returning to the app while that thread is on screen, removes its entry too.
 
 The ongoing notification follows the same rules as an alert: none while the
 switch is off or the phone is signed out, and none for the thread on screen in
-the foreground. A grouped alert names no thread, so it is never an ongoing
+the foreground. With the switch off, a turn start leaves the tray alone unless
+the phone still shows a Live Update for that thread from before: the thread's
+last Finished, Failed or limit alert stays until you read it. A grouped alert names no thread, so it is never an ongoing
 update; each thread's own entry stays until its turn ends. Turning the switch
 off, turning **Device notifications** off or signing out removes what is already
 showing.

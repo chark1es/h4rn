@@ -18,10 +18,12 @@
 //! are tested without a database or a network.
 
 use std::collections::{BTreeMap, HashMap};
+use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
+use futures::FutureExt as _;
 use h4rn_protocol::{AgentActivity, AgentAlertState};
 use tokio::sync::{Mutex, mpsc, oneshot};
 use uuid::Uuid;
@@ -273,6 +275,28 @@ impl PendingGroup {
     }
 }
 
+/// Takes the account's collecting group when it holds this thread.
+///
+/// The whole group goes out early rather than only the thread's entry, so an
+/// iPhone still gets the finish (it has no Live Update to protect) and the
+/// other threads in the group are not split into a second alert.
+fn take_group_with(
+    pending: &mut HashMap<Uuid, PendingGroup>,
+    user_id: Uuid,
+    activity: &AgentActivity,
+) -> Option<Vec<AgentActivity>> {
+    let holds_thread = pending.get(&user_id).is_some_and(|group| {
+        group
+            .activities
+            .iter()
+            .any(|queued| queued.thread_id == activity.thread_id)
+    });
+    if !holds_thread {
+        return None;
+    }
+    pending.remove(&user_id).map(|group| group.activities)
+}
+
 /// The platform a stored device row is for (ADR-052).
 pub fn device_platform(device: &PushDeviceRow) -> PushPlatform {
     PushPlatform::parse(Some(device.platform.as_str()))
@@ -331,15 +355,31 @@ pub fn platform_has_sender(platform: PushPlatform, fcm: bool, apns: bool) -> boo
 }
 
 /// One piece of work for an account's delivery worker.
+///
+/// Every job carries the transitions it sends, taken from the collecting group
+/// when the job was queued. A job never reads `pending` when it runs: a worker
+/// can be behind a slow push provider, and by then `pending` may hold
+/// transitions Connect saw after jobs still waiting in the queue. Sending one of
+/// those early would put a turn's finish ahead of its own turn-start update and
+/// leave a stale "Working" entry on the phone (ADR-053).
 enum DeliveryJob {
-    /// Send whatever group is collecting for the account.
+    /// Send a group of transitions.
     ///
     /// `done` is signalled once the group (and every job queued before it) has
     /// been delivered, so a caller can wait for the queue to drain.
-    Flush(Option<oneshot::Sender<()>>),
-    /// Send one turn-start update, after any collecting group that holds the
-    /// same thread.
-    Working(AgentActivity),
+    Flush {
+        activities: Vec<AgentActivity>,
+        done: Option<oneshot::Sender<()>>,
+    },
+    /// Send one turn-start update, after the collecting group that held the
+    /// same thread when the update arrived.
+    Working {
+        activity: AgentActivity,
+        before: Option<Vec<AgentActivity>>,
+    },
+    /// A job that panics, so a test can prove the worker outlives it.
+    #[cfg(test)]
+    Panic,
 }
 
 /// The relay-side alert service.
@@ -442,7 +482,16 @@ impl AlertService {
         // claimed transition above already makes a replay of this frame a
         // no-op, so each state change updates the phone at most once.
         if activity.state == AgentAlertState::Working {
-            self.enqueue(user_id, DeliveryJob::Working(activity));
+            // A queued message starts its turn the moment the previous one
+            // finishes, so that finish is usually still waiting out the group
+            // window. It goes out first, in the same job: delivered later, it
+            // would reuse the thread's notification and replace the new turn's
+            // Live Update. Only what is collecting now goes with it; a finish
+            // that arrives after this frame stays for its own flush. The job is
+            // queued under the same lock, so no flush can slip in between.
+            let mut pending = self.pending.lock().await;
+            let before = take_group_with(&mut pending, user_id, &activity);
+            self.enqueue(user_id, DeliveryJob::Working { activity, before });
             return;
         }
         let schedule = {
@@ -457,9 +506,27 @@ impl AlertService {
             let window = self.group_window;
             tokio::spawn(async move {
                 tokio::time::sleep(window).await;
-                service.enqueue(user_id, DeliveryJob::Flush(None));
+                service.queue_flush(user_id, None).await;
             });
         }
+    }
+
+    /// Takes the collecting group and queues it, under the `pending` lock.
+    ///
+    /// Queuing under the lock keeps the queue in the order Connect saw the
+    /// transitions: a turn-start that takes the group with it is queued under
+    /// the same lock.
+    async fn queue_flush(self: &Arc<Self>, user_id: Uuid, done: Option<oneshot::Sender<()>>) {
+        let mut pending = self.pending.lock().await;
+        let activities = pending
+            .remove(&user_id)
+            .map(|group| group.activities)
+            .unwrap_or_default();
+        if activities.is_empty() && done.is_none() {
+            // A turn-start already took this window's group with it.
+            return;
+        }
+        self.enqueue(user_id, DeliveryJob::Flush { activities, done });
     }
 
     /// Sends the collecting group now and waits until the account's queue,
@@ -468,7 +535,7 @@ impl AlertService {
     /// Public so tests can drain without waiting for the window.
     pub async fn flush(self: &Arc<Self>, user_id: Uuid) {
         let (done, finished) = oneshot::channel();
-        self.enqueue(user_id, DeliveryJob::Flush(Some(done)));
+        self.queue_flush(user_id, Some(done)).await;
         let _ = finished.await;
     }
 
@@ -485,8 +552,8 @@ impl AlertService {
         let job = match workers.get(&user_id) {
             Some(sender) => match sender.send(job) {
                 Ok(()) => return,
-                // The worker stopped without removing itself (a panic in a
-                // delivery); start a fresh one below.
+                // The worker stopped without removing itself (its task was
+                // aborted); start a fresh one below.
                 Err(mpsc::error::SendError(job)) => job,
             },
             None => job,
@@ -519,35 +586,40 @@ impl AlertService {
                     }
                 }
             };
-            self.run_job(user_id, job).await;
+            // A panic in one delivery must not end the worker: the jobs
+            // queued behind it would sit in a channel nobody drains.
+            if let Err(panic) = AssertUnwindSafe(self.run_job(user_id, job))
+                .catch_unwind()
+                .await
+            {
+                let message = panic
+                    .downcast_ref::<&str>()
+                    .map(|text| (*text).to_string())
+                    .or_else(|| panic.downcast_ref::<String>().cloned())
+                    .unwrap_or_default();
+                tracing::error!(%user_id, panic = %message, "a push delivery panicked");
+            }
         }
     }
 
     async fn run_job(&self, user_id: Uuid, job: DeliveryJob) {
         match job {
-            DeliveryJob::Flush(done) => {
-                let activities = {
-                    let mut pending = self.pending.lock().await;
-                    pending.remove(&user_id).map(|group| group.activities)
-                };
-                if let Some(activities) = activities {
+            DeliveryJob::Flush { activities, done } => {
+                if !activities.is_empty() {
                     self.deliver_group(user_id, &activities).await;
                 }
                 if let Some(done) = done {
                     let _ = done.send(());
                 }
             }
-            DeliveryJob::Working(activity) => {
-                // A queued message starts its turn the moment the previous one
-                // finishes, so that finish is usually still waiting out the
-                // group window. Send it first: delivered later, it would reuse
-                // the thread's notification and replace the new turn's Live
-                // Update.
-                if let Some(activities) = self.take_pending_with(user_id, &activity).await {
+            DeliveryJob::Working { activity, before } => {
+                if let Some(activities) = before {
                     self.deliver_group(user_id, &activities).await;
                 }
                 self.deliver_working(user_id, &activity).await;
             }
+            #[cfg(test)]
+            DeliveryJob::Panic => panic!("a test delivery panicked"),
         }
     }
 
@@ -558,29 +630,6 @@ impl AlertService {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
             .contains_key(&user_id)
-    }
-
-    /// Takes the account's collecting group when it holds this thread.
-    ///
-    /// The whole group goes out early rather than only the thread's entry, so
-    /// an iPhone still gets the finish (it has no Live Update to protect) and
-    /// the other threads in the group are not split into a second alert.
-    async fn take_pending_with(
-        &self,
-        user_id: Uuid,
-        activity: &AgentActivity,
-    ) -> Option<Vec<AgentActivity>> {
-        let mut pending = self.pending.lock().await;
-        let holds_thread = pending.get(&user_id).is_some_and(|group| {
-            group
-                .activities
-                .iter()
-                .any(|queued| queued.thread_id == activity.thread_id)
-        });
-        if !holds_thread {
-            return None;
-        }
-        pending.remove(&user_id).map(|group| group.activities)
     }
 
     /// Sends the alerts a batch of transitions deserves to every phone.
@@ -946,5 +995,42 @@ mod tests {
         assert_eq!(alerts[0].title, "two");
         assert_eq!(alerts[0].body, "proj · Finished");
         assert_eq!(alerts[0].count, 1);
+    }
+
+    /// A service whose store never connects; enough for jobs that send nothing.
+    fn offline_service() -> Arc<AlertService> {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy("postgres://h4rn@127.0.0.1:1/h4rn")
+            .expect("a well-formed lazy pool URL");
+        let http = reqwest::Client::new();
+        Arc::new(AlertService::new(
+            Store::from_pool(pool),
+            Arc::new(FcmClient::disabled(http.clone())),
+            Arc::new(ApnsClient::disabled(http)),
+            Duration::from_millis(1),
+            Duration::from_secs(120),
+        ))
+    }
+
+    #[tokio::test]
+    async fn a_panicking_delivery_leaves_the_queue_draining() {
+        let service = offline_service();
+        let user_id = Uuid::now_v7();
+        let (done, finished) = oneshot::channel();
+        // Both land in the same worker's queue before it runs either.
+        service.enqueue(user_id, DeliveryJob::Panic);
+        service.enqueue(
+            user_id,
+            DeliveryJob::Flush {
+                activities: Vec::new(),
+                done: Some(done),
+            },
+        );
+        let delivered = tokio::time::timeout(Duration::from_secs(5), finished).await;
+        assert!(
+            matches!(delivered, Ok(Ok(()))),
+            "the job after a panic was never run"
+        );
     }
 }

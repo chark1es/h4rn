@@ -160,6 +160,18 @@ class PushContentTest {
   }
 
   @Test
+  fun aTurnStartWithoutALiveUpdateClearsOnlyATrackedEntry() {
+    // th_live had a Live Update before the switch went off: the new turn
+    // start clears it. th_done's id holds its unread Finished alert, and a
+    // queued message's turn start must not erase it.
+    val tracked = setOf("th_live")
+    assertTrue(PushContent.turnStartClearsEntry("th_live", tracked))
+    assertFalse(PushContent.turnStartClearsEntry("th_done", tracked))
+    assertFalse(PushContent.turnStartClearsEntry("th_done", emptySet()))
+    assertFalse(PushContent.turnStartClearsEntry(null, tracked))
+  }
+
+  @Test
   fun onlyATrackedLiveUpdateTheMachineListsAsStoppedIsStale() {
     // A cold start: th_stopped was stopped while the app was closed and
     // th_grouped finished in a grouped alert. th_elsewhere runs on another

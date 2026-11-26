@@ -24,7 +24,10 @@ All notable changes to h4rn are recorded here. The format follows
   later: older builds are never sent the `working` state, so Live Updates
   arrive only from the next mobile release (1.0.2 or later); today's 1.0.1
   builds never receive them. Connect sends each account's notifications from
-  its own queue, so a slow push provider never holds up the relay.
+  its own queue, so a slow push provider never holds up the relay, a finish
+  never arrives ahead of its own turn's start, and one failed delivery does not
+  stop the rest. With the switch off, a new turn never clears the thread's
+  unread Finished, Failed or limit alert.
 - **Edit an earlier prompt to rewind a thread.** Every turn's first sent
   message has an **Edit from here** action; a message steered into a running
   turn cannot be edited on its own, because that would also remove the message

@@ -61,9 +61,11 @@ class H4rnMessagingService : FirebaseMessagingService() {
     val live = content.isLiveUpdate() &&
       preferences.getBoolean(PushPlugin.LIVE_UPDATES_KEY, false)
     // A turn that started is never an alert by itself: with the Live Updates
-    // switch off it says nothing, and any leftover entry for it goes away.
+    // switch off it says nothing. A tracked Live Update left from an earlier
+    // turn goes away; anything else under the thread's id is its last finish,
+    // failure or limit alert, which a new turn must not erase.
     if (content.isLiveOnly() && !live) {
-      content.threadId?.let { H4rnLiveNotifications.cancel(this, it) }
+      H4rnLiveNotifications.cancelIfTracked(this, content.threadId)
       return
     }
     if (live) {
