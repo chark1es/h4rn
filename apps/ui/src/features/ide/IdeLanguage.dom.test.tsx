@@ -222,6 +222,33 @@ describe("the IDE in another language", () => {
     expect(screen.getByText("1204")).toBeTruthy();
   });
 
+  it("keeps the search status on one line, with the whole text on hover", async () => {
+    await setLocalePreference("es");
+    const results = Array.from({ length: 2000 }, (_, index) => ({
+      path: "src/a.ts",
+      line_number: index + 1,
+      column: 1,
+      preview: "x",
+    }));
+    render(
+      <SearchPanel
+        search={search({ results, truncated: true })}
+        onQuery={() => undefined}
+        onOption={() => undefined}
+        onRun={() => undefined}
+        onOpen={() => undefined}
+      />,
+    );
+    for (const text of ["2000 coincidencias", "Límite alcanzado"]) {
+      const status = screen.getByText(text);
+      expect(status.getAttribute("title")).toBe(text);
+      expect(status.style.whiteSpace).toBe("nowrap");
+      expect(status.style.overflow).toBe("hidden");
+      expect(status.style.textOverflow).toBe("ellipsis");
+      expect(status.style.minWidth).toBe("0px");
+    }
+  });
+
   it("names the tab strip's controls and the plain-text fallback in Japanese", async () => {
     await setLocalePreference("ja");
     const tab = { ...createTab("src/a.ts"), loading: false, content: "x", savedContent: "" };
@@ -279,6 +306,14 @@ describe("the preview in another language", () => {
     expect(page.title).toBe("Esta página es demasiado grande para la vista previa.");
     expect(page.detail).toContain("11,0 MiB");
     expect(page.detail).toContain("10,0 MiB");
+
+    // A page over the limit says what failed and what to do, with both sizes.
+    expect(
+      describePreviewFailure({ kind: "documentTooLarge", size: 401 * 1024, limit: 400 * 1024 })
+        .detail,
+    ).toBe(
+      "La vista previa lee como máximo 400 KiB; este archivo ocupa 401 KiB. Ábrelo en un navegador.",
+    );
 
     await setLocalePreference("ja");
     expect(describePreviewFailure({ kind: "gone", detail: null }).detail).toBe(

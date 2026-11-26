@@ -52,10 +52,15 @@ export function describePreviewFailure(failure: PreviewFailureKind): {
     case "documentTooLarge":
       return {
         title: i18n.t("preview:failure.documentTooLargeTitle"),
-        detail: i18n.t("preview:failure.documentTooLarge", {
-          limit: kibibytes(failure.limit),
-          size: kibibytes(failure.size),
-        }),
+        // A file under the limit got here because escaping its text for the
+        // wire made it too large; naming the limit would read as a contradiction.
+        detail:
+          failure.size <= failure.limit
+            ? i18n.t("preview:failure.documentTooLargeEscaped", { size: kibibytes(failure.size) })
+            : i18n.t("preview:failure.documentTooLarge", {
+                limit: kibibytes(failure.limit),
+                size: kibibytes(failure.size),
+              }),
       };
     case "pageTooLarge":
       return {

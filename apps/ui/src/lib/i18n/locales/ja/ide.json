@@ -22,7 +22,7 @@
     "deletedOnDisk": "このファイルはディスク上で削除されました。",
     "changedOnDisk": "編集中に、このファイルがディスク上で変更されました。",
     "reload": "再読み込み",
-    "keepMine": "自分の版を残す"
+    "keepMine": "自分のバージョンを残す"
   },
   "header": {
     "backToThread": "スレッドに戻る",
@@ -73,7 +73,7 @@
     "close": "検索を閉じる",
     "label": "ファイルを検索",
     "find": "ワークスペース内を検索",
-    "matchCase": "大文字と小文字を区別",
+    "matchCase": "大文字と小文字を区別する",
     "regex": "正規表現",
     "glob": "ファイルの glob",
     "run": "検索",
@@ -84,11 +84,11 @@
     "capped": "結果の上限に達しました"
   },
   "status": {
-    "position": "{{line}} 行、{{column}} 列",
+    "position": "行 {{line}}、列 {{column}}",
     "spaces": "スペース: {{size}}",
     "plainText": "プレーンテキスト",
     "local": "ローカル",
-    "daemonOffline": "デーモンはオフラインです",
+    "daemonOffline": "デーモンがオフライン",
     "offline": "オフライン"
   },
   "save": {
@@ -101,12 +101,12 @@
   "conflict": {
     "deletedTitle": "{{path}} はディスク上で削除されました。",
     "changedTitle": "{{path}} はディスク上で変更されました。",
-    "deletedBody": "開いた後に、このファイルは削除されました。自分の版で作り直すか、削除されたままにするか、キャンセルして編集を続けてください。",
-    "changedBody": "開いた後に、ほかの人がこのファイルを保存しました。自分の版を残すか、相手の版を採用するか、キャンセルして編集を続けてください。",
+    "deletedBody": "開いた後に、このファイルは削除されました。自分のバージョンで作り直すか、削除されたままにするか、キャンセルして編集を続けてください。",
+    "changedBody": "開いた後に、ほかの人がこのファイルを保存しました。自分のバージョンを残すか、相手のバージョンを採用するか、キャンセルして編集を続けてください。",
     "leaveDeleted": "削除されたままにする",
-    "takeTheirs": "相手の版を採用",
-    "recreate": "自分の版で作り直す",
-    "keepMine": "自分の版を残す"
+    "takeTheirs": "相手のバージョンを採用",
+    "recreate": "自分のバージョンで作り直す",
+    "keepMine": "自分のバージョンを残す"
   },
   "diff": {
     "label": "差分",
@@ -142,9 +142,9 @@
   },
   "files": {
     "label": "変更されたファイル",
-    "count_other": "{{count, number}} ファイル",
+    "count_other": "{{count, number}} 件のファイル",
     "first": "最初の {{count, number}} 件",
-    "truncated_other": "一覧は {{count, number}} ファイルまでです。残りはターミナルで確認してください。",
+    "truncated_other": "一覧は {{count, number}} 件のファイルまでです。残りはターミナルで確認してください。",
     "binary": "バイナリ",
     "noCounts": "行数なし",
     "noCountsLong": "行数は読み込んでいません",
@@ -191,6 +191,6 @@
     "openPreview": "プレビューを開く",
     "openPreviewOf": "{{name}} のプレビューを開く",
     "agentChanges": "エージェントの変更",
-    "inThisTurn_other": "このターンの {{count, number}} ファイル"
+    "inThisTurn_other": "このターンの {{count, number}} 件のファイル"
   }
 }

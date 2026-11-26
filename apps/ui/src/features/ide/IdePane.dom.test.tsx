@@ -1363,3 +1363,26 @@ describe("one comparison has one branch list and one comment key", () => {
     expect(pathBar().textContent).toBe("b.ts");
   });
 });
+
+describe("the status bar names the workspace's real branch", () => {
+  function statusBar(): HTMLElement {
+    const bar = document.querySelector<HTMLElement>("main > .q-statusbar");
+    if (!bar) throw new Error("the status bar is not rendered");
+    return bar;
+  }
+
+  it("shows the branch the thread reports", async () => {
+    mock.state.threads = {
+      [thread]: { ...threadRow(thread, workspacePath, "Fix the auth test"), branch: "feature/x" },
+    };
+    await mount();
+    expect(within(statusBar()).getByText("feature/x")).toBeTruthy();
+    expect(statusBar().textContent).not.toContain("main");
+  });
+
+  it("shows no branch chip when the thread has no branch", async () => {
+    await mount();
+    expect(statusBar().textContent).not.toContain("main");
+    expect(statusBar().querySelector("svg")).toBeNull();
+  });
+});

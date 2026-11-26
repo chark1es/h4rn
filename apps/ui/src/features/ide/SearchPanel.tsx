@@ -1,5 +1,5 @@
 import { CaseSensitiveIcon, Loader2Icon, RegexIcon, SearchIcon } from "lucide-react";
-import { useEffect, useMemo, useRef } from "react";
+import { type CSSProperties, useEffect, useMemo, useRef } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { FsSearchMatch } from "@/gen";
@@ -23,6 +23,28 @@ function group(matches: FsSearchMatch[]): Array<{ path: string; matches: FsSearc
     else groups.set(match.path, [match]);
   }
   return [...groups.entries()].map(([path, grouped]) => ({ path, matches: grouped }));
+}
+
+/**
+ * One status bar figure. The panel is narrow and the bar is one fixed-height
+ * line, so a long translation ends in an ellipsis with the whole text on hover
+ * instead of pushing past the bar's edge.
+ */
+function StatusText({ text, style }: { text: string; style?: CSSProperties }) {
+  return (
+    <span
+      title={text}
+      style={{
+        minWidth: 0,
+        overflow: "hidden",
+        textOverflow: "ellipsis",
+        whiteSpace: "nowrap",
+        ...style,
+      }}
+    >
+      {text}
+    </span>
+  );
 }
 
 export function SearchPanel({ search, onQuery, onOption, onRun, onOpen }: SearchPanelProps) {
@@ -223,9 +245,9 @@ export function SearchPanel({ search, onQuery, onOption, onRun, onOpen }: Search
         className="q-statusbar"
         style={{ justifyContent: "space-between", fontFamily: "var(--mono)" }}
       >
-        <span>{t("search.matches", { count: search.results.length })}</span>
+        <StatusText text={t("search.matches", { count: search.results.length })} />
         {search.truncated ? (
-          <span style={{ color: "var(--warn)" }}>{t("search.capped")}</span>
+          <StatusText text={t("search.capped")} style={{ color: "var(--warn)" }} />
         ) : null}
       </div>
     </section>

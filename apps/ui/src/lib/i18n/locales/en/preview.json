@@ -31,7 +31,8 @@
   "failure": {
     "goneTitle": "This file is no longer in the workspace.",
     "documentTooLargeTitle": "This file is too large to preview.",
-    "documentTooLarge": "The preview reads at most {{limit}} of text so one response fits a transport frame. This file is {{size}}, or needs more than that once its text is escaped for the wire. Open it in a terminal or split the report.",
+    "documentTooLarge": "The preview reads at most {{limit}}; this file is {{size}}. Open it in a browser instead.",
+    "documentTooLargeEscaped": "This file is {{size}}, too large to preview once its text is escaped for transfer. Open it in a browser instead.",
     "pageTooLargeTitle": "This page is too large to preview.",
     "pageTooLarge": "The prepared page is {{size}}; the preview embeds up to {{limit}} from the workspace.",
     "notTextTitle": "This file isn’t UTF-8 text.",

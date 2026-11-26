@@ -98,6 +98,10 @@ describe("loadPreview errors", () => {
     expect(load.document).toBeNull();
     expect(words(load)?.detail).toContain("390 KiB");
     expect(words(load)?.detail).toContain("escaped");
+    // The file is under the 400 KiB limit, so naming that limit would read as
+    // a contradiction.
+    expect(words(load)?.detail).not.toContain("400 KiB");
+    expect(words(load)?.detail).toContain("Open it in a browser");
     expect(words(load)?.detail).not.toContain("MiB");
   });
 

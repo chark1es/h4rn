@@ -279,8 +279,25 @@ export function useActiveLocale(): Locale {
 // Formatting. Dates, times and numbers go through Intl with the active
 // language, never through string building.
 
+/**
+ * Number formatters by language and options. Lists and diffs format a figure
+ * per row, and building an `Intl.NumberFormat` is far slower than using one.
+ * The language is part of the key, so a language switch gets a new formatter.
+ */
+const numberFormats = new Map<string, Intl.NumberFormat>();
+
+function numberFormat(locale: Locale, options?: Intl.NumberFormatOptions): Intl.NumberFormat {
+  const key = `${locale}\u0000${JSON.stringify(options ?? {})}`;
+  let format = numberFormats.get(key);
+  if (!format) {
+    format = new Intl.NumberFormat(locale, options);
+    numberFormats.set(key, format);
+  }
+  return format;
+}
+
 export function formatNumber(value: number, options?: Intl.NumberFormatOptions): string {
-  return new Intl.NumberFormat(activeLocale(), options).format(value);
+  return numberFormat(activeLocale(), options).format(value);
 }
 
 export function formatDateTime(

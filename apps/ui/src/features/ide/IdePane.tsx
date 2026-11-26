@@ -754,10 +754,12 @@ export function IdePane() {
         ) : null}
 
         <div className="q-statusbar">
-          <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
-            <GitBranchIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
-            main
-          </span>
+          {thread?.branch ? (
+            <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <GitBranchIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+              {thread.branch}
+            </span>
+          ) : null}
           <span>{workspace.host ?? t("status.local")}</span>
           <span className="grow" />
           <span>

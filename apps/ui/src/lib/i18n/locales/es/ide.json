@@ -22,7 +22,7 @@
     "deletedOnDisk": "Este archivo se eliminó en el disco.",
     "changedOnDisk": "Este archivo cambió en el disco mientras lo editabas.",
     "reload": "Recargar",
-    "keepMine": "Mantener la mía"
+    "keepMine": "Mantener mi versión"
   },
   "header": {
     "backToThread": "Volver al hilo",
@@ -75,7 +75,7 @@
     "close": "Cerrar la búsqueda",
     "label": "Buscar archivos",
     "find": "Buscar en el espacio de trabajo",
-    "matchCase": "Coincidir mayúsculas",
+    "matchCase": "Coincidir mayúsculas y minúsculas",
     "regex": "Expresión regular",
     "glob": "Glob de archivos",
     "run": "Buscar",
@@ -85,7 +85,7 @@
     "matches_one": "{{count, number}} coincidencia",
     "matches_many": "{{count, number}} coincidencias",
     "matches_other": "{{count, number}} coincidencias",
-    "capped": "Se alcanzó el límite de resultados"
+    "capped": "Límite alcanzado"
   },
   "status": {
     "position": "Lín. {{line}}, col. {{column}}",
@@ -106,11 +106,11 @@
     "deletedTitle": "{{path}} se eliminó en el disco.",
     "changedTitle": "{{path}} cambió en el disco.",
     "deletedBody": "Este archivo se eliminó después de que lo abrieras. Vuelve a crearlo con tu versión, déjalo eliminado o cancela y sigue editando.",
-    "changedBody": "Otra persona guardó este archivo después de que lo abrieras. Mantén tu versión, toma la suya o cancela y sigue editando.",
+    "changedBody": "Otra persona guardó este archivo después de que lo abrieras. Mantén tu versión, usa la suya o cancela y sigue editando.",
     "leaveDeleted": "Dejar eliminado",
-    "takeTheirs": "Tomar la suya",
-    "recreate": "Recrear con la mía",
-    "keepMine": "Mantener la mía"
+    "takeTheirs": "Usar su versión",
+    "recreate": "Recrear con mi versión",
+    "keepMine": "Mantener mi versión"
   },
   "diff": {
     "label": "Diff",
