@@ -235,6 +235,13 @@ fn mcp_router(state: AppState) -> Router {
                 .post(mcp_http_post)
                 .delete(mcp_http_delete),
         )
+        // `DELETE /mcp` ends a grant, so it shares the aggregate bucket the
+        // OAuth mutations use. Only that method is counted; a POST is a tool
+        // call and has its own per-client limit.
+        .route_layer(axum::middleware::from_fn_with_state(
+            Arc::clone(&outside),
+            crate::mcp_server::http::aggregate_guard,
+        ))
         .route_layer(axum::middleware::from_fn_with_state(
             Arc::clone(&outside),
             crate::mcp_server::http::loopback_guard,
