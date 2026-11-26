@@ -257,6 +257,22 @@ struct PendingGroup {
     scheduled: bool,
 }
 
+impl PendingGroup {
+    /// Records one transition and says whether to start a flush timer.
+    ///
+    /// Only the first transition of a window starts the timer; later ones are
+    /// carried by the flush it already owns. A service built for a caller that
+    /// flushes itself never starts one.
+    fn push(&mut self, activity: AgentActivity, auto_flush: bool) -> bool {
+        self.activities.push(activity);
+        if !auto_flush || self.scheduled {
+            return false;
+        }
+        self.scheduled = true;
+        true
+    }
+}
+
 /// The platform a stored device row is for (ADR-052).
 pub fn device_platform(device: &PushDeviceRow) -> PushPlatform {
     PushPlatform::parse(Some(device.platform.as_str()))
@@ -333,6 +349,9 @@ pub struct AlertService {
     apns: Arc<ApnsClient>,
     group_window: Duration,
     max_age: Duration,
+    /// Whether `ingest` starts a timer for the group window. Only a test that
+    /// calls `flush` itself turns this off.
+    auto_flush: bool,
     pending: Mutex<HashMap<Uuid, PendingGroup>>,
     /// Each account's delivery worker, while it has work.
     ///
@@ -365,11 +384,23 @@ impl AlertService {
             apns,
             group_window,
             max_age,
+            auto_flush: true,
             pending: Mutex::new(HashMap::new()),
             workers: StdMutex::new(HashMap::new()),
             #[cfg(test)]
             ingested: std::sync::atomic::AtomicUsize::new(0),
         }
+    }
+
+    /// The same service with the flush left to the caller.
+    ///
+    /// The relay always lets `ingest` schedule the window. A test that calls
+    /// `flush` itself uses this so a slow database write cannot let the window
+    /// expire between two transitions that belong to one group.
+    #[doc(hidden)]
+    pub fn manual_flush(mut self) -> Self {
+        self.auto_flush = false;
+        self
     }
 
     /// Records one transition and queues its delivery.
@@ -416,14 +447,10 @@ impl AlertService {
         }
         let schedule = {
             let mut pending = self.pending.lock().await;
-            let group = pending.entry(user_id).or_default();
-            group.activities.push(activity);
-            if group.scheduled {
-                false
-            } else {
-                group.scheduled = true;
-                true
-            }
+            pending
+                .entry(user_id)
+                .or_default()
+                .push(activity, self.auto_flush)
         };
         if schedule {
             let service = Arc::clone(self);
@@ -856,6 +883,22 @@ mod tests {
         assert_eq!(alerts.len(), 1);
         assert_eq!(alerts[0].title, "2 agents finished");
         assert_eq!(alerts[0].count, 2);
+    }
+
+    #[test]
+    fn one_window_timer_covers_every_transition_it_collects() {
+        let mut group = PendingGroup::default();
+        assert!(group.push(activity(AgentAlertState::Completed, "one"), true));
+        assert!(!group.push(activity(AgentAlertState::Completed, "two"), true));
+        assert_eq!(group.activities.len(), 2);
+    }
+
+    #[test]
+    fn a_manual_service_never_starts_a_window() {
+        let mut group = PendingGroup::default();
+        assert!(!group.push(activity(AgentAlertState::Completed, "one"), false));
+        assert!(!group.push(activity(AgentAlertState::Completed, "two"), false));
+        assert_eq!(group.activities.len(), 2);
     }
 
     #[test]

@@ -1870,9 +1870,16 @@ before the adapter call. A revoke takes the exclusive gate and then waits for th
 it returns no admitted call and no in-flight prompt under that family can still reach an agent. This
 is true of every path that revokes: Settings → Revoke, `POST /oauth/revoke` and `DELETE /mcp` all
 end up in the same ordered method, because a client that unsubscribes must not be told it is dead
-while a prompt it admitted is still being written. A turn that already delivered its prompt may
+while a prompt it admitted is still being written. That method looks the token's family up read-only
+first and takes the write gate only when one exists, so a made-up token cannot serialize the
+outside RPCs; the lookup is repeated under the gate, and `DELETE /mcp` shares the aggregate bucket
+that caps the unauthenticated OAuth mutations. A turn that already delivered its prompt may
 finish — stopping the owner's work on someone else's revoke would be worse — but its harness session
-loses the tool token, so it cannot call h4rn's tools any more. For the same reason the outside
+loses the tool token, so it cannot call h4rn's tools any more. Only a session with a turn in flight
+under the revoked family loses the token: an idle session that merely last delivered that family
+keeps it, because its next turn runs under another, live grant or is the person's own. A session
+whose token was dropped cannot be given another one, so its next turn starts a fresh session that
+mints a fresh token; the provider conversation is resumed as before. For the same reason the outside
 surface has no tool that stops a turn.
 
 A PR watch is work that outlives the daemon, so it is stored in the journal with its exact triple

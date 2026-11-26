@@ -1169,6 +1169,23 @@ impl OAuthStore {
         })
     }
 
+    /// The family a token belongs to, without changing anything.
+    ///
+    /// A revoke reads this first so a value that names no family is answered
+    /// without waiting for the admission gate: a garbage token must never
+    /// serialize the outside RPCs. A token that was already revoked still
+    /// names its family, exactly as [`Self::revoke_token_families`] finds it.
+    pub fn token_family(&self, token: &str) -> Option<String> {
+        let hash = digest(token);
+        let guard = self.lock();
+        guard
+            .file
+            .tokens
+            .iter()
+            .find(|entry| entry.hash == hash)
+            .map(|entry| entry.family.clone())
+    }
+
     /// Revokes a token and every token in its family.
     ///
     /// Returns only after the revocation is on disk.

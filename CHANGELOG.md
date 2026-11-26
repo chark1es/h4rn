@@ -835,6 +835,14 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Fixed
 
+- **Outside-agent revocation is cheap to refuse and leaves other work alone.** A made-up token no
+  longer waits on an admitted call before it is answered, so it cannot serialize every outside RPC,
+  and `DELETE /mcp` is counted against the same aggregate limit as the OAuth routes. Revoking one
+  grant only drops the tool token of a session with a turn running under that grant: a session whose
+  next turn belongs to another live grant or to the person keeps its tools, and one that did lose
+  them starts a fresh session with a fresh token on its next turn instead of running without h4rn's
+  tools. The Settings revoke and the Labs switch are covered by the same protocol-level ordering
+  test as the client-facing revokes.
 - **Thread controls keep what the model really offers.** The Fast row now
   follows the thread's current model instead of its harness (Codex advertises
   service tiers per model), and the model catalogue a session reports is saved
