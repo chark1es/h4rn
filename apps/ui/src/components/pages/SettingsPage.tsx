@@ -23,6 +23,7 @@ import {
   deviceAvailabilityNote,
   deviceLiveUpdatesEnabled,
   deviceLiveUpdatesSupported,
+  deviceLiveUpdatesUsable,
   deviceStatusLine,
   deviceToggleUsable,
   disableDeviceAlerts,
@@ -685,10 +686,14 @@ function NotificationsForm() {
                   <Toggle
                     checked={liveUpdates}
                     label="Show running agents as live notifications"
+                    disabled={!deviceLiveUpdatesUsable(device)}
                     onChange={changeLiveUpdates}
                   />
                 </div>
               </div>
+            ) : null}
+            {liveShell && !deviceLiveUpdatesUsable(device) ? (
+              <p className="s q-muted">Turn on Device notifications to use live notifications.</p>
             ) : null}
             {device?.permission === "denied" ? (
               <p className="s q-muted">

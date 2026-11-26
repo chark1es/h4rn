@@ -262,6 +262,47 @@ pub fn device_platform(device: &PushDeviceRow) -> PushPlatform {
     PushPlatform::parse(Some(device.platform.as_str()))
 }
 
+/// The first phone app release that shows a `working` frame as a Live Update.
+///
+/// Older Android builds have no Live Update code and would show "Working" as an
+/// ordinary alert on every turn start, so a row registered by one is never sent
+/// that state. The comparison is on the numeric release only, so a pre-release
+/// of this version counts (ADR-053).
+pub const LIVE_UPDATES_MIN_APP_VERSION: (u64, u64, u64) = (1, 0, 2);
+
+/// The numeric `major.minor.patch` of a registered app version, if it has one.
+fn release_triple(version: &str) -> Option<(u64, u64, u64)> {
+    let core = version
+        .trim()
+        .trim_start_matches('v')
+        .split(['-', '+'])
+        .next()?;
+    let mut parts = core.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    let patch = parts.next()?.parse().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some((major, minor, patch))
+}
+
+/// Whether this phone may be sent a turn-start (`working`) frame.
+///
+/// Only an Android app new enough to render it as an ongoing Live Update gets
+/// one. A row with no version, or one that cannot be read, is treated as an
+/// older build: a missed Live Update is quiet, a stray alert is not.
+pub fn device_shows_live_updates(device: &PushDeviceRow) -> bool {
+    if device_platform(device) != PushPlatform::Android {
+        return false;
+    }
+    device
+        .app_version
+        .as_deref()
+        .and_then(release_triple)
+        .is_some_and(|version| version >= LIVE_UPDATES_MIN_APP_VERSION)
+}
+
 /// Whether this relay has a sender for that platform.
 ///
 /// A relay with only FCM configured must not try to send an iPhone's APNs
@@ -281,6 +322,13 @@ pub struct AlertService {
     group_window: Duration,
     max_age: Duration,
     pending: Mutex<HashMap<Uuid, PendingGroup>>,
+    /// One delivery at a time per account, in the order Connect decided them.
+    ///
+    /// A deferred group and a turn-start update for the same thread must reach
+    /// the phone in arrival order: the finish of a turn sent after the next
+    /// turn's `working` frame would replace the ongoing entry while the agent
+    /// is still running (ADR-053).
+    delivery: Mutex<HashMap<Uuid, Arc<Mutex<()>>>>,
     /// How many transitions reached `ingest`, so a relay test can prove a
     /// gated frame never got this far.
     #[cfg(test)]
@@ -303,6 +351,7 @@ impl AlertService {
             group_window,
             max_age,
             pending: Mutex::new(HashMap::new()),
+            delivery: Mutex::new(HashMap::new()),
             #[cfg(test)]
             ingested: std::sync::atomic::AtomicUsize::new(0),
         }
@@ -345,6 +394,15 @@ impl AlertService {
         // claimed transition above already makes a replay of this frame a
         // no-op, so each state change updates the phone at most once.
         if activity.state == AgentAlertState::Working {
+            let lock = self.delivery_lock(user_id).await;
+            let _delivering = lock.lock().await;
+            // A queued message starts its turn the moment the previous one
+            // finishes, so that finish is usually still waiting out the group
+            // window. Send it first: delivered later, it would reuse the
+            // thread's notification and replace the new turn's Live Update.
+            if let Some(activities) = self.take_pending_with(user_id, &activity).await {
+                self.deliver_group(user_id, &activities).await;
+            }
             self.deliver_working(user_id, &activity).await;
             return;
         }
@@ -373,6 +431,8 @@ impl AlertService {
     ///
     /// Public so tests can drain without waiting for the window.
     pub async fn flush(&self, user_id: Uuid) {
+        let lock = self.delivery_lock(user_id).await;
+        let _delivering = lock.lock().await;
         let activities = {
             let mut pending = self.pending.lock().await;
             match pending.remove(&user_id) {
@@ -380,7 +440,41 @@ impl AlertService {
                 None => return,
             }
         };
-        let alerts = group_activities(&activities);
+        self.deliver_group(user_id, &activities).await;
+    }
+
+    /// This account's delivery lock; see [`AlertService::delivery`].
+    async fn delivery_lock(&self, user_id: Uuid) -> Arc<Mutex<()>> {
+        let mut locks = self.delivery.lock().await;
+        Arc::clone(locks.entry(user_id).or_default())
+    }
+
+    /// Takes the account's collecting group when it holds this thread.
+    ///
+    /// The whole group goes out early rather than only the thread's entry, so
+    /// an iPhone still gets the finish (it has no Live Update to protect) and
+    /// the other threads in the group are not split into a second alert.
+    async fn take_pending_with(
+        &self,
+        user_id: Uuid,
+        activity: &AgentActivity,
+    ) -> Option<Vec<AgentActivity>> {
+        let mut pending = self.pending.lock().await;
+        let holds_thread = pending.get(&user_id).is_some_and(|group| {
+            group
+                .activities
+                .iter()
+                .any(|queued| queued.thread_id == activity.thread_id)
+        });
+        if !holds_thread {
+            return None;
+        }
+        pending.remove(&user_id).map(|group| group.activities)
+    }
+
+    /// Sends the alerts a batch of transitions deserves to every phone.
+    async fn deliver_group(&self, user_id: Uuid, activities: &[AgentActivity]) {
+        let alerts = group_activities(activities);
         if alerts.is_empty() {
             return;
         }
@@ -402,8 +496,10 @@ impl AlertService {
     ///
     /// iOS has no Live Update equivalent here, so an iPhone is not sent this
     /// record at all: its `working` state would otherwise become a visible
-    /// alert for a turn that has not finished (ADR-053).
-    async fn deliver_working(self: &Arc<Self>, user_id: Uuid, activity: &AgentActivity) {
+    /// alert for a turn that has not finished. An Android build older than
+    /// [`LIVE_UPDATES_MIN_APP_VERSION`] is skipped for the same reason
+    /// (ADR-053).
+    async fn deliver_working(&self, user_id: Uuid, activity: &AgentActivity) {
         if !self.fcm.configured() {
             return;
         }
@@ -416,7 +512,7 @@ impl AlertService {
             }
         };
         for device in &devices {
-            if device_platform(device) != PushPlatform::Android {
+            if !device_shows_live_updates(device) {
                 continue;
             }
             self.send_to(device, &alert).await;
@@ -508,6 +604,34 @@ mod tests {
         assert!(platform_has_sender(PushPlatform::Ios, false, true));
         assert!(!platform_has_sender(PushPlatform::Android, false, true));
         assert!(!platform_has_sender(PushPlatform::Ios, false, false));
+    }
+
+    fn device_at(platform: &str, version: Option<&str>) -> PushDeviceRow {
+        PushDeviceRow {
+            app_version: version.map(str::to_string),
+            ..device(platform)
+        }
+    }
+
+    #[test]
+    fn only_a_new_enough_android_app_is_sent_a_working_frame() {
+        let live = |platform: &str, version: Option<&str>| {
+            device_shows_live_updates(&device_at(platform, version))
+        };
+        assert!(live("android", Some("1.0.2")));
+        assert!(live("android", Some("1.1.0")));
+        assert!(live("android", Some("2.0.0")));
+        assert!(live("android", Some("1.0.2-rc.1")));
+        // Builds without Live Updates would show "Working" as an alert.
+        assert!(!live("android", Some("1.0.1")));
+        assert!(!live("android", Some("0.9.9")));
+        // No version, or an unreadable one, is an older build.
+        assert!(!live("android", None));
+        assert!(!live("android", Some("")));
+        assert!(!live("android", Some("dev")));
+        assert!(!live("android", Some("1.2")));
+        // An iPhone has no Live Update, whatever its version.
+        assert!(!live("ios", Some("9.9.9")));
     }
 
     #[test]

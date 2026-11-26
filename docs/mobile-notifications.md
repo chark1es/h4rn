@@ -101,19 +101,34 @@ With **Show running agents as live notifications** on, an Android phone keeps
 one ongoing notification for each running thread. It shows the thread title, the
 project name and a state word: **Working**, **Waiting for approval** or **Asked
 a question**. Tapping it opens the thread. Android 16 promotes it to the status
-bar's Live Update surface with an indeterminate progress style; older releases
-show the same ongoing notification without promotion.
+bar's Live Update surface with an indeterminate progress style when it can: the
+app declares the `POST_PROMOTED_NOTIFICATIONS` permission, and the person can
+still turn promotion off for h4rn in the system's notification settings. Without
+promotion, and on older releases, the same ongoing notification shows in the
+shade.
+
+The switch needs **Device notifications** on and allowed; until then it is
+shown but cannot be changed, with a note saying so. Live Updates also need the
+phone app at version 1.0.2 or later: Connect never sends the `working` state to
+an Android registration from an older (or unversioned) build, because that build
+would show "Working" as an ordinary alert on every turn start.
 
 The daemon publishes `working` once when a turn starts, never per token, per
 tool call or per summary update. The next state for that thread updates the same
 notification: an approval or a question changes the state word and still gets
 the person's attention, while a turn that starts is silent. A finish, failure or
 limit replaces the ongoing notification with the normal alert, because both use
-the thread's own notification id. A turn stopped by the person has no alert; the
-phone removes its ongoing notification when the app sees the thread leave
-Working, and opening that thread removes it too. With the app not running, an
-ongoing notification for a turn that ends without an alert can stay until the
-app is next opened.
+the thread's own notification id. When a queued message starts the next turn
+straight away, Connect sends the previous turn's finish before the new turn's
+`working` frame, so the finish never replaces the running turn's entry.
+
+A turn stopped by the person has no alert, and a grouped finish names no
+thread. Every time the app receives the daemon's thread list, the first one
+after a cold start included, it tells the phone which top-level threads are
+running, and the phone removes the ongoing notification of every other thread.
+So an entry left by a Stop, a grouped finish, or a turn that ended while the app
+was closed goes away as soon as the app is open and connected. Opening a thread,
+or returning to the app while that thread is on screen, removes its entry too.
 
 The ongoing notification follows the same rules as an alert: none while the
 switch is off or the phone is signed out, and none for the thread on screen in
@@ -297,10 +312,13 @@ never reached Connect.
 - Live Updates are Android only. iOS would need an ActivityKit widget extension
   with its own Xcode target, which the generated iOS project cannot gain here,
   so the iPhone app offers no equivalent and is not sent the `working` record.
-- An Android ongoing notification is removed by its final alert, by the app
-  seeing the turn end, or by the switch-off/sign-out cancel. If the app is not
-  running and the turn ends without an alert (a Stop, or a grouped finish), the
-  entry can stay until the app is opened.
+- An Android ongoing notification is removed by its final alert, by the app's
+  thread list, or by the switch-off/sign-out cancel. If the app is not running
+  and the turn ends without an alert (a Stop, or a grouped finish), the entry
+  stays until the app is next opened and has fetched the thread list; no frame
+  can remove it sooner. The app only knows the threads of the machine it is
+  connected to, so an entry for a thread on another machine of the same account
+  is removed then as well.
 - Android needs Google Play services. A device without them cannot receive FCM.
 - iOS needs a signed build with the push entitlement, installed on a real
   device, and an operator-configured APNs key on the relay. A simulator cannot

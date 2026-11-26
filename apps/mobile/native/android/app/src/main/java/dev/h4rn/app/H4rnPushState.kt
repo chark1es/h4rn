@@ -13,9 +13,9 @@ object H4rnPushState {
  * The ongoing Live Update notifications currently in the tray (ADR-053).
  *
  * The ids are persisted because the notification service can outlive the
- * WebView: sign-out, the live-updates switch and the shared UI's turn-end
- * signal all have to cancel what is already showing, without rebuilding the
- * thread list. Only per-thread ids are tracked; a grouped alert never is one.
+ * WebView: sign-out, the live-updates switch and the shared UI's list of
+ * running threads all have to cancel what is already showing, even after a
+ * cold start. Only per-thread ids are tracked; a grouped alert never is one.
  */
 object H4rnLiveNotifications {
   private fun ids(context: Context): MutableSet<String> =
@@ -54,6 +54,18 @@ object H4rnLiveNotifications {
   fun cancel(context: Context, threadId: String) {
     manager(context).cancel(PushContent.notificationId(threadId, 0))
     forget(context, threadId)
+  }
+
+  /**
+   * Cancels every tracked Live Update whose thread is not [running].
+   *
+   * [running] is the shared UI's list of top-level threads with a turn in
+   * progress; an entry for any other thread outlived its turn.
+   */
+  fun retainOnly(context: Context, running: Set<String>) {
+    for (threadId in PushContent.staleLiveThreads(ids(context), running)) {
+      cancel(context, threadId)
+    }
   }
 
   /** Cancels every Live Update this app posted. */

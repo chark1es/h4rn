@@ -164,16 +164,18 @@ export async function nativeSetLiveUpdates(enabled: boolean): Promise<void> {
 }
 
 /**
- * Removes a thread's ongoing Live Update once the app sees its turn end.
+ * Keeps only the Live Updates of threads that are still running.
  *
- * A grouped finish names no thread, so it cannot replace each thread's
- * ongoing notification; the shared UI clears the ones it can see finish.
+ * The shell cancels every ongoing entry it tracks for a thread outside
+ * `threadIds`. A grouped finish names no thread and a Stop sends no alert, so
+ * this is how their entries go away, even when the turn ended while the app
+ * was closed.
  */
-export async function nativeClearLiveThread(threadId: string): Promise<void> {
+export async function nativeReconcileLiveThreads(threadIds: string[]): Promise<void> {
   const api = internals();
   if (!api || deviceAlertsPlatform() !== "android") return;
   try {
-    await api.invoke<null>("push_clear_live", { threadId });
+    await api.invoke<null>("push_reconcile_live", { threadIds });
   } catch {
     // Nothing is showing for an older shell; nothing to clear.
   }

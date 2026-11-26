@@ -31,8 +31,8 @@ internal class PushLiveUpdatesArgs {
 }
 
 @InvokeArg
-internal class PushClearLiveArgs {
-  var threadId: String? = null
+internal class PushReconcileLiveArgs {
+  var threadIds: Array<String>? = null
 }
 
 /**
@@ -180,12 +180,19 @@ class PushPlugin(private val activity: android.app.Activity) : Plugin(activity) 
     invoke.resolve()
   }
 
-  /** Removes the Live Update for one thread once the app sees its turn end. */
+  /**
+   * Keeps only the Live Updates of threads the daemon says are running.
+   *
+   * A grouped finish names no thread and a Stop sends no alert, so the shared
+   * UI passes every thread list it gets, the first one after a cold start
+   * included, and each tracked entry outside it is cancelled.
+   */
   @Command
-  fun pushClearLive(invoke: Invoke) {
-    val args = invoke.parseArgs(PushClearLiveArgs::class.java)
-    val threadId = args.threadId?.trim()?.ifEmpty { null }
-    if (threadId != null) H4rnLiveNotifications.cancel(activity, threadId)
+  fun pushReconcileLive(invoke: Invoke) {
+    val args = invoke.parseArgs(PushReconcileLiveArgs::class.java)
+    val running = args.threadIds?.map { it.trim() }?.filter { it.isNotEmpty() }?.toSet()
+    // A missing list is a malformed call, not "nothing is running".
+    if (running != null) H4rnLiveNotifications.retainOnly(activity, running)
     invoke.resolve()
   }
 }

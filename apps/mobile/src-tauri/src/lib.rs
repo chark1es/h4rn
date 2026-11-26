@@ -65,6 +65,13 @@ struct PushEnabledArgs {
     enabled: bool,
 }
 
+#[cfg(target_os = "android")]
+#[derive(serde::Serialize)]
+struct PushReconcileLiveArgs<'a> {
+    #[serde(rename = "threadIds")]
+    thread_ids: &'a [String],
+}
+
 #[cfg(any(target_os = "android", target_os = "ios"))]
 #[derive(serde::Deserialize)]
 struct PushTokenValue {
@@ -305,6 +312,52 @@ fn push_set_enabled(app: tauri::AppHandle, enabled: bool) -> Result<(), String> 
     }
 }
 
+/// Mirrors the Android Live Updates switch into the notification service
+/// (ADR-053). Off also cancels every ongoing entry already showing. iOS has no
+/// Live Updates, so the command is a no-op there.
+#[tauri::command]
+fn push_set_live_updates(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    {
+        let bridge = app.state::<PushBridge>();
+        bridge
+            .0
+            .run_mobile_plugin::<()>("pushSetLiveUpdates", PushEnabledArgs { enabled })
+            .map_err(|error| error.to_string())
+    }
+
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (app, enabled);
+        Ok(())
+    }
+}
+
+/// Cancels every Android Live Update whose thread is not in `thread_ids`, the
+/// top-level threads the daemon says are running (ADR-053).
+#[tauri::command]
+fn push_reconcile_live(app: tauri::AppHandle, thread_ids: Vec<String>) -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    {
+        let bridge = app.state::<PushBridge>();
+        bridge
+            .0
+            .run_mobile_plugin::<()>(
+                "pushReconcileLive",
+                PushReconcileLiveArgs {
+                    thread_ids: &thread_ids,
+                },
+            )
+            .map_err(|error| error.to_string())
+    }
+
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (app, thread_ids);
+        Ok(())
+    }
+}
+
 /// Returns the thread link from a notification tap that cold-started the app.
 ///
 /// iOS buffers the tap natively because the page did not exist when it arrived;
@@ -420,6 +473,8 @@ pub fn run() {
             push_token,
             push_set_foreground_thread,
             push_set_enabled,
+            push_set_live_updates,
+            push_reconcile_live,
             push_take_pending_link,
             deep_link_current,
             preview::preview_capabilities,

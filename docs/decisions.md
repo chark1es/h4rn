@@ -2473,28 +2473,47 @@ Connect treats `working` differently from an alert. It still claims the
 transition id, so a replay is dropped and each state change is delivered at
 most once per thread (ADR-051's dedupe). It does not put it in a group with
 finishing threads: a turn that just started is not an agent that finished. It
-sends the update only to Android registrations; iOS has no Live Update surface
-here, and an APNs `working` alert would tell the person a turn ended when it had
-only begun.
+sends the update only to Android registrations whose app version is at least
+1.0.2; iOS has no Live Update surface here, and an APNs `working` alert would
+tell the person a turn ended when it had only begun. An Android build from
+before Live Updates would show `working` as an ordinary alert, so a row with an
+older, missing or unreadable `app_version` is skipped: a missed ongoing entry is
+quiet, a stray alert on every turn start is not. Deliveries for one account go
+out one at a time in the order Connect decided them, and a `working` frame
+first sends any collecting group that holds a transition for the same thread. A
+queued message starts the next turn the moment the previous one finishes, so
+without that the previous finish, still waiting out the group window, would
+arrive second and replace the new turn's ongoing entry.
 
 The Android app shows a running turn, a waiting approval or a question as an
 ongoing notification: `setOngoing(true)`, the project and state words, and
 Android 16's promoted ongoing notification with an indeterminate
-`ProgressStyle` where the release has it. Older releases get the same ongoing
-notification without promotion. The notification uses the thread's own id, the
+`ProgressStyle` where the release has it and
+`NotificationManagerCompat.canPostPromotedNotifications()` says the app may (the
+manifest declares `POST_PROMOTED_NOTIFICATIONS`, and the person can turn
+promotion off). Otherwise, and on older releases, the same ongoing notification
+shows without promotion. The notification uses the thread's own id, the
 one the finished, failed or limit alert already uses, so the final alert
 replaces the ongoing entry rather than stacking a second one. Only the
 `working` frame is silent; an approval or a question still alerts. A grouped
-final alert names no thread and cannot replace each member's ongoing entry, so
-the app clears per-thread entries when it sees the turn leave Working, and the
-thread on screen clears its own entry when it opens. With the app not running,
-an ongoing entry for a turn that ends without an alert can outlive the turn
-until the app is opened; the docs state that limit rather than promising a
-removal no frame can request.
+final alert names no thread and cannot replace each member's ongoing entry,
+and a Stop sends no alert at all. So the shared UI reconciles: every thread
+list it receives from the daemon over a live connection, the first one after a
+cold start included, goes to the phone as the set of top-level threads that are
+Working, and the phone cancels each tracked entry outside it. A list that has
+not arrived yet, or one from a connection that is down, is not used, because an
+empty or stale list would cancel entries for agents that are still running. The
+thread on screen clears its own entry when it opens and when the app returns to
+the foreground. With the app not running, an entry for a turn that ends without
+an alert stays until the app is next opened and connected; the docs state that
+limit rather than promising a removal no frame can request. The app only sees
+the connected machine's threads, so an entry for another machine's running
+thread is cleared then too; it comes back with that thread's next state.
 
 The whole feature is a separate opt-in, off by default: **Settings →
 Notifications → Phone alerts → Show running agents as live notifications**. It
-needs the existing alert switch and a signed-in phone as well. The flag is
+needs the existing alert switch and a signed-in phone as well, and Settings
+keeps it disabled until **Device notifications** is on. The flag is
 mirrored to the Android notification service, which shows no ongoing entry
 while it is off, while the phone is signed out, or for the thread already on
 screen in the foreground. Turning the switch off, turning alerts off and

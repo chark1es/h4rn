@@ -9,6 +9,7 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import androidx.core.app.NotificationCompat
+import androidx.core.app.NotificationManagerCompat
 import com.google.firebase.messaging.FirebaseMessagingService
 import com.google.firebase.messaging.RemoteMessage
 
@@ -126,10 +127,15 @@ class H4rnMessagingService : FirebaseMessagingService() {
       .setAutoCancel(false)
       .setOnlyAlertOnce(silent)
       .setSilent(silent)
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.BAKLAVA) {
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.BAKLAVA &&
+      NotificationManagerCompat.from(this).canPostPromotedNotifications()
+    ) {
       // Android 16's Live Update surface: a promoted ongoing notification
-      // with an indeterminate progress style. Older releases get the same
-      // ongoing notification without promotion.
+      // with an indeterminate progress style. It needs the
+      // POST_PROMOTED_NOTIFICATIONS permission, and the person can turn
+      // promotion off for h4rn in system settings; either way the same
+      // ongoing notification still shows, only without promotion, as it does
+      // on older releases.
       builder
         .setRequestPromotedOngoing(true)
         .setStyle(

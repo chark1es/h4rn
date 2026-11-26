@@ -13,6 +13,13 @@ All notable changes to h4rn are recorded here. The format follows
   an approval or asking a question. The finish, failure or limit alert replaces
   it; the daemon publishes the new `working` state once per turn start, and iOS
   is not offered the switch because it needs an ActivityKit widget extension.
+  An entry left by a Stop, a grouped finish or a turn that ended while the app
+  was closed goes away once the app is open and has the thread list. A queued
+  turn's entry is never replaced by the previous turn's finish, and the thread
+  on screen loses its entry when you return to the app. Android 16 promotes the
+  entry when the app has the promoted-notification permission and you allow
+  it. The switch needs Device notifications on, and the phone app at 1.0.2 or
+  later: older builds are never sent the `working` state.
 - **Edit an earlier prompt to rewind a thread.** Every turn's first sent
   message has an **Edit from here** action; a message steered into a running
   turn cannot be edited on its own, because that would also remove the message

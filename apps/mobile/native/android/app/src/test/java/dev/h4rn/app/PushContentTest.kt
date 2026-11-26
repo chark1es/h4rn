@@ -158,4 +158,18 @@ class PushContentTest {
     // And that id is the thread's own, not a group id.
     assertEquals("th_one".hashCode(), liveId)
   }
+
+  @Test
+  fun aTrackedLiveUpdateOutsideTheRunningThreadsIsStale() {
+    // A cold start: th_stopped was stopped while the app was closed and
+    // th_grouped finished in a grouped alert; only th_running still runs.
+    val tracked = setOf("th_running", "th_stopped", "th_grouped")
+    assertEquals(
+      setOf("th_stopped", "th_grouped"),
+      PushContent.staleLiveThreads(tracked, setOf("th_running", "th_untracked")),
+    )
+    // Nothing running clears everything; nothing tracked clears nothing.
+    assertEquals(tracked, PushContent.staleLiveThreads(tracked, emptySet()))
+    assertTrue(PushContent.staleLiveThreads(emptySet(), setOf("th_running")).isEmpty())
+  }
 }

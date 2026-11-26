@@ -97,6 +97,17 @@ data class PushContent(
       return thread.isNotEmpty() && thread == openThread
     }
 
+    /**
+     * The tracked Live Updates whose thread is no longer running.
+     *
+     * [running] is every top-level thread with a turn in progress, from the
+     * thread list the shared UI received. A tracked id outside it is a turn
+     * that ended without replacing its entry: a Stop, a grouped finish, or one
+     * that ended while the app was closed.
+     */
+    fun staleLiveThreads(tracked: Set<String>, running: Set<String>): Set<String> =
+      tracked - running
+
     /** The deep link a tap opens. */
     fun deepLink(threadId: String): String = "h4rn://thread/$threadId"
 

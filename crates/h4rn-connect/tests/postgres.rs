@@ -2109,7 +2109,12 @@ async fn a_working_update_is_deduped_and_goes_to_android_only() {
     let subject = Uuid::now_v7().to_string();
     let android = actor_with_subject(&state, ConnectDeviceKind::Mobile, None, &subject).await;
     let iphone = actor_with_subject(&state, ConnectDeviceKind::Mobile, None, &subject).await;
+    let old_android = actor_with_subject(&state, ConnectDeviceKind::Mobile, None, &subject).await;
     assert_eq!(android.user.id, iphone.user.id, "one account, two phones");
+    assert_eq!(
+        android.user.id, old_android.user.id,
+        "one account, three phones"
+    );
     state
         .store
         .register_push_device(
@@ -2118,10 +2123,23 @@ async fn a_working_update_is_deduped_and_goes_to_android_only() {
             "android-fcm-token",
             "android",
             Some("dev.h4rn.app"),
-            None,
+            Some("1.0.2"),
         )
         .await
         .expect("register the Android phone");
+    // A build from before Live Updates would show "Working" as an alert.
+    state
+        .store
+        .register_push_device(
+            old_android.user.id,
+            &old_android.device.id.to_string(),
+            "old-android-fcm-token",
+            "android",
+            Some("dev.h4rn.app"),
+            Some("1.0.1"),
+        )
+        .await
+        .expect("register the older Android phone");
     state
         .store
         .register_push_device(
@@ -2176,6 +2194,13 @@ async fn a_working_update_is_deduped_and_goes_to_android_only() {
         apns.is_empty(),
         "a working frame became an iPhone alert for a turn that did not end"
     );
+    for request in &fcm {
+        let body: serde_json::Value = serde_json::from_slice(&request.body).expect("FCM payload");
+        assert_eq!(
+            body["message"]["token"], "android-fcm-token",
+            "an app without Live Updates was sent a working frame"
+        );
+    }
 
     let body: serde_json::Value = serde_json::from_slice(&fcm[0].body).expect("FCM payload");
     let data = body["message"]["data"].as_object().expect("data object");
@@ -2198,6 +2223,104 @@ async fn a_working_update_is_deduped_and_goes_to_android_only() {
     assert_eq!(data["project"], "h4rn");
     assert_eq!(data["thread_id"], thread.to_string());
     assert_eq!(data["count"], "1");
+}
+
+#[tokio::test]
+#[ignore = "requires H4RN_TEST_DATABASE_URL (use ./scripts/test-connect.sh)"]
+async fn a_queued_turn_start_arrives_after_the_previous_turns_finish() {
+    use h4rn_protocol::{AgentAlertState, ThreadId};
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "access_token": "test-access-token",
+            "expires_in": 3600,
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/projects/demo/messages:send"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"name": "x"})))
+        .mount(&server)
+        .await;
+    let config = Config {
+        fcm_service_account: Some(service_account(&server, "demo")),
+        fcm_token_url: format!("{}/token", server.uri()),
+        fcm_url: server.uri(),
+        ..Config::default()
+    };
+    let state = test_state().await;
+    let phone = actor(&state, ConnectDeviceKind::Mobile, None).await;
+    state
+        .store
+        .register_push_device(
+            phone.user.id,
+            &phone.device.id.to_string(),
+            "android-fcm-token",
+            "android",
+            Some("dev.h4rn.app"),
+            Some("1.0.2"),
+        )
+        .await
+        .expect("register the Android phone");
+    let service = Arc::new(AlertService::new(
+        state.store.clone(),
+        Arc::new(FcmClient::new(&config, reqwest::Client::new())),
+        Arc::new(h4rn_connect::apns::ApnsClient::new(
+            &config,
+            reqwest::Client::new(),
+        )),
+        Duration::from_millis(200),
+        Duration::from_secs(120),
+    ));
+    let thread = ThreadId::new_uuid_v7();
+    // A queued message is promoted: the first turn's finish and the second
+    // turn's start reach Connect back to back.
+    service
+        .ingest(
+            phone.user.id,
+            alert_activity(
+                &thread,
+                AgentAlertState::Completed,
+                Utc::now(),
+                "turn-1-done",
+            ),
+        )
+        .await;
+    service
+        .ingest(
+            phone.user.id,
+            alert_activity(
+                &thread,
+                AgentAlertState::Working,
+                Utc::now(),
+                "turn-2-start",
+            ),
+        )
+        .await;
+    // Let the group window pass so a deferred finish would have gone out.
+    tokio::time::sleep(Duration::from_millis(600)).await;
+
+    let requests = server.received_requests().await.expect("requests");
+    let states: Vec<String> = requests
+        .iter()
+        .filter(|request| request.url.path().ends_with("messages:send"))
+        .map(|request| {
+            let body: serde_json::Value =
+                serde_json::from_slice(&request.body).expect("FCM payload");
+            assert_eq!(body["message"]["data"]["thread_id"], thread.to_string());
+            body["message"]["data"]["state"]
+                .as_str()
+                .expect("state")
+                .to_string()
+        })
+        .collect();
+    assert_eq!(
+        states,
+        vec!["completed".to_string(), "working".to_string()],
+        "the earlier finish replaced the running turn's Live Update"
+    );
 }
 
 #[tokio::test]
