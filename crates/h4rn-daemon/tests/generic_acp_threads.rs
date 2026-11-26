@@ -12,11 +12,12 @@ use std::time::Duration;
 use h4rn_daemon::acp_agents::AcpAgentService;
 use h4rn_daemon::harnesses::StaticHarnessCatalog;
 use h4rn_daemon::journal::SqliteJournal;
+use h4rn_daemon::provider_switch::SwitchRequest;
 use h4rn_daemon::threads::{NewThread, ThreadManager, ThreadManagerOptions};
-use h4rn_harness::GenericAcpHarness;
+use h4rn_harness::{FakeHarness, GenericAcpHarness};
 use h4rn_protocol::{
-    AcpAgentSpec, AcpWorkingDir, ApprovalDecision, Event, HarnessKind, HostId, RuntimeMode,
-    ThreadId, TurnStatus,
+    AcpAgentSpec, AcpWorkingDir, ApprovalDecision, DroppedSettingKind, Event, HarnessKind, HostId,
+    RuntimeMode, ThreadId, TurnStatus,
 };
 use tokio::sync::broadcast;
 
@@ -251,6 +252,123 @@ async fn a_configured_agent_can_be_probed_for_its_version_and_models() {
             .collect::<Vec<_>>(),
         vec!["fixture-model"]
     );
+}
+
+/// A switch to a configured ACP agent resolves that agent's own catalogue.
+///
+/// The UI sends a switch with the configured agent's id. The daemon resolves
+/// what that agent really offers through the same source Settings uses (a
+/// probe when this daemon has no answer yet), then carries over only what the
+/// agent advertised. The agent here publishes a single `default` mode; the
+/// thread's Plan mode is dropped to approval required and reported, and the
+/// switched thread runs on that agent.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_switch_to_a_configured_agent_resolves_its_catalogue() {
+    let Some(binary) = fixture_binary() else {
+        return skip_without_fixture();
+    };
+    let workspace = tempfile::tempdir().expect("workspace");
+    let data = tempfile::tempdir().expect("data dir");
+    let agents = Arc::new(AcpAgentService::open(data.path()).expect("agent service"));
+    agents
+        .add(AcpAgentSpec {
+            id: "fixture".into(),
+            name: "ACP fixture".into(),
+            command: binary.display().to_string(),
+            args: Vec::new(),
+            env: std::collections::BTreeMap::new(),
+            working_dir: AcpWorkingDir::ThreadWorkspace,
+        })
+        .expect("configure");
+    let catalog = StaticHarnessCatalog::with(Arc::new(FakeHarness::new()))
+        .and(Arc::new(GenericAcpHarness::new(agents.clone())));
+    let manager = Arc::new(
+        ThreadManager::open(
+            Arc::new(SqliteJournal::in_memory().await.expect("journal")),
+            Arc::new(catalog),
+            HostId::new("host_test"),
+            ThreadManagerOptions {
+                tick_interval: Duration::from_secs(3600),
+                ..ThreadManagerOptions::default()
+            },
+            None,
+        )
+        .await
+        .expect("manager"),
+    );
+    // The switch resolves the target through this source, exactly as Settings
+    // and the thread header's picker do.
+    manager.set_acp_capabilities(agents.clone());
+    let mut events = manager.subscribe();
+    let created = manager
+        .create_thread(NewThread {
+            thread_id: None,
+            parent_thread_id: None,
+            subagent_id: None,
+            host: HostId::new("host_test"),
+            harness: HarnessKind::ClaudeCode,
+            agent_id: None,
+            workspace_path: workspace.path().display().to_string(),
+            model: "claude-sonnet-5".into(),
+            prompt: "plan the work".into(),
+            attachments: Vec::new(),
+            runtime_mode: RuntimeMode::Plan,
+            reasoning_effort: None,
+            fast: false,
+            worktree: None,
+        })
+        .await
+        .expect("create")
+        .thread_id;
+    let (status, _, _) = next_turn(&mut events, |_| {}).await;
+    assert_eq!(status, TurnStatus::Completed);
+
+    let switched = manager
+        .switch_thread_harness(
+            &created,
+            SwitchRequest {
+                harness: HarnessKind::Acp,
+                agent_id: Some("fixture".into()),
+                model: "fixture-model".into(),
+            },
+        )
+        .await
+        .expect("switch to the configured agent");
+    assert_eq!(switched.summary.harness, HarnessKind::Acp);
+    assert_eq!(switched.summary.agent_id.as_deref(), Some("fixture"));
+    assert_eq!(
+        switched.summary.runtime_mode,
+        RuntimeMode::ApprovalRequired,
+        "the agent does not offer Plan"
+    );
+    assert!(
+        switched
+            .dropped
+            .iter()
+            .any(|setting| setting.setting == DroppedSettingKind::RuntimeMode),
+        "the dropped Plan mode was not reported: {:?}",
+        switched.dropped
+    );
+    // The resolution was a real probe: the catalogue the fixture advertises is
+    // now what Settings shows for this agent.
+    assert!(
+        agents.list()[0]
+            .modes
+            .iter()
+            .any(|mode| mode.id == "default"),
+        "the switch did not resolve the agent's own catalogue"
+    );
+
+    // The switched thread really runs on that agent.
+    manager
+        .send_message(&created, "after the switch".into(), Vec::new())
+        .await
+        .expect("send");
+    let (status, text, _) = next_turn(&mut events, |_| {}).await;
+    assert_eq!(status, TurnStatus::Completed);
+    assert!(text.contains("after the switch"), "got {text:?}");
+    manager.shutdown().await;
 }
 
 #[cfg(unix)]

@@ -760,6 +760,29 @@ pub trait Journal: Send + Sync {
     /// subscribe replay and live events.
     async fn head(&self) -> Result<u64, JournalError>;
 
+    /// Whether one thread's journal already holds `request_id`'s answer.
+    ///
+    /// Send, Dismiss and every sweep retry ask this before appending, so a
+    /// whole-thread read would make each answer cost the whole conversation.
+    /// The SQL journal filters on the request id inside the stored event; a
+    /// journal without SQL falls back to the full read.
+    async fn guest_resolution_exists(
+        &self,
+        thread_id: &ThreadId,
+        request_id: &str,
+    ) -> Result<bool, JournalError> {
+        Ok(self
+            .read_wire_since(thread_id, 0)
+            .await?
+            .into_iter()
+            .any(|entry| {
+                matches!(
+                    entry.event,
+                    Event::GuestRequestResolved { request_id: id, .. } if id == request_id
+                )
+            }))
+    }
+
     /// The domain log for one thread, used to rebuild lifecycle state.
     async fn read_domain(&self, thread_id: &ThreadId) -> Result<Vec<ThreadEvent>, JournalError>;
 
@@ -1154,6 +1177,17 @@ impl SqliteJournal {
         sqlx::query(
             "CREATE INDEX IF NOT EXISTS idx_daemon_wire_events_thread_seq
              ON daemon_wire_events (thread_id, seq)",
+        )
+        .execute(&self.pool)
+        .await?;
+
+        // A guest answer is looked up by request id before every Send, Dismiss
+        // and sweep retry. The partial expression index keeps that a lookup on
+        // the request id instead of a walk of every event the thread holds.
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_daemon_wire_events_guest_resolution
+             ON daemon_wire_events (json_extract(event_json, '$.request_id'))
+             WHERE json_extract(event_json, '$.type') = 'guest_request_resolved'",
         )
         .execute(&self.pool)
         .await?;
@@ -2046,6 +2080,28 @@ impl Journal for SqliteJournal {
             .fetch_one(&self.pool)
             .await?;
         Ok(head.unwrap_or(0) as u64)
+    }
+
+    async fn guest_resolution_exists(
+        &self,
+        thread_id: &ThreadId,
+        request_id: &str,
+    ) -> Result<bool, JournalError> {
+        // The partial index on the request id makes this a lookup rather than a
+        // walk of the thread's events; the type check keeps an unrelated event
+        // that happens to carry the same id string out of the answer.
+        let found: Option<i64> = sqlx::query_scalar(
+            "SELECT 1 FROM daemon_wire_events
+             WHERE thread_id = ?
+               AND json_extract(event_json, '$.type') = 'guest_request_resolved'
+               AND json_extract(event_json, '$.request_id') = ?
+             LIMIT 1",
+        )
+        .bind(thread_id.as_str())
+        .bind(request_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(found.is_some())
     }
 
     async fn read_domain(&self, thread_id: &ThreadId) -> Result<Vec<ThreadEvent>, JournalError> {
@@ -4330,6 +4386,53 @@ mod tests {
         assert!(
             journal.list_threads().await.unwrap().is_empty(),
             "a failed append must not leave the thread row behind"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_guest_answer_is_looked_up_by_its_request_id() {
+        let journal = SqliteJournal::in_memory().await.unwrap();
+        let one = meta("th_one");
+        let wire = vec![
+            Event::GuestRequestResolved {
+                thread_id: one.thread_id.clone(),
+                request_id: "greq_one".into(),
+                sent: true,
+            },
+            Event::GuestRequestResolved {
+                thread_id: one.thread_id.clone(),
+                request_id: "greq_two".into(),
+                sent: false,
+            },
+        ];
+        journal.append(&one, &[], &wire).await.unwrap();
+
+        assert!(
+            journal
+                .guest_resolution_exists(&one.thread_id, "greq_one")
+                .await
+                .unwrap()
+        );
+        assert!(
+            journal
+                .guest_resolution_exists(&one.thread_id, "greq_two")
+                .await
+                .unwrap()
+        );
+        assert!(
+            !journal
+                .guest_resolution_exists(&one.thread_id, "greq_three")
+                .await
+                .unwrap(),
+            "another request's answer was taken for this one"
+        );
+        let other = meta("th_two");
+        assert!(
+            !journal
+                .guest_resolution_exists(&other.thread_id, "greq_one")
+                .await
+                .unwrap(),
+            "another thread's answer was taken for this one"
         );
     }
 
