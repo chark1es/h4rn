@@ -468,6 +468,22 @@ pub enum HarnessError {
         /// Requested feature.
         feature: String,
     },
+    /// A resumed session cannot prove the permission level it restored.
+    ///
+    /// A resume or load reply that names no mode catalogue leaves the native
+    /// mode unknown, so h4rn cannot show that the continued conversation runs
+    /// no wider than the requested mode. The daemon drops the stored session
+    /// and retries the same turn on a fresh one, which applies and checks the
+    /// mode itself; this failure only surfaces when that retry cannot happen.
+    #[error(
+        "{harness:?} cannot confirm the permission level of the resumed session for mode `{mode}`"
+    )]
+    ResumeUnconfirmed {
+        /// Harness involved.
+        harness: HarnessKind,
+        /// The mode the turn asked for.
+        mode: String,
+    },
     /// This live session cannot apply a value it accepts, but the next session
     /// start can.
     ///
