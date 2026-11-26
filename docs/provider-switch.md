@@ -46,7 +46,15 @@ only fail after the switch, so it is not listed.
    while the journal still calls your request undelivered. That holds even when
    the harness reports the turn and then exits: a prompt it accepted is not
    settled before the journal has the acceptance, so a switch in that window
-   carries both the request and the reply.
+   carries both the request and the reply. While that write is open, the output
+   the adapter reports is held rather than published, and consecutive text is
+   merged in the hold the same way live output is, so a long reply cannot
+   overflow the hold and lose its tail. If the adapter's stream ends inside
+   that window, the daemon applies the held reply before the end is settled as
+   a failed stream end, so the words are not lost. A journal that refuses the
+   acceptance, or the handoff clear that belongs to it, is retried; the turn is
+   not marked durable until both land, so the prompt is never left recorded as
+   undelivered beside a turn that already ran.
 5. Each turn is metered against the harness and model that actually ran it.
 6. A recorded usage limit belonged to the old provider, so the switch clears
    it and its countdown leaves the sidebar and the phone inbox. An armed
