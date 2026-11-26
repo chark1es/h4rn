@@ -1,9 +1,11 @@
 import { PencilIcon, PlusIcon, RefreshCwIcon, Trash2Icon, UnplugIcon } from "lucide-react";
 import { useEffect, useState } from "react";
+import { Trans, useTranslation } from "react-i18next";
 
 import { ChipSelect } from "@/components/common/ChipSelect";
 import type { AcpAgent, HarnessKind, HarnessVersionInfo } from "@/gen";
 import { HARNESS_LABELS } from "@/lib/entities";
+import { formatList, i18n } from "@/lib/i18n";
 import { useApp } from "@/lib/store/appStore";
 
 import {
@@ -28,13 +30,14 @@ import {
 
 /** One sentence naming where the row stands; the version numbers sit beside it. */
 function statusText(row: HarnessVersionInfo): string {
-  if (row.installed === null) return "Not installed";
-  if (row.update_available) return "Update available";
-  if (row.latest === null) return "Latest version unknown";
-  return "Up to date";
+  if (row.installed === null) return i18n.t("settings:harnesses.status.notInstalled");
+  if (row.update_available) return i18n.t("settings:harnesses.status.updateAvailable");
+  if (row.latest === null) return i18n.t("settings:harnesses.status.latestUnknown");
+  return i18n.t("settings:harnesses.status.upToDate");
 }
 
 function HarnessRow({ row }: { row: HarnessVersionInfo }) {
+  const { t } = useTranslation(["settings", "common"]);
   const kind: HarnessKind = row.harness;
   const updating = useHarnesses((state) => state.updating[kind] === true);
   const output = useHarnesses((state) => state.output[kind]);
@@ -61,18 +64,22 @@ function HarnessRow({ row }: { row: HarnessVersionInfo }) {
               type="button"
               className="q-btn secondary"
               disabled={updating}
-              aria-label={`Update ${HARNESS_LABELS[kind]}`}
+              aria-label={t("harnesses.updateLabel", { harness: HARNESS_LABELS[kind] })}
               onClick={() => void updateHarness(kind)}
             >
-              {updating ? "Updating…" : "Update"}
+              {updating ? t("harnesses.updating") : t("harnesses.update")}
             </button>
           ) : null}
         </div>
       </div>
       {row.update_available && row.method.kind === "manual" ? (
         <p className="q-harness-manual">
-          h4rn won't change this install. Run <span className="q-mono">{row.method.command}</span>{" "}
-          in a terminal.
+          <Trans
+            t={t}
+            i18nKey="harnesses.manual"
+            values={{ command: row.method.command }}
+            components={{ code: <span className="q-mono" /> }}
+          />
         </p>
       ) : null}
       {showOutput ? (
@@ -80,7 +87,7 @@ function HarnessRow({ row }: { row: HarnessVersionInfo }) {
           {(output?.length ?? 0) > 0 ? <pre className="q-mono">{output?.join("\n")}</pre> : null}
           {result ? (
             <p className={result.ok ? "res" : "res bad"}>
-              {result.ok ? "" : "Failed · "}
+              {result.ok ? "" : `${t("harnesses.failed")} · `}
               {result.message}
             </p>
           ) : null}
@@ -93,8 +100,8 @@ function HarnessRow({ row }: { row: HarnessVersionInfo }) {
 function AgentProbeLine({ id }: { id: string }) {
   const probe = useHarnesses((state) => state.probes[id]);
   const probing = useHarnesses((state) => state.probing[id] === true);
-  if (probing)
-    return <p className="q-harness-manual">Starting the agent once for its ACP handshake…</p>;
+  const { t } = useTranslation(["settings", "common"]);
+  if (probing) return <p className="q-harness-manual">{t("harnesses.acp.probing")}</p>;
   if (!probe) return null;
   if (probe.error) {
     return (
@@ -104,16 +111,23 @@ function AgentProbeLine({ id }: { id: string }) {
     );
   }
   const parts = [
-    probe.version ? `version ${probe.version}` : null,
+    probe.version ? t("harnesses.acp.version", { version: probe.version }) : null,
     probe.models.length > 0
-      ? `${probe.models.length} model${probe.models.length === 1 ? "" : "s"}`
-      : "no models advertised",
-    probe.modes.length > 0 ? probe.modes.map((mode) => mode.name).join(", ") : null,
+      ? t("harnesses.acp.models", { count: probe.models.length })
+      : t("harnesses.acp.noModels"),
+    probe.modes.length > 0
+      ? formatList(
+          probe.modes.map((mode) => mode.name),
+          "conjunction",
+          "narrow",
+        )
+      : null,
   ].filter(Boolean);
   return <p className="q-harness-manual">{parts.join(" · ")}</p>;
 }
 
 function AgentRow({ agent, onEdit }: { agent: AcpAgent; onEdit: () => void }) {
+  const { t } = useTranslation(["settings", "common"]);
   const probing = useHarnesses((state) => state.probing[agent.id] === true);
   const [removing, setRemoving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -127,13 +141,13 @@ function AgentRow({ agent, onEdit }: { agent: AcpAgent; onEdit: () => void }) {
           </div>
           <div className="s">
             {agent.installed
-              ? `${agent.version ? `version ${agent.version} · ` : ""}${agent.path ?? agent.command}`
-              : "Not installed · command not found"}
+              ? `${agent.version ? `${t("harnesses.acp.version", { version: agent.version })} · ` : ""}${agent.path ?? agent.command}`
+              : t("harnesses.acp.notFound")}
           </div>
         </div>
         <div className="ctl">
           <span className="q-faint" style={{ fontSize: 12 }}>
-            Managed outside h4rn
+            {t("harnesses.acp.managedOutside")}
           </span>
           <button
             type="button"
@@ -142,22 +156,26 @@ function AgentRow({ agent, onEdit }: { agent: AcpAgent; onEdit: () => void }) {
             onClick={() => void probeAcpAgent(agent.id).then(setError)}
           >
             <RefreshCwIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-            {probing ? "Checking…" : agent.installed ? "Check" : "Check again"}
+            {probing
+              ? t("common:checking")
+              : agent.installed
+                ? t("harnesses.acp.check")
+                : t("harnesses.checkAgain")}
           </button>
           <button
             type="button"
             className="q-btn ghost"
             onClick={onEdit}
-            aria-label={`Edit ${agent.name}`}
+            aria-label={t("harnesses.acp.editLabel", { name: agent.name })}
           >
             <PencilIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-            Edit
+            {t("common:edit")}
           </button>
           <button
             type="button"
             className="q-btn ghost danger"
             disabled={removing}
-            aria-label={`Remove ${agent.name}`}
+            aria-label={t("harnesses.acp.removeLabel", { name: agent.name })}
             onClick={() => {
               setRemoving(true);
               void removeAcpAgent(agent.id).then((message) => {
@@ -167,7 +185,7 @@ function AgentRow({ agent, onEdit }: { agent: AcpAgent; onEdit: () => void }) {
             }}
           >
             <Trash2Icon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-            Remove
+            {t("common:remove")}
           </button>
         </div>
       </div>
@@ -190,6 +208,7 @@ function AgentForm({
   existingIds: string[];
   onDone: () => void;
 }) {
+  const { t } = useTranslation(["settings", "common"]);
   const [form, setForm] = useState<AcpAgentForm | null>(agent === "new" ? EMPTY_ACP_FORM : null);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -205,7 +224,9 @@ function AgentForm({
       })
       .catch((reason: unknown) => {
         if (!cancelled) {
-          setError(reason instanceof Error ? reason.message : "Could not read this agent.");
+          setError(
+            reason instanceof Error ? reason.message : i18n.t("settings:harnesses.acp.readFailed"),
+          );
         }
       });
     return () => {
@@ -240,17 +261,21 @@ function AgentForm({
   if (!form) {
     return (
       <div className="q-group">
-        <h2>Edit {agent === "new" ? "agent" : agent.name}</h2>
+        <h2>
+          {agent === "new"
+            ? t("harnesses.acp.editAgent")
+            : t("harnesses.acp.editLabel", { name: agent.name })}
+        </h2>
         {error ? (
           <p className="q-harness-manual" style={{ color: "var(--danger)" }} role="alert">
             {error}
           </p>
         ) : (
-          <p className="q-muted">Reading the agent's configuration…</p>
+          <p className="q-muted">{t("harnesses.acp.reading")}</p>
         )}
         <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 12 }}>
           <button type="button" className="q-btn ghost" onClick={onDone}>
-            Close
+            {t("common:close")}
           </button>
         </div>
       </div>
@@ -259,23 +284,24 @@ function AgentForm({
 
   return (
     <div className="q-group">
-      <h2>{agent === "new" ? "Add a local ACP agent" : `Edit ${agent.name}`}</h2>
-      <p className="desc">
-        h4rn runs this command directly, with the arguments below and no shell expansion. It runs
-        with this computer's privileges. The agent manages its own updates and sign-in.
-      </p>
+      <h2>
+        {agent === "new"
+          ? t("harnesses.acp.addTitle")
+          : t("harnesses.acp.editLabel", { name: agent.name })}
+      </h2>
+      <p className="desc">{t("harnesses.acp.formHint")}</p>
 
       <div className="q-field">
         <div className="lab">
-          <div className="t">Display name</div>
-          <div className="s">Shown in this list and the new-thread picker.</div>
+          <div className="t">{t("harnesses.acp.displayName")}</div>
+          <div className="s">{t("harnesses.acp.displayNameHint")}</div>
         </div>
         <div className="ctl">
           <input
             className="q-input"
             value={form.name}
             onChange={(event) => patch({ name: event.target.value })}
-            aria-label="ACP agent display name"
+            aria-label={t("harnesses.acp.displayNameLabel")}
             style={{ maxWidth: 300 }}
           />
         </div>
@@ -283,8 +309,8 @@ function AgentForm({
 
       <div className="q-field">
         <div className="lab">
-          <div className="t">Instance id</div>
-          <div className="s">Lowercase slug, unique on this host.</div>
+          <div className="t">{t("harnesses.acp.instanceId")}</div>
+          <div className="s">{t("harnesses.acp.instanceIdHint")}</div>
         </div>
         <div className="ctl">
           <input
@@ -292,7 +318,7 @@ function AgentForm({
             value={form.id}
             disabled={agent !== "new"}
             onChange={(event) => patch({ id: event.target.value })}
-            aria-label="ACP agent instance id"
+            aria-label={t("harnesses.acp.instanceIdLabel")}
             style={{ maxWidth: 240 }}
           />
         </div>
@@ -300,15 +326,15 @@ function AgentForm({
 
       <div className="q-field">
         <div className="lab">
-          <div className="t">Command</div>
-          <div className="s">An executable name on PATH, or an absolute path.</div>
+          <div className="t">{t("harnesses.acp.command")}</div>
+          <div className="s">{t("harnesses.acp.commandHint")}</div>
         </div>
         <div className="ctl">
           <input
             className="q-input q-mono"
             value={form.command}
             onChange={(event) => patch({ command: event.target.value })}
-            aria-label="ACP agent command"
+            aria-label={t("harnesses.acp.commandLabel")}
             placeholder="deepseek-acp"
             style={{ maxWidth: 360 }}
           />
@@ -317,8 +343,8 @@ function AgentForm({
 
       <div className="q-field" style={{ alignItems: "flex-start" }}>
         <div className="lab">
-          <div className="t">Arguments</div>
-          <div className="s">One literal argument per row. No quotes or shell syntax.</div>
+          <div className="t">{t("harnesses.acp.arguments")}</div>
+          <div className="s">{t("harnesses.acp.argumentsHint")}</div>
         </div>
         <div className="ctl" style={{ flexDirection: "column", alignItems: "stretch", gap: 6 }}>
           {form.args.map((argument, index) => (
@@ -332,15 +358,15 @@ function AgentForm({
                   args[index] = event.target.value;
                   patch({ args });
                 }}
-                aria-label={`Argument ${index + 1}`}
+                aria-label={t("harnesses.acp.argumentLabel", { row: index + 1 })}
               />
               <button
                 type="button"
                 className="q-btn ghost"
-                aria-label={`Remove argument ${index + 1}`}
+                aria-label={t("harnesses.acp.removeArgument", { row: index + 1 })}
                 onClick={() => patch({ args: form.args.filter((_, at) => at !== index) })}
               >
-                Remove
+                {t("common:remove")}
               </button>
             </div>
           ))}
@@ -351,15 +377,15 @@ function AgentForm({
             onClick={() => patch({ args: [...form.args, ""] })}
           >
             <PlusIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-            Add argument
+            {t("harnesses.acp.addArgument")}
           </button>
         </div>
       </div>
 
       <div className="q-field" style={{ alignItems: "flex-start" }}>
         <div className="lab">
-          <div className="t">Environment</div>
-          <div className="s">Extra variables for this command only.</div>
+          <div className="t">{t("harnesses.acp.environment")}</div>
+          <div className="s">{t("harnesses.acp.environmentHint")}</div>
         </div>
         <div className="ctl" style={{ flexDirection: "column", alignItems: "stretch", gap: 6 }}>
           {form.env.map((row, index) => (
@@ -373,7 +399,7 @@ function AgentForm({
                   env[index] = { ...row, key: event.target.value };
                   patch({ env });
                 }}
-                aria-label={`Environment name ${index + 1}`}
+                aria-label={t("harnesses.acp.envNameLabel", { row: index + 1 })}
                 placeholder="NAME"
               />
               <input
@@ -384,16 +410,16 @@ function AgentForm({
                   env[index] = { ...row, value: event.target.value };
                   patch({ env });
                 }}
-                aria-label={`Environment value ${index + 1}`}
+                aria-label={t("harnesses.acp.envValueLabel", { row: index + 1 })}
               />
               <button
                 type="button"
                 className="q-btn ghost"
-                aria-label={`Remove environment row ${index + 1}`}
+                aria-label={t("harnesses.acp.removeEnv", { row: index + 1 })}
                 disabled={form.env.length === 1 && row.key === "" && row.value === ""}
                 onClick={() => patch({ env: form.env.filter((_, at) => at !== index) })}
               >
-                Remove
+                {t("common:remove")}
               </button>
             </div>
           ))}
@@ -404,24 +430,24 @@ function AgentForm({
             onClick={() => patch({ env: [...form.env, { key: "", value: "" }] })}
           >
             <PlusIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-            Add variable
+            {t("harnesses.acp.addVariable")}
           </button>
         </div>
       </div>
 
       <div className="q-field">
         <div className="lab">
-          <div className="t">Working directory</div>
-          <div className="s">Where the agent starts; the thread workspace by default.</div>
+          <div className="t">{t("harnesses.acp.workingDir")}</div>
+          <div className="s">{t("harnesses.acp.workingDirHint")}</div>
         </div>
         <div className="ctl" style={{ gap: 8 }}>
           <ChipSelect
             id="acp-working-dir"
-            label="Working directory"
+            label={t("harnesses.acp.workingDir")}
             value={form.workingDir}
             options={[
-              { value: "thread_workspace", label: "Thread workspace" },
-              { value: "fixed_path", label: "Fixed path" },
+              { value: "thread_workspace", label: t("harnesses.acp.threadWorkspace") },
+              { value: "fixed_path", label: t("harnesses.acp.fixedPath") },
             ]}
             onChange={(value) => patch({ workingDir: value as "thread_workspace" | "fixed_path" })}
           />
@@ -430,7 +456,7 @@ function AgentForm({
               className="q-input q-mono"
               value={form.path}
               onChange={(event) => patch({ path: event.target.value })}
-              aria-label="Fixed working directory"
+              aria-label={t("harnesses.acp.fixedPathLabel")}
               placeholder="/home/you/project"
               style={{ maxWidth: 320 }}
             />
@@ -446,7 +472,7 @@ function AgentForm({
 
       <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 12 }}>
         <button type="button" className="q-btn ghost" onClick={onDone} disabled={saving}>
-          Cancel
+          {t("common:cancel")}
         </button>
         <button
           type="button"
@@ -454,7 +480,11 @@ function AgentForm({
           onClick={() => void save()}
           disabled={saving}
         >
-          {saving ? "Saving…" : agent === "new" ? "Add agent" : "Save changes"}
+          {saving
+            ? t("common:saving")
+            : agent === "new"
+              ? t("harnesses.acp.addAgent")
+              : t("common:saveChanges")}
         </button>
       </div>
     </div>
@@ -463,6 +493,7 @@ function AgentForm({
 
 /** Settings → Harnesses: installed versus latest, with an Update action. */
 export function HarnessSettings() {
+  const { t } = useTranslation(["settings", "common"]);
   useHarnessVersions();
   useAcpAgents();
   const rows = useHarnesses((state) => state.rows);
@@ -477,14 +508,11 @@ export function HarnessSettings() {
 
   return (
     <div className="q-form">
-      <h1>Harnesses</h1>
-      <p className="lead">
-        The agent CLIs h4rn runs on this host. Latest versions come from the npm registry and are
-        checked every few hours.
-      </p>
+      <h1>{t("harnesses.title")}</h1>
+      <p className="lead">{t("harnesses.lead")}</p>
       <div className="q-group">
         <div className="q-group-head">
-          <h2>CLI versions</h2>
+          <h2>{t("harnesses.cliVersions")}</h2>
           <button
             type="button"
             className="q-btn ghost"
@@ -492,7 +520,7 @@ export function HarnessSettings() {
             onClick={() => void loadHarnessVersions()}
           >
             <RefreshCwIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-            Check again
+            {t("harnesses.checkAgain")}
           </button>
         </div>
         {!loaded ? (
@@ -506,7 +534,7 @@ export function HarnessSettings() {
 
       <div className="q-group">
         <div className="q-group-head">
-          <h2>Local ACP agents</h2>
+          <h2>{t("harnesses.acp.title")}</h2>
           {editing === null ? (
             <button
               type="button"
@@ -515,23 +543,19 @@ export function HarnessSettings() {
               disabled={connection !== "online"}
             >
               <PlusIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-              Add ACP agent
+              {t("harnesses.acp.addButton")}
             </button>
           ) : null}
         </div>
-        <p className="desc">
-          Any command that speaks the Agent Client Protocol over stdio. h4rn launches it with the
-          arguments you write, literally, and no shell. It runs with this computer's privileges;
-          install, sign in and update it yourself.
-        </p>
+        <p className="desc">{t("harnesses.acp.hint")}</p>
         {!agentsLoaded ? (
           <div className="q-skel" style={{ height: 80 }} />
         ) : agentsError ? (
           <p className="q-muted">{agentsError.message}</p>
         ) : agents.length === 0 ? (
           <p className="q-muted">
-            <UnplugIcon className="q-icon s14" strokeWidth={1.5} aria-hidden /> No local ACP agents
-            yet.
+            <UnplugIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />{" "}
+            {t("harnesses.acp.empty")}
           </p>
         ) : (
           agents.map((agent) => (

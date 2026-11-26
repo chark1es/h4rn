@@ -8,6 +8,7 @@
 import { useSyncExternalStore } from "react";
 
 import { toProtoError } from "@/lib/client/errors";
+import { i18n } from "@/lib/i18n";
 import { getClient, pushToast } from "@/lib/store/appStore";
 
 export type AgentAlertState = {
@@ -90,7 +91,7 @@ export async function setAgentAlertsEnabled(enabled: boolean): Promise<boolean> 
     update({ saving: false, error: describe(error) });
     pushToast({
       variant: "error",
-      title: "Agent alerts could not be changed",
+      title: i18n.t("settings:notifications.agentAlertsFailed"),
       description: describe(error),
     });
     return false;
@@ -123,6 +124,6 @@ export function agentAlertsSwitchEnabled(
  */
 export function agentAlertsAvailabilityText(daemonPaired: boolean): string {
   return daemonPaired
-    ? "Each alert carries the thread id, its title, the project name, the state and the time. Never message text, tool output, file paths or credentials. Delivery goes through Connect, not a direct connection."
-    : "Pair this machine with Connect to send alerts to a phone.";
+    ? i18n.t("settings:notifications.agentAlertsPaired")
+    : i18n.t("settings:notifications.agentAlertsUnpaired");
 }

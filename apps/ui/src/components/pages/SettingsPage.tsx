@@ -1,6 +1,8 @@
 import type * as React from "react";
 import { useEffect, useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
 
+import { ChipSelect } from "@/components/common/ChipSelect";
 import { ShortcutCaps } from "@/components/common/Kbd";
 import { AccessSettings } from "@/features/access/AccessSettings";
 import { ForgeSettings } from "@/features/forge/ForgeSettings";
@@ -58,6 +60,16 @@ import {
   useMultilineEnter,
 } from "@/lib/chatSettings";
 import {
+  i18n,
+  LOCALE_NAMES,
+  LOCALES,
+  type LocalePreference,
+  setLocalePreference,
+  systemLocale,
+  useActiveLocale,
+  useLocalePreference,
+} from "@/lib/i18n";
+import {
   COMMAND_GROUPS,
   COMMANDS,
   type CommandId,
@@ -104,11 +116,7 @@ function Toggle({
   );
 }
 
-const SCHEMES: Array<{ value: Theme; label: string }> = [
-  { value: "system", label: "System" },
-  { value: "light", label: "Light" },
-  { value: "dark", label: "Dark" },
-];
+const SCHEMES: Theme[] = ["system", "light", "dark"];
 
 function describeError(error: unknown): string {
   if (error instanceof Error) return error.message;
@@ -116,21 +124,22 @@ function describeError(error: unknown): string {
   if (typeof error === "object" && error !== null && "message" in error) {
     return String((error as { message: unknown }).message);
   }
-  return "The change did not stick.";
+  return i18n.t("settings:errors.didNotStick");
 }
 
 function GeneralForm() {
+  const { t } = useTranslation(["settings", "common"]);
   return (
     <div className="q-form">
-      <h1>General</h1>
-      <p className="lead">How h4rn starts and where it keeps its local state.</p>
+      <h1>{t("general.title")}</h1>
+      <p className="lead">{t("general.lead")}</p>
       <StartupSettings />
       <AboutSettings />
       <div className="q-group">
-        <h2>Daemon</h2>
+        <h2>{t("general.daemon")}</h2>
         <div className="q-field">
           <div className="lab">
-            <div className="t">Data directory</div>
+            <div className="t">{t("general.dataDirectory")}</div>
           </div>
           <div className="ctl">
             <span className="q-mono q-muted">~/.h4rn</span>
@@ -185,6 +194,7 @@ export function autostartUnsupported(message: string): boolean {
  * fake "off" during the read would claim a setting the person never chose.
  */
 export function StartupSettings() {
+  const { t } = useTranslation(["settings", "common"]);
   const shell = useMemo(desktopShellBridge, []);
   const [autostart, setAutostart] = useState<AutostartState>({ status: "loading" });
   const [shellSettings, setShellSettings] = useState<ShellSettings | null>(null);
@@ -254,26 +264,26 @@ export function StartupSettings() {
 
   return (
     <div className="q-group">
-      <h2>Startup</h2>
+      <h2>{t("startup.title")}</h2>
       {autostart.status !== "unsupported" ? (
         <div className="q-field">
           <div className="lab">
-            <div className="t">Open at login</div>
+            <div className="t">{t("startup.openAtLogin")}</div>
             {autostart.status === "error" ? (
               <div className="s" role="alert" style={{ color: "var(--danger)" }}>
                 {autostart.error}
               </div>
             ) : (
-              <div className="s">Start h4rn when you sign in to this computer</div>
+              <div className="s">{t("startup.openAtLoginHint")}</div>
             )}
           </div>
           <div className="ctl">
             {autostart.status === "loading" ? (
-              <span className="q-faint">Checking…</span>
+              <span className="q-faint">{t("common:checking")}</span>
             ) : autostart.status === "ready" ? (
               <Toggle
                 checked={autostart.enabled}
-                label="Open at login"
+                label={t("startup.openAtLogin")}
                 onChange={(next) => void changeAutostart(next)}
               />
             ) : null}
@@ -282,20 +292,20 @@ export function StartupSettings() {
       ) : null}
       <div className="q-field">
         <div className="lab">
-          <div className="t">Keep running in tray</div>
+          <div className="t">{t("startup.keepInTray")}</div>
           <div className="s">
             {shellSettings !== null && !trayAvailable
-              ? "No tray icon was created, so closing the window quits h4rn"
+              ? t("startup.trayMissing")
               : keepInTray
-                ? "Closing the window keeps h4rn in the tray — open h4rn again to show it"
-                : "Closing the window quits h4rn"}
+                ? t("startup.trayKeeps")
+                : t("startup.trayQuits")}
           </div>
         </div>
         <div className="ctl">
           <Toggle
             checked={keepInTray}
             disabled={shellSettings === null || !trayAvailable}
-            label="Keep running in tray"
+            label={t("startup.keepInTray")}
             onChange={(next) => void changeTray(next)}
           />
         </div>
@@ -310,25 +320,21 @@ export function StartupSettings() {
 }
 
 function ChatForm() {
+  const { t } = useTranslation(["settings", "common"]);
   const followUp = useFollowUpBehavior();
   const multiline = useMultilineEnter();
   return (
     <div className="q-form">
-      <h1>Chat</h1>
-      <p className="lead">
-        How a reply behaves while the agent is already working. These choices apply to this device.
-      </p>
+      <h1>{t("chat.title")}</h1>
+      <p className="lead">{t("chat.lead")}</p>
       <div className="q-group">
-        <h2>Follow-up behaviour</h2>
+        <h2>{t("chat.followUp")}</h2>
         <div className="q-field">
           <div className="lab">
             <div className="t" id="follow-up-label">
-              Send while the agent is working
+              {t("chat.sendWhileWorking")}
             </div>
-            <div className="s">
-              Queue waits for the next turn. Steer goes into the running turn when its agent can
-              accept it.
-            </div>
+            <div className="s">{t("chat.sendWhileWorkingHint")}</div>
           </div>
           <div className="ctl">
             <fieldset className="q-seg inline q-seg-fs" aria-labelledby="follow-up-label">
@@ -337,31 +343,29 @@ function ChatForm() {
                 aria-pressed={followUp === "queue"}
                 onClick={() => setFollowUpBehavior("queue")}
               >
-                Queue
+                {t("chat.queue")}
               </button>
               <button
                 type="button"
                 aria-pressed={followUp === "steer"}
                 onClick={() => setFollowUpBehavior("steer")}
               >
-                Steer
+                {t("chat.steer")}
               </button>
             </fieldset>
           </div>
         </div>
         <div className="q-field">
           <div className="lab">
-            <div className="t">Enter inserts a new line</div>
+            <div className="t">{t("chat.enterNewLine")}</div>
             <div className="s">
-              {multiline
-                ? "Cmd/Ctrl+Enter sends; add Shift for the other follow-up action."
-                : "Enter sends; Cmd/Ctrl+Enter uses the other follow-up action."}
+              {multiline ? t("chat.enterNewLineOn") : t("chat.enterNewLineOff")}
             </div>
           </div>
           <div className="ctl">
             <Toggle
               checked={multiline}
-              label="Enter inserts a new line"
+              label={t("chat.enterNewLine")}
               onChange={setMultilineEnter}
             />
           </div>
@@ -371,34 +375,77 @@ function ChatForm() {
   );
 }
 
+/**
+ * Settings → Appearance → Language. The choice applies to this device at once;
+ * System follows the browser or OS language when h4rn has it, else English.
+ * Each language is named in its own script so a reader can find theirs from
+ * any current language.
+ */
+function LanguageField() {
+  const { t } = useTranslation(["settings", "common"]);
+  const preference = useLocalePreference();
+  const active = useActiveLocale();
+  const options: Array<{ value: LocalePreference; label: string; hint?: string }> = [
+    { value: "system", label: t("appearance.languageSystem"), hint: LOCALE_NAMES[systemLocale()] },
+    ...LOCALES.map((locale) => ({ value: locale, label: LOCALE_NAMES[locale] })),
+  ];
+  return (
+    <div className="q-field">
+      <div className="lab">
+        <div className="t" id="language-label">
+          {t("appearance.interfaceLanguage")}
+        </div>
+        <div className="s">
+          {preference === "system"
+            ? t("appearance.languageFollowsSystem", { language: LOCALE_NAMES[active] })
+            : t("appearance.languageThisDevice")}
+        </div>
+      </div>
+      <div className="ctl">
+        <ChipSelect<LocalePreference>
+          label={t("appearance.interfaceLanguage")}
+          value={preference}
+          options={options}
+          onChange={(next) => void setLocalePreference(next)}
+        />
+      </div>
+    </div>
+  );
+}
+
 function AppearanceForm() {
+  const { t } = useTranslation(["settings", "common"]);
   const theme = useApp((state) => state.ui.theme);
   const terminalMatches = useTerminalMatchesApp();
   return (
     <div className="q-form">
-      <h1>Appearance</h1>
-      <p className="lead">h4rn follows your system by default. The theme applies to this device.</p>
+      <h1>{t("appearance.title")}</h1>
+      <p className="lead">{t("appearance.lead")}</p>
       <div className="q-group">
-        <h2>Theme</h2>
+        <h2>{t("appearance.theme")}</h2>
         <div className="q-field">
           <div className="lab">
             <div className="t" id="color-scheme-label">
-              Color scheme
+              {t("appearance.colorScheme")}
             </div>
             <div className="s">
-              {theme === "system" ? "Follows your system setting" : `Always ${theme}`}
+              {theme === "system"
+                ? t("appearance.followsSystem")
+                : theme === "light"
+                  ? t("appearance.alwaysLight")
+                  : t("appearance.alwaysDark")}
             </div>
           </div>
           <div className="ctl">
             <fieldset className="q-seg inline q-seg-fs" aria-labelledby="color-scheme-label">
               {SCHEMES.map((scheme) => (
                 <button
-                  key={scheme.value}
+                  key={scheme}
                   type="button"
-                  aria-pressed={theme === scheme.value}
-                  onClick={() => setTheme(scheme.value)}
+                  aria-pressed={theme === scheme}
+                  onClick={() => setTheme(scheme)}
                 >
-                  {scheme.label}
+                  {t(`appearance.schemes.${scheme}`)}
                 </button>
               ))}
             </fieldset>
@@ -406,49 +453,32 @@ function AppearanceForm() {
         </div>
         <div className="q-field">
           <div className="lab">
-            <div className="t">Terminal</div>
-            <div className="s">{terminalMatches ? "Matches the app theme" : "Always dark"}</div>
+            <div className="t">{t("appearance.terminal")}</div>
+            <div className="s">
+              {terminalMatches ? t("appearance.terminalMatches") : t("appearance.alwaysDark")}
+            </div>
           </div>
           <div className="ctl">
             <Toggle
               checked={terminalMatches}
-              label="Terminal matches the app theme"
+              label={t("appearance.terminalToggle")}
               onChange={setTerminalMatchesApp}
             />
           </div>
         </div>
       </div>
+      <div className="q-group">
+        <h2>{t("appearance.language")}</h2>
+        <LanguageField />
+      </div>
     </div>
   );
 }
 
-const NOTIFICATION_ROWS: Array<{
-  key: NotificationSettingKey;
-  title: string;
-  subtitle: string;
-  label: string;
-}> = [
-  {
-    key: "approvals",
-    title: "Approvals",
-    subtitle: "A command or question is waiting to run",
-    label: "Approval notifications",
-  },
-  {
-    key: "finishedTurns",
-    title: "Finished turns",
-    subtitle: "A thread lands in Done",
-    label: "Finished turn notifications",
-  },
-  {
-    key: "hostOffline",
-    title: "Host offline",
-    subtitle: "A host becomes unreachable",
-    label: "Host offline notifications",
-  },
-];
+const NOTIFICATION_ROWS: NotificationSettingKey[] = ["approvals", "finishedTurns", "hostOffline"];
 
 function NotificationsForm() {
+  const { t } = useTranslation(["settings", "common"]);
   const channel = useMemo(notificationChannel, []);
   const settings = useNotificationSettings();
   const shell = secretShell();
@@ -567,32 +597,32 @@ function NotificationsForm() {
 
   const rows = relayPresence
     ? NOTIFICATION_ROWS
-    : NOTIFICATION_ROWS.filter((row) => row.key !== "hostOffline");
+    : NOTIFICATION_ROWS.filter((row) => row !== "hostOffline");
   const availabilityNote = deviceAvailabilityNote(device);
 
   return (
     <div className="q-form">
-      <h1>Notifications</h1>
-      <p className="lead">Only things that need you interrupt you.</p>
+      <h1>{t("notifications.title")}</h1>
+      <p className="lead">{t("notifications.lead")}</p>
       {channel ? (
         <div className="q-group">
-          <h2>On this device</h2>
+          <h2>{t("notifications.onThisDevice")}</h2>
           {rows.map((row) => (
-            <div className="q-field" key={row.key}>
+            <div className="q-field" key={row}>
               <div className="lab">
-                <div className="t">{row.title}</div>
-                <div className="s">{row.subtitle}</div>
+                <div className="t">{t(`notifications.rows.${row}.title`)}</div>
+                <div className="s">{t(`notifications.rows.${row}.subtitle`)}</div>
               </div>
               <div className="ctl">
                 {permission === null ? (
-                  <span className="q-faint">Checking…</span>
+                  <span className="q-faint">{t("common:checking")}</span>
                 ) : permission === "denied" ? (
-                  <span className="q-muted">Blocked in system settings</span>
+                  <span className="q-muted">{t("notifications.blocked")}</span>
                 ) : (
                   <Toggle
-                    checked={displayedNotificationSetting(permission, settings[row.key])}
-                    label={row.label}
-                    onChange={(next) => void change(row.key, next)}
+                    checked={displayedNotificationSetting(permission, settings[row])}
+                    label={t(`notifications.rows.${row}.label`)}
+                    onChange={(next) => void change(row, next)}
                   />
                 )}
               </div>
@@ -601,13 +631,13 @@ function NotificationsForm() {
           {hostOffline.kind === "no-links" || hostOffline.kind === "relay-too-old" ? (
             <p className="s q-muted">
               {hostOffline.kind === "relay-too-old"
-                ? "This relay does not report which machines this device is linked to. Update the relay to get host offline alerts."
-                : "Host offline alerts need a host linked through the relay. This device has none, so there is no other host to watch."}
+                ? t("notifications.relayTooOld")
+                : t("notifications.noLinks")}
             </p>
           ) : null}
           {channel.kind === "browser" && pageUnavailable ? (
             <p className="s q-muted" role="status">
-              Notifications stopped working on this page. Reload h4rn to try again.
+              {t("notifications.pageUnavailable")}
             </p>
           ) : null}
           {error ? (
@@ -618,27 +648,25 @@ function NotificationsForm() {
         </div>
       ) : (
         <div className="q-group">
-          <h2>On this device</h2>
+          <h2>{t("notifications.onThisDevice")}</h2>
           <p className="lead">
             {shell === "mobile"
-              ? "This build does not send notifications yet. Use the desktop app or a browser."
-              : "This browser does not support notifications."}
+              ? t("notifications.mobileUnsupported")
+              : t("notifications.browserUnsupported")}
           </p>
         </div>
       )}
       <div className="q-group">
-        <h2>Phone alerts</h2>
+        <h2>{t("notifications.phoneAlerts")}</h2>
         <div className="q-field">
           <div className="lab">
-            <div className="t">Send agent alerts to my phone through Connect</div>
-            <div className="s">
-              Finished, failed, approval and question alerts for this machine.
-            </div>
+            <div className="t">{t("notifications.agentAlerts")}</div>
+            <div className="s">{t("notifications.agentAlertsHint")}</div>
           </div>
           <div className="ctl">
             <Toggle
               checked={agentAlerts.enabled === true}
-              label="Send agent alerts to my phone through Connect"
+              label={t("notifications.agentAlerts")}
               disabled={
                 !agentAlertsSwitchEnabled(
                   agentAlerts.enabled,
@@ -660,13 +688,13 @@ function NotificationsForm() {
           <>
             <div className="q-field">
               <div className="lab">
-                <div className="t">Device notifications</div>
+                <div className="t">{t("notifications.deviceNotifications")}</div>
                 <div className="s">{deviceStatusLine(device, signedIn)}</div>
               </div>
               <div className="ctl">
                 <Toggle
                   checked={device?.enabled === true && device?.permission === "granted"}
-                  label="Device notifications"
+                  label={t("notifications.deviceNotifications")}
                   disabled={!deviceToggleUsable(device, signedIn, deviceBusy)}
                   onChange={(next) => void changeDeviceAlerts(next)}
                 />
@@ -675,17 +703,13 @@ function NotificationsForm() {
             {liveShell ? (
               <div className="q-field">
                 <div className="lab">
-                  <div className="t">Show running agents as live notifications</div>
-                  <div className="s">
-                    An ongoing notification names the thread and project while an agent works, waits
-                    for an approval or asks you something. The finish, failure or limit alert
-                    replaces it.
-                  </div>
+                  <div className="t">{t("notifications.liveUpdates")}</div>
+                  <div className="s">{t("notifications.liveUpdatesHint")}</div>
                 </div>
                 <div className="ctl">
                   <Toggle
                     checked={liveUpdates}
-                    label="Show running agents as live notifications"
+                    label={t("notifications.liveUpdates")}
                     disabled={!deviceLiveUpdatesUsable(device)}
                     onChange={changeLiveUpdates}
                   />
@@ -693,16 +717,13 @@ function NotificationsForm() {
               </div>
             ) : null}
             {liveShell && !deviceLiveUpdatesUsable(device) ? (
-              <p className="s q-muted">Turn on Device notifications to use live notifications.</p>
+              <p className="s q-muted">{t("notifications.liveUpdatesNeedDevice")}</p>
             ) : null}
             {device?.permission === "denied" ? (
-              <p className="s q-muted">
-                Blocked in system settings. Allow notifications for h4rn there, then reopen this
-                page.
-              </p>
+              <p className="s q-muted">{t("notifications.deviceBlocked")}</p>
             ) : null}
             {device?.available === false ? (
-              <p className="s q-muted">This build cannot receive alerts.</p>
+              <p className="s q-muted">{t("notifications.buildCannotReceive")}</p>
             ) : null}
             {availabilityNote ? <p className="s q-muted">{availabilityNote}</p> : null}
             {device?.error ? (
@@ -727,8 +748,10 @@ function ShortcutRow({
   onRecord: (id: CommandId | null) => void;
 }) {
   useKeybindingsVersion();
+  const { t } = useTranslation(["settings", "common"]);
   const [error, setError] = useState<string | null>(null);
   const customized = isCustomized(command.id);
+  const name = t(`shortcuts.commands.${command.id}`);
 
   useEffect(() => {
     if (!recording) return;
@@ -744,7 +767,11 @@ function ShortcutRow({
       if (["Control", "Meta", "Shift", "Alt", "AltGraph"].includes(event.key)) return;
       const chord = chordFromEvent(event);
       if (!chord) {
-        setError(`Hold ${isApplePlatform ? "Cmd" : "Ctrl"} with the key.`);
+        setError(
+          isApplePlatform
+            ? i18n.t("settings:shortcuts.holdCmd")
+            : i18n.t("settings:shortcuts.holdCtrl"),
+        );
         return;
       }
       const result = rebind(command.id, formatChord(chord));
@@ -762,14 +789,14 @@ function ShortcutRow({
     <div className="q-field">
       <div className="lab">
         <div className="t" style={{ fontWeight: 400 }}>
-          {command.label}
+          {name}
         </div>
         {error ? (
           <div className="s" role="alert" style={{ color: "var(--danger)" }}>
             {error}
           </div>
         ) : recording ? (
-          <div className="s">Press the new shortcut. Esc cancels.</div>
+          <div className="s">{t("shortcuts.pressNew")}</div>
         ) : null}
       </div>
       <div className="ctl">
@@ -779,10 +806,13 @@ function ShortcutRow({
             className="q-btn ghost"
             style={{ height: 24 }}
             onClick={() => resetBinding(command.id)}
-            aria-label={`Reset ${command.label} to ${chordText(command.binding)}`}
-            title={`Reset to ${chordText(command.binding)}`}
+            aria-label={t("shortcuts.resetLabel", {
+              command: name,
+              shortcut: chordText(command.binding),
+            })}
+            title={t("shortcuts.resetTitle", { shortcut: chordText(command.binding) })}
           >
-            Reset
+            {t("common:reset")}
           </button>
         ) : null}
         <button
@@ -790,14 +820,17 @@ function ShortcutRow({
           className={`q-keybind${recording ? " on" : ""}`}
           aria-label={
             recording
-              ? `Recording a shortcut for ${command.label}`
-              : `Change shortcut for ${command.label}, now ${shortcutText(command.id)}`
+              ? t("shortcuts.recordingLabel", { command: name })
+              : t("shortcuts.changeLabel", {
+                  command: name,
+                  shortcut: shortcutText(command.id),
+                })
           }
           aria-pressed={recording}
           onClick={() => onRecord(recording ? null : command.id)}
         >
           {recording ? (
-            <span className="q-faint">Press keys…</span>
+            <span className="q-faint">{t("shortcuts.pressKeys")}</span>
           ) : (
             <ShortcutCaps command={command.id} />
           )}
@@ -809,29 +842,29 @@ function ShortcutRow({
 
 function ShortcutsForm() {
   useKeybindingsVersion();
+  const { t } = useTranslation(["settings", "common"]);
   const [recording, setRecording] = useState<CommandId | null>(null);
   const anyCustom = COMMANDS.some((command) => isCustomized(command.id));
   return (
     <div className="q-form">
       <div className="q-form-head">
         <div>
-          <h1>Shortcuts</h1>
+          <h1>{t("shortcuts.title")}</h1>
           <p className="lead">
-            Every shortcut is {isApplePlatform ? "Cmd" : "Ctrl"} plus a key, so typing never runs a
-            command. Click a shortcut to change it. Changes apply to this device.
+            {isApplePlatform ? t("shortcuts.leadCmd") : t("shortcuts.leadCtrl")}
           </p>
         </div>
         {anyCustom ? (
           <div>
             <button type="button" className="q-btn secondary" onClick={resetAllBindings}>
-              Reset all
+              {t("common:resetAll")}
             </button>
           </div>
         ) : null}
       </div>
       {COMMAND_GROUPS.map((group) => (
         <div className="q-group" key={group}>
-          <h2>{group}</h2>
+          <h2>{t(`shortcuts.groups.${group}`)}</h2>
           {COMMANDS.filter((command) => command.group === group).map((command) => (
             <ShortcutRow
               key={command.id}
@@ -882,11 +915,12 @@ const FORMS: Record<string, () => React.ReactNode> = {
 
 /** Static settings surfaces, ported from the approved prototype. */
 export function SettingsPage({ section }: { section: string }) {
+  const { t } = useTranslation(["settings", "common"]);
   const key = FORMS[section] ? section : "hosts";
   const Form = FORMS[key] ?? (() => <LiveHostsForm />);
 
   return (
-    <main className="q-main" aria-label="Settings">
+    <main className="q-main" aria-label={t("page.label")}>
       <div className="q-page">
         <Form />
       </div>

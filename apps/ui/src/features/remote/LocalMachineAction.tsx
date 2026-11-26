@@ -8,6 +8,8 @@
  * forgets the remote using the same path as Disconnect.
  */
 
+import { useTranslation } from "react-i18next";
+
 import { cn } from "@/lib/utils";
 
 import { forgetMachine, shellKind, useRemote } from "./remoteStore";
@@ -33,6 +35,7 @@ export function UseThisMachineButton({
   onUseLocal?: () => void;
   className?: string;
 }) {
+  const { t } = useTranslation("settings", { keyPrefix: "localMachine" });
   const stored = useStoredRemoteName();
   const name = machineName ?? stored;
   if (!name) return null;
@@ -43,30 +46,26 @@ export function UseThisMachineButton({
   const mobile = shellKind() === "mobile";
   const disconnect = mobile || verb === "disconnect";
   const label = mobile
-    ? "Disconnect"
+    ? t("disconnect")
     : verb === "disconnect"
-      ? `Disconnect from ${name}`
+      ? t("disconnectFrom", { name })
       : compact
-        ? "Use local"
-        : "Use this machine";
+        ? t("useLocal")
+        : t("useThis");
   // WCAG 2.5.3: the accessible name must contain the visible label. The longer
   // explanation stays in the title, which screen readers expose as a
   // description rather than replacing the name.
   const ariaLabel = disconnect
-    ? `Disconnect from ${name}`
+    ? t("disconnectFrom", { name })
     : compact
-      ? `Use local — disconnect from ${name}`
-      : `Use this machine — disconnect from ${name}`;
+      ? t("useLocalLabel", { name })
+      : t("useThisLabel", { name });
   return (
     <button
       type="button"
       className={cn("q-btn ghost", className)}
       style={{ height: 24 }}
-      title={
-        mobile
-          ? `Disconnect from ${name}. This app stays offline until you pick another machine.`
-          : `Disconnect from ${name} and use the daemon on this machine`
-      }
+      title={mobile ? t("mobileTitle", { name }) : t("desktopTitle", { name })}
       aria-label={ariaLabel}
       onClick={onUseLocal}
     >

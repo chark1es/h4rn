@@ -7,12 +7,14 @@
  */
 import { CheckIcon, CopyIcon, KeyRoundIcon } from "lucide-react";
 import { useEffect, useState } from "react";
+import { Trans, useTranslation } from "react-i18next";
 
 import { ConfirmDialog } from "@/components/common/ConfirmDialog";
 import { readActiveRemote } from "@/features/remote/active";
 import type { HarnessKind, OutsideAgentLevel, OutsideAgentSignIn, OutsideAgentView } from "@/gen";
 import { HARNESS_LABELS } from "@/lib/entities";
-import { absoluteDateTime, relativeAge } from "@/lib/format";
+import { absoluteDateTime } from "@/lib/format";
+import { formatRelativeTime } from "@/lib/i18n";
 import { useApp } from "@/lib/store/appStore";
 import { cn } from "@/lib/utils";
 
@@ -28,14 +30,11 @@ import {
 
 const TOOL_HARNESSES: HarnessKind[] = ["claude_code", "codex", "opencode", "antigravity", "acp"];
 
-const LEVELS: Array<{ value: OutsideAgentLevel; label: string }> = [
-  { value: "read_only", label: "Read only" },
-  { value: "supervised", label: "Supervised" },
-  { value: "full_access", label: "Full access" },
-];
+const LEVELS: OutsideAgentLevel[] = ["read_only", "supervised", "full_access"];
 
 /** A copy button that confirms in place instead of opening a toast. */
 function CopyButton({ value, label }: { value: string; label: string }) {
+  const { t } = useTranslation(["settings", "common"]);
   const [copied, setCopied] = useState(false);
   useEffect(() => {
     if (!copied) return;
@@ -59,7 +58,7 @@ function CopyButton({ value, label }: { value: string; label: string }) {
       ) : (
         <CopyIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
       )}
-      {copied ? "Copied" : "Copy MCP URL"}
+      {copied ? t("common:copied") : t("access.copyMcpUrl")}
     </button>
   );
 }
@@ -73,6 +72,7 @@ function AgentRow({
   busy: boolean;
   onRevoke: () => void;
 }) {
+  const { t } = useTranslation(["settings", "common"]);
   return (
     <div className="q-field">
       <div className="lab" style={{ width: "auto", flex: 1, minWidth: 0 }}>
@@ -83,11 +83,13 @@ function AgentRow({
           {levelLabel(agent.level)} · {levelDescription(agent.level)}
         </div>
         <div className="q-faint" style={{ fontSize: 12 }}>
-          Connected {relativeAge(agent.connected_at)} ago
-          {agent.last_used_at ? ` · Last used ${relativeAge(agent.last_used_at)} ago` : ""}
-          {" · Sign-in until "}
+          {t("access.connected", { when: formatRelativeTime(agent.connected_at) })}
+          {agent.last_used_at
+            ? ` · ${t("access.lastUsed", { when: formatRelativeTime(agent.last_used_at) })}`
+            : ""}
+          {" · "}
           <span title={absoluteDateTime(agent.expires_at)}>
-            {absoluteDateTime(agent.expires_at)}
+            {t("access.signInUntil", { when: absoluteDateTime(agent.expires_at) })}
           </span>
         </div>
       </div>
@@ -97,9 +99,9 @@ function AgentRow({
           className="q-btn secondary"
           disabled={busy}
           onClick={onRevoke}
-          aria-label={`Revoke ${agent.name}`}
+          aria-label={t("access.revokeLabel", { name: agent.name })}
         >
-          Revoke
+          {t("common:revoke")}
         </button>
       </div>
     </div>
@@ -122,31 +124,36 @@ function harnessEnabled(
  * preselected: approving needs an explicit choice.
  */
 function SignInCard({ signIn }: { signIn: OutsideAgentSignIn }) {
+  const { t } = useTranslation(["settings", "common"]);
   const [level, setLevel] = useState<OutsideAgentLevel | null>(null);
   const busy = useAccess((state) => Boolean(state.pending[signIn.request_id]));
   return (
     <div className="q-field" style={{ flexDirection: "column", alignItems: "stretch", gap: 10 }}>
       <div className="lab" style={{ width: "auto" }}>
-        <div className="t">{signIn.client_name} wants to connect</div>
+        <div className="t">{t("access.wantsToConnect", { name: signIn.client_name })}</div>
         <div className="s">
-          Unverified name, chosen by the app. If you approve, your browser returns to{" "}
-          <span className="q-mono">{signIn.redirect_origin}</span>.
+          <Trans
+            t={t}
+            i18nKey="access.unverifiedName"
+            values={{ origin: signIn.redirect_origin }}
+            components={{ code: <span className="q-mono" /> }}
+          />
         </div>
       </div>
-      <div role="radiogroup" aria-label={`What ${signIn.client_name} may do`}>
+      <div role="radiogroup" aria-label={t("access.mayDo", { name: signIn.client_name })}>
         {LEVELS.map((entry) => (
-          <label key={entry.value} className="q-resolve-opt">
+          <label key={entry} className="q-resolve-opt">
             <input
               type="radio"
               name={`outside-level-${signIn.request_id}`}
               className="sr-only"
-              checked={level === entry.value}
-              onChange={() => setLevel(entry.value)}
+              checked={level === entry}
+              onChange={() => setLevel(entry)}
             />
-            <span className={cn("q-radio", level === entry.value && "on")} aria-hidden />
+            <span className={cn("q-radio", level === entry && "on")} aria-hidden />
             <span>
-              <span style={{ fontWeight: 500 }}>{entry.label}</span>
-              <span className="q-faint sub">{levelDescription(entry.value)}</span>
+              <span style={{ fontWeight: 500 }}>{levelLabel(entry)}</span>
+              <span className="q-faint sub">{levelDescription(entry)}</span>
             </span>
           </label>
         ))}
@@ -158,7 +165,7 @@ function SignInCard({ signIn }: { signIn: OutsideAgentSignIn }) {
           disabled={busy}
           onClick={() => void respondSignIn(signIn, "deny", null)}
         >
-          Deny
+          {t("access.deny")}
         </button>
         <button
           type="button"
@@ -166,7 +173,7 @@ function SignInCard({ signIn }: { signIn: OutsideAgentSignIn }) {
           disabled={busy || !level}
           onClick={() => void respondSignIn(signIn, "approve", level)}
         >
-          Approve
+          {t("access.approve")}
         </button>
       </div>
     </div>
@@ -174,6 +181,7 @@ function SignInCard({ signIn }: { signIn: OutsideAgentSignIn }) {
 }
 
 export function AccessSettings() {
+  const { t } = useTranslation(["settings", "common"]);
   const online = useApp((state) => state.connection.status) === "online";
   const agents = useAccess((state) => state.agents);
   const signIns = useAccess((state) => state.signIns);
@@ -198,54 +206,47 @@ export function AccessSettings() {
   if (!online) {
     return (
       <div className="q-form">
-        <h1>Sharing &amp; access</h1>
-        <p className="lead">
-          Outside agents connect to this machine. Reconnect to see who is connected and copy the MCP
-          URL.
-        </p>
+        <h1>{t("access.title")}</h1>
+        <p className="lead">{t("access.offlineLead")}</p>
       </div>
     );
   }
 
   return (
     <div className="q-form">
-      <h1>Sharing &amp; access</h1>
-      <p className="lead">
-        Let an agent you did not start work with h4rn, and decide what h4rn's own tools may do
-        inside the agents h4rn runs.
-      </p>
+      <h1>{t("access.title")}</h1>
+      <p className="lead">{t("access.lead")}</p>
 
       {outsideEnabled === true ? (
         <div className="q-group">
-          <h2>Outside agents</h2>
+          <h2>{t("access.outsideAgents")}</h2>
           <p className="q-faint" style={{ marginTop: -4, marginBottom: 12 }}>
-            Add this URL to Claude Code, Codex or another MCP client that supports OAuth. The client
-            signs in once; you choose its level here, in h4rn.
+            {t("access.outsideAgentsHint")}
           </p>
           <div className="q-field">
             <div className="lab" style={{ flex: 1, minWidth: 0 }}>
-              <div className="t">MCP URL</div>
+              <div className="t">{t("access.mcpUrl")}</div>
               <div className="s">
                 <span className="q-mono" style={{ wordBreak: "break-all" }}>
-                  {mcpUrl || "Outside agents need a loopback listener"}
+                  {mcpUrl || t("access.needsLoopback")}
                 </span>
               </div>
             </div>
             <div className="ctl" style={{ flex: "0 1 auto", justifyContent: "flex-end" }}>
-              {remote ? null : <CopyButton value={mcpUrl} label="Copy the outside-agent MCP URL" />}
+              {remote ? null : <CopyButton value={mcpUrl} label={t("access.copyMcpUrlLabel")} />}
             </div>
           </div>
           {remote ? (
             <p className="q-faint" style={{ marginTop: 8 }}>
-              This h4rn app is connected to {remote.machineName} from another device. That URL is
-              the address on that computer's own loopback, so it works only there: an agent on the
-              internet cannot reach it yet. Copy it from h4rn on {remote.machineName} itself.
+              {t("access.remoteNote", { machine: remote.machineName })}
             </p>
           ) : null}
 
           {signIns.length > 0 ? (
             <div style={{ marginTop: 16 }}>
-              <h3 style={{ margin: "0 0 8px", fontSize: 13, fontWeight: 600 }}>Waiting for you</h3>
+              <h3 style={{ margin: "0 0 8px", fontSize: 13, fontWeight: 600 }}>
+                {t("access.waiting")}
+              </h3>
               {signIns.map((signIn) => (
                 <SignInCard key={signIn.request_id} signIn={signIn} />
               ))}
@@ -254,7 +255,7 @@ export function AccessSettings() {
 
           {loading ? (
             <p className="q-faint" style={{ marginTop: 12 }}>
-              Reading connected agents…
+              {t("access.readingAgents")}
             </p>
           ) : error ? (
             <p className="q-faint" style={{ marginTop: 12 }}>
@@ -265,10 +266,8 @@ export function AccessSettings() {
             <div className="q-empty" style={{ marginTop: 12 }}>
               <KeyRoundIcon className="q-icon" strokeWidth={1.5} aria-hidden />
               <div>
-                <div className="t">No outside agent is connected</div>
-                <div className="s">
-                  Nothing can read or start threads from outside h4rn until you approve a sign-in.
-                </div>
+                <div className="t">{t("access.noneConnected")}</div>
+                <div className="s">{t("access.noneConnectedHint")}</div>
               </div>
             </div>
           ) : (
@@ -283,18 +282,15 @@ export function AccessSettings() {
           )}
         </div>
       ) : outsideEnabled === false ? (
-        <p className="q-faint">
-          Outside agents are in Labs. Turn them on in Settings → Labs → Outside agents (OAuth).
-        </p>
+        <p className="q-faint">{t("access.inLabs")}</p>
       ) : (
-        <p className="q-faint">Reading the outside-agent setting…</p>
+        <p className="q-faint">{t("access.readingSetting")}</p>
       )}
 
       <div className="q-group">
-        <h2>h4rn tools in your agents</h2>
+        <h2>{t("access.tools")}</h2>
         <p className="q-faint" style={{ marginTop: -4, marginBottom: 12 }}>
-          Agents h4rn runs can link pull requests to their thread and read its state. Turn the tools
-          off per harness if you would rather they did not.
+          {t("access.toolsHint")}
         </p>
         {TOOL_HARNESSES.map((harness) => {
           const enabled = harnessEnabled(settings?.enabled ?? null, harness);
@@ -303,11 +299,7 @@ export function AccessSettings() {
             <div className="q-field" key={harness}>
               <div className="lab" style={{ flex: 1 }}>
                 <div className="t">{HARNESS_LABELS[harness]}</div>
-                <div className="s">
-                  {enabled
-                    ? "Link pull requests, watch them and read the thread's status."
-                    : "No h4rn tools are offered to these sessions."}
-                </div>
+                <div className="s">{enabled ? t("access.toolsOn") : t("access.toolsOff")}</div>
               </div>
               <div className="ctl" style={{ flex: "0 1 auto", justifyContent: "flex-end" }}>
                 <button
@@ -315,7 +307,7 @@ export function AccessSettings() {
                   className={cn("q-switch", busy && "busy")}
                   role="switch"
                   aria-checked={enabled}
-                  aria-label={`h4rn tools in ${HARNESS_LABELS[harness]}`}
+                  aria-label={t("access.toolsIn", { harness: HARNESS_LABELS[harness] })}
                   aria-disabled={busy || undefined}
                   disabled={busy}
                   onClick={() => void setAgentToolsEnabled(harness, !enabled)}
@@ -328,9 +320,9 @@ export function AccessSettings() {
 
       <ConfirmDialog
         open={Boolean(revoking)}
-        title={revoking ? `Revoke ${revoking.name}?` : "Revoke this agent?"}
-        description="Its access token and refresh token stop working immediately. It must ask to sign in again to reconnect."
-        confirmLabel="Revoke"
+        title={revoking ? t("access.revokeTitle", { name: revoking.name }) : t("access.revokeThis")}
+        description={t("access.revokeDescription")}
+        confirmLabel={t("common:revoke")}
         onOpenChange={(open) => {
           if (!open) setRevoking(null);
         }}

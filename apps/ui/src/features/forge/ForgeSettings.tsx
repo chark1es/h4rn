@@ -1,5 +1,6 @@
 import { KeyRoundIcon, PlusIcon, RefreshCwIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Trans, useTranslation } from "react-i18next";
 
 import { ChipSelect } from "@/components/common/ChipSelect";
 import { ConfirmDialog } from "@/components/common/ConfirmDialog";
@@ -12,7 +13,7 @@ import type {
   ForgeRemote,
   ForgeRepoRef,
 } from "@/gen";
-import { relativeAge } from "@/lib/format";
+import { formatList, formatRelativeTime, i18n } from "@/lib/i18n";
 import { getClient, pushToast, useApp } from "@/lib/store/appStore";
 
 const api = () => new ForgeApi((request) => getClient().request(request));
@@ -28,17 +29,6 @@ const DEFAULT_BASE: Record<ForgeKind, string> = {
   azure_devops: "https://dev.azure.com",
 };
 
-/** The forge's smallest useful token, in the words of its own settings page. */
-const SCOPES: Record<ForgeKind, string> = {
-  github: "a fine-grained token with Contents: read, Pull requests: write and Checks: read",
-  gitlab: "a project access token with read_api and write to merge requests",
-  gitea: "a token with repo scope on the repositories you want to see",
-  forgejo: "a token with repo scope on the repositories you want to see",
-  bitbucket:
-    "an Atlassian API token (Account: read, Repositories: read, Pull requests: read and write) with your Atlassian account email, or a workspace, project or repository access token (app passwords were retired in July 2026)",
-  azure_devops: "a personal access token with Code: read & write",
-};
-
 /** OAuth device flow is a GitHub dotcom feature in this build. */
 function supportsDeviceFlow(accounts: ForgeAccounts, base: string): boolean {
   const github = accounts.capabilities.find((entry) => entry.forge === "github");
@@ -48,20 +38,12 @@ function supportsDeviceFlow(accounts: ForgeAccounts, base: string): boolean {
 }
 
 function sourceLabel(source: ForgeCredentialSource): string {
-  switch (source) {
-    case "pat":
-      return "Token";
-    case "o_auth_device":
-      return "GitHub device flow";
-    case "gh_cli":
-      return "Imported from gh";
-    case "glab_cli":
-      return "Imported from glab";
-    case "bitbucket_api_token":
-      return "API token (email + token)";
-    case "bitbucket_access_token":
-      return "Workspace, project or repository access token";
-  }
+  return i18n.t(`settings:forges.source.${source}`);
+}
+
+/** "@name" after a forge, when the account reported one. */
+function asUser(username: string | null | undefined): string {
+  return username ? i18n.t("settings:forges.asUser", { username }) : "";
 }
 
 /** Scopes that reach beyond the pull requests this surface needs. */
@@ -78,10 +60,11 @@ function AccountsTable({
   accounts: ForgeAccount[];
   onRemove: (account: ForgeAccount) => void;
 }) {
+  const { t } = useTranslation(["settings", "common"]);
   if (accounts.length === 0) {
     return (
       <p className="q-muted" style={{ fontSize: 13, margin: "4px 0 16px" }}>
-        No forge accounts yet. Add a token below, or import one your CLI already stores.
+        {t("forges.noAccounts")}
       </p>
     );
   }
@@ -89,10 +72,10 @@ function AccountsTable({
     <table className="q-tbl">
       <thead>
         <tr>
-          <th>Account</th>
-          <th>Host</th>
-          <th>Scopes</th>
-          <th>Added</th>
+          <th>{t("forges.table.account")}</th>
+          <th>{t("forges.table.host")}</th>
+          <th>{t("forges.table.scopes")}</th>
+          <th>{t("forges.table.added")}</th>
           <th />
         </tr>
       </thead>
@@ -123,25 +106,37 @@ function AccountsTable({
               </td>
               <td>
                 {account.scopes.length === 0 ? (
-                  <span className="q-faint">Not reported</span>
+                  <span className="q-faint">{t("forges.notReported")}</span>
                 ) : broad.length > 0 ? (
-                  <span className="q-warn" title={`Broad scopes: ${broad.join(", ")}`}>
-                    {broad.join(", ")} · broader than needed
+                  <span
+                    className="q-warn"
+                    title={t("forges.broadScopesTitle", { scopes: formatList(broad) })}
+                  >
+                    {formatList(broad, "conjunction", "narrow")} · {t("forges.broaderThanNeeded")}
                   </span>
                 ) : (
-                  <span className="q-muted">{account.scopes.join(", ")}</span>
+                  <span className="q-muted">
+                    {formatList(account.scopes, "conjunction", "narrow")}
+                  </span>
                 )}
               </td>
-              <td className="q-muted">{relativeAge(account.created_at)}</td>
+              <td className="q-muted">
+                {formatRelativeTime(account.created_at, Date.now(), {
+                  numeric: "auto",
+                  style: "short",
+                })}
+              </td>
               <td className="r" style={{ paddingRight: 0 }}>
                 <button
                   type="button"
                   className="q-btn danger"
                   style={{ height: 24 }}
-                  aria-label={`Remove ${account.display_name ?? account.username ?? forgeLabel(account.forge)}`}
+                  aria-label={t("forges.removeLabel", {
+                    name: account.display_name ?? account.username ?? forgeLabel(account.forge),
+                  })}
                   onClick={() => onRemove(account)}
                 >
-                  Remove
+                  {t("common:remove")}
                 </button>
               </td>
             </tr>
@@ -159,6 +154,7 @@ function AddAccountForm({
   onAdded: () => void;
   repositories: ForgeRemote[];
 }) {
+  const { t } = useTranslation(["settings", "common"]);
   const [forge, setForge] = useState<ForgeKind>("github");
   const [baseUrl, setBaseUrl] = useState(DEFAULT_BASE.github);
   const [username, setUsername] = useState("");
@@ -223,13 +219,16 @@ function AddAccountForm({
       setToken("");
       setUsername("");
       pushToast({
-        title: `Added ${forgeLabel(forge)}${account.username ? ` as @${account.username}` : ""}.`,
+        title: t("forges.toast.added", {
+          forge: forgeLabel(forge),
+          user: asUser(account.username),
+        }),
         variant: "success",
       });
       onAdded();
     } catch (cause) {
       pushToast({
-        title: "The account was not added.",
+        title: t("forges.toast.addFailed"),
         description: cause instanceof Error ? cause.message : String(cause),
         variant: "error",
       });
@@ -240,46 +239,45 @@ function AddAccountForm({
 
   return (
     <div className="q-group">
-      <h2>Add an account</h2>
+      <h2>{t("forges.add.title")}</h2>
       <div className="q-field">
         <div className="lab">
-          <div className="t">Forge</div>
+          <div className="t">{t("forges.add.forge")}</div>
         </div>
         <div className="ctl">
           <ChipSelect
-            label="Forge"
+            label={t("forges.add.forge")}
             value={forge}
             width={190}
             options={FORGES.map((kind) => ({ value: kind, label: forgeLabel(kind) }))}
             onChange={changeForge}
           />
           <span className="q-faint" style={{ fontSize: 12 }}>
-            Use {SCOPES[forge]}.
+            {t(`forges.scopes.${forge}`)}
           </span>
           {forge === "bitbucket" ? (
             <span className="q-faint" style={{ fontSize: 12, display: "block" }}>
-              App passwords no longer work. Paste an API token with your Atlassian account email, or
-              a workspace, project or repository access token with the email left empty.
+              {t("forges.add.bitbucketNote")}
             </span>
           ) : null}
         </div>
       </div>
       <div className="q-field">
         <div className="lab">
-          <div className="t">Base URL</div>
+          <div className="t">{t("forges.add.baseUrl")}</div>
           <div className="s">
             {forge === "azure_devops"
-              ? "Include the organization, e.g. https://dev.azure.com/acme"
+              ? t("forges.add.baseUrlAzure")
               : forge === "bitbucket"
-                ? "Bitbucket Cloud only, at bitbucket.org"
-                : "Point a self-hosted forge at its own host"}
+                ? t("forges.add.baseUrlBitbucket")
+                : t("forges.add.baseUrlSelfHosted")}
           </div>
         </div>
         <div className="ctl">
           <input
             className="q-input q-mono"
             style={{ maxWidth: 300, fontSize: 12 }}
-            aria-label="Forge base URL"
+            aria-label={t("forges.add.baseUrlLabel")}
             value={baseUrl}
             onChange={(event) => setBaseUrl(event.target.value)}
             placeholder={DEFAULT_BASE[forge]}
@@ -289,27 +287,22 @@ function AddAccountForm({
       {forge === "bitbucket" ? (
         <div className="q-field">
           <div className="lab">
-            <div className="t">Atlassian account email</div>
-            <div className="s">
-              Needed for an API token (email + token). Leave empty for a workspace, project or
-              repository access token.
-            </div>
+            <div className="t">{t("forges.add.email")}</div>
+            <div className="s">{t("forges.add.emailHint")}</div>
           </div>
           <div className="ctl">
             <input
               className="q-input q-mono"
               style={{ maxWidth: 300, fontSize: 12 }}
               autoComplete="username"
-              aria-label="Atlassian account email"
+              aria-label={t("forges.add.email")}
               value={username}
               onChange={(event) => setUsername(event.target.value)}
               placeholder="you@example.com"
             />
             {accessTokenWithoutRepository ? (
               <span className="q-warn" style={{ fontSize: 12, display: "block" }}>
-                An access token cannot read your account, so it is validated against a repository.
-                Open the Pull requests page from a checkout of a Bitbucket repository first, then
-                this form can detect it.
+                {t("forges.add.needsRepository")}
               </span>
             ) : null}
           </div>
@@ -318,14 +311,12 @@ function AddAccountForm({
       {forge === "bitbucket" && candidateRepos.length > 1 ? (
         <div className="q-field">
           <div className="lab">
-            <div className="t">Validate against</div>
-            <div className="s">
-              Which detected Bitbucket repository proves this account. The first is used by default.
-            </div>
+            <div className="t">{t("forges.add.validateAgainst")}</div>
+            <div className="s">{t("forges.add.validateAgainstHint")}</div>
           </div>
           <div className="ctl">
             <ChipSelect
-              label="Bitbucket repository to validate against"
+              label={t("forges.add.validateAgainstLabel")}
               value={detectedRepo ? repositoryName(detectedRepo) : ""}
               width={300}
               options={candidateRepos.map((repo) => ({
@@ -339,8 +330,8 @@ function AddAccountForm({
       ) : null}
       <div className="q-field">
         <div className="lab">
-          <div className="t">Token</div>
-          <div className="s">Stored on this host, never shown again</div>
+          <div className="t">{t("forges.add.token")}</div>
+          <div className="s">{t("forges.add.tokenHint")}</div>
         </div>
         <div className="ctl">
           <input
@@ -348,10 +339,10 @@ function AddAccountForm({
             style={{ maxWidth: 320, fontSize: 12 }}
             type="password"
             autoComplete="off"
-            aria-label="Forge token"
+            aria-label={t("forges.add.tokenLabel")}
             value={token}
             onChange={(event) => setToken(event.target.value)}
-            placeholder="Paste a token"
+            placeholder={t("forges.add.tokenPlaceholder")}
           />
           <button
             type="button"
@@ -366,11 +357,11 @@ function AddAccountForm({
             onClick={() => void submit()}
           >
             <PlusIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-            {busy ? "Checking…" : "Add account"}
+            {busy ? t("common:checking") : t("forges.add.button")}
           </button>
           {missingOrganization ? (
             <span className="q-warn" style={{ fontSize: 12 }}>
-              Add the organization to the base URL.
+              {t("forges.add.missingOrganization")}
             </span>
           ) : null}
         </div>
@@ -380,6 +371,7 @@ function AddAccountForm({
 }
 
 function DeviceFlow({ baseUrl, onComplete }: { baseUrl: string; onComplete: () => void }) {
+  const { t } = useTranslation(["settings", "common"]);
   const [flow, setFlow] = useState<ForgeDeviceFlow | null>(null);
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
@@ -401,11 +393,8 @@ function DeviceFlow({ baseUrl, onComplete }: { baseUrl: string; onComplete: () =
       setFlow(await api().startDeviceFlow(baseUrl));
     } catch (cause) {
       pushToast({
-        title: "The device flow did not start.",
-        description:
-          cause instanceof Error
-            ? cause.message
-            : "Set H4RN_GITHUB_CLIENT_ID on the daemon to enable it.",
+        title: t("forges.device.startFailed"),
+        description: cause instanceof Error ? cause.message : t("forges.device.needsClientId"),
         variant: "error",
       });
     } finally {
@@ -430,22 +419,23 @@ function DeviceFlow({ baseUrl, onComplete }: { baseUrl: string; onComplete: () =
             break;
           case "slow_down":
             delay = Math.max(1, result.interval) * 1000;
-            setStatus("GitHub asked us to slow down; still waiting…");
+            setStatus(i18n.t("settings:forges.device.slowDown"));
             timer.current = setTimeout(() => void poll(), delay);
             break;
           case "complete":
             setFlow(null);
             pushToast({
-              title: `Connected ${forgeLabel(result.account.forge)}${
-                result.account.username ? ` as @${result.account.username}` : ""
-              }.`,
+              title: i18n.t("settings:forges.toast.connected", {
+                forge: forgeLabel(result.account.forge),
+                user: asUser(result.account.username),
+              }),
               variant: "success",
             });
             onComplete();
             break;
           case "expired":
             setFlow(null);
-            setStatus("The code expired. Start again.");
+            setStatus(i18n.t("settings:forges.device.expired"));
             break;
           case "denied":
             setFlow(null);
@@ -466,40 +456,44 @@ function DeviceFlow({ baseUrl, onComplete }: { baseUrl: string; onComplete: () =
 
   return (
     <div className="q-group">
-      <h2>GitHub device flow</h2>
+      <h2>{t("forges.device.title")}</h2>
       {flow ? (
         <>
           <p className="desc">
-            Enter this code at{" "}
-            <a
-              className="q-accent"
-              href={flow.verification_uri}
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              {flow.verification_uri}
-            </a>
-            . The code expires in {Math.ceil(flow.expires_in / 60)} minutes.
+            <Trans
+              t={t}
+              i18nKey="forges.device.enterCode"
+              count={Math.ceil(flow.expires_in / 60)}
+              values={{ uri: flow.verification_uri }}
+              components={{
+                link: (
+                  // biome-ignore lint/a11y/useAnchorContent: Trans fills the link with the URI
+                  <a
+                    className="q-accent"
+                    href={flow.verification_uri}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  />
+                ),
+              }}
+            />
           </p>
           <div className="q-code-big" style={{ margin: "4px 0 10px" }}>
             {flow.user_code}
           </div>
           <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
             <span className="q-faint" style={{ fontSize: 12 }}>
-              <RefreshCwIcon className="q-icon s12" strokeWidth={1.5} aria-hidden /> Waiting for
-              authorization…
+              <RefreshCwIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />{" "}
+              {t("forges.device.waiting")}
             </span>
             <button type="button" className="q-btn ghost" onClick={() => setFlow(null)}>
-              Stop
+              {t("forges.device.stop")}
             </button>
           </div>
         </>
       ) : (
         <>
-          <p className="desc">
-            Authorize once in the browser; the daemon keeps the resulting token. Needs
-            H4RN_GITHUB_CLIENT_ID on the host.
-          </p>
+          <p className="desc">{t("forges.device.hint")}</p>
           <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
             <button
               type="button"
@@ -507,7 +501,7 @@ function DeviceFlow({ baseUrl, onComplete }: { baseUrl: string; onComplete: () =
               disabled={busy}
               onClick={() => void start()}
             >
-              {busy ? "Starting…" : "Start device flow"}
+              {busy ? t("forges.device.starting") : t("forges.device.start")}
             </button>
             {status ? (
               <span className="q-warn" style={{ fontSize: 12 }}>
@@ -522,6 +516,7 @@ function DeviceFlow({ baseUrl, onComplete }: { baseUrl: string; onComplete: () =
 }
 
 export function ForgeSettings() {
+  const { t } = useTranslation(["settings", "common"]);
   const threads = useApp((state) => state.threads);
   const [repositories, setRepositories] = useState<ForgeRemote[]>([]);
   const [data, setData] = useState<ForgeAccounts>({
@@ -610,13 +605,15 @@ export function ForgeSettings() {
     try {
       await api().removeAccount(account.account_id);
       pushToast({
-        title: `Removed ${account.display_name ?? account.username ?? forgeLabel(account.forge)}.`,
+        title: t("forges.toast.removed", {
+          name: account.display_name ?? account.username ?? forgeLabel(account.forge),
+        }),
         variant: "success",
       });
       load();
     } catch (cause) {
       pushToast({
-        title: "The account was not removed.",
+        title: t("forges.toast.removeFailed"),
         description: cause instanceof Error ? cause.message : String(cause),
         variant: "error",
       });
@@ -628,15 +625,16 @@ export function ForgeSettings() {
     try {
       const account = await api().importCli(forge, null);
       pushToast({
-        title: `Imported ${forgeLabel(forge)}${
-          account.username ? ` as @${account.username}` : ""
-        }.`,
+        title: t("forges.toast.imported", {
+          forge: forgeLabel(forge),
+          user: asUser(account.username),
+        }),
         variant: "success",
       });
       load();
     } catch (cause) {
       pushToast({
-        title: `No ${forge === "github" ? "gh" : "glab"} credential was imported.`,
+        title: t("forges.toast.importFailed", { cli: forge === "github" ? "gh" : "glab" }),
         description: cause instanceof Error ? cause.message : String(cause),
         variant: "error",
       });
@@ -651,16 +649,12 @@ export function ForgeSettings() {
     <div className="q-form" style={{ maxWidth: 940 }}>
       <div className="q-form-head">
         <div style={{ flex: 1 }}>
-          <h1>Forges</h1>
-          <p className="lead">
-            GitHub, GitLab, Gitea, Forgejo, Bitbucket Cloud and Azure DevOps accounts used for pull
-            requests, checks and reviews. Tokens stay on this host and every call goes through the
-            daemon.
-          </p>
+          <h1>{t("forges.title")}</h1>
+          <p className="lead">{t("forges.lead")}</p>
         </div>
         <button type="button" className="q-btn secondary" onClick={load} disabled={loading}>
           <RefreshCwIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-          Refresh
+          {t("common:refresh")}
         </button>
       </div>
 
@@ -671,7 +665,7 @@ export function ForgeSettings() {
       ) : null}
 
       <div className="q-group">
-        <h2>Accounts</h2>
+        <h2>{t("forges.accounts")}</h2>
         {loading ? (
           <div aria-busy="true">
             {[0, 1].map((row) => (
@@ -686,11 +680,13 @@ export function ForgeSettings() {
       <AddAccountForm onAdded={load} repositories={repositories} />
 
       <div className="q-group">
-        <h2>Import from a CLI</h2>
+        <h2>{t("forges.import.title")}</h2>
         <p className="desc">
-          Reads the token {""}
-          <span className="q-mono">gh</span> or <span className="q-mono">glab</span> already stored
-          for the current user. Nothing is imported until you confirm.
+          <Trans
+            t={t}
+            i18nKey="forges.import.hint"
+            components={{ code: <span className="q-mono" /> }}
+          />
         </p>
         <div style={{ display: "flex", gap: 8 }}>
           <button
@@ -699,7 +695,7 @@ export function ForgeSettings() {
             disabled={importing}
             onClick={() => setImportForge("github")}
           >
-            Import from gh
+            {t("forges.import.fromGh")}
           </button>
           <button
             type="button"
@@ -707,7 +703,7 @@ export function ForgeSettings() {
             disabled={importing}
             onClick={() => setImportForge("gitlab")}
           >
-            Import from glab
+            {t("forges.import.fromGlab")}
           </button>
         </div>
       </div>
@@ -715,23 +711,15 @@ export function ForgeSettings() {
       {deviceFlow ? <DeviceFlow baseUrl={DEFAULT_BASE.github} onComplete={load} /> : null}
 
       <div className="q-group">
-        <h2>Least privilege</h2>
-        <p className="desc">
-          The pull request surface reads contents, checks and reviews, and writes comments and
-          replies. It never needs repository administration, secrets or organization write access; a
-          token that reports those scopes is flagged above.
-        </p>
+        <h2>{t("forges.leastPrivilege")}</h2>
+        <p className="desc">{t("forges.leastPrivilegeHint")}</p>
       </div>
 
       <ConfirmDialog
         open={removing !== null}
-        title={`Remove ${removing ? forgeLabel(removing.forge) : ""} account?`}
-        description={
-          removing
-            ? `The token for ${removing.base_url} is deleted from this host. Pull requests for that host stop loading until you add an account again.`
-            : ""
-        }
-        confirmLabel="Remove account"
+        title={t("forges.remove.title", { forge: removing ? forgeLabel(removing.forge) : "" })}
+        description={removing ? t("forges.remove.description", { url: removing.base_url }) : ""}
+        confirmLabel={t("forges.remove.button")}
         onOpenChange={(open) => {
           if (!open) setRemoving(null);
         }}
@@ -743,13 +731,15 @@ export function ForgeSettings() {
 
       <ConfirmDialog
         open={importForge !== null}
-        title={importForge === "github" ? "Import the gh token?" : "Import the glab token?"}
+        title={t("forges.import.confirmTitle", { cli: importForge === "github" ? "gh" : "glab" })}
         description={
           importForge
-            ? `h4rn reads the credential ${importForge === "github" ? "gh" : "glab"} stores for the signed-in user and saves it on this host. Only do this if you trust this machine.`
+            ? t("forges.import.confirmDescription", {
+                cli: importForge === "github" ? "gh" : "glab",
+              })
             : ""
         }
-        confirmLabel="Import token"
+        confirmLabel={t("forges.import.confirmButton")}
         onOpenChange={(open) => {
           if (!open) setImportForge(null);
         }}

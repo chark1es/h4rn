@@ -7,6 +7,7 @@ import {
   Trash2Icon,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { ChipSelect } from "@/components/common/ChipSelect";
 import { ConfirmDialog } from "@/components/common/ConfirmDialog";
@@ -19,6 +20,7 @@ import { useProjects } from "@/features/projects/store";
 import type { HarnessKind, ScheduleDraft, ScheduleRun, ScheduleTask, ScheduleTaskId } from "@/gen";
 import { onScheduleFrame } from "@/lib/client/frames";
 import { HARNESS_LABELS, harnessLabel } from "@/lib/entities";
+import { i18n } from "@/lib/i18n";
 import { HARNESS_MODELS } from "@/lib/models";
 import { openThread, useApp } from "@/lib/store/appStore";
 import { MODE_CHOICES } from "@/lib/threadControls";
@@ -31,6 +33,7 @@ import {
   describeDestination,
   describeRun,
   describeSchedule,
+  destinationHint,
   draftOf,
   emptyDraft,
   formatDateTime,
@@ -41,11 +44,13 @@ import {
   localTimezone,
   nextRunText,
   outcomeWord,
+  placeholderHint,
   rotateScheduleWebhook,
   runScheduleNow,
   SCHEDULE_KINDS,
   type ScheduleFormErrors,
   type ScheduleKind,
+  scheduleKindLabel,
   setScheduleEnabled,
   unitLabel,
   updateSchedule,
@@ -53,6 +58,7 @@ import {
   validateDraft,
   WEBHOOK_PLACEHOLDERS,
   WEEKDAYS,
+  weekdayName,
   withKind,
 } from "./index";
 
@@ -78,20 +84,24 @@ function ScheduleFields({
   error?: string | undefined;
   onChange: (schedule: ScheduleDraft["schedule"]) => void;
 }) {
+  const { t } = useTranslation(["settings", "common"]);
   const schedule = draft.schedule;
   return (
     <>
       <div className="q-field">
         <div className="lab">
-          <div className="t">When</div>
+          <div className="t">{t("schedules.editor.when")}</div>
           <FieldError message={error} />
         </div>
         <div className="ctl">
           <ChipSelect<ScheduleKind>
-            label="Schedule"
+            label={t("schedules.editor.schedule")}
             value={schedule.kind}
             width={150}
-            options={SCHEDULE_KINDS.map((entry) => ({ value: entry.kind, label: entry.label }))}
+            options={SCHEDULE_KINDS.map((kind) => ({
+              value: kind,
+              label: scheduleKindLabel(kind),
+            }))}
             onChange={(kind) => onChange(withKind(draft, kind).schedule)}
           />
         </div>
@@ -100,20 +110,20 @@ function ScheduleFields({
       {schedule.kind === "once" ? (
         <div className="q-field">
           <div className="lab">
-            <div className="t">Date and time</div>
+            <div className="t">{t("schedules.editor.dateTime")}</div>
           </div>
           <div className="ctl">
             <input
               className="q-input"
               type="date"
-              aria-label="Date"
+              aria-label={t("schedules.editor.date")}
               value={schedule.date}
               onChange={(event) => onChange({ ...schedule, date: event.target.value })}
             />
             <input
               className="q-input"
               type="time"
-              aria-label="Time"
+              aria-label={t("schedules.editor.time")}
               value={schedule.time}
               onChange={(event) => onChange({ ...schedule, time: event.target.value })}
             />
@@ -124,7 +134,7 @@ function ScheduleFields({
       {schedule.kind === "every" ? (
         <div className="q-field">
           <div className="lab">
-            <div className="t">Interval</div>
+            <div className="t">{t("schedules.editor.interval")}</div>
           </div>
           <div className="ctl">
             <input
@@ -132,7 +142,7 @@ function ScheduleFields({
               type="number"
               min={1}
               max={10080}
-              aria-label="Interval count"
+              aria-label={t("schedules.editor.intervalCount")}
               value={schedule.count}
               onChange={(event) =>
                 onChange({ ...schedule, count: Number(event.target.value) || 1 })
@@ -140,7 +150,7 @@ function ScheduleFields({
               style={{ width: 80 }}
             />
             <ChipSelect<"minutes" | "hours">
-              label="Interval unit"
+              label={t("schedules.editor.intervalUnit")}
               value={schedule.unit}
               width={110}
               options={[
@@ -156,13 +166,13 @@ function ScheduleFields({
       {schedule.kind === "daily" ? (
         <div className="q-field">
           <div className="lab">
-            <div className="t">Time</div>
+            <div className="t">{t("schedules.editor.time")}</div>
           </div>
           <div className="ctl">
             <input
               className="q-input"
               type="time"
-              aria-label="Daily time"
+              aria-label={t("schedules.editor.dailyTime")}
               value={schedule.time}
               onChange={(event) => onChange({ ...schedule, time: event.target.value })}
             />
@@ -174,29 +184,29 @@ function ScheduleFields({
         <>
           <div className="q-field">
             <div className="lab">
-              <div className="t">Days</div>
+              <div className="t">{t("schedules.editor.days")}</div>
             </div>
             <div className="ctl" style={{ flexWrap: "wrap", justifyContent: "flex-end" }}>
               {WEEKDAYS.map((day) => {
-                const on = schedule.days.includes(day.day);
+                const on = schedule.days.includes(day);
                 return (
                   <button
-                    key={day.day}
+                    key={day}
                     type="button"
                     className={`q-btn ${on ? "secondary" : "ghost"}`}
                     aria-pressed={on}
-                    aria-label={day.long}
+                    aria-label={weekdayName(day, "long")}
                     style={{ minWidth: 42, height: 26 }}
                     onClick={() =>
                       onChange({
                         ...schedule,
                         days: on
-                          ? schedule.days.filter((value) => value !== day.day)
-                          : [...schedule.days, day.day].sort((left, right) => left - right),
+                          ? schedule.days.filter((value) => value !== day)
+                          : [...schedule.days, day].sort((left, right) => left - right),
                       })
                     }
                   >
-                    {day.short}
+                    {weekdayName(day, "short")}
                   </button>
                 );
               })}
@@ -204,13 +214,13 @@ function ScheduleFields({
           </div>
           <div className="q-field">
             <div className="lab">
-              <div className="t">Time</div>
+              <div className="t">{t("schedules.editor.time")}</div>
             </div>
             <div className="ctl">
               <input
                 className="q-input"
                 type="time"
-                aria-label="Weekly time"
+                aria-label={t("schedules.editor.weeklyTime")}
                 value={schedule.time}
                 onChange={(event) => onChange({ ...schedule, time: event.target.value })}
               />
@@ -222,13 +232,13 @@ function ScheduleFields({
       {schedule.kind === "cron" ? (
         <div className="q-field">
           <div className="lab">
-            <div className="t">Cron expression</div>
-            <div className="s">minute hour day-of-month month day-of-week</div>
+            <div className="t">{t("schedules.editor.cron")}</div>
+            <div className="s">{t("schedules.editor.cronHint")}</div>
           </div>
           <div className="ctl">
             <input
               className="q-input q-mono"
-              aria-label="Cron expression"
+              aria-label={t("schedules.editor.cron")}
               placeholder="0 9 * * *"
               value={schedule.expression}
               onChange={(event) => onChange({ ...schedule, expression: event.target.value })}
@@ -243,6 +253,7 @@ function ScheduleFields({
 
 /** The webhook URL, copy and rotate controls. */
 function WebhookPanel({ task }: { task: ScheduleTask | null }) {
+  const { t } = useTranslation(["settings", "common"]);
   const live = useSchedules((state) =>
     task ? (state.tasks.find((entry) => entry.task_id === task.task_id) ?? task) : null,
   );
@@ -270,47 +281,47 @@ function WebhookPanel({ task }: { task: ScheduleTask | null }) {
     if (!path) return;
     try {
       await navigator.clipboard.writeText(path);
-      setCopied("Path copied");
+      setCopied(i18n.t("settings:schedules.webhook.copied"));
     } catch {
-      setCopied("Copy failed");
+      setCopied(i18n.t("settings:schedules.webhook.copyFailed"));
     }
   };
   return (
     <div className="q-group">
       <div className="q-group-head">
-        <h2>Webhook</h2>
+        <h2>{t("schedules.webhook.title")}</h2>
       </div>
       <div className="q-field">
         <div className="lab">
-          <div className="t">URL path</div>
+          <div className="t">{t("schedules.webhook.path")}</div>
           <div className="s">
             {!live
-              ? "Save the task to create its URL."
+              ? t("schedules.webhook.saveFirst")
               : hasPath
-                ? "Anyone with this path can start a run. Rotate it if it leaks."
-                : "No URL yet."}
+                ? t("schedules.webhook.secret")
+                : t("schedules.webhook.none")}
           </div>
         </div>
         <div className="ctl">
           <span className="q-mono q-muted" title={path ?? undefined} style={{ maxWidth: 360 }}>
             {path ??
               (hasPath && loading
-                ? "Loading…"
+                ? t("common:loading")
                 : revealError
-                  ? "Unavailable"
+                  ? t("schedules.webhook.unavailable")
                   : hasPath
-                    ? "Hidden"
+                    ? t("schedules.webhook.hidden")
                     : "—")}
           </span>
           <button
             type="button"
             className="q-btn ghost"
             disabled={!path}
-            aria-label="Copy webhook path"
+            aria-label={t("schedules.webhook.copyLabel")}
             onClick={() => void copy()}
           >
             <CopyIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-            Copy
+            {t("common:copy")}
           </button>
           <button
             type="button"
@@ -323,7 +334,7 @@ function WebhookPanel({ task }: { task: ScheduleTask | null }) {
             }}
           >
             <RotateCwIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-            {rotating ? "Rotating…" : "Rotate"}
+            {rotating ? t("schedules.webhook.rotating") : t("schedules.webhook.rotate")}
           </button>
         </div>
       </div>
@@ -339,10 +350,8 @@ function WebhookPanel({ task }: { task: ScheduleTask | null }) {
       ) : null}
       <div className="q-field q-field-block">
         <div className="lab">
-          <div className="t">Prompt placeholders</div>
-          <div className="s">
-            No value is left empty. A value is wrapped as untrusted request data.
-          </div>
+          <div className="t">{t("schedules.webhook.placeholders")}</div>
+          <div className="s">{t("schedules.webhook.placeholdersHint")}</div>
         </div>
         <div className="ctl" style={{ flexDirection: "column", alignItems: "stretch", gap: 4 }}>
           {WEBHOOK_PLACEHOLDERS.map((entry) => (
@@ -350,16 +359,12 @@ function WebhookPanel({ task }: { task: ScheduleTask | null }) {
               <span className="q-mono" style={{ minWidth: 132 }}>
                 {entry.token}
               </span>
-              <span className="q-muted">{entry.hint}</span>
+              <span className="q-muted">{placeholderHint(entry)}</span>
             </div>
           ))}
         </div>
       </div>
-      <p className="q-muted">
-        A public URL needs a tunnel to this daemon (the Connect relay carries the typed socket, not
-        plain HTTP). Point Tailscale Funnel, Cloudflare Tunnel or another reverse proxy at this
-        daemon's loopback port and keep the path.
-      </p>
+      <p className="q-muted">{t("schedules.webhook.tunnel")}</p>
     </div>
   );
 }
@@ -376,6 +381,7 @@ function ScheduleEditor({
   timezone: string;
   onClose: () => void;
 }) {
+  const { t } = useTranslation(["settings", "common"]);
   const [draft, setDraft] = useState<ScheduleDraft>(() =>
     task ? draftOf(task) : emptyDraft(host, timezone),
   );
@@ -412,23 +418,26 @@ function ScheduleEditor({
   };
 
   return (
-    <section className="q-group" aria-label={task ? "Edit scheduled task" : "New scheduled task"}>
+    <section
+      className="q-group"
+      aria-label={task ? t("schedules.editor.editLabel") : t("schedules.editor.newLabel")}
+    >
       <div className="q-group-head">
-        <h2>{task ? "Edit task" : "New task"}</h2>
+        <h2>{task ? t("schedules.editor.editTitle") : t("schedules.newTask")}</h2>
         <button type="button" className="q-btn ghost" onClick={onClose}>
-          Close
+          {t("common:close")}
         </button>
       </div>
 
       <div className="q-field">
         <div className="lab">
-          <div className="t">Name</div>
+          <div className="t">{t("textGeneration.name")}</div>
           <FieldError message={errors.name} />
         </div>
         <div className="ctl">
           <input
             className="q-input"
-            aria-label="Task name"
+            aria-label={t("schedules.editor.nameLabel")}
             aria-invalid={Boolean(errors.name)}
             value={draft.name}
             onChange={(event) => patch({ name: event.target.value })}
@@ -445,14 +454,14 @@ function ScheduleEditor({
 
       <div className="q-field">
         <div className="lab">
-          <div className="t">Time zone</div>
-          <div className="s">Wall-clock schedules use this zone</div>
+          <div className="t">{t("schedules.editor.timezone")}</div>
+          <div className="s">{t("schedules.editor.timezoneHint")}</div>
           <FieldError message={errors.timezone} />
         </div>
         <div className="ctl">
           <input
             className="q-input q-mono"
-            aria-label="Time zone"
+            aria-label={t("schedules.editor.timezone")}
             list="schedule-timezones"
             value={draft.timezone}
             onChange={(event) => patch({ timezone: event.target.value })}
@@ -468,17 +477,18 @@ function ScheduleEditor({
 
       <div className="q-field">
         <div className="lab">
-          <div className="t">Destination</div>
-          <div className="s">
-            {DESTINATIONS.find((entry) => entry.value === draft.destination)?.hint}
-          </div>
+          <div className="t">{t("schedules.editor.destination")}</div>
+          <div className="s">{destinationHint(draft.destination)}</div>
         </div>
         <div className="ctl">
           <ChipSelect<ScheduleDraft["destination"]>
-            label="Destination"
+            label={t("schedules.editor.destination")}
             value={draft.destination}
             width={220}
-            options={DESTINATIONS.map((entry) => ({ value: entry.value, label: entry.label }))}
+            options={DESTINATIONS.map((value) => ({
+              value,
+              label: describeDestination(value),
+            }))}
             onChange={(destination) => patch({ destination })}
           />
         </div>
@@ -486,13 +496,13 @@ function ScheduleEditor({
 
       <div className="q-field">
         <div className="lab">
-          <div className="t">Workspace</div>
+          <div className="t">{t("schedules.editor.workspace")}</div>
           <FieldError message={errors.workspace} />
         </div>
         <div className="ctl">
           <input
             className="q-input q-mono"
-            aria-label="Workspace path"
+            aria-label={t("schedules.editor.workspaceLabel")}
             list="schedule-workspaces"
             value={draft.workspace_path}
             onChange={(event) => patch({ workspace_path: event.target.value })}
@@ -510,11 +520,11 @@ function ScheduleEditor({
 
       <div className="q-field">
         <div className="lab">
-          <div className="t">Harness</div>
+          <div className="t">{t("schedules.editor.harness")}</div>
         </div>
         <div className="ctl">
           <ChipSelect<string>
-            label="Harness"
+            label={t("schedules.editor.harness")}
             value={draft.harness === "acp" ? `acp:${draft.agent_id ?? ""}` : draft.harness}
             width={200}
             options={[
@@ -559,13 +569,13 @@ function ScheduleEditor({
 
       <div className="q-field">
         <div className="lab">
-          <div className="t">Model</div>
+          <div className="t">{t("sourceControl.model")}</div>
           <FieldError message={errors.model} />
         </div>
         <div className="ctl">
           <input
             className="q-input q-mono"
-            aria-label="Model"
+            aria-label={t("sourceControl.model")}
             value={draft.model}
             onChange={(event) => patch({ model: event.target.value })}
             style={{ width: 240 }}
@@ -575,14 +585,17 @@ function ScheduleEditor({
 
       <div className="q-field">
         <div className="lab">
-          <div className="t">Permissions</div>
+          <div className="t">{t("threads.permissions")}</div>
         </div>
         <div className="ctl">
           <ChipSelect<ScheduleDraft["runtime_mode"]>
-            label="Permissions"
+            label={t("threads.permissions")}
             value={draft.runtime_mode}
             width={190}
-            options={MODE_CHOICES.map((choice) => ({ value: choice.value, label: choice.label }))}
+            options={MODE_CHOICES.map((choice) => ({
+              value: choice.value,
+              label: t(`common:permissionModes.${choice.value}`),
+            }))}
             onChange={(runtime_mode) => patch({ runtime_mode })}
           />
         </div>
@@ -590,13 +603,13 @@ function ScheduleEditor({
 
       <div className="q-field q-field-block">
         <div className="lab">
-          <div className="t">Prompt</div>
+          <div className="t">{t("schedules.editor.prompt")}</div>
           <FieldError message={errors.prompt} />
         </div>
         <div className="ctl" style={{ flexDirection: "column", alignItems: "stretch" }}>
           <textarea
             className="q-input"
-            aria-label="Prompt"
+            aria-label={t("schedules.editor.prompt")}
             rows={6}
             value={draft.prompt}
             onChange={(event) => patch({ prompt: event.target.value })}
@@ -608,8 +621,8 @@ function ScheduleEditor({
 
       <div className="q-field">
         <div className="lab">
-          <div className="t">Enabled</div>
-          <div className="s">A paused task keeps its history and URL.</div>
+          <div className="t">{t("schedules.editor.enabled")}</div>
+          <div className="s">{t("schedules.editor.enabledHint")}</div>
         </div>
         <div className="ctl">
           <button
@@ -617,7 +630,7 @@ function ScheduleEditor({
             className="q-switch"
             role="switch"
             aria-checked={draft.enabled}
-            aria-label="Task enabled"
+            aria-label={t("schedules.editor.enabledLabel")}
             onClick={() => patch({ enabled: !draft.enabled })}
           />
         </div>
@@ -625,7 +638,7 @@ function ScheduleEditor({
 
       {Object.keys(errors).length > 0 ? (
         <p className="q-muted" role="alert">
-          Fix the highlighted fields to save.
+          {t("schedules.editor.fixFields")}
         </p>
       ) : null}
       {saveError ? (
@@ -635,7 +648,7 @@ function ScheduleEditor({
       ) : null}
       <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, paddingTop: 4 }}>
         <button type="button" className="q-btn ghost" onClick={onClose}>
-          Cancel
+          {t("common:cancel")}
         </button>
         <button
           type="button"
@@ -643,7 +656,7 @@ function ScheduleEditor({
           disabled={saving}
           onClick={() => void save()}
         >
-          {saving ? "Saving…" : "Save task"}
+          {saving ? t("common:saving") : t("schedules.editor.save")}
         </button>
       </div>
     </section>
@@ -660,6 +673,7 @@ function timezoneOptions(preferred: string): string[] {
 
 /** One run in the history list. */
 function RunRow({ run }: { run: ScheduleRun }) {
+  const { t } = useTranslation(["settings", "common"]);
   const at = new Date(run.started_at);
   return (
     <div className="q-field">
@@ -667,7 +681,9 @@ function RunRow({ run }: { run: ScheduleRun }) {
         <div className="t">{outcomeWord(run)}</div>
         <div className="s">
           {Number.isNaN(at.getTime()) ? "" : formatDateTime(at)}
-          {run.scheduled_for ? ` · scheduled ${formatDateTime(new Date(run.scheduled_for))}` : ""}
+          {run.scheduled_for
+            ? ` · ${t("schedules.run.scheduled", { when: formatDateTime(new Date(run.scheduled_for)) })}`
+            : ""}
           {run.detail ? ` · ${run.detail}` : ""}
         </div>
       </div>
@@ -678,7 +694,7 @@ function RunRow({ run }: { run: ScheduleRun }) {
             className="q-btn ghost"
             onClick={() => run.thread_id && openThread(run.thread_id)}
           >
-            Open thread
+            {t("schedules.run.openThread")}
           </button>
         ) : null}
       </div>
@@ -698,19 +714,20 @@ function TaskRow({
   onHistory: () => void;
   onDelete: () => void;
 }) {
+  const { t } = useTranslation(["settings", "common"]);
   const busy = useSchedules((state) => state.saving);
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const toggle = async () => {
     setError(null);
     const ok = await setScheduleEnabled(task.task_id, !task.enabled);
-    if (!ok) setError(getSchedulesState().saveError ?? "The task did not change.");
+    if (!ok) setError(getSchedulesState().saveError ?? t("schedules.task.toggleFailed"));
   };
   const run = async () => {
     setRunning(true);
     setError(null);
     const ok = await runScheduleNow(task.task_id);
-    if (!ok) setError(getSchedulesState().saveError ?? "The run did not start.");
+    if (!ok) setError(getSchedulesState().saveError ?? t("schedules.task.runFailed"));
     setRunning(false);
   };
   return (
@@ -723,7 +740,7 @@ function TaskRow({
         </div>
         <div className="s">
           {nextRunText(task)}
-          {task.last_run ? ` · ${describeRun(task.last_run)}` : " · Never run"}
+          {` · ${describeRun(task.last_run)}`}
         </div>
         {error ? (
           <div className="s" role="alert" style={{ color: "var(--danger)" }}>
@@ -737,7 +754,11 @@ function TaskRow({
           className="q-switch"
           role="switch"
           aria-checked={task.enabled}
-          aria-label={`${task.enabled ? "Pause" : "Resume"} ${task.name}`}
+          aria-label={
+            task.enabled
+              ? t("schedules.task.pause", { name: task.name })
+              : t("schedules.task.resume", { name: task.name })
+          }
           disabled={busy}
           onClick={() => void toggle()}
         />
@@ -746,34 +767,34 @@ function TaskRow({
             type="button"
             className="q-btn secondary"
             disabled={running || busy}
-            aria-label={`Run ${task.name} now`}
+            aria-label={t("schedules.task.runLabel", { name: task.name })}
             onClick={() => void run()}
           >
-            {running ? "Starting…" : "Run now"}
+            {running ? t("forges.device.starting") : t("schedules.task.run")}
           </button>
         ) : null}
         <button
           type="button"
           className="q-btn ghost"
-          aria-label={`History for ${task.name}`}
+          aria-label={t("schedules.task.historyLabel", { name: task.name })}
           onClick={onHistory}
         >
           <HistoryIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-          History
+          {t("schedules.task.history")}
         </button>
         <button
           type="button"
           className="q-btn ghost"
-          aria-label={`Edit ${task.name}`}
+          aria-label={t("harnesses.acp.editLabel", { name: task.name })}
           onClick={onEdit}
         >
           <PencilIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-          Edit
+          {t("common:edit")}
         </button>
         <button
           type="button"
           className="q-btn ghost danger"
-          aria-label={`Delete ${task.name}`}
+          aria-label={t("schedules.task.deleteLabel", { name: task.name })}
           onClick={onDelete}
         >
           <Trash2Icon className="q-icon s14" strokeWidth={1.5} aria-hidden />
@@ -785,6 +806,7 @@ function TaskRow({
 
 /** Settings → Scheduled tasks. */
 export function SchedulesSettings() {
+  const { t } = useTranslation(["settings", "common"]);
   const online = useApp((state) => state.connection.status) === "online";
   const host = useApp((state) => state.localHostId);
   const daemonTimezone = useApp((state) => state.daemonTimezone);
@@ -819,12 +841,8 @@ export function SchedulesSettings() {
     <div className="q-form">
       <div className="q-form-head">
         <div>
-          <h1>Scheduled tasks</h1>
-          <p className="lead">
-            Run a prompt on a schedule or when a webhook is called. The daemon owns the timer, so
-            closing this app does not stop a task. A run that is still working makes the next slot
-            skip, and a missed slot runs once when the daemon comes back.
-          </p>
+          <h1>{t("schedules.title")}</h1>
+          <p className="lead">{t("schedules.lead")}</p>
         </div>
         <div style={{ display: "flex", gap: 8 }}>
           <button
@@ -833,7 +851,7 @@ export function SchedulesSettings() {
             disabled={loading || !online}
             onClick={() => void loadSchedules()}
           >
-            Refresh
+            {t("common:refresh")}
           </button>
           <button
             type="button"
@@ -842,7 +860,7 @@ export function SchedulesSettings() {
             onClick={() => setEditing("new")}
           >
             <PlusIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-            New task
+            {t("schedules.newTask")}
           </button>
         </div>
       </div>
@@ -870,17 +888,14 @@ export function SchedulesSettings() {
 
       <div className="q-group">
         <div className="q-group-head">
-          <h2>Tasks</h2>
+          <h2>{t("schedules.tasks")}</h2>
         </div>
         {!loaded && online ? (
           <div className="q-skel" style={{ height: 120 }} />
         ) : !online ? (
-          <p className="q-muted">Offline</p>
+          <p className="q-muted">{t("worktrees.offline")}</p>
         ) : tasks.length === 0 ? (
-          <p className="q-muted">
-            No scheduled tasks yet. Start one for a recurring review, a nightly check, or a webhook
-            from another service.
-          </p>
+          <p className="q-muted">{t("schedules.empty")}</p>
         ) : (
           tasks.map((task) => (
             <TaskRow
@@ -897,9 +912,9 @@ export function SchedulesSettings() {
       {historyTask ? (
         <div className="q-group">
           <div className="q-group-head">
-            <h2>History · {historyTask.name}</h2>
+            <h2>{t("schedules.historyTitle", { name: historyTask.name })}</h2>
             <button type="button" className="q-btn ghost" onClick={() => setHistoryFor(null)}>
-              Close
+              {t("common:close")}
             </button>
           </div>
           {runsError ? (
@@ -910,7 +925,7 @@ export function SchedulesSettings() {
           {runsLoading === historyTask.task_id ? (
             <div className="q-skel" style={{ height: 80 }} />
           ) : (runs[historyTask.task_id]?.length ?? 0) === 0 ? (
-            <p className="q-muted">No runs yet.</p>
+            <p className="q-muted">{t("schedules.noRuns")}</p>
           ) : (
             runs[historyTask.task_id]?.map((run) => <RunRow key={run.run_id} run={run} />)
           )}
@@ -919,13 +934,9 @@ export function SchedulesSettings() {
 
       <ConfirmDialog
         open={removing !== null}
-        title="Delete this scheduled task?"
-        description={
-          removing
-            ? `"${removing.name}" and its run history are deleted. Threads it already started stay.`
-            : ""
-        }
-        confirmLabel="Delete"
+        title={t("schedules.delete.title")}
+        description={removing ? t("schedules.delete.description", { name: removing.name }) : ""}
+        confirmLabel={t("common:delete")}
         onOpenChange={(open) => {
           if (!open) setRemoving(null);
         }}

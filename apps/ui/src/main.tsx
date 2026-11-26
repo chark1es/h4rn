@@ -6,6 +6,10 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { App } from "./App";
 import { TooltipProvider } from "./components/ui/tooltip";
+// UI translations: reads the saved language (or the system's) and loads its
+// catalogue before the first render, so a non-English reader never sees an
+// English flash. English is bundled; never rejects.
+import { prepareI18n } from "./lib/i18n";
 // Mobile-only pairing/deep-link/safe-area adapter; inert everywhere else. It
 // also primes the platform secret store before the first synchronous config
 // read, so no credential has to live in localStorage.
@@ -17,7 +21,7 @@ if (!container) {
   throw new Error("Root element #root is missing from index.html");
 }
 
-void preparePlatform().finally(() => {
+void Promise.allSettled([preparePlatform(), prepareI18n()]).finally(() => {
   createRoot(container).render(
     <StrictMode>
       <TooltipProvider>

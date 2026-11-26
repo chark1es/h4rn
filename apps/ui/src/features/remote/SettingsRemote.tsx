@@ -13,6 +13,7 @@ import {
   WifiOffIcon,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { Trans, useTranslation } from "react-i18next";
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
 import { ChipSelect } from "@/components/common/ChipSelect";
 import type {
@@ -24,7 +25,7 @@ import type {
 } from "@/gen";
 import { useNow } from "@/hooks/use-now";
 import { harnessLabel, machineSeed } from "@/lib/entities";
-import { relativeAge } from "@/lib/format";
+import { formatList, formatNumber, formatRelativeTime, i18n } from "@/lib/i18n";
 import { getClient, navigate, pushToast, useApp } from "@/lib/store/appStore";
 import { cn } from "@/lib/utils";
 
@@ -36,6 +37,8 @@ import {
   formatShortCode,
   orderedScopes,
   SCOPE_OPTIONS,
+  scopeLabel,
+  scopeSub,
   scopesLabel,
   toggleScope,
 } from "./pairingScopes";
@@ -45,6 +48,7 @@ import {
   createPairing,
   dismissPairing,
   forgetMachine,
+  type RemoteBusy,
   refresh,
   renameDevice,
   revokeDevice,
@@ -66,20 +70,23 @@ function Health({ tone, children }: { tone: "on" | "off" | "danger"; children: R
 }
 
 function pathLabel(transport: string): string {
-  if (transport === "mock") return "Direct";
   if (transport === "tailscale") return "Tailscale";
-  if (transport === "relay") return "Relay";
-  return "Direct";
+  if (transport === "relay") return i18n.t("settings:hosts.path.relay");
+  return i18n.t("settings:hosts.path.direct");
 }
 
 function latencyText(ms: number | null | undefined): string {
-  return typeof ms === "number" && Number.isFinite(ms) ? `${Math.round(ms)} ms` : "—";
+  return typeof ms === "number" && Number.isFinite(ms)
+    ? formatNumber(Math.round(ms), { style: "unit", unit: "millisecond", unitDisplay: "short" })
+    : "—";
 }
 
 function relativeSeen(iso: string | null | undefined, now: number): string {
-  if (!iso) return "Never";
-  const value = relativeAge(iso, now);
-  return value === "now" ? "Just now" : `${value} ago`;
+  if (!iso) return i18n.t("settings:about.never");
+  const then = Date.parse(iso);
+  if (!Number.isFinite(then)) return "—";
+  if (now - then < 60_000) return i18n.t("settings:about.justNow");
+  return formatRelativeTime(then, now);
 }
 
 function signedIn(user: unknown): boolean {
@@ -91,9 +98,10 @@ function signedIn(user: unknown): boolean {
  * is unreachable, so the machine count says nothing about the world.
  */
 function RelayUnreachable({ connectUrl }: { connectUrl: string }) {
+  const { t } = useTranslation(["settings", "common"]);
   return (
     <p className="q-muted" style={{ fontSize: 12, margin: "0 0 10px" }} role="status">
-      Can’t reach {connectUrl}.
+      {t("hosts.cantReach", { target: connectUrl })}
     </p>
   );
 }
@@ -112,13 +120,14 @@ function MachineRows({
   machines: MachineSummary[];
   activeId: string | null;
   connection: { status: string; latencyMs: number | null; transport: string };
-  busy: string | null;
+  busy: RemoteBusy | null;
   now: number;
 }) {
+  const { t } = useTranslation(["settings", "common"]);
   return (
     <div className="q-group">
       <h2>
-        Machines <span className="grow" />
+        {t("hosts.machines")} <span className="grow" />
         <button
           type="button"
           className="q-btn ghost"
@@ -126,17 +135,17 @@ function MachineRows({
           onClick={() => void refresh()}
         >
           <RefreshCwIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-          Refresh
+          {t("common:refresh")}
         </button>
       </h2>
       <table className="q-tbl">
         <thead>
           <tr>
-            <th>Machine</th>
-            <th>Hosts</th>
-            <th>Connection</th>
-            <th>Presence</th>
-            <th className="r">Latency</th>
+            <th>{t("hosts.table.machine")}</th>
+            <th>{t("hosts.table.hosts")}</th>
+            <th>{t("hosts.table.connection")}</th>
+            <th>{t("hosts.table.presence")}</th>
+            <th className="r">{t("hosts.table.latency")}</th>
             <th />
           </tr>
         </thead>
@@ -159,17 +168,27 @@ function MachineRows({
                 </td>
                 <td className="q-muted">
                   {machine.hosts.length === 0
-                    ? "No hosts"
-                    : machine.hosts.map((host) => host.name).join(", ")}
+                    ? t("hosts.noHosts")
+                    : formatList(
+                        machine.hosts.map((host) => host.name),
+                        "conjunction",
+                        "narrow",
+                      )}
                 </td>
                 <td className="q-muted">
-                  {active ? pathLabel(connection.transport) : machine.online ? "Reachable" : "—"}
+                  {active
+                    ? pathLabel(connection.transport)
+                    : machine.online
+                      ? t("hosts.reachable")
+                      : "—"}
                 </td>
                 <td>
                   {online ? (
-                    <Health tone="on">Online</Health>
+                    <Health tone="on">{t("hosts.online")}</Health>
                   ) : (
-                    <Health tone="danger">Offline · {relativeSeen(machine.last_seen, now)}</Health>
+                    <Health tone="danger">
+                      {t("hosts.offline")} · {relativeSeen(machine.last_seen, now)}
+                    </Health>
                   )}
                 </td>
                 <td className="r q-num q-muted">
@@ -183,7 +202,7 @@ function MachineRows({
                       style={{ height: 24 }}
                       onClick={forgetMachine}
                     >
-                      Disconnect
+                      {t("hosts.disconnect")}
                     </button>
                   ) : (
                     <button
@@ -193,10 +212,10 @@ function MachineRows({
                       disabled={!machine.online || busy !== null}
                       onClick={() => void activateMachine(machine.id)}
                     >
-                      {busy === `Connecting to ${machine.name}` ? (
+                      {busy?.kind === "connecting" && busy.machineId === machine.id ? (
                         <LoaderIcon className="q-icon s14 q-spin" strokeWidth={1.5} aria-hidden />
                       ) : null}
-                      Connect
+                      {t("hosts.connect")}
                     </button>
                   )}
                 </td>
@@ -214,6 +233,7 @@ function MachineRows({
  * opens it with the pairing code showing.
  */
 export function LiveHostsForm({ pairing: pairFirst = false }: { pairing?: boolean }) {
+  const { t } = useTranslation(["settings", "common"]);
   const hosts = useApp((state) => state.hosts);
   const connection = useApp((state) => state.connection);
   const phase = useRemote((state) => state.phase);
@@ -245,11 +265,8 @@ export function LiveHostsForm({ pairing: pairFirst = false }: { pairing?: boolea
     <div className="q-form" style={{ maxWidth: 880 }}>
       <div className="q-form-head">
         <div style={{ flex: 1 }}>
-          <h1>Hosts & devices</h1>
-          <p className="lead">
-            Hosts are machines that run agents; WSL distros are separate hosts with their own
-            harnesses and credentials. Devices are the phones and computers you supervise them from.
-          </p>
+          <h1>{t("hosts.title")}</h1>
+          <p className="lead">{t("hosts.lead")}</p>
         </div>
         <button
           type="button"
@@ -257,13 +274,13 @@ export function LiveHostsForm({ pairing: pairFirst = false }: { pairing?: boolea
           onClick={() =>
             pushToast({
               variant: "info",
-              title: "Add a machine with h4rnd login.",
-              description: "Run `h4rnd login --connect <url>` on it, then refresh.",
+              title: t("hosts.addHostToast"),
+              description: t("hosts.addHostToastHint"),
             })
           }
         >
           <PlusIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-          Add host
+          {t("hosts.addHost")}
         </button>
         <button
           type="button"
@@ -274,8 +291,8 @@ export function LiveHostsForm({ pairing: pairFirst = false }: { pairing?: boolea
             if (!isSignedIn) {
               pushToast({
                 variant: "info",
-                title: "Sign in to pair a device.",
-                description: "Pairing goes through h4rn-connect. Sign in under Remote access.",
+                title: t("hosts.signInToPair"),
+                description: t("hosts.signInToPairHint"),
               });
               return;
             }
@@ -286,7 +303,7 @@ export function LiveHostsForm({ pairing: pairFirst = false }: { pairing?: boolea
           }}
         >
           <QrCodeIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-          Pair through relay
+          {t("hosts.pairThroughRelay")}
         </button>
       </div>
 
@@ -294,24 +311,24 @@ export function LiveHostsForm({ pairing: pairFirst = false }: { pairing?: boolea
 
       {active ? (
         <div className="q-group">
-          <h2>Connected machine</h2>
+          <h2>{t("hosts.connectedMachine")}</h2>
           <div className="q-field">
             <div className="lab">
               <div className="t">
                 {connection.status === "online"
-                  ? `Connected to ${active.machineName} through h4rn-connect`
+                  ? t("hosts.connectedTo", { machine: active.machineName })
                   : connection.status === "connecting"
-                    ? `Connecting to ${active.machineName}…`
-                    : `Can’t reach ${active.machineName}`}
+                    ? t("hosts.connectingTo", { machine: active.machineName })
+                    : t("hosts.cantReach", { target: active.machineName })}
               </div>
               <div className="s">
                 {connection.status === "online"
                   ? mobile
-                    ? "This app can disconnect and keep working offline."
-                    : "The local daemon is always available as well."
+                    ? t("hosts.onlineMobile")
+                    : t("hosts.onlineDesktop")
                   : mobile
-                    ? "The remote path is down. Pick another machine, or disconnect."
-                    : "The remote path is down. This machine can still run agents."}
+                    ? t("hosts.downMobile")
+                    : t("hosts.downDesktop")}
               </div>
             </div>
             <div className="ctl">
@@ -324,11 +341,8 @@ export function LiveHostsForm({ pairing: pairFirst = false }: { pairing?: boolea
 
       {!isSignedIn ? (
         <div className="q-group">
-          <h2>Remote access</h2>
-          <p className="desc">
-            Sign in to h4rn-connect to reach machines outside this network, or keep working with the
-            local daemon.
-          </p>
+          <h2>{t("hosts.remoteAccess")}</h2>
+          <p className="desc">{t("hosts.remoteAccessHint")}</p>
           <ConnectSignIn compact />
         </div>
       ) : null}
@@ -350,13 +364,17 @@ export function LiveHostsForm({ pairing: pairFirst = false }: { pairing?: boolea
           </>
         ) : (
           <div className="q-group">
-            <h2>Machines</h2>
+            <h2>{t("hosts.machines")}</h2>
             {error ? (
               <RelayUnreachable connectUrl={connectUrl} />
             ) : (
               <p className="desc">
-                No machine has logged in to this relay yet. Run{" "}
-                <span className="q-mono">h4rnd login --connect {connectUrl}</span> on a host.
+                <Trans
+                  t={t}
+                  i18nKey="hosts.noMachines"
+                  values={{ command: `h4rnd login --connect ${connectUrl}` }}
+                  components={{ code: <span className="q-mono" /> }}
+                />
               </p>
             )}
           </div>
@@ -364,26 +382,24 @@ export function LiveHostsForm({ pairing: pairFirst = false }: { pairing?: boolea
       ) : null}
 
       <div className="q-group" style={{ marginBottom: 0 }}>
-        <h2>Hosts</h2>
+        <h2>{t("hosts.table.hosts")}</h2>
       </div>
       <table className="q-tbl" style={{ marginBottom: 36 }}>
         <thead>
           <tr>
-            <th>Host</th>
-            <th>System</th>
-            <th>Connection</th>
-            <th>Presence</th>
-            <th>Harnesses</th>
-            <th className="r">Latency</th>
+            <th>{t("hosts.table.host")}</th>
+            <th>{t("hosts.table.system")}</th>
+            <th>{t("hosts.table.connection")}</th>
+            <th>{t("hosts.table.presence")}</th>
+            <th>{t("hosts.table.harnesses")}</th>
+            <th className="r">{t("hosts.table.latency")}</th>
           </tr>
         </thead>
         <tbody>
           {rows.length === 0 ? (
             <tr>
               <td colSpan={6} className="q-muted" style={{ padding: "18px 0" }}>
-                {phase === "loading"
-                  ? "Loading hosts…"
-                  : "No hosts answer yet. Start the daemon, or connect a remote machine above."}
+                {phase === "loading" ? t("hosts.loadingHosts") : t("hosts.noHostsYet")}
               </td>
             </tr>
           ) : null}
@@ -409,17 +425,19 @@ export function LiveHostsForm({ pairing: pairFirst = false }: { pairing?: boolea
                 </td>
                 <td>
                   {online ? (
-                    <Health tone="on">Online</Health>
+                    <Health tone="on">{t("hosts.online")}</Health>
                   ) : (
                     <Health tone="off">
-                      {connection.status === "connecting" ? "Connecting…" : "Offline"}
+                      {connection.status === "connecting"
+                        ? t("hosts.connecting")
+                        : t("hosts.offline")}
                     </Health>
                   )}
                 </td>
                 <td className="q-muted">
                   {host.harnesses.length === 0
-                    ? "None installed"
-                    : host.harnesses.map(harnessLabel).join(", ")}
+                    ? t("hosts.noneInstalled")
+                    : formatList(host.harnesses.map(harnessLabel), "conjunction", "narrow")}
                 </td>
                 <td className="r q-num q-muted">
                   {online
@@ -435,26 +453,27 @@ export function LiveHostsForm({ pairing: pairFirst = false }: { pairing?: boolea
       {isSignedIn ? <PairedDevicesGroup /> : null}
 
       <div className="q-group">
-        <h2>Connection</h2>
+        <h2>{t("hosts.table.connection")}</h2>
         <div className="q-field">
           <div className="lab">
-            <div className="t">Transport</div>
-            <div className="s">Chosen by the Rust transport; TypeScript only renders it.</div>
+            <div className="t">{t("hosts.transport")}</div>
+            <div className="s">{t("hosts.transportHint")}</div>
           </div>
           <div className="ctl">
             {connection.status === "online" ? (
               <Health tone="on">
-                {pathLabel(connection.transport)} · {latencyText(connection.latencyMs)} · encrypted
+                {pathLabel(connection.transport)} · {latencyText(connection.latencyMs)} ·{" "}
+                {t("hosts.encrypted")}
               </Health>
             ) : connection.status === "connecting" ? (
-              <span className="q-muted">Connecting…</span>
+              <span className="q-muted">{t("hosts.connecting")}</span>
             ) : (
-              <Health tone="danger">Offline</Health>
+              <Health tone="danger">{t("hosts.offline")}</Health>
             )}
             <span style={{ flex: 1 }} />
             <button type="button" className="q-btn secondary" onClick={() => void refresh()}>
               <RefreshCwIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-              Refresh
+              {t("common:refresh")}
             </button>
           </div>
         </div>
@@ -477,9 +496,9 @@ function deviceIcon(device: ConnectDevice) {
 }
 
 function deviceKindLabel(device: ConnectDevice): string {
-  if (device.kind === "daemon") return "Daemon";
-  if (device.kind === "mobile") return "Phone";
-  return "Computer";
+  if (device.kind === "daemon") return i18n.t("settings:devices.kind.daemon");
+  if (device.kind === "mobile") return i18n.t("settings:devices.kind.phone");
+  return i18n.t("settings:devices.kind.computer");
 }
 
 function DeviceRow({
@@ -495,6 +514,7 @@ function DeviceRow({
   onRename: (name: string) => Promise<boolean>;
   onRevoke: () => Promise<boolean>;
 }) {
+  const { t } = useTranslation(["settings", "common"]);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(device.name);
   const [confirming, setConfirming] = useState(false);
@@ -522,7 +542,7 @@ function DeviceRow({
               <input
                 className="q-input"
                 value={draft}
-                aria-label={`Rename ${device.name}`}
+                aria-label={t("devices.rename", { name: device.name })}
                 style={{ height: 26, maxWidth: 180 }}
                 ref={nameInput}
                 onChange={(event) => setDraft(event.target.value)}
@@ -536,7 +556,7 @@ function DeviceRow({
               <button
                 type="button"
                 className="q-ibtn"
-                aria-label="Save name"
+                aria-label={t("devices.saveName")}
                 onClick={() => void onRename(draft).then((ok) => ok && setEditing(false))}
               >
                 <CheckIcon className="q-icon s14" strokeWidth={2} aria-hidden />
@@ -547,13 +567,13 @@ function DeviceRow({
                 style={{ height: 24 }}
                 onClick={() => setEditing(false)}
               >
-                Cancel
+                {t("common:cancel")}
               </button>
             </span>
           ) : (
             <span>
               <span style={{ fontWeight: 500 }}>{device.name}</span>
-              {current ? <span className="q-faint"> · this device</span> : null}
+              {current ? <span className="q-faint"> · {t("devices.thisDevice")}</span> : null}
             </span>
           )}
         </span>
@@ -564,7 +584,7 @@ function DeviceRow({
         {device.last_seen ? (
           <Health tone="on">{relativeSeen(device.last_seen, now)}</Health>
         ) : (
-          <span className="q-muted">Never connected</span>
+          <span className="q-muted">{t("devices.neverConnected")}</span>
         )}
       </td>
       <td className="r" style={{ paddingRight: 0 }}>
@@ -572,10 +592,10 @@ function DeviceRow({
           <span style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
             <span className="q-faint" style={{ fontSize: 12 }}>
               {current
-                ? "Sign out of this device?"
+                ? t("devices.confirmSignOut")
                 : device.kind === "daemon"
-                  ? "Disconnect this host?"
-                  : "Revoke?"}
+                  ? t("devices.confirmDisconnect")
+                  : t("devices.confirmRevoke")}
             </span>
             <button
               type="button"
@@ -583,7 +603,7 @@ function DeviceRow({
               style={{ height: 24 }}
               onClick={() => setConfirming(false)}
             >
-              Cancel
+              {t("common:cancel")}
             </button>
             <button
               type="button"
@@ -598,7 +618,7 @@ function DeviceRow({
                 });
               }}
             >
-              {current ? "Sign out" : "Revoke"}
+              {current ? t("devices.signOut") : t("common:revoke")}
             </button>
           </span>
         ) : (
@@ -606,7 +626,7 @@ function DeviceRow({
             <button
               type="button"
               className="q-ibtn"
-              aria-label={`Rename ${device.name}`}
+              aria-label={t("devices.rename", { name: device.name })}
               onClick={() => setEditing(true)}
             >
               <PencilIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
@@ -617,7 +637,7 @@ function DeviceRow({
               style={{ height: 24 }}
               onClick={() => setConfirming(true)}
             >
-              {current ? "Sign out" : "Revoke"}
+              {current ? t("devices.signOut") : t("common:revoke")}
             </button>
           </span>
         )}
@@ -663,15 +683,17 @@ function usePairingConfirmations(enabled: boolean): {
       await getClient().request({ type: "confirm_pairing", device_id: deviceId, confirm });
       pushToast({
         variant: "success",
-        title: confirm ? "Device approved." : "Device rejected.",
+        title: confirm
+          ? i18n.t("settings:devices.pairing.approved")
+          : i18n.t("settings:devices.pairing.rejected"),
         description: confirm
-          ? "It can now reach this host with the scopes it was granted."
-          : "Its key was revoked and never reached this host.",
+          ? i18n.t("settings:devices.pairing.approvedHint")
+          : i18n.t("settings:devices.pairing.rejectedHint"),
       });
     } catch (error) {
       pushToast({
         variant: "error",
-        title: "Could not record the pairing decision.",
+        title: i18n.t("settings:devices.pairing.decisionFailed"),
         description: error instanceof Error ? error.message : String(error),
       });
       const response = await getClient()
@@ -686,6 +708,7 @@ function usePairingConfirmations(enabled: boolean): {
 
 /** Incoming pairing requests waiting for the owner to compare codes. */
 function PairingConfirmations() {
+  const { t } = useTranslation(["settings", "common"]);
   const isSignedIn = useRemote((state) => state.user !== null);
   const { entries: confirmations, decide: decidePairing } = usePairingConfirmations(isSignedIn);
   if (confirmations.length === 0) return null;
@@ -694,13 +717,13 @@ function PairingConfirmations() {
       {confirmations.map((entry) => (
         <fieldset key={entry.device_id} className="q-sas-host">
           <legend className="q-muted" style={{ fontSize: 12 }}>
-            {entry.device_name} wants to connect. Its screen shows
+            {t("devices.pairing.wantsToConnect", { name: entry.device_name })}
           </legend>
           <div className="q-sas-code num" data-testid="host-sas">
             {entry.sas}
           </div>
           <div className="q-faint" style={{ fontSize: 12 }}>
-            Approve only if both codes match. Until then the device cannot reach this host.
+            {t("devices.pairing.compare")}
           </div>
           <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
             <button
@@ -709,7 +732,7 @@ function PairingConfirmations() {
               data-testid="confirm-pairing"
               onClick={() => void decidePairing(entry.device_id, true)}
             >
-              Confirm device
+              {t("devices.pairing.confirm")}
             </button>
             <button
               type="button"
@@ -717,7 +740,7 @@ function PairingConfirmations() {
               data-testid="reject-pairing"
               onClick={() => void decidePairing(entry.device_id, false)}
             >
-              Reject
+              {t("devices.pairing.reject")}
             </button>
           </div>
         </fieldset>
@@ -728,6 +751,7 @@ function PairingConfirmations() {
 
 /** QR code and short code for adding a phone or computer. */
 function PairDeviceGroup({ onClose }: { onClose: () => void }) {
+  const { t } = useTranslation(["settings", "common"]);
   const user = useRemote((state) => state.user);
   const machines = useRemote((state) => state.machines);
   const activeId = useRemote((state) => state.activeMachineId);
@@ -780,10 +804,15 @@ function PairDeviceGroup({ onClose }: { onClose: () => void }) {
   return (
     <div className="q-group" id="pair-device">
       <h2>
-        Pair through relay <span className="grow" />
+        {t("hosts.pairThroughRelay")} <span className="grow" />
         {pairing ? (
           <span className="q-faint q-num" style={{ fontSize: 12, fontWeight: 400 }}>
-            Expires in <span data-countdown="pair">{remainingText}</span>
+            <Trans
+              t={t}
+              i18nKey="devices.pairing.expiresIn"
+              values={{ time: remainingText }}
+              components={{ countdown: <span data-countdown="pair" /> }}
+            />
           </span>
         ) : null}
         <button
@@ -792,20 +821,20 @@ function PairDeviceGroup({ onClose }: { onClose: () => void }) {
           style={{ height: 24, marginLeft: 8 }}
           onClick={onClose}
         >
-          Done
+          {t("common:done")}
         </button>
       </h2>
       <div style={{ paddingTop: 12 }}>
         <div className="q-field" style={{ borderTop: "1px solid var(--line)" }}>
           <div className="lab">
-            <div className="t">Machine</div>
-            <div className="s">The paired device can reach this machine's hosts.</div>
+            <div className="t">{t("hosts.table.machine")}</div>
+            <div className="s">{t("devices.pairing.machineHint")}</div>
           </div>
           <div className="ctl">
             <ChipSelect
-              label="Machine to pair with"
+              label={t("devices.pairing.machineLabel")}
               value={machineId}
-              placeholder="No machines"
+              placeholder={t("devices.pairing.noMachines")}
               width={200}
               options={available.map((machine) => ({
                 value: machine.id,
@@ -830,19 +859,23 @@ function PairDeviceGroup({ onClose }: { onClose: () => void }) {
             <div className="q-qr">
               <QrCode
                 value={pairing.qr}
-                label={`Pairing QR code for ${pairingMachine?.name ?? "this machine"}`}
+                label={t("devices.pairing.qrLabel", {
+                  machine: pairingMachine?.name ?? t("devices.pairing.thisMachine"),
+                })}
                 size={148}
               />
             </div>
             <div style={{ flex: 1, minWidth: 0 }}>
               <div className="q-muted" style={{ fontSize: 12 }}>
-                Scan with the h4rn app, or enter this code
+                {t("devices.pairing.scan")}
               </div>
               <div className="q-code-big" style={{ margin: "4px 0 2px" }}>
                 {formatShortCode(pairing.shortCode)}
               </div>
               <div className="q-faint" style={{ fontSize: 12, marginBottom: 14 }}>
-                Works once, for one device. Pairs with {pairingMachine?.name ?? "this machine"}.
+                {t("devices.pairing.worksOnce", {
+                  machine: pairingMachine?.name ?? t("devices.pairing.thisMachine"),
+                })}
               </div>
               <div className="q-pair-scopes">
                 {SCOPE_OPTIONS.map((scope) => (
@@ -863,8 +896,10 @@ function PairDeviceGroup({ onClose }: { onClose: () => void }) {
                       ) : null}
                     </span>
                     <span>
-                      <span style={{ fontWeight: 500 }}>{scope.label}</span>
-                      {scope.sub ? <span className="q-faint sub">{scope.sub}</span> : null}
+                      <span style={{ fontWeight: 500 }}>{scopeLabel(scope.id)}</span>
+                      {scopeSub(scope.id) ? (
+                        <span className="q-faint sub">{scopeSub(scope.id)}</span>
+                      ) : null}
                     </span>
                   </label>
                 ))}
@@ -885,7 +920,7 @@ function PairDeviceGroup({ onClose }: { onClose: () => void }) {
                   ) : (
                     <CopyIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
                   )}
-                  {copied ? "Copied" : "Copy link"}
+                  {copied ? t("common:copied") : t("devices.pairing.copyLink")}
                 </button>
                 <button
                   type="button"
@@ -893,7 +928,7 @@ function PairDeviceGroup({ onClose }: { onClose: () => void }) {
                   onClick={() => void createPairing(machineId, scopes)}
                 >
                   <RefreshCwIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-                  New code
+                  {t("devices.pairing.newCode")}
                 </button>
               </div>
             </div>
@@ -902,7 +937,9 @@ function PairDeviceGroup({ onClose }: { onClose: () => void }) {
           <div className="q-field">
             <div className="lab">
               <div className="t">
-                {phase === "signing_in" ? "Preparing a code…" : "No code yet"}
+                {phase === "signing_in"
+                  ? t("devices.pairing.preparing")
+                  : t("devices.pairing.noCode")}
               </div>
             </div>
             <div className="ctl">
@@ -912,7 +949,7 @@ function PairDeviceGroup({ onClose }: { onClose: () => void }) {
                 disabled={!machineId}
                 onClick={() => void createPairing(machineId, scopes)}
               >
-                Generate a pairing code
+                {t("devices.pairing.generate")}
               </button>
             </div>
           </div>
@@ -924,6 +961,7 @@ function PairDeviceGroup({ onClose }: { onClose: () => void }) {
 
 /** Phones and computers that supervise the hosts. */
 function PairedDevicesGroup() {
+  const { t } = useTranslation(["settings", "common"]);
   const device = useRemote((state) => state.device);
   const devices = useRemote((state) => state.devices);
   const now = useNow();
@@ -931,22 +969,19 @@ function PairedDevicesGroup() {
   return (
     <div className="q-group">
       <h2>
-        Devices{" "}
+        {t("devices.title")}{" "}
         <span className="q-faint q-num" style={{ fontSize: 12, fontWeight: 400 }}>
           {liveDevices.length}
         </span>
       </h2>
-      <p className="desc">
-        Phones and computers that can reach your hosts. Each gets its own scopes, and you can revoke
-        one without touching the others.
-      </p>
+      <p className="desc">{t("devices.hint")}</p>
       <table className="q-tbl">
         <thead>
           <tr>
-            <th>Device</th>
-            <th>Kind</th>
-            <th>Scopes</th>
-            <th>Last seen</th>
+            <th>{t("devices.table.device")}</th>
+            <th>{t("devices.table.kind")}</th>
+            <th>{t("devices.table.scopes")}</th>
+            <th>{t("devices.table.lastSeen")}</th>
             <th />
           </tr>
         </thead>
@@ -954,7 +989,7 @@ function PairedDevicesGroup() {
           {liveDevices.length === 0 ? (
             <tr>
               <td colSpan={5} className="q-muted" style={{ padding: "16px 0" }}>
-                No devices paired yet.
+                {t("devices.empty")}
               </td>
             </tr>
           ) : null}
@@ -989,34 +1024,37 @@ export function LiveAccountForm() {
   const machines = useRemote((state) => state.machines);
   const active = useRemote((state) => state.active);
   const error = useRemote((state) => state.error);
+  const { t } = useTranslation(["settings", "common"]);
 
   return (
     <div className="q-form">
-      <h1>Account & relay</h1>
-      <p className="lead">
-        Relay reaches hosts that are not on your network. Nothing is routed until you allow it.
-      </p>
+      <h1>{t("account.title")}</h1>
+      <p className="lead">{t("account.lead")}</p>
 
       {user ? (
         <>
           <div className="q-group">
-            <h2>Relay</h2>
+            <h2>{t("account.relay")}</h2>
             <div className="q-field">
               <div className="lab">
-                <div className="t">Connection</div>
+                <div className="t">{t("hosts.table.connection")}</div>
               </div>
               <div className="ctl">
                 {connection.status === "online" ? (
                   <Health tone="on">
-                    {pathLabel(connection.transport)}
-                    {hostName ? ` to ${hostName}` : ""} · {latencyText(connection.latencyMs)} ·
-                    encrypted
+                    {hostName
+                      ? t("account.pathTo", {
+                          path: pathLabel(connection.transport),
+                          host: hostName,
+                        })
+                      : pathLabel(connection.transport)}{" "}
+                    · {latencyText(connection.latencyMs)} · {t("hosts.encrypted")}
                   </Health>
                 ) : connection.status === "connecting" ? (
-                  <span className="q-muted">Connecting…</span>
+                  <span className="q-muted">{t("hosts.connecting")}</span>
                 ) : (
                   <>
-                    <Health tone="danger">Offline</Health>
+                    <Health tone="danger">{t("hosts.offline")}</Health>
                     {active ? (
                       <>
                         <span style={{ flex: 1 }} />
@@ -1029,7 +1067,7 @@ export function LiveAccountForm() {
             </div>
             <div className="q-field">
               <div className="lab">
-                <div className="t">Relay URL</div>
+                <div className="t">{t("account.relayUrl")}</div>
               </div>
               <div className="ctl">
                 <span className="q-faint q-mono" style={{ fontSize: 11.5 }}>
@@ -1039,18 +1077,20 @@ export function LiveAccountForm() {
             </div>
             <div className="q-field">
               <div className="lab">
-                <div className="t">Paired machines</div>
-                <div className="s">Reached through h4rn-connect</div>
+                <div className="t">{t("account.pairedMachines")}</div>
+                <div className="s">{t("account.pairedMachinesHint")}</div>
               </div>
               <div className="ctl">
                 {error ? (
                   <span className="q-muted" style={{ fontSize: 12 }} role="status">
-                    Can’t reach {connectUrl}.
+                    {t("hosts.cantReach", { target: connectUrl })}
                   </span>
                 ) : (
                   <span className="q-muted q-num">
-                    {machines.filter((machine) => machine.online).length} online of{" "}
-                    {machines.length}
+                    {t("account.onlineOf", {
+                      online: machines.filter((machine) => machine.online).length,
+                      count: machines.length,
+                    })}
                   </span>
                 )}
                 <span style={{ flex: 1 }} />
@@ -1065,17 +1105,17 @@ export function LiveAccountForm() {
                     })
                   }
                 >
-                  Manage hosts
+                  {t("account.manageHosts")}
                 </button>
               </div>
             </div>
           </div>
 
           <div className="q-group">
-            <h2>Account</h2>
+            <h2>{t("account.account")}</h2>
             <div className="q-field">
               <div className="lab">
-                <div className="t">{user.display_name ?? "Signed in"}</div>
+                <div className="t">{user.display_name ?? t("account.signedIn")}</div>
                 <div className="s">{user.email ?? user.id}</div>
               </div>
               <div className="ctl">
@@ -1089,8 +1129,8 @@ export function LiveAccountForm() {
             </div>
             <div className="q-field">
               <div className="lab">
-                <div className="t">This device</div>
-                <div className="s">{device?.name ?? "Unknown device"}</div>
+                <div className="t">{t("account.thisDevice")}</div>
+                <div className="s">{device?.name ?? t("account.unknownDevice")}</div>
               </div>
               <div className="ctl">
                 <span className="q-faint" style={{ fontSize: 12 }}>
@@ -1108,7 +1148,7 @@ export function LiveAccountForm() {
                     })
                   }
                 >
-                  Manage devices
+                  {t("account.manageDevices")}
                 </button>
               </div>
             </div>

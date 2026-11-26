@@ -1,5 +1,6 @@
 import { CircleCheckIcon, KeyRoundIcon, PlusIcon, TriangleAlertIcon } from "lucide-react";
 import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { ChipSelect } from "@/components/common/ChipSelect";
 import { useHarnesses, useHarnessVersions } from "@/features/harnesses/harnessStore";
@@ -13,6 +14,7 @@ import type {
   TitleModelSetting,
 } from "@/gen";
 import { HARNESS_LABELS } from "@/lib/entities";
+import { formatNumber, i18n } from "@/lib/i18n";
 import { useApp } from "@/lib/store/appStore";
 
 import {
@@ -29,11 +31,7 @@ import {
   validateGeneratorDraft,
 } from "./textGenerationStore";
 
-const MODES: Array<{ value: TitleModelMode; label: string }> = [
-  { value: "off", label: "Off" },
-  { value: "coding_agent", label: "Coding agent" },
-  { value: "text_generator", label: "Text generator" },
-];
+const MODES: TitleModelMode[] = ["off", "coding_agent", "text_generator"];
 
 /**
  * The coding-agent picker has one value the protocol does not: `thread`
@@ -42,33 +40,33 @@ const MODES: Array<{ value: TitleModelMode; label: string }> = [
 type AgentChoice = HarnessKind | "thread";
 const FOLLOW_THREAD = "thread" as const;
 
-const KINDS: Array<{ value: TextGeneratorKind; label: string; hint: string }> = [
-  {
-    value: "open_ai_compatible",
-    label: "OpenAI-compatible",
-    hint: "OpenAI, OpenRouter, Ollama, LM Studio",
-  },
-  { value: "anthropic", label: "Anthropic", hint: "api.anthropic.com" },
-];
+const KINDS: TextGeneratorKind[] = ["open_ai_compatible", "anthropic"];
 
 function useHostName(): string {
-  return useApp((state) =>
-    state.localHostId ? (state.hosts[state.localHostId]?.name ?? "this host") : "this host",
+  const { t } = useTranslation(["settings", "common"]);
+  const name = useApp((state) =>
+    state.localHostId ? (state.hosts[state.localHostId]?.name ?? null) : null,
   );
+  return name ?? t("textGeneration.thisHost");
 }
 
 function kindLabel(kind: TextGeneratorKind): string {
-  return KINDS.find((entry) => entry.value === kind)?.label ?? kind;
+  return i18n.t(`settings:textGeneration.kinds.${kind}.label`);
+}
+
+function kindHint(kind: TextGeneratorKind): string {
+  return i18n.t(`settings:textGeneration.kinds.${kind}.hint`);
 }
 
 function TestResult({ generatorId }: { generatorId: TextGeneratorId }) {
   const report = useTextGeneration((state) => state.reports[generatorId]);
   const error = useTextGeneration((state) => state.testErrors[generatorId]);
   const testing = useTextGeneration((state) => state.testing[generatorId] === true);
+  const { t } = useTranslation(["settings", "common"]);
   if (testing) {
     return (
       <span className="q-faint" style={{ fontSize: 12 }}>
-        Sending a tiny prompt…
+        {t("textGeneration.sendingPrompt")}
       </span>
     );
   }
@@ -84,16 +82,30 @@ function TestResult({ generatorId }: { generatorId: TextGeneratorId }) {
   if (report.ok) {
     return (
       <span className="q-ok" style={{ fontSize: 12 }}>
-        <CircleCheckIcon className="q-icon s12" strokeWidth={1.5} aria-hidden /> Replied in{" "}
-        {Number(report.latency_ms)} ms
-        {report.reply ? `: “${report.reply}”` : "."}
+        <CircleCheckIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />{" "}
+        {report.reply
+          ? t("textGeneration.repliedWith", {
+              latency: formatNumber(Number(report.latency_ms), {
+                style: "unit",
+                unit: "millisecond",
+                unitDisplay: "short",
+              }),
+              reply: report.reply,
+            })
+          : t("textGeneration.replied", {
+              latency: formatNumber(Number(report.latency_ms), {
+                style: "unit",
+                unit: "millisecond",
+                unitDisplay: "short",
+              }),
+            })}
       </span>
     );
   }
   return (
     <span className="q-danger" role="alert" style={{ fontSize: 12 }}>
       <TriangleAlertIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />{" "}
-      {report.error ?? "The generator did not answer."}
+      {report.error ?? t("textGeneration.noAnswer")}
       {report.hint ? ` ${report.hint}` : ""}
     </span>
   );
@@ -105,6 +117,7 @@ function GeneratorRow({ id }: { id: TextGeneratorId }) {
   );
   const testing = useTextGeneration((state) => state.testing[id] === true);
   const host = useHostName();
+  const { t } = useTranslation(["settings", "common"]);
   if (!generator) return null;
   return (
     <div className="q-field" style={{ alignItems: "flex-start" }}>
@@ -121,7 +134,9 @@ function GeneratorRow({ id }: { id: TextGeneratorId }) {
         <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
           <span className="q-secret">
             <KeyRoundIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
-            {generator.has_api_key ? `Key stored on ${host}` : "No key"}
+            {generator.has_api_key
+              ? t("textGeneration.keyStored", { host })
+              : t("textGeneration.noKey")}
           </span>
           <button
             type="button"
@@ -129,14 +144,14 @@ function GeneratorRow({ id }: { id: TextGeneratorId }) {
             disabled={testing}
             onClick={() => void testTextGenerator(generator.id)}
           >
-            {testing ? "Testing…" : "Test"}
+            {testing ? t("textGeneration.testing") : t("textGeneration.test")}
           </button>
           <button
             type="button"
             className="q-btn ghost"
             onClick={() => void removeTextGenerator(generator.id)}
           >
-            Remove
+            {t("common:remove")}
           </button>
         </div>
         <div style={{ marginTop: 6 }}>
@@ -149,6 +164,7 @@ function GeneratorRow({ id }: { id: TextGeneratorId }) {
 
 /** The add form, exported so its reset behaviour can be tested. */
 export function AddGenerator() {
+  const { t } = useTranslation(["settings", "common"]);
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
   const [kind, setKind] = useState<TextGeneratorKind>("open_ai_compatible");
@@ -177,7 +193,7 @@ export function AddGenerator() {
     return (
       <button type="button" className="q-btn secondary" onClick={() => setOpen(true)}>
         <PlusIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-        Add generator
+        {t("textGeneration.addGenerator")}
       </button>
     );
   }
@@ -192,23 +208,23 @@ export function AddGenerator() {
 
   return (
     <div className="q-group" style={{ marginTop: 12 }}>
-      <h2>New generator</h2>
+      <h2>{t("textGeneration.newGenerator")}</h2>
       <div className="q-field">
         <div className="lab">
-          <div className="t">Name</div>
+          <div className="t">{t("textGeneration.name")}</div>
           {errors?.name ? (
             <div className="s q-danger" role="alert">
               {errors.name}
             </div>
           ) : (
-            <div className="s">Shown in the title-model picker</div>
+            <div className="s">{t("textGeneration.nameHint")}</div>
           )}
         </div>
         <div className="ctl">
           <input
             className="q-input"
             value={name}
-            aria-label="Generator name"
+            aria-label={t("textGeneration.nameLabel")}
             onChange={(event) => setName(event.target.value)}
             style={{ maxWidth: 300, fontSize: 12 }}
           />
@@ -216,18 +232,18 @@ export function AddGenerator() {
       </div>
       <div className="q-field">
         <div className="lab">
-          <div className="t">Kind</div>
-          <div className="s">{KINDS.find((entry) => entry.value === kind)?.hint}</div>
+          <div className="t">{t("textGeneration.kind")}</div>
+          <div className="s">{kindHint(kind)}</div>
         </div>
         <div className="ctl">
           <ChipSelect<TextGeneratorKind>
-            label="Generator kind"
+            label={t("textGeneration.kindLabel")}
             value={kind}
             width={190}
             options={KINDS.map((entry) => ({
-              value: entry.value,
-              label: entry.label,
-              hint: entry.hint,
+              value: entry,
+              label: kindLabel(entry),
+              hint: kindHint(entry),
             }))}
             onChange={setKind}
           />
@@ -235,20 +251,20 @@ export function AddGenerator() {
       </div>
       <div className="q-field">
         <div className="lab">
-          <div className="t">Base URL</div>
+          <div className="t">{t("forges.add.baseUrl")}</div>
           {errors?.base_url ? (
             <div className="s q-danger" role="alert">
               {errors.base_url}
             </div>
           ) : (
-            <div className="s">https, or http on this machine only</div>
+            <div className="s">{t("textGeneration.baseUrlHint")}</div>
           )}
         </div>
         <div className="ctl">
           <input
             className="q-input q-mono"
             value={baseUrl}
-            aria-label="Generator base URL"
+            aria-label={t("textGeneration.baseUrlLabel")}
             placeholder={
               kind === "anthropic" ? "https://api.anthropic.com" : "https://api.openai.com/v1"
             }
@@ -259,20 +275,20 @@ export function AddGenerator() {
       </div>
       <div className="q-field">
         <div className="lab">
-          <div className="t">Model</div>
+          <div className="t">{t("sourceControl.model")}</div>
           {errors?.model ? (
             <div className="s q-danger" role="alert">
               {errors.model}
             </div>
           ) : (
-            <div className="s">The model that writes titles</div>
+            <div className="s">{t("textGeneration.modelHint")}</div>
           )}
         </div>
         <div className="ctl">
           <input
             className="q-input q-mono"
             value={model}
-            aria-label="Generator model"
+            aria-label={t("textGeneration.modelLabel")}
             placeholder="gpt-5.4-mini"
             onChange={(event) => setModel(event.target.value)}
             style={{ maxWidth: 260, fontSize: 12 }}
@@ -281,16 +297,16 @@ export function AddGenerator() {
       </div>
       <div className="q-field">
         <div className="lab">
-          <div className="t">API key</div>
-          <div className="s">Stored on {host}; optional for a local server</div>
+          <div className="t">{t("textGeneration.apiKey")}</div>
+          <div className="s">{t("textGeneration.apiKeyHint", { host })}</div>
         </div>
         <div className="ctl">
           <input
             className="q-input q-mono"
             type="password"
             value={apiKey}
-            aria-label="Generator API key"
-            placeholder="Write-only"
+            aria-label={t("textGeneration.apiKeyLabel")}
+            placeholder={t("textGeneration.writeOnly")}
             onChange={(event) => setApiKey(event.target.value)}
             style={{ maxWidth: 300, fontSize: 12 }}
           />
@@ -305,7 +321,7 @@ export function AddGenerator() {
             setOpen(false);
           }}
         >
-          Cancel
+          {t("common:cancel")}
         </button>
         <button
           type="button"
@@ -324,7 +340,7 @@ export function AddGenerator() {
             });
           }}
         >
-          {saving ? "Saving…" : "Save generator"}
+          {saving ? t("common:saving") : t("textGeneration.saveGenerator")}
         </button>
       </div>
       {saveError ? (
@@ -343,6 +359,7 @@ export function AddGenerator() {
  * The Providers page owns its one page title, so this renders as a group.
  */
 export function TextGeneratorsSettings() {
+  const { t } = useTranslation(["settings", "common"]);
   const connection = useApp((state) => state.connection.status);
   const generators = useTextGeneration((state) => state.generators);
   const loaded = useTextGeneration((state) => state.loaded);
@@ -356,11 +373,8 @@ export function TextGeneratorsSettings() {
 
   return (
     <div className="q-group">
-      <h2>Text generators</h2>
-      <p className="desc">
-        A model API that only writes text. h4rn can use one for thread titles instead of starting a
-        coding agent. Keys stay on {host}; this app only sees whether one exists.
-      </p>
+      <h2>{t("textGeneration.title")}</h2>
+      <p className="desc">{t("textGeneration.lead", { host })}</p>
 
       {loading && generators.length === 0 ? (
         <div className="q-skel" style={{ height: 60 }} />
@@ -368,22 +382,19 @@ export function TextGeneratorsSettings() {
         <div className="q-empty">
           <p style={{ margin: 0 }}>{error.message}</p>
           <p className="q-faint" style={{ margin: "4px 0 12px" }}>
-            {error.hint ?? "Retry when the daemon is online."}
+            {error.hint ?? t("textGeneration.retryOnline")}
           </p>
           <button
             type="button"
             className="q-btn secondary"
             onClick={() => void loadTextGenerators()}
           >
-            Try again
+            {t("common:tryAgain")}
           </button>
         </div>
       ) : generators.length === 0 ? (
         <>
-          <p className="desc">
-            None yet. Titles can still be written by an installed coding agent; add a generator for
-            a faster, cheaper model.
-          </p>
+          <p className="desc">{t("textGeneration.empty")}</p>
           {loaded ? <AddGenerator /> : null}
         </>
       ) : (
@@ -411,28 +422,33 @@ export function ModePicker({
   value: TitleModelMode;
   onChange: (next: TitleModelMode) => void;
 }) {
+  const { t } = useTranslation(["settings", "common"]);
   const buttons = useRef<Array<HTMLButtonElement | null>>([]);
   const select = (index: number) => {
     const next = (index + MODES.length) % MODES.length;
     const mode = MODES[next];
     if (!mode) return;
-    onChange(mode.value);
+    onChange(mode);
     buttons.current[next]?.focus();
   };
   return (
-    <div className="q-seg inline q-seg-choice" role="radiogroup" aria-label="Title model">
+    <div
+      className="q-seg inline q-seg-choice"
+      role="radiogroup"
+      aria-label={t("textGeneration.titleModelLabel")}
+    >
       {MODES.map((mode, index) => (
         // biome-ignore lint/a11y/useSemanticElements: a segmented radio group, not a form radio
         <button
-          key={mode.value}
+          key={mode}
           ref={(element) => {
             buttons.current[index] = element;
           }}
           type="button"
           role="radio"
-          aria-checked={value === mode.value}
-          tabIndex={value === mode.value ? 0 : -1}
-          onClick={() => onChange(mode.value)}
+          aria-checked={value === mode}
+          tabIndex={value === mode ? 0 : -1}
+          onClick={() => onChange(mode)}
           onKeyDown={(event) => {
             if (event.key === "ArrowRight" || event.key === "ArrowDown") {
               event.preventDefault();
@@ -449,7 +465,7 @@ export function ModePicker({
             }
           }}
         >
-          {mode.label}
+          {t(`sourceControl.modes.${mode}`)}
         </button>
       ))}
     </div>
@@ -457,6 +473,7 @@ export function ModePicker({
 }
 
 function TitleDraftForm({ saved }: { saved: TextGenerationSettings }) {
+  const { t } = useTranslation(["settings", "common"]);
   const [draft, setDraft] = useState<TitleModelSetting>(saved.title);
   const generators = useTextGeneration((state) => state.generators);
   const saving = useTextGeneration((state) => state.savingSettings);
@@ -504,14 +521,11 @@ function TitleDraftForm({ saved }: { saved: TextGenerationSettings }) {
 
   return (
     <div className="q-group">
-      <h2>Title model</h2>
-      <p className="desc">
-        A new thread shows the first line of your first prompt immediately. The model then writes a
-        shorter title and replaces it. A title you rename yourself is never replaced.
-      </p>
+      <h2>{t("textGeneration.titleModel")}</h2>
+      <p className="desc">{t("textGeneration.titleModelHint")}</p>
       <div className="q-field">
         <div className="lab">
-          <div className="t">Who writes titles</div>
+          <div className="t">{t("textGeneration.whoWrites")}</div>
           <div className="s">{titleModelSummary({ title: draft })}</div>
         </div>
         <div className="ctl">
@@ -522,26 +536,22 @@ function TitleDraftForm({ saved }: { saved: TextGenerationSettings }) {
       {draft.mode === "coding_agent" ? (
         <div className="q-field">
           <div className="lab">
-            <div className="t">Coding agent</div>
-            <div className="s">
-              Claude Code runs once in an empty folder with no tools, then exits. Follow the
-              thread's agent uses Claude Code for Claude Code threads; Codex threads keep the
-              first-line title or use a text generator.
-            </div>
+            <div className="t">{t("sourceControl.modes.coding_agent")}</div>
+            <div className="s">{t("textGeneration.codingAgentHint")}</div>
             {agents.length === 0 ? (
-              <div className="s q-faint">No Claude Code is installed on this host yet.</div>
+              <div className="s q-faint">{t("sourceControl.noClaudeCode")}</div>
             ) : null}
           </div>
           <div className="ctl">
             <ChipSelect<AgentChoice>
-              label="Coding agent for titles"
+              label={t("textGeneration.codingAgentLabel")}
               value={draft.harness ?? FOLLOW_THREAD}
               width={220}
               options={[
                 {
                   value: FOLLOW_THREAD,
-                  label: "Follow the thread's agent",
-                  hint: "Claude Code threads use their own; others keep the first line",
+                  label: t("sourceControl.followThread"),
+                  hint: t("textGeneration.followThreadHint"),
                 },
                 ...agents.map((agent) => ({
                   value: agent.harness,
@@ -561,16 +571,16 @@ function TitleDraftForm({ saved }: { saved: TextGenerationSettings }) {
         <>
           <div className="q-field">
             <div className="lab">
-              <div className="t">Generator</div>
+              <div className="t">{t("textGeneration.generator")}</div>
               <div className="s">
                 {generators.length > 0
-                  ? "Add or remove generators under Providers."
-                  : "Add a generator under Providers first."}
+                  ? t("textGeneration.manageUnderProviders")
+                  : t("textGeneration.addUnderProviders")}
               </div>
             </div>
             <div className="ctl">
               <ChipSelect<TextGeneratorId>
-                label="Text generator for titles"
+                label={t("textGeneration.generatorLabel")}
                 value={draft.generator_id ?? ""}
                 width={200}
                 disabled={generators.length === 0}
@@ -587,14 +597,14 @@ function TitleDraftForm({ saved }: { saved: TextGenerationSettings }) {
           </div>
           <div className="q-field">
             <div className="lab">
-              <div className="t">Model</div>
-              <div className="s">Defaults to the generator's model</div>
+              <div className="t">{t("sourceControl.model")}</div>
+              <div className="s">{t("textGeneration.titleModelDefault")}</div>
             </div>
             <div className="ctl">
               <input
                 className="q-input q-mono"
                 value={model}
-                aria-label="Title model"
+                aria-label={t("textGeneration.titleModelLabel")}
                 onChange={(event) => patchSetting({ model: event.target.value })}
                 style={{ maxWidth: 260, fontSize: 12 }}
               />
@@ -608,7 +618,7 @@ function TitleDraftForm({ saved }: { saved: TextGenerationSettings }) {
                   }
                 }}
               >
-                {testing ? "Testing…" : "Test"}
+                {testing ? t("textGeneration.testing") : t("textGeneration.test")}
               </button>
             </div>
           </div>
@@ -630,7 +640,7 @@ function TitleDraftForm({ saved }: { saved: TextGenerationSettings }) {
           disabled={saving || !changed}
           onClick={() => setDraft(saved.title)}
         >
-          Reset
+          {t("common:reset")}
         </button>
         <button
           type="button"
@@ -651,7 +661,7 @@ function TitleDraftForm({ saved }: { saved: TextGenerationSettings }) {
             });
           }}
         >
-          {saving ? "Saving…" : "Save"}
+          {saving ? t("common:saving") : t("common:save")}
         </button>
       </div>
       {saveError ? (
@@ -666,6 +676,7 @@ function TitleDraftForm({ saved }: { saved: TextGenerationSettings }) {
 
 /** Settings → Threads. */
 export function ThreadSettings({ children }: { children?: ReactNode }) {
+  const { t } = useTranslation(["settings", "common"]);
   const connection = useApp((state) => state.connection.status);
   const settings = useTextGeneration((state) => state.settings);
   const loading = useTextGeneration((state) => state.settingsLoading);
@@ -680,13 +691,10 @@ export function ThreadSettings({ children }: { children?: ReactNode }) {
 
   return (
     <div className="q-form">
-      <h1>Threads</h1>
-      <p className="lead">
-        Defaults for threads started from this device: their permission mode, and how h4rn names
-        them. A thread keeps its own settings once it exists.
-      </p>
+      <h1>{t("threads.title")}</h1>
+      <p className="lead">{t("threads.lead")}</p>
       {children}
-      <h2>Titles</h2>
+      <h2>{t("threads.titles")}</h2>
       {settings ? (
         <TitleDraftForm saved={settings} />
       ) : loading ? (
@@ -695,15 +703,15 @@ export function ThreadSettings({ children }: { children?: ReactNode }) {
         <div className="q-empty">
           <p style={{ margin: 0 }}>{error.message}</p>
           <p className="q-faint" style={{ margin: "4px 0 12px" }}>
-            {error.hint ?? "Retry when the daemon is online."}
+            {error.hint ?? t("textGeneration.retryOnline")}
           </p>
           <button type="button" className="q-btn secondary" onClick={() => void loadTitleModel()}>
-            Try again
+            {t("common:tryAgain")}
           </button>
         </div>
       ) : (
         <p className="q-faint" style={{ fontSize: 12 }}>
-          Connect to the daemon to read the title model.
+          {t("threads.connectForTitles")}
         </p>
       )}
     </div>

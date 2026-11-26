@@ -1,4 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
+
+import { setLocalePreference } from "@/lib/i18n";
 
 import {
   formatShortCode,
@@ -29,6 +31,17 @@ describe("pairing scopes", () => {
     expect(scopesLabel(["view", "approve", "terminal", "files", "admin"])).toBe("All");
     expect(scopesLabel(["view"])).toBe("View only");
     expect(scopesLabel(["view", "approve", "files"])).toBe("Approve and reply, Files and edits");
+  });
+
+  describe("in another language", () => {
+    afterEach(() => setLocalePreference("system"));
+
+    it("joins the names the way the language does", async () => {
+      await setLocalePreference("ja");
+      expect(scopesLabel(["view", "approve", "files"])).toBe("承認と返信、ファイルと編集");
+      await setLocalePreference("es");
+      expect(scopesLabel(["view", "approve", "terminal", "files"])).toMatch(/, .+ y /);
+    });
   });
 });
 

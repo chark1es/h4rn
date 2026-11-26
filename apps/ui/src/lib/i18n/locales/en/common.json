@@ -1,0 +1,33 @@
+{
+  "checking": "Checking…",
+  "loading": "Loading…",
+  "saving": "Saving…",
+  "save": "Save",
+  "cancel": "Cancel",
+  "delete": "Delete",
+  "remove": "Remove",
+  "reset": "Reset",
+  "resetAll": "Reset all",
+  "retry": "Retry",
+  "tryAgain": "Try again",
+  "copy": "Copy",
+  "copied": "Copied",
+  "close": "Close",
+  "edit": "Edit",
+  "add": "Add",
+  "on": "On",
+  "off": "Off",
+  "none": "None",
+  "default": "Default",
+  "refresh": "Refresh",
+  "revoke": "Revoke",
+  "done": "Done",
+  "unknown": "Unknown",
+  "saveChanges": "Save changes",
+  "permissionModes": {
+    "approval_required": "Approval required",
+    "auto_accept_edits": "Auto-accept edits",
+    "plan": "Plan",
+    "full_access": "Full access"
+  }
+}

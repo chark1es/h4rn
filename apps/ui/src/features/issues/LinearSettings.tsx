@@ -1,10 +1,11 @@
 import { KeyRoundIcon, RefreshCwIcon } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { ChipSelect } from "@/components/common/ChipSelect";
 import { useProjects } from "@/features/projects/store";
 import type { LinearAccount, LinearProjectTeam, LinearTeam } from "@/gen";
-import { relativeAge } from "@/lib/format";
+import { formatRelativeTime } from "@/lib/i18n";
 import { getClient, pushToast } from "@/lib/store/appStore";
 
 import { IssueApi, type IssueRequest } from "./store";
@@ -18,6 +19,7 @@ const api = (request: IssueRequest = (value) => getClient().request(value)) =>
  * shown again.
  */
 export function LinearSettings({ request }: { request?: IssueRequest } = {}) {
+  const { t } = useTranslation(["settings", "common"]);
   const projects = useProjects((state) => state.projects);
   const [accounts, setAccounts] = useState<LinearAccount[]>([]);
   const [teams, setTeams] = useState<Record<string, LinearTeam[]>>({});
@@ -88,11 +90,11 @@ export function LinearSettings({ request }: { request?: IssueRequest } = {}) {
     try {
       await api(request).connectLinear(key.trim());
       setKey("");
-      pushToast({ title: "Linear connected.", variant: "success" });
+      pushToast({ title: t("linear.toast.connected"), variant: "success" });
       load();
     } catch (cause) {
       pushToast({
-        title: "Linear rejected the key.",
+        title: t("linear.toast.rejected"),
         description: cause instanceof Error ? cause.message : String(cause),
         variant: "error",
       });
@@ -108,7 +110,7 @@ export function LinearSettings({ request }: { request?: IssueRequest } = {}) {
       load();
     } catch (cause) {
       pushToast({
-        title: "The Linear connection was not removed.",
+        title: t("linear.toast.removeFailed"),
         description: cause instanceof Error ? cause.message : String(cause),
         variant: "error",
       });
@@ -138,7 +140,7 @@ export function LinearSettings({ request }: { request?: IssueRequest } = {}) {
       }
     } catch (cause) {
       pushToast({
-        title: "The Linear team was not saved.",
+        title: t("linear.toast.teamFailed"),
         description: cause instanceof Error ? cause.message : String(cause),
         variant: "error",
       });
@@ -153,13 +155,10 @@ export function LinearSettings({ request }: { request?: IssueRequest } = {}) {
         <h2 style={{ flex: 1 }}>Linear</h2>
         <button type="button" className="q-btn ghost" onClick={load} disabled={loading}>
           <RefreshCwIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-          Refresh
+          {t("common:refresh")}
         </button>
       </div>
-      <p className="desc">
-        Connect with a personal API key. The key stays on this host, is never returned to a client,
-        and is only used to read your team's issues and post comments.
-      </p>
+      <p className="desc">{t("linear.hint")}</p>
       {error ? (
         <p className="q-warn" role="alert">
           {error}
@@ -169,9 +168,9 @@ export function LinearSettings({ request }: { request?: IssueRequest } = {}) {
         <table className="q-tbl">
           <thead>
             <tr>
-              <th>Workspace</th>
-              <th>Account</th>
-              <th>Connected</th>
+              <th>{t("linear.table.workspace")}</th>
+              <th>{t("linear.table.account")}</th>
+              <th>{t("linear.table.connected")}</th>
               <th />
             </tr>
           </thead>
@@ -184,8 +183,13 @@ export function LinearSettings({ request }: { request?: IssueRequest } = {}) {
                     <span style={{ fontWeight: 500 }}>{account.name}</span>
                   </span>
                 </td>
-                <td className="q-muted">{account.email ?? "Not reported"}</td>
-                <td className="q-muted">{relativeAge(account.created_at)}</td>
+                <td className="q-muted">{account.email ?? t("forges.notReported")}</td>
+                <td className="q-muted">
+                  {formatRelativeTime(account.created_at, Date.now(), {
+                    numeric: "auto",
+                    style: "short",
+                  })}
+                </td>
                 <td className="r" style={{ paddingRight: 0 }}>
                   <button
                     type="button"
@@ -194,7 +198,7 @@ export function LinearSettings({ request }: { request?: IssueRequest } = {}) {
                     disabled={busy}
                     onClick={() => void disconnect(account)}
                   >
-                    Remove
+                    {t("common:remove")}
                   </button>
                 </td>
               </tr>
@@ -203,7 +207,7 @@ export function LinearSettings({ request }: { request?: IssueRequest } = {}) {
         </table>
       ) : error ? null : (
         <p className="q-muted" style={{ fontSize: 13, margin: "4px 0 12px" }}>
-          No Linear workspace connected yet.
+          {t("linear.empty")}
         </p>
       )}
       {accounts
@@ -217,8 +221,8 @@ export function LinearSettings({ request }: { request?: IssueRequest } = {}) {
         <input
           className="q-input"
           type="password"
-          aria-label="Linear API key"
-          placeholder="Linear personal API key"
+          aria-label={t("linear.keyLabel")}
+          placeholder={t("linear.keyPlaceholder")}
           value={key}
           onChange={(event) => setKey(event.target.value)}
           style={{ flex: 1 }}
@@ -229,15 +233,13 @@ export function LinearSettings({ request }: { request?: IssueRequest } = {}) {
           disabled={busy || !key.trim()}
           onClick={() => void connect()}
         >
-          {busy ? "Checking…" : "Connect and test"}
+          {busy ? t("common:checking") : t("linear.connect")}
         </button>
       </div>
       {accounts.length > 0 && projects.length > 0 ? (
         <div style={{ marginTop: 20 }}>
-          <h3 style={{ fontSize: 13, margin: "0 0 8px" }}>Teams per project</h3>
-          <p className="desc">
-            A project's team appears beside its forge issues on the Issues page.
-          </p>
+          <h3 style={{ fontSize: 13, margin: "0 0 8px" }}>{t("linear.teams")}</h3>
+          <p className="desc">{t("linear.teamsHint")}</p>
           {projects.map((project) => {
             const mapping = mappings.find((candidate) => candidate.project_id === project.id);
             const value = mapping ? `${mapping.account_id}::${mapping.team_id}` : "";
@@ -254,11 +256,11 @@ export function LinearSettings({ request }: { request?: IssueRequest } = {}) {
               >
                 <span style={{ flex: 1 }}>{project.name}</span>
                 <ChipSelect
-                  label={`Linear team for ${project.name}`}
+                  label={t("linear.teamFor", { project: project.name })}
                   value={value}
                   disabled={busy}
                   options={[
-                    { value: "", label: "No Linear team" },
+                    { value: "", label: t("linear.noTeam") },
                     ...accounts.flatMap((account) =>
                       (teams[account.account_id] ?? []).map((team) => ({
                         value: `${account.account_id}::${team.id}`,

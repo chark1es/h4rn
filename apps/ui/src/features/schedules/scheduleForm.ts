@@ -14,59 +14,67 @@ import type {
   ScheduleSpec,
   ScheduleTask,
 } from "@/gen";
+import { activeLocale, i18n } from "@/lib/i18n";
 
 export type ScheduleKind = ScheduleSpec["kind"];
 export type ScheduleField = "name" | "workspace" | "model" | "prompt" | "timezone" | "schedule";
 export type ScheduleFormErrors = Partial<Record<ScheduleField, string>>;
+type CronField = "minute" | "hour" | "dayOfMonth" | "month" | "dayOfWeek";
 
 /** The schedule kinds in the order the editor offers them. */
-export const SCHEDULE_KINDS: Array<{ kind: ScheduleKind; label: string }> = [
-  { kind: "once", label: "Once" },
-  { kind: "every", label: "Every…" },
-  { kind: "daily", label: "Daily" },
-  { kind: "weekly", label: "Weekly" },
-  { kind: "cron", label: "Cron" },
-  { kind: "webhook", label: "On webhook" },
+export const SCHEDULE_KINDS: ScheduleKind[] = [
+  "once",
+  "every",
+  "daily",
+  "weekly",
+  "cron",
+  "webhook",
 ];
 
-/** Where a run goes, in the editor's words. */
-export const DESTINATIONS: Array<{ value: ScheduleDestination; label: string; hint: string }> = [
-  {
-    value: "new_thread",
-    label: "New thread each run",
-    hint: "Every run is a separate thread.",
-  },
-  {
-    value: "continue_thread",
-    label: "One thread, continuing",
-    hint: "Later runs post into the same conversation.",
-  },
-  {
-    value: "fresh_session",
-    label: "One thread, fresh session",
-    hint: "The thread stays readable; each run starts without the old context.",
-  },
+/** A schedule kind in the editor's words. */
+export function scheduleKindLabel(kind: ScheduleKind): string {
+  return i18n.t(`settings:schedules.kinds.${kind}`);
+}
+
+/** Where a run goes, in the order the editor offers them. */
+export const DESTINATIONS: ScheduleDestination[] = [
+  "new_thread",
+  "continue_thread",
+  "fresh_session",
 ];
+
+/** What a destination means, under the picker. */
+export function destinationHint(destination: ScheduleDestination): string {
+  return i18n.t(`settings:schedules.destinations.${destination}.hint`);
+}
 
 /** Weekdays as the editor numbers them (Monday = 1). */
-export const WEEKDAYS: Array<{ day: number; short: string; long: string }> = [
-  { day: 1, short: "Mon", long: "Monday" },
-  { day: 2, short: "Tue", long: "Tuesday" },
-  { day: 3, short: "Wed", long: "Wednesday" },
-  { day: 4, short: "Thu", long: "Thursday" },
-  { day: 5, short: "Fri", long: "Friday" },
-  { day: 6, short: "Sat", long: "Saturday" },
-  { day: 7, short: "Sun", long: "Sunday" },
-];
+export const WEEKDAYS: number[] = [1, 2, 3, 4, 5, 6, 7];
+
+/**
+ * A weekday's name in the active language, from Intl rather than a list of
+ * words. 2024-01-01 was a Monday, so day `n` is 2024-01-0n.
+ */
+export function weekdayName(day: number, width: "short" | "long"): string {
+  const date = new Date(Date.UTC(2024, 0, day, 12));
+  return new Intl.DateTimeFormat(activeLocale(), { weekday: width, timeZone: "UTC" }).format(date);
+}
 
 /** The webhook placeholders, with one example each. */
 export const WEBHOOK_PLACEHOLDERS = [
-  { token: "{{body.path}}", hint: "A JSON field, such as {{body.pull_request.html_url}}" },
-  { token: "{{headers.name}}", hint: "A request header, such as {{headers.x-github-event}}" },
-  { token: "{{query.name}}", hint: "A query value, such as {{query.ref}}" },
-  { token: "{{body}}", hint: "The raw body" },
-  { token: "{{request}}", hint: "The method, path, query, headers and body" },
-];
+  { token: "{{body.path}}", id: "jsonField", example: "{{body.pull_request.html_url}}" },
+  { token: "{{headers.name}}", id: "header", example: "{{headers.x-github-event}}" },
+  { token: "{{query.name}}", id: "query", example: "{{query.ref}}" },
+  { token: "{{body}}", id: "body", example: null },
+  { token: "{{request}}", id: "request", example: null },
+] as const;
+
+/** What a webhook placeholder stands for. The example is never interpolated. */
+export function placeholderHint(entry: (typeof WEBHOOK_PLACEHOLDERS)[number]): string {
+  return entry.example
+    ? i18n.t(`settings:schedules.placeholders.${entry.id}`, { example: entry.example })
+    : i18n.t(`settings:schedules.placeholders.${entry.id}`);
+}
 
 /** A blank draft for a new task. */
 export function emptyDraft(host: string, timezone: string): ScheduleDraft {
@@ -174,30 +182,31 @@ export function realDate(value: string): boolean {
 /** Client-side validation; the daemon validates again before saving. */
 export function validateDraft(draft: ScheduleDraft): ScheduleFormErrors {
   const errors: ScheduleFormErrors = {};
-  if (!draft.name.trim()) errors.name = "Give the task a name.";
-  else if (draft.name.trim().length > 120) errors.name = "Keep the name under 120 characters.";
-  if (!draft.workspace_path.trim()) errors.workspace = "Choose a workspace.";
+  const t = i18n.getFixedT(null, "settings", "schedules.validate");
+  if (!draft.name.trim()) errors.name = t("nameRequired");
+  else if (draft.name.trim().length > 120) errors.name = t("nameTooLong");
+  if (!draft.workspace_path.trim()) errors.workspace = t("workspaceRequired");
   else if (!isAbsolute(draft.workspace_path)) {
-    errors.workspace = "Use an absolute path on this host.";
+    errors.workspace = t("workspaceAbsolute");
   }
-  if (!draft.model.trim()) errors.model = "Choose a model.";
-  if (!draft.prompt.trim()) errors.prompt = "Write the prompt to send.";
-  if (!knownTimezone(draft.timezone)) errors.timezone = "Choose a known IANA time zone.";
+  if (!draft.model.trim()) errors.model = t("modelRequired");
+  if (!draft.prompt.trim()) errors.prompt = t("promptRequired");
+  if (!knownTimezone(draft.timezone)) errors.timezone = t("timezone");
 
   const schedule = draft.schedule;
   if (schedule.kind === "once") {
     if (!realDate(schedule.date) || !TIME.test(schedule.time)) {
-      errors.schedule = "Choose a real date and time.";
+      errors.schedule = t("dateTime");
     }
   } else if (schedule.kind === "every") {
     if (!Number.isInteger(schedule.count) || schedule.count < 1 || schedule.count > 10_080) {
-      errors.schedule = "Choose between 1 and 10080 units.";
+      errors.schedule = t("intervalRange");
     }
   } else if (schedule.kind === "daily") {
-    if (!TIME.test(schedule.time)) errors.schedule = "Choose a real time of day.";
+    if (!TIME.test(schedule.time)) errors.schedule = t("time");
   } else if (schedule.kind === "weekly") {
-    if (schedule.days.length === 0) errors.schedule = "Choose at least one weekday.";
-    else if (!TIME.test(schedule.time)) errors.schedule = "Choose a real time of day.";
+    if (schedule.days.length === 0) errors.schedule = t("weekday");
+    else if (!TIME.test(schedule.time)) errors.schedule = t("time");
   } else if (schedule.kind === "cron") {
     const problem = cronProblem(schedule.expression);
     if (problem) errors.schedule = problem;
@@ -219,37 +228,39 @@ export function isAbsolute(path: string): boolean {
  * mistakes early so a save is not sent for them.
  */
 export function cronProblem(expression: string): string | null {
+  const t = i18n.getFixedT(null, "settings", "schedules.cron");
   const fields = expression.trim().split(/\s+/).filter(Boolean);
   if (fields.length !== 5) {
-    return "Use five fields: minute hour day-of-month month day-of-week.";
+    return t("fiveFields");
   }
-  const bounds: Array<[string, number, number]> = [
+  const bounds: Array<[CronField, number, number]> = [
     ["minute", 0, 59],
     ["hour", 0, 23],
-    ["day of month", 1, 31],
+    ["dayOfMonth", 1, 31],
     ["month", 1, 12],
-    ["day of week", 0, 7],
+    ["dayOfWeek", 0, 7],
   ];
   for (let index = 0; index < fields.length; index += 1) {
-    const [name, minimum, maximum] = bounds[index] as [string, number, number];
+    const [fieldName, minimum, maximum] = bounds[index] as [CronField, number, number];
+    const name = t(`fields.${fieldName}`);
     const field = fields[index] ?? "";
     for (const part of field.split(",")) {
       const [range = "", step] = part.split("/");
       if (part.includes("/") && (!step || !/^\d+$/.test(step) || Number(step) === 0)) {
-        return `The ${name} step in \`${part}\` is not a positive number.`;
+        return t("step", { name, part });
       }
       if (range === "*") continue;
       const boundsPart = range?.split("-") ?? [];
-      if (boundsPart.length > 2) return `The ${name} field \`${part}\` is not valid.`;
+      if (boundsPart.length > 2) return t("invalid", { name, part });
       for (const number of boundsPart) {
-        if (!/^\d+$/.test(number)) return `The ${name} field \`${part}\` is not numeric.`;
+        if (!/^\d+$/.test(number)) return t("notNumeric", { name, part });
         const value = Number(number);
         if (value < minimum || value > maximum) {
-          return `The ${name} ${value} must be between ${minimum} and ${maximum}.`;
+          return t("range", { name, value, minimum, maximum });
         }
       }
       if (boundsPart.length === 2 && Number(boundsPart[0]) > Number(boundsPart[1])) {
-        return `The ${name} range \`${part}\` runs backwards.`;
+        return t("backwards", { name, part });
       }
     }
   }
@@ -258,47 +269,56 @@ export function cronProblem(expression: string): string | null {
 
 /** One sentence for the list. */
 export function describeSchedule(spec: ScheduleSpec): string {
+  const t = i18n.getFixedT(null, "settings", "schedules.describe");
   switch (spec.kind) {
     case "once":
-      return `Once on ${spec.date} at ${spec.time}`;
+      return t("once", { date: spec.date, time: spec.time });
     case "every":
-      return `Every ${spec.count} ${spec.unit}`;
+      return spec.unit === "minutes"
+        ? t("everyMinutes", { count: spec.count })
+        : t("everyHours", { count: spec.count });
     case "daily":
-      return `Daily at ${spec.time}`;
+      return t("daily", { time: spec.time });
     case "weekly": {
       const names = spec.days
-        .map((day) => WEEKDAYS.find((entry) => entry.day === day)?.short)
-        .filter(Boolean)
-        .join(", ");
-      return `Weekly on ${names} at ${spec.time}`;
+        .filter((day) => WEEKDAYS.includes(day))
+        .map((day) => weekdayName(day, "short"));
+      const days = new Intl.ListFormat(activeLocale(), {
+        style: "narrow",
+        type: "conjunction",
+      }).format(names);
+      return t("weekly", { days, time: spec.time });
     }
     case "cron":
-      return `Cron ${spec.expression}`;
+      return t("cron", { expression: spec.expression });
     case "webhook":
-      return "On webhook";
+      return t("webhook");
   }
 }
 
 /** The destination in the list's words. */
 export function describeDestination(destination: ScheduleDestination): string {
-  return DESTINATIONS.find((entry) => entry.value === destination)?.label ?? destination;
+  return DESTINATIONS.includes(destination)
+    ? i18n.t(`settings:schedules.destinations.${destination}.label`)
+    : destination;
 }
 
 /** A local, readable next-run line, or what the task is waiting for. */
 export function nextRunText(task: ScheduleTask, now = new Date()): string {
-  if (task.schedule.kind === "webhook") return "Runs when its URL is called";
-  if (!task.enabled) return "Paused";
-  if (!task.next_run_at) return "No further run";
+  const t = i18n.getFixedT(null, "settings", "schedules.next");
+  if (task.schedule.kind === "webhook") return t("webhook");
+  if (!task.enabled) return t("paused");
+  if (!task.next_run_at) return t("none");
   const at = new Date(task.next_run_at);
   if (Number.isNaN(at.getTime())) return "";
-  const prefix = at.getTime() <= now.getTime() ? "Due now" : "Next";
-  return `${prefix} ${formatDateTime(at)}`;
+  const when = formatDateTime(at);
+  return at.getTime() <= now.getTime() ? t("due", { when }) : t("next", { when });
 }
 
 /** A short local date and time. */
 export function formatDateTime(at: Date): string {
   try {
-    return new Intl.DateTimeFormat(undefined, {
+    return new Intl.DateTimeFormat(activeLocale(), {
       dateStyle: "medium",
       timeStyle: "short",
     }).format(at);
@@ -309,34 +329,29 @@ export function formatDateTime(at: Date): string {
 
 /** The outcome of the last run in the list, with its detail. */
 export function describeRun(run: ScheduleRun | null): string {
-  if (!run) return "Never run";
+  const t = i18n.getFixedT(null, "settings", "schedules.run");
+  if (!run) return t("never");
   const at = new Date(run.started_at);
   const when = Number.isNaN(at.getTime()) ? "" : formatDateTime(at);
+  const detail = run.detail ? ` · ${run.detail}` : "";
   switch (run.outcome) {
     case "started":
-      return `Ran ${when}`;
+      return t("ran", { when });
     case "skipped":
-      return `Skipped ${when}${run.detail ? ` · ${run.detail}` : ""}`;
+      return `${t("skipped", { when })}${detail}`;
     case "failed":
-      return `Failed ${when}${run.detail ? ` · ${run.detail}` : ""}`;
+      return `${t("failed", { when })}${detail}`;
   }
 }
 
 /** The outcome in one word, for the history table. */
 export function outcomeWord(run: ScheduleRun): string {
-  switch (run.outcome) {
-    case "started":
-      return "Started";
-    case "skipped":
-      return "Skipped";
-    case "failed":
-      return "Failed";
-  }
+  return i18n.t(`settings:schedules.outcome.${run.outcome}`);
 }
 
 /** The interval unit in the editor's words. */
 export function unitLabel(unit: IntervalUnit): string {
-  return unit === "minutes" ? "minutes" : "hours";
+  return i18n.t(`settings:schedules.units.${unit}`);
 }
 
 /** Whether the task's prompt can use webhook placeholders. */

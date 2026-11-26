@@ -1,4 +1,5 @@
 import type { AcpAgentSpec, AcpWorkingDir } from "@/gen";
+import { i18n } from "@/lib/i18n";
 
 /** The editable shape of the "Add / edit ACP agent" form. */
 export type AcpAgentForm = {
@@ -40,46 +41,47 @@ export function validateAcpAgentForm(
   const name = form.name.trim();
   const command = form.command.trim();
 
-  if (!id) return "An instance id is required.";
+  if (!id) return i18n.t("settings:harnesses.validate.idRequired");
   if (!ACP_ID_PATTERN.test(id) || id.includes("--")) {
-    return "Use lowercase letters, digits and single dashes; start and end with a letter or digit.";
+    return i18n.t("settings:harnesses.validate.idPattern");
   }
-  if (id.length > 64) return "Keep the instance id to 64 characters or fewer.";
+  if (id.length > 64) return i18n.t("settings:harnesses.validate.idTooLong");
   if (options.editingId !== undefined && id !== options.editingId) {
-    return "The instance id cannot be changed while editing.";
+    return i18n.t("settings:harnesses.validate.idLocked");
   }
   if (options.editingId === undefined && options.existingIds?.includes(id)) {
-    return "That instance id is already in use.";
+    return i18n.t("settings:harnesses.validate.idTaken");
   }
-  if (!name) return "A display name is required.";
+  if (!name) return i18n.t("settings:harnesses.validate.nameRequired");
   // Count characters the way the daemon does (Rust `chars()`), not UTF-16 code
   // units, so an emoji or an accent is one character on both sides.
-  if (Array.from(name).length > 80) return "Keep the display name to 80 characters or fewer.";
-  if (/[\n\r\0]/.test(name)) return "The display name must be one line.";
-  if (!command) return "A command is required.";
-  if (/[\n\r\0]/.test(command)) return "The command must be one line.";
+  if (Array.from(name).length > 80) return i18n.t("settings:harnesses.validate.nameTooLong");
+  if (/[\n\r\0]/.test(name)) return i18n.t("settings:harnesses.validate.nameOneLine");
+  if (!command) return i18n.t("settings:harnesses.validate.commandRequired");
+  if (/[\n\r\0]/.test(command)) return i18n.t("settings:harnesses.validate.commandOneLine");
   if ((command.includes("/") || command.includes("\\")) && !isAbsolutePath(command)) {
-    return "Use an executable name on PATH, or an absolute path.";
+    return i18n.t("settings:harnesses.validate.commandPath");
   }
 
   for (const [index, argument] of form.args.entries()) {
-    if (argument.includes("\0")) return `Argument ${index + 1} contains a NUL byte.`;
+    if (argument.includes("\0"))
+      return i18n.t("settings:harnesses.validate.argNul", { row: index + 1 });
   }
 
   for (const [index, row] of form.env.entries()) {
     if (!row.key.trim() && !row.value) continue;
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(row.key.trim())) {
-      return `Environment row ${index + 1} needs a name like NAME or NAME_2.`;
+      return i18n.t("settings:harnesses.validate.envName", { row: index + 1 });
     }
     if (row.value.includes("\0")) {
-      return `Environment row ${index + 1} contains a NUL byte.`;
+      return i18n.t("settings:harnesses.validate.envNul", { row: index + 1 });
     }
   }
 
   if (form.workingDir === "fixed_path") {
     const path = form.path.trim();
-    if (!path) return "Enter the fixed working directory.";
-    if (!isAbsolutePath(path)) return "The working directory must be an absolute path.";
+    if (!path) return i18n.t("settings:harnesses.validate.pathRequired");
+    if (!isAbsolutePath(path)) return i18n.t("settings:harnesses.validate.pathAbsolute");
   }
 
   return null;
@@ -161,7 +163,9 @@ export function acpPickerOptions(
     ...builtins,
     ...agents.map((agent) => ({
       value: `acp:${agent.id}`,
-      label: agent.installed ? agent.name : `${agent.name} · not installed`,
+      label: agent.installed
+        ? agent.name
+        : i18n.t("settings:harnesses.acp.notInstalledOption", { name: agent.name }),
     })),
   ];
 }
