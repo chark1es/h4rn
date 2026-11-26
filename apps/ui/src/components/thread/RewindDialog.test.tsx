@@ -15,6 +15,7 @@ const mock = vi.hoisted(() => ({
     method: "handoff" as RewindMethod,
     filesEnabled: true,
     error: null as string | null,
+    leftAlone: [] as string[],
   },
 }));
 
@@ -73,7 +74,7 @@ afterEach(() => {
   vi.clearAllMocks();
   mock.refusal = null;
   mock.filesAvailable = true;
-  mock.plan = { method: "handoff", filesEnabled: true, error: null };
+  mock.plan = { method: "handoff", filesEnabled: true, error: null, leftAlone: [] };
 });
 
 function open(overrides: Partial<ThreadSummary> = {}) {
@@ -83,6 +84,7 @@ function open(overrides: Partial<ThreadSummary> = {}) {
       method: mock.plan.method,
       files_enabled: mock.plan.filesEnabled,
       files_available: mock.filesAvailable,
+      left_alone: mock.plan.leftAlone,
     };
   });
   return render(
@@ -107,12 +109,22 @@ describe("RewindDialog", () => {
     expect(screen.getByText(/starts a new session with a handoff/)).toBeTruthy();
   });
 
+  it("names the ignored files a restore leaves alone", async () => {
+    mock.plan.leftAlone = [".env", "secret.log"];
+    open();
+    await screen.findByText("Revert files too");
+    expect(screen.queryByText(/Ignored files stay as they are/)).toBeNull();
+    fireEvent.click(screen.getByLabelText(/Revert files too/));
+    expect(screen.getByText(/Ignored files stay as they are: \.env, secret\.log\./)).toBeTruthy();
+  });
+
   it("sends the file choice to the daemon and closes on success", async () => {
     const onOpenChange = vi.fn();
     mock.planRewind.mockImplementation(async () => ({
       method: "handoff",
       files_enabled: true,
       files_available: true,
+      left_alone: [],
     }));
     render(
       <RewindDialog
