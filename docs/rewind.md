@@ -124,8 +124,20 @@ A file that is there but cannot be read when the checkpoint is taken (a
 `private.key` at mode 000, say) makes the checkpoint incomplete, and **Revert
 files too** refuses with that file named. Leaving it out would record it as
 absent, and the restore would then delete it once the turn made it readable. A
-file that disappeared while the checkpoint was being taken is left out, as git
-would record it removed. Each path keeps its own bytes even when it ends in a
+folder git cannot open (a `sec/` at mode 000) does the same, with the folder
+named: git would quietly skip the untracked files inside, and a tracked file
+under it could not be looked at either. So does a folder whose `.gitignore`
+git cannot read, because what it ignores is then unknown. The restore compares
+the checkpoint with a second tree of the worktree as it is now, built the same
+way, and that tree follows the same rules; an error found there starts with
+"the worktree as it is now", so it is clear the checkpoint itself was fine. A
+file or folder you do not need restored can be added to `.gitignore`: ignored
+paths are outside both trees, so an unreadable one stops blocking a rewind
+(the restore then leaves it exactly as it is), as long as no tracked file sits
+inside it. A file that disappeared while
+the checkpoint was being taken is left out, as git would record it removed. A
+file swapped for a symlink or a FIFO in the middle of the capture is reported
+at once instead of followed or waited on. Each path keeps its own bytes even when it ends in a
 carriage return next to a path without one (`a.txt` and `a.txt\r`).
 Checkpoints are only captured while the Labs switch is on, so a turn sent while
 it was off has none; turning the switch on does not invent one for work that

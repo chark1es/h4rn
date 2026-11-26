@@ -1183,7 +1183,8 @@ pub const MAX_CHECKPOINT_IGNORED: usize = 10_000;
 /// `.git/info/attributes`, and not the global `core.attributesFile`. A clean
 /// filter and `core.autocrlf` never run either. `Err` names why a checkpoint
 /// cannot be complete — more ignored paths than [`MAX_CHECKPOINT_IGNORED`], a
-/// file that is there but cannot be read, or a worktree git cannot list — and
+/// file that is there but cannot be read, a folder git could not open (its
+/// untracked files would go unlisted), or a worktree git cannot list — and
 /// the caller records that reason so a restore refuses with it.
 ///
 /// Ignored files are outside the tree by design (they are build output, not
@@ -1200,8 +1201,9 @@ pub fn checkpoint_commit(workspace: &Path) -> Result<Option<Checkpoint>, String>
     let Some(repo) = toplevel(workspace) else {
         return Ok(None);
     };
-    // A file that is there but cannot be read makes the checkpoint
-    // incomplete: recording it as absent would let a restore delete it.
+    // A file that is there but cannot be read, or a folder git could not
+    // list, makes the checkpoint incomplete: recording what is inside as
+    // absent would let a restore delete it.
     let Some(tree) = worktree_tree(&repo)? else {
         return Ok(None);
     };
@@ -1222,11 +1224,12 @@ pub fn checkpoint_commit(workspace: &Path) -> Result<Option<Checkpoint>, String>
 /// Regular files are hashed in one `--stdin-paths` process; a path that
 /// protocol cannot carry (one with a newline, or starting with a quote) and
 /// every symlink target get their own. `Ok(None)` when the tree could not be
-/// written. `Err` when git could not list the worktree, or when a file that is
-/// still there could not be read: leaving it out would record it as absent,
-/// and a restore would then delete it.
+/// written. `Err` when git could not list the whole worktree (a folder it
+/// could not open), or when a path that is still there could not be read:
+/// leaving it out would record it as absent, and a restore would then delete
+/// it. The reason names the path and is the caller's to place in time.
 fn worktree_tree(repo: &Path) -> Result<Option<String>, String> {
-    let listed = run_bytes_with_timeout(
+    let (status, listed, stderr) = run_raw(
         repo,
         [
             "ls-files",
@@ -1238,6 +1241,15 @@ fn worktree_tree(repo: &Path) -> Result<Option<String>, String> {
         ],
         OBSERVATION_GIT_TIMEOUT,
     )?;
+    if !status.success() {
+        return Err(failure_message(status, &stderr));
+    }
+    // `ls-files` warns and still exits 0 when it cannot open a folder (or a
+    // folder's `.gitignore`), and the untracked files inside are simply not
+    // listed. A tree without them would record them as absent.
+    if let Some(reason) = unlisted_folder(&stderr) {
+        return Err(reason);
+    }
     let paths = nul_paths(&listed)?;
     // `core.filemode=false` makes git ignore the executable bit; the tree must
     // record what git would have recorded.
@@ -1260,17 +1272,22 @@ fn worktree_tree(repo: &Path) -> Result<Option<String>, String> {
         }
         let absolute = repo.join(tree_path);
         // A path that disappeared while the tree was being built is left out:
-        // `git add -A` would have recorded it as removed.
-        let Ok(meta) = absolute.symlink_metadata() else {
-            continue;
+        // `git add -A` would have recorded it as removed. Any other error (a
+        // folder on the way that cannot be searched) leaves the path's state
+        // unknown, and recording it as absent would let a restore delete it.
+        let meta = match absolute.symlink_metadata() {
+            Ok(meta) => meta,
+            Err(error) if is_absent(&error) => continue,
+            Err(error) => return Err(format!("{tree_path} could not be read: {error}")),
         };
         if meta.file_type().is_symlink() {
-            let Ok(target) = std::fs::read_link(&absolute) else {
-                continue;
+            let target = match std::fs::read_link(&absolute) {
+                Ok(target) => target,
+                Err(error) if is_absent(&error) => continue,
+                Err(error) => return Err(format!("{tree_path} could not be read: {error}")),
             };
-            let Ok(object) = hash_bytes(repo, &path_to_bytes(&target)) else {
-                continue;
-            };
+            let object = hash_bytes(repo, &path_to_bytes(&target))
+                .map_err(|error| format!("{tree_path} could not be recorded: {error}"))?;
             entries.push((tree_path, MODE_SYMLINK, object));
         } else if meta.is_file() {
             let mode = if filemode && is_executable(&meta) {
@@ -1323,6 +1340,43 @@ fn worktree_tree(repo: &Path) -> Result<Option<String>, String> {
     };
     let tree = tree.trim().to_owned();
     Ok((!tree.is_empty()).then_some(tree))
+}
+
+/// Whether an I/O error means the path is simply not there: it was removed, or
+/// a folder on the way became a file.
+fn is_absent(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+    )
+}
+
+/// The reason a worktree listing is incomplete, from `ls-files`' stderr.
+///
+/// Git exits 0 after `could not open directory 'x/'` (the untracked files in
+/// `x/` are not listed) and after `unable to access 'x/.gitignore'` (what that
+/// folder ignores is unknown). Either way the listing cannot be trusted to name
+/// every file, so the folder is named and the tree is not written. Git runs
+/// with `LC_ALL=C` (see [`sanitize`]), so the wording is stable.
+fn unlisted_folder(stderr: &[u8]) -> Option<String> {
+    let stderr = String::from_utf8_lossy(stderr);
+    stderr.lines().find_map(|line| {
+        let line = line.trim();
+        let rest = line.strip_prefix("warning: ").unwrap_or(line);
+        if let Some(rest) = rest.strip_prefix("could not open directory '") {
+            let (folder, cause) = rest.rsplit_once("': ").unwrap_or((rest, "unknown error"));
+            Some(format!(
+                "git could not open the folder {folder}, so the files in it could not be listed: {cause}"
+            ))
+        } else if let Some(rest) = rest.strip_prefix("unable to access '") {
+            let (file, cause) = rest.rsplit_once("': ").unwrap_or((rest, "unknown error"));
+            Some(format!(
+                "git could not read {file}, so which files it ignores is unknown: {cause}"
+            ))
+        } else {
+            None
+        }
+    })
 }
 
 /// The gitlink a folder in the worktree stands for, if any.
@@ -1415,23 +1469,43 @@ fn hash_one_file(repo: &Path, path: &str) -> Result<Option<String>, String> {
         Err(error) => error,
     };
     if still_readable(repo, path)? {
-        Err(format!(
-            "{path} could not be read for the checkpoint: {error}"
-        ))
+        Err(format!("{path} could not be read: {error}"))
     } else {
         Ok(None)
     }
 }
 
-/// Whether a file the checkpoint lists can still be opened: `Ok(false)` when it
+/// Whether a file the listing named can still be opened: `Ok(false)` when it
 /// is gone, `Err` naming it when it is there but cannot be read.
+///
+/// The open never follows a symlink and never blocks: a file swapped for a
+/// link, or for a FIFO with no writer, while the tree was being built is
+/// reported at once instead of followed or waited on forever.
 fn still_readable(repo: &Path, path: &str) -> Result<bool, String> {
-    match std::fs::File::open(repo.join(path)) {
-        Ok(_) => Ok(true),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(format!(
-            "{path} could not be read for the checkpoint: {error}"
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let file = match options.open(repo.join(path)) {
+        Ok(file) => file,
+        Err(error) if is_absent(&error) => return Ok(false),
+        #[cfg(unix)]
+        Err(error) if error.raw_os_error() == Some(libc::ELOOP) => {
+            return Err(format!(
+                "{path} became a symbolic link while it was being read"
+            ));
+        }
+        Err(error) => return Err(format!("{path} could not be read: {error}")),
+    };
+    match file.metadata() {
+        Ok(meta) if meta.is_file() => Ok(true),
+        Ok(_) => Err(format!(
+            "{path} stopped being a regular file while it was being read"
         )),
+        Err(error) => Err(format!("{path} could not be read: {error}")),
     }
 }
 
@@ -1468,9 +1542,12 @@ fn path_to_bytes(path: &Path) -> Vec<u8> {
 /// build directory with thousands of objects costs one line. Names only: the
 /// checkpoint must not depend on reading the ignored content. Past
 /// [`MAX_CHECKPOINT_IGNORED`] the listing is refused: a partial one cannot tell
-/// a missing ignored path from one that was never listed.
+/// a missing ignored path from one that was never listed. So is one where git
+/// could not open a folder: a fully ignored folder is listed without being
+/// opened, but one that also holds tracked files is walked, and the ignored
+/// files inside would go unrecorded (see [`unlisted_folder`]).
 fn ignored_paths(workspace: &Path) -> Result<Vec<String>, String> {
-    let raw = run_bytes_with_timeout(
+    let (status, raw, stderr) = run_raw(
         workspace,
         [
             "ls-files",
@@ -1483,6 +1560,12 @@ fn ignored_paths(workspace: &Path) -> Result<Vec<String>, String> {
         ],
         OBSERVATION_GIT_TIMEOUT,
     )?;
+    if !status.success() {
+        return Err(failure_message(status, &stderr));
+    }
+    if let Some(reason) = unlisted_folder(&stderr) {
+        return Err(reason);
+    }
     let mut paths = nul_paths(&raw)?;
     if paths.len() > MAX_CHECKPOINT_IGNORED {
         return Err(format!(
@@ -1551,7 +1634,9 @@ pub fn checkpoint_changes(
     // through `.git/info/attributes` and the global `core.attributesFile`, so
     // a turn that only changed a file's line endings could look unchanged.
     // Two trees built the same way are compared by their raw bytes.
-    let now = worktree_tree(&repo)?
+    // A reason from this tree is about the worktree now, not the checkpoint.
+    let now = worktree_tree(&repo)
+        .map_err(|error| format!("the worktree as it is now: {error}"))?
         .ok_or_else(|| "git could not record the worktree as it is now".to_owned())?;
     // Rename detection would report a staged rename as only its new path, and
     // restoring that path would delete the file without putting the old one
@@ -2903,5 +2988,60 @@ pub fn mentions_worktree(input: &Value) -> bool {
         Value::Array(items) => items.iter().any(mentions_worktree),
         Value::Object(map) => map.values().any(mentions_worktree),
         _ => false,
+    }
+}
+
+#[cfg(all(test, unix))]
+mod still_readable_tests {
+    use super::still_readable;
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    use std::path::Path;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    fn mkfifo(path: &Path) {
+        let name = CString::new(path.as_os_str().as_bytes()).unwrap();
+        // SAFETY: `name` is a valid NUL-terminated path for this call.
+        let made = unsafe { libc::mkfifo(name.as_ptr(), 0o600) };
+        assert_eq!(made, 0, "mkfifo: {}", std::io::Error::last_os_error());
+    }
+
+    /// `still_readable(repo, path)` on its own thread, which must answer within
+    /// a few seconds: a blocking open would never come back.
+    fn answer_promptly(repo: &Path, path: &str) -> Result<bool, String> {
+        let (repo, path) = (repo.to_owned(), path.to_owned());
+        let (send, receive) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = send.send(still_readable(&repo, &path));
+        });
+        receive
+            .recv_timeout(Duration::from_secs(5))
+            .expect("still_readable must not block on a FIFO")
+    }
+
+    #[test]
+    fn a_fifo_or_a_link_to_one_is_reported_at_once_and_never_waited_on() {
+        let dir = tempfile::tempdir().unwrap();
+        mkfifo(&dir.path().join("pipe"));
+        std::os::unix::fs::symlink("pipe", dir.path().join("link")).unwrap();
+
+        let linked = answer_promptly(dir.path(), "link").expect_err("a link is not followed");
+        assert!(linked.contains("link"), "{linked}");
+        assert!(linked.contains("symbolic link"), "{linked}");
+
+        let pipe = answer_promptly(dir.path(), "pipe").expect_err("a FIFO is not a file");
+        assert!(pipe.contains("pipe"), "{pipe}");
+        assert!(pipe.contains("regular file"), "{pipe}");
+    }
+
+    #[test]
+    fn a_regular_file_is_readable_and_a_missing_one_is_gone() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "a").unwrap();
+        assert_eq!(still_readable(dir.path(), "a.txt"), Ok(true));
+        assert_eq!(still_readable(dir.path(), "missing.txt"), Ok(false));
+        // A folder on the way that is now a file: the path is gone too.
+        assert_eq!(still_readable(dir.path(), "a.txt/inner"), Ok(false));
     }
 }

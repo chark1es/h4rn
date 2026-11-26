@@ -3019,6 +3019,215 @@ mod tests {
         assert!(refused.contains("private.key"), "{refused}");
     }
 
+    /// Takes `turn`'s checkpoint as a turn's start does (see threads.rs): a
+    /// reason the capture cannot be complete is recorded, and returned.
+    fn capture_turn(fixture: &Fixture, turn: &str) -> Option<String> {
+        let turn = TurnId::new(turn);
+        match crate::worktrees::git::checkpoint_commit(&fixture.repo) {
+            Ok(Some(checkpoint)) => {
+                fixture
+                    .store
+                    .record_checkpoint(
+                        &fixture.repo,
+                        &fixture.thread,
+                        &turn,
+                        &checkpoint.tree,
+                        &checkpoint.ignored,
+                    )
+                    .unwrap();
+                None
+            }
+            Ok(None) => None,
+            Err(reason) => {
+                fixture
+                    .store
+                    .record_checkpoint_incomplete(&fixture.repo, &fixture.thread, &turn, &reason)
+                    .unwrap();
+                Some(reason)
+            }
+        }
+    }
+
+    /// A folder set to mode 000 that goes back to 0755 when dropped, so the
+    /// temporary directory can always be removed. `None` (with a note) when
+    /// this user can list it anyway (running as root): the test cannot be set
+    /// up.
+    #[cfg(unix)]
+    struct LockedFolder(PathBuf);
+
+    #[cfg(unix)]
+    impl LockedFolder {
+        fn lock(path: &Path) -> Option<Self> {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o000)).unwrap();
+            let locked = Self(path.to_owned());
+            if fs::read_dir(path).is_ok() {
+                eprintln!(
+                    "skipped: this user can list a mode-000 folder (running as root?), \
+                     so an unreadable folder cannot be set up"
+                );
+                return None;
+            }
+            Some(locked)
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for LockedFolder {
+        fn drop(&mut self) {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o755));
+        }
+    }
+
+    /// Checkpoints turn_1 with `folder` locked, lets the "turn" unlock it, and
+    /// checks that the restore refuses naming `named` and deletes none of
+    /// `kept` (path, text).
+    #[cfg(unix)]
+    fn locked_folder_refuses(fixture: &Fixture, folder: &str, named: &str, kept: &[(&str, &str)]) {
+        let Some(locked) = LockedFolder::lock(&fixture.repo.join(folder)) else {
+            return;
+        };
+        if let Some(reason) = capture_turn(fixture, "turn_1") {
+            assert!(reason.contains(named), "{reason}");
+        }
+        // The turn runs `chmod 755` on the folder and changes nothing else.
+        drop(locked);
+
+        let prepared = fixture.prepare(&["turn_1"]);
+        if let Ok(prepared) = &prepared {
+            run_restore(prepared);
+        }
+        for (path, text) in kept {
+            assert!(
+                fixture.repo.join(path).exists(),
+                "{path} must not be deleted by the restore"
+            );
+            assert_eq!(read(&fixture.repo, path), *text);
+        }
+        let refused = prepared.expect_err("the restore refuses");
+        assert!(refused.contains("no complete file checkpoint"), "{refused}");
+        assert!(refused.contains(named), "{refused}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_folder_with_tracked_and_untracked_files_refuses_and_deletes_nothing() {
+        let fixture = Fixture::new(&[("README.md", "hi\n"), ("sec/tracked.key", "tracked\n")]);
+        write(&fixture.repo, "sec/untracked.key", "untracked\n");
+        locked_folder_refuses(
+            &fixture,
+            "sec",
+            "sec/",
+            &[
+                ("sec/tracked.key", "tracked\n"),
+                ("sec/untracked.key", "untracked\n"),
+            ],
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_folder_of_untracked_files_refuses_and_deletes_nothing() {
+        // `ls-files` warns that it cannot open the folder and exits 0; only
+        // that warning shows the listing missed these files.
+        let fixture = Fixture::new(&[("README.md", "hi\n")]);
+        write(&fixture.repo, "sec/untracked.key", "untracked\n");
+        write(&fixture.repo, "sec/other.key", "other\n");
+        locked_folder_refuses(
+            &fixture,
+            "sec",
+            "sec/",
+            &[
+                ("sec/untracked.key", "untracked\n"),
+                ("sec/other.key", "other\n"),
+            ],
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_tracked_file_in_an_unreadable_ignored_folder_refuses_and_is_kept() {
+        // `ls-files` never opens an ignored folder, so it prints no warning;
+        // only the tracked file's own failed lookup shows it cannot be seen.
+        let fixture = Fixture::new(&[("README.md", "hi\n"), (".gitignore", "sec/\n")]);
+        write(&fixture.repo, "sec/tracked.key", "tracked\n");
+        git(&fixture.repo, &["add", "-f", "sec/tracked.key"]);
+        git(&fixture.repo, &["commit", "-q", "-m", "force-add"]);
+        locked_folder_refuses(
+            &fixture,
+            "sec",
+            "sec/tracked.key",
+            &[("sec/tracked.key", "tracked\n")],
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_ignored_file_in_a_folder_git_cannot_list_is_never_deleted() {
+        use std::os::unix::fs::PermissionsExt;
+        // An ignored folder that also holds a tracked file is walked by the
+        // ignored listing. At mode 0100 the tracked file can still be read,
+        // but the folder cannot be listed, so `secret.key` would go
+        // unrecorded as ignored.
+        let fixture = Fixture::new(&[("README.md", "hi\n"), (".gitignore", "sec/\n")]);
+        write(&fixture.repo, "sec/tracked.txt", "tracked\n");
+        git(&fixture.repo, &["add", "-f", "sec/tracked.txt"]);
+        git(&fixture.repo, &["commit", "-q", "-m", "force-add"]);
+        write(&fixture.repo, "sec/secret.key", "secret\n");
+        let Some(locked) = LockedFolder::lock(&fixture.repo.join("sec")) else {
+            return;
+        };
+        fs::set_permissions(fixture.repo.join("sec"), fs::Permissions::from_mode(0o100)).unwrap();
+        if let Some(reason) = capture_turn(&fixture, "turn_1") {
+            assert!(reason.contains("sec/"), "{reason}");
+        }
+        // The turn opens the folder up and stops ignoring it.
+        drop(locked);
+        write(&fixture.repo, ".gitignore", "");
+
+        let prepared = fixture.prepare(&["turn_1"]);
+        if let Ok(prepared) = &prepared {
+            run_restore(prepared);
+        }
+        assert!(
+            fixture.repo.join("sec/secret.key").exists(),
+            "an ignored file git could not list is never deleted"
+        );
+        let refused = prepared.expect_err("the restore refuses");
+        assert!(refused.contains("no complete file checkpoint"), "{refused}");
+        assert!(refused.contains("sec/"), "{refused}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_file_unreadable_only_now_is_named_as_the_worktree_now() {
+        use std::os::unix::fs::PermissionsExt;
+        let fixture = Fixture::new(&[("README.md", "hi\n"), ("notes.txt", "before\n")]);
+        fixture.checkpoint("turn_1");
+        // The turn locks the file the checkpoint read without trouble.
+        let notes = fixture.repo.join("notes.txt");
+        fs::set_permissions(&notes, fs::Permissions::from_mode(0o000)).unwrap();
+        let readable = fs::File::open(&notes).is_ok();
+        let refused = fixture.prepare(&["turn_1"]).map(|_| ());
+        fs::set_permissions(&notes, fs::Permissions::from_mode(0o644)).unwrap();
+        if readable {
+            eprintln!(
+                "skipped: this user can read a mode-000 file (running as root?), \
+                 so an unreadable file cannot be set up"
+            );
+            return;
+        }
+        let refused = refused.expect_err("the plan cannot see notes.txt");
+        assert!(
+            refused.starts_with("the worktree as it is now: "),
+            "{refused}"
+        );
+        assert!(refused.contains("notes.txt"), "{refused}");
+        assert!(!refused.contains("checkpoint"), "{refused}");
+        assert_eq!(read(&fixture.repo, "notes.txt"), "before\n");
+    }
+
     #[test]
     fn an_untracked_nested_repository_is_left_out_of_the_plan() {
         let fixture = Fixture::new(&[("README.md", "hi\n")]);
