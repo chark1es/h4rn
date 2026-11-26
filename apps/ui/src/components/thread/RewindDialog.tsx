@@ -32,17 +32,17 @@ function leftAloneText(paths: string[] | undefined): string | null {
   return rest > 0 ? i18n.t("dialogs:rewind.ignoredMore", { paths: shown, count: rest }) : shown;
 }
 
+/** A plan error with no message of its own; worded when the dialog renders. */
+const PLAN_FAILED = "\u0000rewind.planError";
+
 /**
- * Edits one sent prompt: the message and everything after it leave the thread.
+ * Edits one sent prompt: the message and everything after it are removed from the thread.
  *
  * The method the dialog names is the one the daemon would really use for the
  * selected prompt, and file restore is only shown when this machine's Labs
  * switch is on and the daemon would accept it. The warning says plainly that
  * the file choice also undoes the person's own later edits.
  */
-/** A plan error with no message of its own; worded when the dialog renders. */
-const PLAN_FAILED = "\u0000rewind.planError";
-
 export function RewindDialog({
   thread,
   log,
