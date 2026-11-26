@@ -795,6 +795,13 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Fixed
 
+- **Thread controls keep what the model really offers.** The Fast row now
+  follows the thread's current model instead of its harness (Codex advertises
+  service tiers per model), and the model catalogue a session reports is saved
+  with the thread, so a daemon restart no longer falls back to the static list
+  or silently starts a Codex thread on another model. OpenCode's in-place mode
+  and model switches have request-shape tests.
+
 - **A harness switch keeps the whole reply around its handoff.** Text the adapter
   reports while the switch is recording that the new harness took the prompt is
   merged like live output, so a long reply is no longer cut off at the hold's bound;

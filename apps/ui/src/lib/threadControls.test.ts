@@ -9,6 +9,7 @@ import {
   nonDefaultSettings,
   runtimeModeForModeId,
   threadEffortChoices,
+  threadFastSupported,
   threadModeChoices,
   threadModelChoices,
 } from "@/lib/threadControls";
@@ -111,6 +112,18 @@ describe("thread controls", () => {
     expect(fastSupported("codex")).toBe(true);
     expect(fastSupported("claude_code")).toBe(false);
     expect(fastSupported("acp")).toBe(false);
+  });
+
+  it("follows the model's fast tier and falls back to the harness before a session", () => {
+    expect(threadFastSupported(summary({ harness: "codex", fast_available: true }))).toBe(true);
+    // A switch to a model without a service tier hides the row.
+    expect(threadFastSupported(summary({ harness: "codex", fast_available: false }))).toBe(false);
+    // No session has answered yet (a new thread or an older daemon): the
+    // harness-wide answer stands.
+    expect(threadFastSupported(summary({ harness: "codex" }))).toBe(true);
+    expect(threadFastSupported(summary({ harness: "claude_code", fast_available: false }))).toBe(
+      false,
+    );
   });
 
   it("shows only settings that differ from the defaults", () => {

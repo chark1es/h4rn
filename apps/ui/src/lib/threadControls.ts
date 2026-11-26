@@ -114,6 +114,21 @@ export function fastSupported(harness: HarnessKind, agentId?: string | null): bo
   return harness === "codex" && !agentId;
 }
 
+/**
+ * Whether the Fast row belongs on this thread.
+ *
+ * The fast tier belongs to the model, so the daemon carries the live session's
+ * answer for the thread's current model in `fast_available`; a switch to a
+ * model without one hides the row. `undefined` means no session has reported
+ * it yet (an older daemon, or a thread that has not run), and the harness-wide
+ * answer stands.
+ */
+export function threadFastSupported(
+  summary: Pick<ThreadSummary, "harness" | "fast_available">,
+): boolean {
+  return summary.fast_available ?? fastSupported(summary.harness);
+}
+
 /** A human label for one effort value. */
 export function effortLabel(effort: string): string {
   switch (effort) {

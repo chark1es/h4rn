@@ -1031,7 +1031,6 @@ struct SwitchSnapshot {
     meta: ThreadMeta,
     state: ThreadState,
     session_settings: Option<ThreadSettings>,
-    advertised_models: Vec<String>,
     advertised_efforts: Vec<String>,
     context_window: Option<u64>,
     /// The limit the switch clears, so a refused switch keeps its countdown.
@@ -1048,7 +1047,6 @@ impl SwitchSnapshot {
         record.meta = self.meta;
         record.state = self.state;
         record.session_settings = self.session_settings;
-        record.advertised_models = self.advertised_models;
         record.advertised_efforts = self.advertised_efforts;
         record.context_window = self.context_window;
         record.limit = self.limit;
@@ -1155,15 +1153,6 @@ struct ThreadRecord {
     held_promotions: Vec<QueuedMessageId>,
     /// Effort values the live session advertised.
     advertised_efforts: Vec<String>,
-    /// Model ids the live session reported, when it named a catalogue.
-    ///
-    /// Codex publishes its `model/list` at session start; the summary carries
-    /// it so the picker offers what the session really has instead of the
-    /// adapter's static guess. Empty before the first session. A session that
-    /// ends does not empty it: the harness and agent have not changed, so the
-    /// last catalogue still describes what the next session of the same CLI
-    /// offers. A new session that reports a list replaces it.
-    advertised_models: Vec<String>,
     /// The thread settings the live session was started with, or was last
     /// switched to in place.
     ///
@@ -2804,8 +2793,9 @@ impl ThreadRecord {
             runtime_mode: self.meta.runtime_mode,
             reasoning_effort: self.meta.reasoning_effort.clone(),
             reasoning_efforts: self.advertised_efforts.clone(),
-            models: self.advertised_models.clone(),
+            models: self.meta.advertised_models.clone(),
             fast: self.meta.fast,
+            fast_available: self.meta.fast_available,
             tab,
             // The manual override sticks until the next turn starts, so this
             // is true exactly for the placement it caused: a lifecycle
@@ -2978,7 +2968,6 @@ impl ThreadRecord {
             meta: self.meta.clone(),
             state: self.state.clone(),
             session_settings: self.session_settings.clone(),
-            advertised_models: self.advertised_models.clone(),
             advertised_efforts: self.advertised_efforts.clone(),
             context_window: self.context_window,
             limit: self.limit.clone(),
@@ -4850,6 +4839,8 @@ impl ThreadManager {
             runtime_mode: request.runtime_mode,
             reasoning_effort: request.reasoning_effort,
             fast: request.fast,
+            advertised_models: Vec::new(),
+            fast_available: None,
             worktree: request.worktree,
             created_at: now,
             usage: Usage::default(),
@@ -4897,7 +4888,6 @@ impl ThreadManager {
             resume_at: None,
             limit: None,
             advertised_efforts: Vec::new(),
-            advertised_models: Vec::new(),
             session_settings: None,
             settings_lock: Arc::new(Mutex::new(())),
             switch_lock: Arc::new(Mutex::new(())),
@@ -5043,6 +5033,8 @@ impl ThreadManager {
             runtime_mode: RuntimeMode::ApprovalRequired,
             reasoning_effort: None,
             fast: false,
+            advertised_models: Vec::new(),
+            fast_available: None,
             worktree: None,
             created_at,
             usage: Usage::default(),
@@ -5134,7 +5126,6 @@ impl ThreadManager {
             resume_at: None,
             limit: None,
             advertised_efforts: Vec::new(),
-            advertised_models: Vec::new(),
             session_settings: None,
             settings_lock: Arc::new(Mutex::new(())),
             ttft_ms: None,
@@ -5364,6 +5355,10 @@ impl ThreadManager {
             runtime_mode: meta.runtime_mode,
             reasoning_effort: meta.reasoning_effort.clone(),
             fast: meta.fast,
+            // The fork starts on the source's harness and model, so the
+            // catalogue the source's last session reported describes it too.
+            advertised_models: meta.advertised_models.clone(),
+            fast_available: meta.fast_available,
             // A fork runs in the source's workspace. Per-fork worktrees come
             // later; the fork never invents one.
             worktree: None,
@@ -5636,7 +5631,6 @@ impl ThreadManager {
             resume_at: None,
             limit: None,
             advertised_efforts: Vec::new(),
-            advertised_models: Vec::new(),
             session_settings: None,
             settings_lock: Arc::new(Mutex::new(())),
             switch_lock: Arc::new(Mutex::new(())),
@@ -8421,7 +8415,8 @@ impl ThreadManager {
                 imported.native_resume = false;
             }
             record.session_settings = None;
-            record.advertised_models.clear();
+            record.meta.advertised_models.clear();
+            record.meta.fast_available = None;
             record.advertised_efforts.clear();
             record.context_window = None;
             let domain = vec![ThreadEvent::HarnessSwitched {
@@ -8694,10 +8689,12 @@ impl ThreadManager {
                 ThreadSettingsChange::Mode(mode) => record.meta.runtime_mode = *mode,
                 ThreadSettingsChange::Model(_) => {
                     record.meta.model = settings.model.clone();
-                    // A different model can have a different context window;
-                    // the proxy catalog fills it again on the next session
-                    // start.
+                    // A different model can have a different context window and
+                    // fast tier; the live switch below fills the tier it really
+                    // got, and the proxy catalog fills the window again on the
+                    // next session start.
                     record.context_window = None;
+                    record.meta.fast_available = None;
                 }
                 ThreadSettingsChange::Effort(_) => {
                     record.meta.reasoning_effort = settings.reasoning_effort.clone();
@@ -8727,12 +8724,13 @@ impl ThreadManager {
                     }
                 }
                 if matches!(change, ThreadSettingsChange::Model(_)) {
-                    // A new model can advertise a different effort list or a
-                    // different catalogue; the summary must show the one the
-                    // session now has, not the old model's.
+                    // A new model can advertise a different effort list, a
+                    // different catalogue or no fast tier; the summary must
+                    // show what the session now has, not the old model's.
                     if let Some(controls) = switched_controls {
-                        record.advertised_models = controls.models.clone().unwrap_or_default();
+                        record.meta.advertised_models = controls.models.clone().unwrap_or_default();
                         record.advertised_efforts = controls.efforts;
+                        record.meta.fast_available = Some(controls.fast);
                     }
                 }
             } else {
@@ -10377,7 +10375,6 @@ impl Inner {
                 resume_at: None,
                 limit: None,
                 advertised_efforts: Vec::new(),
-                advertised_models: Vec::new(),
                 session_settings: None,
                 settings_lock: Arc::new(Mutex::new(())),
                 switch_lock: Arc::new(Mutex::new(())),
@@ -11502,15 +11499,15 @@ impl Inner {
         let health = session.transport_health();
         let controls = session.controls();
         let session: SharedSession = Arc::new(Mutex::new(session));
-        // Serialise the publish with a settings change for this thread, so a
-        // value the person picked while the harness was booting is never
-        // reverted by a reconcile of the older snapshot below. The lock is
-        // taken before the record: `apply_thread_settings` takes the same
-        // settings lock first and the record second, so this order never
-        // deadlocks. Both guards drop before the prompt is delivered.
+        // No settings lock here: it is not what keeps a value the person picked
+        // while the harness was booting. The only write below that could undo
+        // such a change is the resumed-model reconcile, and it writes only
+        // while the record still names the model this session was started with
+        // (`record.meta.model == started_settings.model`). A model picked during
+        // startup makes that equality fail, so the newer choice stays; every
+        // other field below (`session`, `session_settings`, the catalogues) is
+        // either this startup's own or noticed by `detach_stale_session`.
         {
-            let settings_lock = handle.lock().await.settings_lock.clone();
-            let _settings = settings_lock.lock().await;
             let mut record = handle.lock().await;
             if record.closed
                 || self.closed.load(Ordering::Relaxed)
@@ -11534,11 +11531,25 @@ impl Inner {
             // A new session that names a catalogue replaces the last one; a
             // session that names none leaves it alone, because the harness and
             // agent have not changed and the last list still describes them.
-            if let Some(models) = controls
-                .as_ref()
-                .and_then(|controls| controls.models.clone())
-            {
-                record.advertised_models = models;
+            // The row is durable, so a restart keeps the catalogue instead of
+            // falling back to the adapter's static guess.
+            if let Some(controls) = controls.as_ref() {
+                if let Some(models) = controls.models.clone() {
+                    record.meta.advertised_models = models;
+                }
+                // Fast belongs to the model, so the session's answer replaces
+                // the last one even when it is "no tier" — but only while the
+                // thread still runs the model this session started on. A model
+                // picked during startup is the newer choice, and the session
+                // that takes it reports its own tier when it starts.
+                record.meta.fast_available = if record.meta.model == started_settings.model {
+                    Some(controls.fast)
+                } else {
+                    // A model picked during startup: the running session's
+                    // answer describes the old one, so it is unknown until the
+                    // session that takes the new model starts.
+                    None
+                };
             }
             record.advertised_efforts = controls
                 .as_ref()
@@ -28587,6 +28598,122 @@ mod tests {
         assert_eq!(summary.model, "gpt-b");
     }
 
+    /// The fast row follows the model, not just the harness.
+    ///
+    /// Codex advertises its service tiers per model, so a thread switched to a
+    /// model without one must not be offered Fast. The session's answer is what
+    /// the summary carries, and the daemon refuses a fast request the new model
+    /// cannot honour.
+    #[tokio::test]
+    async fn the_fast_tier_follows_the_model_the_thread_switches_to() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (harness, _settings) = FakeHarness::new()
+            .with_kind(HarnessKind::Codex)
+            .with_advertised_models(["gpt-a".to_string(), "gpt-b".to_string()])
+            .with_model_fast("gpt-a", true)
+            .with_model_fast("gpt-b", false)
+            .with_session_settings();
+        let host = HostId::new("host_test");
+        let manager = open_test_manager(harness, host.clone()).await;
+        let mut request = new_thread(host, workspace.path(), "first");
+        request.harness = HarnessKind::Codex;
+        request.model = "gpt-a".into();
+        let created = manager.create_thread(request).await.expect("create");
+        wait_for_idle(&manager, &created.thread_id).await;
+
+        let summary = manager
+            .get_thread(&created.thread_id, 0)
+            .await
+            .expect("summary")
+            .summary;
+        assert_eq!(
+            summary.fast_available,
+            Some(true),
+            "the model the thread runs offers Fast"
+        );
+
+        // Switching in place to a model with no service tier updates the
+        // summary at once: the picker must not keep offering the old model's
+        // row.
+        let summary = manager
+            .set_thread_model(&created.thread_id, "gpt-b".into())
+            .await
+            .expect("switch to the model without Fast");
+        assert_eq!(summary.model, "gpt-b");
+        assert_eq!(
+            summary.fast_available,
+            Some(false),
+            "the summary follows the model's catalogue, not the harness's"
+        );
+        let error = manager
+            .set_thread_fast(&created.thread_id, true)
+            .await
+            .expect_err("a model with no fast tier refuses Fast");
+        assert!(matches!(error, ManagerError::Unsupported(_)), "{error:?}");
+    }
+
+    /// The catalogue a thread's session reported outlives a daemon restart.
+    ///
+    /// Without it the picker and a new thread on that host fall back to the
+    /// adapter's static guess, which can name a model the installed CLI no
+    /// longer offers; the model the thread itself runs must not change either.
+    #[tokio::test]
+    async fn the_model_catalogue_survives_a_daemon_restart() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let journal: Arc<dyn Journal> =
+            Arc::new(SqliteJournal::in_memory().await.expect("journal"));
+        let (harness, _settings) = FakeHarness::new()
+            .with_kind(HarnessKind::Codex)
+            .with_advertised_models(["gpt-a".to_string(), "gpt-b".to_string()])
+            .with_model_fast("gpt-a", true)
+            .with_session_settings();
+        let host = HostId::new("host_test");
+        let manager = open_test_manager_with_journal(harness, host.clone(), journal.clone()).await;
+        let mut request = new_thread(host.clone(), workspace.path(), "first");
+        request.harness = HarnessKind::Codex;
+        request.model = "gpt-a".into();
+        let created = manager.create_thread(request).await.expect("create");
+        wait_for_idle(&manager, &created.thread_id).await;
+        let before = manager
+            .get_thread(&created.thread_id, 0)
+            .await
+            .expect("summary")
+            .summary;
+        assert_eq!(before.models, vec!["gpt-a", "gpt-b"]);
+        assert_eq!(before.fast_available, Some(true));
+        manager.shutdown().await;
+        drop(manager);
+
+        // A fresh daemon with a harness that advertises nothing yet: the row
+        // itself is what carries the catalogue across the restart.
+        let restarted = open_test_manager_with_journal(
+            FakeHarness::new().with_kind(HarnessKind::Codex),
+            host,
+            journal,
+        )
+        .await;
+        let summary = restarted
+            .get_thread(&created.thread_id, 0)
+            .await
+            .expect("summary after restart")
+            .summary;
+        assert_eq!(
+            summary.models,
+            vec!["gpt-a", "gpt-b"],
+            "the catalogue the session reported survived the restart"
+        );
+        assert_eq!(
+            summary.model, "gpt-a",
+            "the restart did not silently change the thread's model"
+        );
+        assert_eq!(
+            summary.fast_available,
+            Some(true),
+            "the fast answer belonged to the persisted model"
+        );
+        restarted.shutdown().await;
+    }
+
     /// A resumed agent keeps the model its conversation was using; the summary
     /// shows that model instead of the `default` alias the thread asked for.
     #[tokio::test]
@@ -28695,6 +28822,65 @@ mod tests {
             stored.model, "default",
             "the journal keeps the model chosen during startup"
         );
+    }
+
+    /// A model picked during startup beats the resumed default's reconcile.
+    ///
+    /// The thread starts on the agent's `default` alias, which the restored
+    /// reply resolves to `m-2`. A person who picks `m-1` while the harness is
+    /// booting must keep it: the startup's equality check is the guard, which
+    /// is why the publish does not need a settings lock.
+    #[tokio::test]
+    async fn a_concrete_model_chosen_during_startup_beats_the_restored_default() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (harness, start) = FakeHarness::new().with_start_gate();
+        let (harness, _settings) = harness
+            .with_kind(HarnessKind::Acp)
+            .with_instance("demo")
+            .with_advertised_models(["m-1".to_string(), "m-2".to_string()])
+            .with_default_model("default")
+            .with_restored_model("m-2")
+            .with_session_settings();
+        let (harness, sessions) = harness.with_session_count();
+        let host = HostId::new("host_test");
+        let journal: Arc<dyn Journal> =
+            Arc::new(SqliteJournal::in_memory().await.expect("journal"));
+        let manager = open_test_manager_with_journal(harness, host.clone(), journal.clone()).await;
+        let mut events = manager.subscribe();
+        let mut request = new_thread(host, workspace.path(), "first");
+        request.harness = HarnessKind::Acp;
+        request.agent_id = Some("demo".into());
+        request.model = "default".into();
+        let created = manager.create_thread(request).await.expect("create");
+
+        assert!(wait_until(|| sessions.get() >= 1).await);
+        let summary = manager
+            .set_thread_model(&created.thread_id, "m-1".into())
+            .await
+            .expect("pick a concrete model");
+        assert_eq!(summary.model, "m-1");
+
+        start.release();
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+        wait_for_idle(&manager, &created.thread_id).await;
+
+        let summary = manager
+            .get_thread(&created.thread_id, 0)
+            .await
+            .expect("summary")
+            .summary;
+        assert_eq!(
+            summary.model, "m-1",
+            "the startup must not reconcile the restored default over the model picked during it"
+        );
+        let stored = journal
+            .list_threads()
+            .await
+            .expect("the journal")
+            .into_iter()
+            .find(|meta| meta.thread_id == created.thread_id)
+            .expect("the thread's metadata");
+        assert_eq!(stored.model, "m-1");
     }
 
     /// A resumed agent with no catalogue in its reply leaves the daemon unable

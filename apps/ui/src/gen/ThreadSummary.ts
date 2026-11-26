@@ -112,11 +112,21 @@ reasoning_efforts: Array<string>,
  */
 models: Array<string>, 
 /**
- * Whether the thread asks the harness for its fast tier.
+ * Whether the thread asks for the harness's fast tier.
  *
  * Only harnesses with a real fast tier (Codex service tiers) report this.
  */
 fast: boolean, 
+/**
+ * Whether the thread's current model offers a fast tier.
+ *
+ * The fast tier belongs to the model, not the harness: Codex's catalogue
+ * names it per model, and a thread switched to a model without one must
+ * not be offered the row. `None` means no session has reported it yet (a
+ * thread that has not run, or an older daemon), and the client falls back
+ * to what the harness offers as a whole.
+ */
+fast_available?: boolean, 
 /**
  * Derived tab placement.
  */

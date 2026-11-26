@@ -15,10 +15,10 @@ import {
 } from "@/lib/store/appStore";
 import {
   effortLabel,
-  fastSupported,
   modeLabel,
   nonDefaultSettings,
   threadEffortChoices,
+  threadFastSupported,
   threadModeChoices,
   threadModelChoices,
 } from "@/lib/threadControls";
@@ -58,8 +58,9 @@ function Choice({
  * The compact thread controls in the composer: the current model, permission
  * mode and effort, and a picker for each the harness really offers.
  *
- * A harness without a real effort control or fast tier shows no row for it, and
- * an ACP agent shows only the modes it advertised.
+ * A harness without a real effort control or fast tier shows no row for it, an
+ * ACP agent shows only the modes it advertised, and Fast follows the thread's
+ * current model: a model without a service tier hides the row.
  */
 export function ThreadControls({ summary }: { summary: ThreadSummary }) {
   useProxyCatalog();
@@ -84,7 +85,7 @@ export function ThreadControls({ summary }: { summary: ThreadSummary }) {
     agent?.modes.map((mode) => mode.id),
   );
   const efforts = threadEffortChoices(summary.harness, summary.reasoning_efforts ?? []);
-  const fast = fastSupported(summary.harness);
+  const fast = threadFastSupported(summary);
   const models = threadModelChoices(
     summary.harness,
     summary.model,
@@ -226,13 +227,13 @@ export function ThreadControls({ summary }: { summary: ThreadSummary }) {
             </>
           ) : null}
 
-          {fast ? (
+          {fast || (summary.fast ?? false) ? (
             <>
               <div className="q-tctrl-head">Speed</div>
               <Choice
                 checked={summary.fast ?? false}
                 label="Fast"
-                hint="Priority service tier, higher usage"
+                hint={fast ? "Priority service tier, higher usage" : "This model has no fast tier"}
                 onSelect={() => {
                   void setThreadFast(summary.thread_id, !(summary.fast ?? false)).then((ok) => {
                     if (ok) setOpen(false);

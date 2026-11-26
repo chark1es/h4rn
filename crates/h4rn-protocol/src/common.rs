@@ -465,11 +465,21 @@ pub struct ThreadSummary {
     /// daemon's thread has none, so the picker falls back to the static list.
     #[serde(default)]
     pub models: Vec<String>,
-    /// Whether the thread asks the harness for its fast tier.
+    /// Whether the thread asks for the harness's fast tier.
     ///
     /// Only harnesses with a real fast tier (Codex service tiers) report this.
     #[serde(default)]
     pub fast: bool,
+    /// Whether the thread's current model offers a fast tier.
+    ///
+    /// The fast tier belongs to the model, not the harness: Codex's catalogue
+    /// names it per model, and a thread switched to a model without one must
+    /// not be offered the row. `None` means no session has reported it yet (a
+    /// thread that has not run, or an older daemon), and the client falls back
+    /// to what the harness offers as a whole.
+    #[serde(default)]
+    #[ts(optional)]
+    pub fast_available: Option<bool>,
     /// Derived tab placement.
     pub tab: ThreadTab,
     /// Whether the current tab is where the person just placed the thread.
@@ -946,6 +956,7 @@ mod tests {
             reasoning_efforts: Vec::new(),
             models: Vec::new(),
             fast: false,
+            fast_available: None,
             tab: ThreadTab::Working,
             placed_by_user: false,
             pinned: false,

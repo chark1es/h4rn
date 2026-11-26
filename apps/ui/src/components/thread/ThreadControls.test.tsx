@@ -121,6 +121,47 @@ describe("ThreadControls", () => {
     expect(screen.queryByText("Fast")).toBeNull();
   });
 
+  it("drops the Fast row when a switch lands on a model without one", () => {
+    render(
+      <ThreadControls
+        summary={summary({
+          harness: "codex",
+          model: "gpt-a",
+          models: ["gpt-a", "gpt-b"],
+          fast_available: true,
+        })}
+      />,
+    );
+    fireEvent.click(screen.getByText("gpt-a"));
+    expect(screen.getByText("Fast")).toBeTruthy();
+    cleanup();
+
+    // The daemon reports the new model has no service tier: the row is gone.
+    render(
+      <ThreadControls
+        summary={summary({
+          harness: "codex",
+          model: "gpt-b",
+          models: ["gpt-a", "gpt-b"],
+          fast_available: false,
+        })}
+      />,
+    );
+    fireEvent.click(screen.getByText("gpt-b"));
+    expect(screen.queryByText("Fast")).toBeNull();
+  });
+
+  it("keeps a checked Fast row when the model has no tier, so it can be turned off", () => {
+    render(
+      <ThreadControls
+        summary={summary({ harness: "codex", model: "gpt-b", fast: true, fast_available: false })}
+      />,
+    );
+    fireEvent.click(screen.getByText("gpt-b"));
+    fireEvent.click(screen.getByRole("menuitemradio", { name: /^Fast/ }));
+    expect(mock.actions.setThreadFast).toHaveBeenCalledWith("th_1", false);
+  });
+
   it("shows no permission rows for an agent whose modes are unknown", () => {
     mock.agents = [{ id: "demo", modes: [{ id: "code" }], models: [{ id: "m-1" }] }];
     render(

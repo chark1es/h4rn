@@ -3481,6 +3481,7 @@ mod tests {
             reasoning_efforts: Vec::new(),
             models: Vec::new(),
             fast: false,
+            fast_available: None,
             tab: h4rn_protocol::ThreadTab::Working,
             placed_by_user: false,
             pinned: false,

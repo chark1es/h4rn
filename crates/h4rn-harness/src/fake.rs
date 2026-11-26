@@ -423,6 +423,8 @@ pub struct FakeHarness {
     default_models: Vec<String>,
     /// Effects each model offers, so a model switch changes the catalogue.
     model_efforts: Option<BTreeMap<String, Vec<String>>>,
+    /// Which models offer a fast tier, when a test asks for a per-model answer.
+    model_fast: BTreeMap<String, bool>,
     /// Configured ACP agent ids this fake harness accepts, when a test creates
     /// an ACP thread and later switches it to another configured agent.
     instances: Vec<String>,
@@ -911,6 +913,7 @@ impl Default for FakeHarness {
             restored_model: None,
             default_models: Vec::new(),
             model_efforts: None,
+            model_fast: BTreeMap::new(),
             instances: Vec::new(),
             switchable: true,
             completion_gate: None,
@@ -1282,6 +1285,16 @@ impl FakeHarness {
     /// what the live session actually offers.
     pub fn with_advertised_models(mut self, models: impl IntoIterator<Item = String>) -> Self {
         self.advertised_models = Some(models.into_iter().collect());
+        self
+    }
+
+    /// Says whether one model offers a fast tier, the way Codex's catalogue
+    /// answers per model.
+    ///
+    /// A model the map does not name falls back to what the harness offers as
+    /// a whole, so a test only names the models that differ.
+    pub fn with_model_fast(mut self, model: impl Into<String>, fast: bool) -> Self {
+        self.model_fast.insert(model.into(), fast);
         self
     }
 
@@ -1857,6 +1870,7 @@ impl Harness for FakeHarness {
             restored_model: self.restored_model.clone(),
             default_models: self.default_models.clone(),
             model_efforts: self.model_efforts.clone(),
+            model_fast: self.model_fast.clone(),
             current_model: spec.model.clone(),
             switchable: self.switchable,
             primed,
@@ -1928,6 +1942,8 @@ pub struct FakeSession {
     default_models: Vec<String>,
     /// Efforts each model offers, when a test asked for per-model catalogues.
     model_efforts: Option<BTreeMap<String, Vec<String>>>,
+    /// Which models offer a fast tier, when a test asked for one.
+    model_fast: BTreeMap<String, bool>,
     /// The model this session runs, so its effort catalogue can follow it.
     current_model: String,
     /// Whether this session accepts in-place setting changes.
@@ -2047,7 +2063,11 @@ impl HarnessSession for FakeSession {
             current_model: self.restored_model.clone(),
             default_models: self.default_models.clone(),
             efforts,
-            fast: base.fast,
+            fast: self
+                .model_fast
+                .get(&self.current_model)
+                .copied()
+                .unwrap_or(base.fast),
             switch_mode: self.switchable,
             switch_model: self.switchable,
             switch_effort: self.switchable,

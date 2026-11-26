@@ -126,6 +126,21 @@ pub struct ThreadMeta {
     pub reasoning_effort: Option<String>,
     /// Whether the thread asks for the harness's fast tier.
     pub fast: bool,
+    /// Model ids the thread's last session advertised.
+    ///
+    /// Codex publishes its `model/list` at session start. Keeping the list on
+    /// the thread row means a daemon restart does not fall back to the
+    /// adapter's static guess: the picker and a new thread on that host start
+    /// from what the installed CLI really offers. A new session that reports a
+    /// catalogue replaces it; a harness switch clears it.
+    pub advertised_models: Vec<String>,
+    /// Whether the thread's current model offered a fast tier, when known.
+    ///
+    /// The fast tier belongs to the model, so the answer from the last session
+    /// describes the model the row names. `None` before any session advertised
+    /// one, and after a switch to a model whose tier the session could not
+    /// report. Persisted beside `advertised_models` for the same reason.
+    pub fast_available: Option<bool>,
     /// Worktree intent recorded at creation.
     pub worktree: Option<WorktreeRequest>,
     /// Creation time, used as the initial lifecycle clock.
@@ -1049,6 +1064,8 @@ impl SqliteJournal {
                 runtime_mode   TEXT NOT NULL DEFAULT 'approval_required',
                 reasoning_effort TEXT,
                 fast           INTEGER NOT NULL DEFAULT 0,
+                fast_available INTEGER,
+                advertised_models_json TEXT NOT NULL DEFAULT '[]',
                 worktree_json  TEXT,
                 parent_thread_id TEXT,
                 subagent_id    TEXT,
@@ -1115,6 +1132,14 @@ impl SqliteJournal {
             .await?;
         self.ensure_column("daemon_threads", "fast", "INTEGER NOT NULL DEFAULT 0")
             .await?;
+        self.ensure_column("daemon_threads", "fast_available", "INTEGER")
+            .await?;
+        self.ensure_column(
+            "daemon_threads",
+            "advertised_models_json",
+            "TEXT NOT NULL DEFAULT '[]'",
+        )
+        .await?;
         self.ensure_column(
             "daemon_threads",
             "title_source",
@@ -1625,10 +1650,11 @@ async fn upsert_thread_on(
     let worktree_identity_json = serde_json::to_string(&meta.worktree_identity)?;
     let provider_turns_json = serde_json::to_string(&meta.provider_turns)?;
     let forked_json = serde_json::to_string(&meta.forked_from)?;
+    let advertised_models_json = serde_json::to_string(&meta.advertised_models)?;
     sqlx::query(
         "INSERT INTO daemon_threads
-            (thread_id, host, harness, title, title_source, workspace_path, model, created_at, usage_json, resume_id, runtime_mode, reasoning_effort, fast, worktree_json, parent_thread_id, subagent_id, agent_id, agent_fingerprint, parked_json, queued_json, claimed_json, imported_json, rewind_json, worktree_identity_json, provider_turns_json, forked_json, handoff_pending, switch_generation)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (thread_id, host, harness, title, title_source, workspace_path, model, created_at, usage_json, resume_id, runtime_mode, reasoning_effort, fast, fast_available, advertised_models_json, worktree_json, parent_thread_id, subagent_id, agent_id, agent_fingerprint, parked_json, queued_json, claimed_json, imported_json, rewind_json, worktree_identity_json, provider_turns_json, forked_json, handoff_pending, switch_generation)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(thread_id) DO UPDATE SET
             host = excluded.host,
             harness = excluded.harness,
@@ -1641,6 +1667,8 @@ async fn upsert_thread_on(
             runtime_mode = excluded.runtime_mode,
             reasoning_effort = excluded.reasoning_effort,
             fast = excluded.fast,
+            fast_available = excluded.fast_available,
+            advertised_models_json = excluded.advertised_models_json,
             worktree_json = excluded.worktree_json,
             parent_thread_id = excluded.parent_thread_id,
             subagent_id = excluded.subagent_id,
@@ -1670,6 +1698,8 @@ async fn upsert_thread_on(
     .bind(runtime_mode)
     .bind(meta.reasoning_effort.as_deref())
     .bind(meta.fast as i64)
+    .bind(meta.fast_available.map(|available| available as i64))
+    .bind(advertised_models_json)
     .bind(worktree_json)
     .bind(meta.parent_thread_id.as_ref().map(ThreadId::as_str))
     .bind(meta.subagent_id.as_ref().map(SubagentId::as_str))
@@ -1812,7 +1842,7 @@ impl Journal for SqliteJournal {
 
     async fn list_threads(&self) -> Result<Vec<ThreadMeta>, JournalError> {
         let rows = sqlx::query(
-            "SELECT thread_id, host, harness, title, title_source, workspace_path, model, created_at, usage_json, resume_id, runtime_mode, reasoning_effort, fast, worktree_json, parent_thread_id, subagent_id, agent_id, agent_fingerprint, parked_json, queued_json, claimed_json, imported_json, rewind_json, worktree_identity_json, provider_turns_json, forked_json, handoff_pending, switch_generation
+            "SELECT thread_id, host, harness, title, title_source, workspace_path, model, created_at, usage_json, resume_id, runtime_mode, reasoning_effort, fast, fast_available, advertised_models_json, worktree_json, parent_thread_id, subagent_id, agent_id, agent_fingerprint, parked_json, queued_json, claimed_json, imported_json, rewind_json, worktree_identity_json, provider_turns_json, forked_json, handoff_pending, switch_generation
              FROM daemon_threads ORDER BY created_at ASC",
         )
         .fetch_all(&self.pool)
@@ -1853,6 +1883,13 @@ impl Journal for SqliteJournal {
                     .unwrap_or_default(),
                 reasoning_effort: row.try_get("reasoning_effort")?,
                 fast: row.try_get::<i64, _>("fast")? != 0,
+                fast_available: row
+                    .try_get::<Option<i64>, _>("fast_available")?
+                    .map(|available| available != 0),
+                advertised_models: row
+                    .try_get::<Option<String>, _>("advertised_models_json")?
+                    .and_then(|json| serde_json::from_str(&json).ok())
+                    .unwrap_or_default(),
                 worktree: worktree_json
                     .and_then(|json| serde_json::from_str(&json).ok())
                     .flatten(),
@@ -3434,6 +3471,8 @@ mod tests {
             runtime_mode: RuntimeMode::ApprovalRequired,
             reasoning_effort: None,
             fast: false,
+            advertised_models: Vec::new(),
+            fast_available: None,
             worktree: None,
             created_at: Utc::now(),
             usage: Usage::default(),
@@ -3471,6 +3510,7 @@ mod tests {
             reasoning_efforts: Vec::new(),
             models: Vec::new(),
             fast: false,
+            fast_available: None,
             tab: h4rn_protocol::ThreadTab::Working,
             placed_by_user: false,
             pinned: false,

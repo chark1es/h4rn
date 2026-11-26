@@ -2294,6 +2294,8 @@ fn idle_thread_meta(
         runtime_mode: RuntimeMode::ApprovalRequired,
         reasoning_effort: None,
         fast: false,
+        advertised_models: Vec::new(),
+        fast_available: None,
         worktree: None,
         created_at: Utc::now(),
         usage: Default::default(),
