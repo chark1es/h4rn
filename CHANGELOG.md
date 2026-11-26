@@ -48,6 +48,12 @@ All notable changes to h4rn are recorded here. The format follows
   follow the Language choice; agent output, tool output, file names and diffs
   stay as written. Token counts, costs and durations use the language's own
   formats, and palette rows that open a dialog now end in "…".
+- **The usage page in Chinese, Spanish and Japanese.** The page, its chart,
+  tables, limits and reset history, the auto-resume cards and the usage footer
+  under the composer follow the Language choice. Token counts, costs,
+  percentages, durations and dates use the language's own formats (the footer
+  now writes tokens like the receipt, "12.4K"); model ids, harness names and
+  provider messages stay as sent.
 - **Android Live Updates show a running agent.** A separate switch under
   Settings → Notifications → Phone alerts shows each running thread as an
   ongoing notification with its project and whether it is working, waiting for

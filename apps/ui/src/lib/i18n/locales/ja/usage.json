@@ -1,0 +1,178 @@
+{
+  "unitDisplay": "short",
+  "title": "使用量",
+  "refresh": "使用量を更新",
+  "allThreads": "すべてのマシンのすべてのスレッド",
+  "scope": {
+    "label": "範囲",
+    "thread": "スレッド",
+    "workspace": "ワークスペース",
+    "machine": "マシン",
+    "global": "全体"
+  },
+  "range": {
+    "label": "期間",
+    "today": "今日",
+    "14d": "14 日",
+    "30d": "30 日",
+    "all": "すべて"
+  },
+  "groupBy": {
+    "label": "グループ化",
+    "harness": "Harness",
+    "model": "モデル"
+  },
+  "metric": {
+    "label": "グラフの指標",
+    "tokens": "トークン",
+    "cost": "コスト"
+  },
+  "chart": {
+    "title": {
+      "tokens": {
+        "hour": {
+          "harness": "harness 別の 1 時間あたりのトークン",
+          "model": "モデル別の 1 時間あたりのトークン"
+        },
+        "day": {
+          "harness": "harness 別の 1 日あたりのトークン",
+          "model": "モデル別の 1 日あたりのトークン"
+        }
+      },
+      "cost": {
+        "hour": {
+          "harness": "harness 別の 1 時間あたりのコスト",
+          "model": "モデル別の 1 時間あたりのコスト"
+        },
+        "day": {
+          "harness": "harness 別の 1 日あたりのコスト",
+          "model": "モデル別の 1 日あたりのコスト"
+        }
+      }
+    },
+    "viewTable": "表で表示",
+    "viewChart": "グラフで表示",
+    "empty": "この期間に計測されたターンはまだありません。",
+    "bar": "{{label}} · {{value}}",
+    "hour": "時間",
+    "day": "日付",
+    "total": "合計"
+  },
+  "stats": {
+    "tokens": "トークン",
+    "tokensIn": "入力 {{tokens}}",
+    "cost": "コスト",
+    "estimate": "推定",
+    "throughput": "スループット",
+    "tokPerSec": "tok/s",
+    "turns_other": "{{count, number}} ターン",
+    "firstToken": "最初のトークン",
+    "mean": "平均",
+    "active": "アクティブ",
+    "activeShare": "アクティブ {{percent}}",
+    "runtime": "実行時間",
+    "wallTime": "経過時間"
+  },
+  "breakdown": {
+    "title": {
+      "harness": "harness 別",
+      "model": "モデル別"
+    },
+    "aside": "コストは価格表に基づく推定です · 請求額ではありません",
+    "empty": "この期間に計測されたものはありません。",
+    "harness": "Harness",
+    "model": "モデル",
+    "tokens": "トークン",
+    "cost": "コスト",
+    "tps": "tok/s",
+    "ttft": "TTFT",
+    "runs": "実行回数",
+    "active": "アクティブ"
+  },
+  "activeIdle": {
+    "title": "アクティブとアイドル",
+    "active": "アクティブ · {{percent}}",
+    "idle": "アイドル {{duration}}",
+    "note": "アイドルは、ターンがあなたを待っていた時間です（承認、質問、上限）。"
+  },
+  "limits": {
+    "title": "上限",
+    "settings": "自動再開の設定",
+    "unavailable": "現在、上限を取得できません。{{detail}}",
+    "none": "上限は検出されていません。上限が発生すると、h4rn が harness またはプロキシから読み取ります。",
+    "account": "アカウント",
+    "limited": "上限到達",
+    "limitedAt": "上限到達 · {{percent}}",
+    "resets": "{{time}} にリセット · あと {{countdown}}",
+    "noReset": "リセット時刻は報告されていません。",
+    "window": {
+      "hours_other": "{{count, number}} 時間",
+      "weekly": "週間",
+      "daily": "日次",
+      "monthly": "月間"
+    },
+    "source": {
+      "harness": "harness が報告",
+      "proxy": "プロキシから",
+      "provider": "プロバイダーから"
+    }
+  },
+  "resets": {
+    "title": "リセット履歴",
+    "aside": "新しい順",
+    "observed": "検出日時",
+    "harness": "Harness",
+    "account": "アカウント",
+    "reset": "リセット",
+    "source": "取得元",
+    "unknown": "不明",
+    "sourceName": {
+      "harness": "harness",
+      "proxy": "プロキシ",
+      "provider": "プロバイダー"
+    }
+  },
+  "offline": {
+    "title": "前回のレポートを表示しています",
+    "connecting": "デーモンに接続中です。数値は前回読み取ったままです。再接続したら更新してください。",
+    "degraded": "デーモンとの接続が不安定です。数値は前回読み取ったままです。再接続したら更新してください。",
+    "offline": "デーモンはオフラインです。数値は前回読み取ったままです。再接続したら更新してください。"
+  },
+  "error": {
+    "hint": "期間を広げるか、更新してください。"
+  },
+  "footnote": "使用量は h4rn 自身が集計します。価格が不明な場合は $0.00 ではなく「—」と表示します。コストは推定であり、請求額ではありません。",
+  "time": {
+    "now": "今",
+    "unknown": "不明"
+  },
+  "footer": {
+    "tokens": "{{tokens}} トークン",
+    "cost": "推定 {{cost}}",
+    "rate": "{{rate}} tok/s",
+    "ttft": "TTFT {{time}}",
+    "active": "アクティブ {{duration}}",
+    "context": "コンテキスト {{percent}}"
+  },
+  "resume": {
+    "paused": "{{title}} は一時停止中です",
+    "hitLimit": "{{harness}} が上限に達しました。",
+    "hitLimitUnknown": "harness が上限に達しました。",
+    "hitLimitAt": "{{harness}} が {{time}} に上限に達しました。h4rn は保存されたコンテキストで {{resumeAt}} にターンを再開します。",
+    "hitLimitAtUnknown": "harness が {{time}} に上限に達しました。h4rn は保存されたコンテキストで {{resumeAt}} にターンを再開します。",
+    "autoResumesAt": "{{time}} に自動再開",
+    "untilAutoResume": "後に自動再開",
+    "lastFailed": "前回の試行に失敗しました：{{error}}",
+    "failOver": "フェイルオーバー…",
+    "failingOver": "フェイルオーバー中…",
+    "cancel": "自動再開をキャンセル",
+    "cancelShort": "キャンセル",
+    "cancelling": "キャンセル中…",
+    "resumeNow": "今すぐ再開",
+    "resuming": "再開中…",
+    "noFailover": "フェイルオーバー先のモデルがありません",
+    "resumeOn": "{{harness}} が上限に達しました。次のモデルで今すぐ再開：",
+    "resumeOnUnknown": "harness が上限に達しました。次のモデルで今すぐ再開：",
+    "default": "デフォルト"
+  }
+}

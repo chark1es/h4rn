@@ -256,7 +256,7 @@ describe("the thread view in another language", () => {
   it("follows each language's conventions for times, counters and names", async () => {
     await setLocalePreference("zh-CN");
     expect(i18n.t("thread:turn.limit.armedIn", { time: "5分钟" })).toBe(
-      "自动继续已开启，将在 5分钟后继续。",
+      "自动恢复已开启，将在 5分钟后恢复。",
     );
     expect(i18n.t("thread:harnessSwitch.noOther")).toContain("“设置 → Harness”");
 

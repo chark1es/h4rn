@@ -1,0 +1,178 @@
+{
+  "unitDisplay": "narrow",
+  "title": "用量",
+  "refresh": "刷新用量",
+  "allThreads": "所有机器上的全部对话",
+  "scope": {
+    "label": "范围",
+    "thread": "对话",
+    "workspace": "工作区",
+    "machine": "机器",
+    "global": "全局"
+  },
+  "range": {
+    "label": "时间范围",
+    "today": "今天",
+    "14d": "14 天",
+    "30d": "30 天",
+    "all": "全部"
+  },
+  "groupBy": {
+    "label": "分组方式",
+    "harness": "Harness",
+    "model": "模型"
+  },
+  "metric": {
+    "label": "图表指标",
+    "tokens": "Token",
+    "cost": "费用"
+  },
+  "chart": {
+    "title": {
+      "tokens": {
+        "hour": {
+          "harness": "按 harness 统计的每小时 token",
+          "model": "按模型统计的每小时 token"
+        },
+        "day": {
+          "harness": "按 harness 统计的每日 token",
+          "model": "按模型统计的每日 token"
+        }
+      },
+      "cost": {
+        "hour": {
+          "harness": "按 harness 统计的每小时费用",
+          "model": "按模型统计的每小时费用"
+        },
+        "day": {
+          "harness": "按 harness 统计的每日费用",
+          "model": "按模型统计的每日费用"
+        }
+      }
+    },
+    "viewTable": "以表格查看",
+    "viewChart": "以图表查看",
+    "empty": "此时间范围内还没有计量的回合。",
+    "bar": "{{label}} · {{value}}",
+    "hour": "小时",
+    "day": "日期",
+    "total": "合计"
+  },
+  "stats": {
+    "tokens": "Token",
+    "tokensIn": "输入 {{tokens}}",
+    "cost": "费用",
+    "estimate": "估算",
+    "throughput": "吞吐量",
+    "tokPerSec": "tok/s",
+    "turns_other": "{{count, number}} 个回合",
+    "firstToken": "首个 token",
+    "mean": "平均",
+    "active": "活跃",
+    "activeShare": "活跃 {{percent}}",
+    "runtime": "运行时长",
+    "wallTime": "实际耗时"
+  },
+  "breakdown": {
+    "title": {
+      "harness": "按 harness",
+      "model": "按模型"
+    },
+    "aside": "费用按你的价格表计算 · 仅为估算，并非账单",
+    "empty": "此时间范围内没有计量数据。",
+    "harness": "Harness",
+    "model": "模型",
+    "tokens": "Token",
+    "cost": "费用",
+    "tps": "tok/s",
+    "ttft": "TTFT",
+    "runs": "运行次数",
+    "active": "活跃"
+  },
+  "activeIdle": {
+    "title": "活跃与空闲",
+    "active": "活跃 · {{percent}}",
+    "idle": "空闲 {{duration}}",
+    "note": "空闲指回合等待你的时间：审批、问题和限额。"
+  },
+  "limits": {
+    "title": "限额",
+    "settings": "自动恢复设置",
+    "unavailable": "暂时无法获取限额。{{detail}}",
+    "none": "尚未发现限额。限额出现时，h4rn 会从 harness 或代理读取。",
+    "account": "账户",
+    "limited": "已受限",
+    "limitedAt": "已受限 · {{percent}}",
+    "resets": "{{time}} 重置 · 还有 {{countdown}}",
+    "noReset": "未报告重置时间。",
+    "window": {
+      "hours_other": "{{count, number}} 小时",
+      "weekly": "每周",
+      "daily": "每日",
+      "monthly": "每月"
+    },
+    "source": {
+      "harness": "由 harness 报告",
+      "proxy": "来自代理",
+      "provider": "来自提供方"
+    }
+  },
+  "resets": {
+    "title": "重置记录",
+    "aside": "最新的在前",
+    "observed": "发现时间",
+    "harness": "Harness",
+    "account": "账户",
+    "reset": "重置时间",
+    "source": "来源",
+    "unknown": "未知",
+    "sourceName": {
+      "harness": "harness",
+      "proxy": "代理",
+      "provider": "提供方"
+    }
+  },
+  "offline": {
+    "title": "显示的是上次的报告",
+    "connecting": "守护进程正在连接。数字保持上次读取的值，重新连接后请刷新。",
+    "degraded": "守护进程连接不稳定。数字保持上次读取的值，重新连接后请刷新。",
+    "offline": "守护进程已离线。数字保持上次读取的值，重新连接后请刷新。"
+  },
+  "error": {
+    "hint": "试试更大的时间范围，或刷新。"
+  },
+  "footnote": "用量由 h4rn 自行统计；缺少价格时显示“—”而不是 $0.00。费用仅为估算，并非账单。",
+  "time": {
+    "now": "现在",
+    "unknown": "未知"
+  },
+  "footer": {
+    "tokens": "{{tokens}} token",
+    "cost": "约 {{cost}}",
+    "rate": "{{rate}} tok/s",
+    "ttft": "TTFT {{time}}",
+    "active": "活跃 {{duration}}",
+    "context": "上下文 {{percent}}"
+  },
+  "resume": {
+    "paused": "{{title}} 已暂停",
+    "hitLimit": "{{harness}} 达到了限额。",
+    "hitLimitUnknown": "harness 达到了限额。",
+    "hitLimitAt": "{{harness}} 在 {{time}} 达到了限额。h4rn 会在 {{resumeAt}} 带着保存的上下文恢复该回合。",
+    "hitLimitAtUnknown": "harness 在 {{time}} 达到了限额。h4rn 会在 {{resumeAt}} 带着保存的上下文恢复该回合。",
+    "autoResumesAt": "将于 {{time}} 自动恢复",
+    "untilAutoResume": "后自动恢复",
+    "lastFailed": "上次尝试失败：{{error}}",
+    "failOver": "故障转移…",
+    "failingOver": "正在故障转移…",
+    "cancel": "取消自动恢复",
+    "cancelShort": "取消",
+    "cancelling": "正在取消…",
+    "resumeNow": "立即恢复",
+    "resuming": "正在恢复…",
+    "noFailover": "没有可以故障转移到的模型",
+    "resumeOn": "{{harness}} 达到了限额。立即在以下模型上恢复：",
+    "resumeOnUnknown": "harness 达到了限额。立即在以下模型上恢复：",
+    "default": "默认"
+  }
+}

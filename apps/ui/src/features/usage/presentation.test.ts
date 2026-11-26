@@ -142,8 +142,8 @@ describe("usage presentation formatting", () => {
 
   it("formats first token in the unit the number deserves", () => {
     expect(firstToken(0)).toBe("—");
-    expect(firstToken(420)).toBe("420 ms");
-    expect(firstToken(1_700)).toBe("1.7 s");
+    expect(firstToken(420)).toBe("420ms");
+    expect(firstToken(1_700)).toBe("1.7s");
   });
 
   it("clamps percentages into a renderable range", () => {

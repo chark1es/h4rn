@@ -1,8 +1,10 @@
 import { ClockIcon, RefreshCwIcon, TriangleAlertIcon } from "lucide-react";
 import { useEffect } from "react";
+import { useTranslation } from "react-i18next";
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
 import { ChipSelect } from "@/components/common/ChipSelect";
 import type {
+  LimitStatus,
   UsageBucketPoint,
   UsageGroup,
   UsageReport,
@@ -13,18 +15,24 @@ import type {
 import { useIsPhone } from "@/hooks/use-media-query";
 import { useNow } from "@/hooks/use-now";
 import { harnessLabel, harnessSeed } from "@/lib/entities";
-import { absoluteDateTime, absoluteTime, cost, duration, tokens } from "@/lib/format";
+import { absoluteDateTime, absoluteTime, formatCost, formatTokens } from "@/lib/format";
+import { formatNumber, i18n } from "@/lib/i18n";
 import { navigate, useApp } from "@/lib/store/appStore";
 import { cn } from "@/lib/utils";
 
 import { AutoResumeCards } from "./AutoResumeCard";
 import {
+  axisMoney,
   bucketLabel,
   bucketTotal,
   countdownPrecise,
   firstToken,
+  formatPercent,
+  formatRate,
+  formatSpan,
   percent,
   seriesColor,
+  tokenParts,
 } from "./presentation";
 import {
   type ChartMetric,
@@ -41,19 +49,13 @@ import {
   useUsage,
 } from "./usageStore";
 
-const RANGES = [
-  { key: "today", label: "Today" },
-  { key: "14d", label: "14 days" },
-  { key: "30d", label: "30 days" },
-  { key: "all", label: "All" },
-] as const;
+const RANGES = ["today", "14d", "30d", "all"] as const;
 
-const SCOPES: Array<{ key: UsageScope; label: string }> = [
-  { key: "thread", label: "Thread" },
-  { key: "workspace", label: "Workspace" },
-  { key: "machine", label: "Machine" },
-  { key: "global", label: "Global" },
-];
+const SCOPES: UsageScope[] = ["thread", "workspace", "machine", "global"];
+
+const GROUPS: GroupKey[] = ["harness", "model"];
+
+const METRICS: ChartMetric[] = ["tokens", "cost"];
 
 const SKELETON_STATS = ["tokens", "cost", "throughput", "first-token", "active", "runtime"];
 
@@ -117,18 +119,19 @@ function Stat({
 }
 
 function ScopePicker({ compact = false }: { compact?: boolean }) {
+  const { t } = useTranslation("usage");
   const scope = useUsage((state) => state.query.scope);
   const thread = useApp((state) =>
     state.ui.selectedThreadId ? state.threads[state.ui.selectedThreadId] : undefined,
   );
   // Scopes that need a thread are offered only when one is open.
-  const options = SCOPES.filter((option) => option.key === "global" || thread).map((option) => ({
-    value: option.key,
-    label: option.label,
+  const options = SCOPES.filter((key) => key === "global" || thread).map((key) => ({
+    value: key,
+    label: t(`scope.${key}`),
   }));
   return (
     <ChipSelect
-      label="Scope"
+      label={t("scope.label")}
       value={scope}
       options={options}
       onChange={setScope}
@@ -139,18 +142,23 @@ function ScopePicker({ compact = false }: { compact?: boolean }) {
 }
 
 function RangePicker({ compact = false }: { compact?: boolean }) {
+  const { t } = useTranslation("usage");
   const range = useUsage((state) => state.query.range);
   return (
-    <div className={cn("q-seg", compact ? undefined : "inline")} role="tablist" aria-label="Range">
-      {RANGES.map((option) => (
+    <div
+      className={cn("q-seg", compact ? undefined : "inline")}
+      role="tablist"
+      aria-label={t("range.label")}
+    >
+      {RANGES.map((key) => (
         <button
-          key={option.key}
+          key={key}
           type="button"
           role="tab"
-          aria-selected={range === option.key}
-          onClick={() => setRange(option.key)}
+          aria-selected={range === key}
+          onClick={() => setRange(key)}
         >
-          {option.label}
+          {t(`range.${key}`)}
         </button>
       ))}
     </div>
@@ -158,15 +166,11 @@ function RangePicker({ compact = false }: { compact?: boolean }) {
 }
 
 function GroupPicker() {
+  const { t } = useTranslation("usage");
   const groupBy = useUsage((state) => state.query.groupBy);
   return (
-    <div className="q-seg inline" role="tablist" aria-label="Group by">
-      {(
-        [
-          ["harness", "Harness"],
-          ["model", "Model"],
-        ] as Array<[GroupKey, string]>
-      ).map(([key, label]) => (
+    <div className="q-seg inline" role="tablist" aria-label={t("groupBy.label")}>
+      {GROUPS.map((key) => (
         <button
           key={key}
           type="button"
@@ -174,7 +178,7 @@ function GroupPicker() {
           aria-selected={groupBy === key}
           onClick={() => setGroupBy(key)}
         >
-          {label}
+          {t(`groupBy.${key}`)}
         </button>
       ))}
     </div>
@@ -182,15 +186,11 @@ function GroupPicker() {
 }
 
 function MetricPicker() {
+  const { t } = useTranslation("usage");
   const metric = useUsage((state) => state.query.metric);
   return (
-    <div className="q-seg inline" role="tablist" aria-label="Chart metric">
-      {(
-        [
-          ["tokens", "Tokens"],
-          ["cost", "Cost"],
-        ] as Array<[ChartMetric, string]>
-      ).map(([key, label]) => (
+    <div className="q-seg inline" role="tablist" aria-label={t("metric.label")}>
+      {METRICS.map((key) => (
         <button
           key={key}
           type="button"
@@ -198,7 +198,7 @@ function MetricPicker() {
           aria-selected={metric === key}
           onClick={() => setMetric(key)}
         >
-          {label}
+          {t(`metric.${key}`)}
         </button>
       ))}
     </div>
@@ -217,6 +217,7 @@ function niceCeil(value: number): number {
 }
 
 function UsageChart({ report, metric }: { report: UsageReport; metric: ChartMetric }) {
+  const { t } = useTranslation("usage");
   const bucket = report.bucket;
   const labels = report.buckets.map((point) => bucketLabel(point, bucket));
   const totals = report.buckets.map((_, index) =>
@@ -231,7 +232,7 @@ function UsageChart({ report, metric }: { report: UsageReport; metric: ChartMetr
   if (report.buckets.length === 0) {
     return (
       <div className="q-empty" style={{ padding: "28px 0" }}>
-        <p style={{ margin: 0 }}>No metered turns in this range yet.</p>
+        <p style={{ margin: 0 }}>{t("chart.empty")}</p>
       </div>
     );
   }
@@ -263,7 +264,7 @@ function UsageChart({ report, metric }: { report: UsageReport; metric: ChartMetr
               transform: "translateY(50%)",
             }}
           >
-            {metric === "cost" ? `$${tick.toFixed(2)}` : tokens(tick).replace(/\.0(?=[kM]?$)/, "")}
+            {metric === "cost" ? axisMoney(tick) : formatTokens(tick)}
           </span>
         ))}
         {report.buckets.map((point, index) => {
@@ -280,7 +281,11 @@ function UsageChart({ report, metric }: { report: UsageReport; metric: ChartMetr
                 height: "100%",
                 position: "relative",
               }}
-              title={`${labels[index] ?? ""} · ${metric === "cost" ? cost(point.totals.cost_micros) : tokens(total)}`}
+              title={t("chart.bar", {
+                label: labels[index] ?? "",
+                value:
+                  metric === "cost" ? formatCost(point.totals.cost_micros) : formatTokens(total),
+              })}
             >
               <div
                 style={{
@@ -337,7 +342,7 @@ function Legend({ report }: { report: UsageReport }) {
         return (
           <span key={series.key}>
             <i style={{ background: seriesColor(series.key, index) }} />
-            {label(series.key)} <b className="num">{tokens(total)}</b>
+            {label(series.key)} <b className="num">{formatTokens(total)}</b>
           </span>
         );
       })}
@@ -346,17 +351,18 @@ function Legend({ report }: { report: UsageReport }) {
 }
 
 function SeriesTable({ report, metric }: { report: UsageReport; metric: ChartMetric }) {
+  const { t } = useTranslation("usage");
   const cell = (point: UsageBucketPoint | undefined): string => {
-    if (!point) return metric === "cost" ? "—" : "0";
+    if (!point) return metric === "cost" ? "—" : formatNumber(0);
     return metric === "cost"
-      ? cost(point.totals.cost_micros)
-      : tokens(point.totals.input_tokens + point.totals.output_tokens);
+      ? formatCost(point.totals.cost_micros)
+      : formatTokens(point.totals.input_tokens + point.totals.output_tokens);
   };
   return (
     <table className="q-tbl">
       <thead>
         <tr>
-          <th>{report.bucket === "hour" ? "Hour" : "Day"}</th>
+          <th>{report.bucket === "hour" ? t("chart.hour") : t("chart.day")}</th>
           {report.series.map((series) => (
             <th key={series.key} className="r">
               {report.series_group_by === "harness"
@@ -364,7 +370,7 @@ function SeriesTable({ report, metric }: { report: UsageReport; metric: ChartMet
                 : series.key}
             </th>
           ))}
-          <th className="r">Total</th>
+          <th className="r">{t("chart.total")}</th>
         </tr>
       </thead>
       <tbody>
@@ -383,7 +389,7 @@ function SeriesTable({ report, metric }: { report: UsageReport; metric: ChartMet
                 </td>
               ))}
               <td className="r num">
-                {metric === "cost" ? `$${rowTotal.toFixed(2)}` : tokens(rowTotal)}
+                {metric === "cost" ? formatCost(rowTotal * 1_000_000) : formatTokens(rowTotal)}
               </td>
             </tr>
           );
@@ -394,28 +400,29 @@ function SeriesTable({ report, metric }: { report: UsageReport; metric: ChartMet
 }
 
 function Breakdown({ report }: { report: UsageReport }) {
+  const { t } = useTranslation("usage");
   const groupBy = useUsage((state) => state.query.groupBy);
   return (
     <div className="q-sec">
       <div className="q-sec-h">
-        <h2>By {groupBy}</h2>
-        <span className="aside">Cost uses your price table · estimates, not billing</span>
+        <h2>{t(`breakdown.title.${groupBy}`)}</h2>
+        <span className="aside">{t("breakdown.aside")}</span>
       </div>
       {report.groups.length === 0 ? (
         <p className="q-faint" style={{ margin: 0, fontSize: 13 }}>
-          Nothing metered in this range.
+          {t("breakdown.empty")}
         </p>
       ) : (
         <table className="q-tbl">
           <thead>
             <tr>
-              <th>{groupBy === "harness" ? "Harness" : "Model"}</th>
-              <th className="r">Tokens</th>
-              <th className="r">Cost</th>
-              <th className="r">tok/s</th>
-              <th className="r">TTFT</th>
-              <th className="r">Runs</th>
-              <th className="r">Active</th>
+              <th>{t(`breakdown.${groupBy}`)}</th>
+              <th className="r">{t("breakdown.tokens")}</th>
+              <th className="r">{t("breakdown.cost")}</th>
+              <th className="r">{t("breakdown.tps")}</th>
+              <th className="r">{t("breakdown.ttft")}</th>
+              <th className="r">{t("breakdown.runs")}</th>
+              <th className="r">{t("breakdown.active")}</th>
             </tr>
           </thead>
           <tbody>
@@ -437,17 +444,15 @@ function Breakdown({ report }: { report: UsageReport }) {
                   )}
                 </td>
                 <td className="r num">
-                  {tokens(group.totals.input_tokens + group.totals.output_tokens)}
+                  {formatTokens(group.totals.input_tokens + group.totals.output_tokens)}
                 </td>
                 <td className={cn("r num", group.totals.cost_micros <= 0 && "q-faint")}>
-                  {cost(group.totals.cost_micros)}
+                  {formatCost(group.totals.cost_micros)}
                 </td>
-                <td className="r num">
-                  {group.totals.tps > 0 ? Math.round(group.totals.tps) : "—"}
-                </td>
+                <td className="r num">{formatRate(group.totals.tps)}</td>
                 <td className="r num">{firstToken(group.totals.ttft_ms)}</td>
-                <td className="r num">{group.totals.turns}</td>
-                <td className="r num">{duration(group.totals.active_ms)}</td>
+                <td className="r num">{formatNumber(group.totals.turns)}</td>
+                <td className="r num">{formatSpan(group.totals.active_ms)}</td>
               </tr>
             ))}
           </tbody>
@@ -457,25 +462,31 @@ function Breakdown({ report }: { report: UsageReport }) {
   );
 }
 
-/** Names the window a limit covers when its message does, else who reported it. */
-function limitWindow(limit: import("@/gen").LimitStatus): string {
+/**
+ * Names the window a limit covers when its message does, else who reported it.
+ * The provider's message is English; only the window it names is reworded.
+ */
+function limitWindow(limit: LimitStatus): string {
   const hours = limit.message?.match(/(\d+)[- ]hour/i);
-  if (hours) return `${hours[1]}-hour`;
-  const named = limit.message?.match(/\b(weekly|daily|monthly)\b/i);
-  if (named?.[1]) return named[1].toLowerCase();
-  return limit.source === "harness"
-    ? "reported by the harness"
-    : limit.source === "proxy"
-      ? "from the proxy"
-      : "from the provider";
+  if (hours?.[1]) return i18n.t("usage:limits.window.hours", { count: Number(hours[1]) });
+  const named = limit.message?.match(/\b(weekly|daily|monthly)\b/i)?.[1]?.toLowerCase();
+  if (named === "weekly" || named === "daily" || named === "monthly") {
+    return i18n.t(`usage:limits.window.${named}`);
+  }
+  return i18n.t(`usage:limits.source.${limit.source}`);
 }
 
-function LimitRow({ limit }: { limit: import("@/gen").LimitStatus }) {
+function LimitRow({ limit }: { limit: LimitStatus }) {
+  const { t } = useTranslation("usage");
   const now = useNow(1_000);
   const thread = useApp((state) => (limit.thread_id ? state.threads[limit.thread_id] : undefined));
   const consumed = limit.limit > 0 ? percent(limit.consumed, limit.limit) : 0;
   const label =
-    limit.limit > 0 ? (consumed >= 100 ? `Limited · ${consumed}%` : `${consumed}%`) : "Limited";
+    limit.limit > 0
+      ? consumed >= 100
+        ? t("limits.limitedAt", { percent: formatPercent(consumed) })
+        : formatPercent(consumed)
+      : t("limits.limited");
   const tone = consumed >= 100 ? "danger" : consumed >= 75 ? "warn" : "";
   const harness = limit.harness ?? thread?.harness ?? "claude_code";
   const host = thread?.host ?? limit.account ?? "h4rn";
@@ -489,7 +500,7 @@ function LimitRow({ limit }: { limit: import("@/gen").LimitStatus }) {
             label={harness}
             size={12}
           />
-          {harnessLabel(harness)} · {limit.account ?? limit.provider ?? "account"}
+          {harnessLabel(harness)} · {limit.account ?? limit.provider ?? t("limits.account")}
           <span className="q-faint">{limitWindow(limit)}</span>
         </span>
         <span
@@ -503,19 +514,19 @@ function LimitRow({ limit }: { limit: import("@/gen").LimitStatus }) {
         <i style={{ width: `${limit.limit > 0 ? Math.max(consumed, 2) : 100}%` }} />
       </div>
       <div className="q-faint num" style={{ fontSize: 12, marginTop: 5 }}>
-        {limit.reset_at ? (
-          <>
-            Resets {absoluteTime(limit.reset_at)} · in {countdownPrecise(limit.reset_at, now)}
-          </>
-        ) : (
-          (limit.message ?? "No reset time reported.")
-        )}
+        {limit.reset_at
+          ? t("limits.resets", {
+              time: absoluteTime(limit.reset_at),
+              countdown: countdownPrecise(limit.reset_at, now),
+            })
+          : (limit.message ?? t("limits.noReset"))}
       </div>
     </div>
   );
 }
 
 function LimitsPanel() {
+  const { t } = useTranslation("usage");
   const limits = useUsage((state) => state.limits);
   const loading = useUsage((state) => state.limitsLoading);
   const error = useUsage((state) => state.limitsError);
@@ -531,14 +542,14 @@ function LimitsPanel() {
   if (error && !limits) {
     return (
       <p className="q-faint" style={{ fontSize: 12, margin: 0 }}>
-        Limits are unavailable right now. {error.hint ?? error.message}
+        {t("limits.unavailable", { detail: error.hint ?? error.message })}
       </p>
     );
   }
   if (!limits || limits.limits.length === 0) {
     return (
       <p className="q-faint" style={{ fontSize: 12, margin: 0 }}>
-        No limits observed. h4rn reads them from the harness or the proxy when they appear.
+        {t("limits.none")}
       </p>
     );
   }
@@ -552,6 +563,7 @@ function LimitsPanel() {
 }
 
 function ResetHistory() {
+  const { t } = useTranslation("usage");
   const resets = useUsage((state) => state.resets);
   const loading = useUsage((state) => state.resetsLoading);
   if (loading && !resets) {
@@ -561,17 +573,17 @@ function ResetHistory() {
   return (
     <div className="q-sec" style={{ marginTop: 24 }}>
       <div className="q-sec-h">
-        <h2>Reset history</h2>
-        <span className="aside">Newest first</span>
+        <h2>{t("resets.title")}</h2>
+        <span className="aside">{t("resets.aside")}</span>
       </div>
       <table className="q-tbl">
         <thead>
           <tr>
-            <th>Observed</th>
-            <th>Harness</th>
-            <th>Account</th>
-            <th>Reset</th>
-            <th>Source</th>
+            <th>{t("resets.observed")}</th>
+            <th>{t("resets.harness")}</th>
+            <th>{t("resets.account")}</th>
+            <th>{t("resets.reset")}</th>
+            <th>{t("resets.source")}</th>
           </tr>
         </thead>
         <tbody>
@@ -580,8 +592,10 @@ function ResetHistory() {
               <td className="num">{absoluteDateTime(item.observed_at)}</td>
               <td>{item.harness ? harnessLabel(item.harness) : "—"}</td>
               <td>{item.account ?? item.provider ?? "—"}</td>
-              <td className="num">{item.reset_at ? absoluteDateTime(item.reset_at) : "unknown"}</td>
-              <td className="q-faint">{item.source}</td>
+              <td className="num">
+                {item.reset_at ? absoluteDateTime(item.reset_at) : t("resets.unknown")}
+              </td>
+              <td className="q-faint">{t(`resets.sourceName.${item.source}`)}</td>
             </tr>
           ))}
         </tbody>
@@ -591,6 +605,7 @@ function ResetHistory() {
 }
 
 function Stats({ report, phone = false }: { report: UsageReport | null; phone?: boolean }) {
+  const { t } = useTranslation("usage");
   const marginBottom = phone ? 0 : 32;
   if (!report) {
     return (
@@ -609,42 +624,47 @@ function Stats({ report, phone = false }: { report: UsageReport | null; phone?: 
   const spark = (pick: (point: UsageTotals) => number) =>
     report.buckets.map((point) => pick(point.totals));
   const activeRatio = percent(totals.active_ms, totals.active_ms + totals.idle_ms);
+  const tokenTotal = tokenParts(totals.input_tokens + totals.output_tokens);
   return (
     <div className="q-stats" style={{ marginBottom }}>
       <Stat
-        label="Tokens"
-        value={tokens(totals.input_tokens + totals.output_tokens).replace(/[a-zA-Z]+$/, "")}
-        unit={tokens(totals.input_tokens + totals.output_tokens).match(/[a-zA-Z]+$/)?.[0]}
-        detail={`${tokens(totals.input_tokens)} in`}
+        label={t("stats.tokens")}
+        value={tokenTotal.value}
+        unit={tokenTotal.unit}
+        detail={t("stats.tokensIn", { tokens: formatTokens(totals.input_tokens) })}
         spark={spark((point) => point.input_tokens + point.output_tokens)}
       />
       <Stat
-        label="Cost"
-        value={cost(totals.cost_micros)}
-        detail="estimate"
+        label={t("stats.cost")}
+        value={formatCost(totals.cost_micros)}
+        detail={t("stats.estimate")}
         spark={spark((point) => point.cost_micros / 1_000_000)}
       />
       <Stat
-        label="Throughput"
-        value={totals.tps > 0 ? `${Math.round(totals.tps)}` : "—"}
-        unit={totals.tps > 0 ? "tok/s" : undefined}
-        detail={`${totals.turns} turns`}
+        label={t("stats.throughput")}
+        value={formatRate(totals.tps)}
+        unit={totals.tps > 0 ? t("stats.tokPerSec") : undefined}
+        detail={t("stats.turns", { count: totals.turns })}
         spark={spark((point) => point.tps)}
       />
       <Stat
-        label="First token"
+        label={t("stats.firstToken")}
         value={firstToken(totals.ttft_ms)}
-        detail="mean"
+        detail={t("stats.mean")}
         spark={spark((point) => point.ttft_ms)}
       />
       {phone ? null : (
-        <Stat label="Active" value={duration(totals.active_ms)} detail={`${activeRatio}% active`} />
+        <Stat
+          label={t("stats.active")}
+          value={formatSpan(totals.active_ms)}
+          detail={t("stats.activeShare", { percent: formatPercent(activeRatio) })}
+        />
       )}
       {phone ? null : (
         <Stat
-          label="Runtime"
-          value={duration(totals.runtime_ms)}
-          detail="wall time"
+          label={t("stats.runtime")}
+          value={formatSpan(totals.runtime_ms)}
+          detail={t("stats.wallTime")}
           spark={spark((point) => point.wall_ms)}
         />
       )}
@@ -653,13 +673,14 @@ function Stats({ report, phone = false }: { report: UsageReport | null; phone?: 
 }
 
 function ActiveIdle({ report }: { report: UsageReport }) {
+  const { t } = useTranslation("usage");
   const active = report.totals.active_ms;
   const idle = report.totals.idle_ms;
   const activeWidth = percent(active, active + idle);
   return (
     <div className="q-sec" style={{ margin: 0 }}>
       <div className="q-sec-h">
-        <h2>Active vs idle</h2>
+        <h2>{t("activeIdle.title")}</h2>
       </div>
       <div className="q-split" style={{ margin: "6px 0 10px" }}>
         <i style={{ flex: Math.max(activeWidth, 1), background: "var(--fg-2)" }} />
@@ -670,16 +691,18 @@ function ActiveIdle({ report }: { report: UsageReport }) {
         className="num"
       >
         <span>
-          <b style={{ fontWeight: 500 }}>{duration(active)}</b>{" "}
-          <span className="q-muted">active · {activeWidth}%</span>
+          <b style={{ fontWeight: 500 }}>{formatSpan(active)}</b>{" "}
+          <span className="q-muted">
+            {t("activeIdle.active", { percent: formatPercent(activeWidth) })}
+          </span>
         </span>
-        <span className="q-muted">{duration(idle)} idle</span>
+        <span className="q-muted">{t("activeIdle.idle", { duration: formatSpan(idle) })}</span>
       </div>
       <p className="q-faint" style={{ fontSize: 12, margin: "10px 0 24px", lineHeight: "17px" }}>
-        Idle counts time a turn waited on you: approvals, questions, and limits.
+        {t("activeIdle.note")}
       </p>
       <div className="q-sec-h" style={{ marginBottom: 6 }}>
-        <h2>Limits</h2>
+        <h2>{t("limits.title")}</h2>
         <button
           type="button"
           className="q-link"
@@ -688,7 +711,7 @@ function ActiveIdle({ report }: { report: UsageReport }) {
             navigate({ kind: "placeholder", surface: "settings", path: "/settings/resume" })
           }
         >
-          Auto-resume settings
+          {t("limits.settings")}
         </button>
       </div>
       <LimitsPanel />
@@ -697,6 +720,7 @@ function ActiveIdle({ report }: { report: UsageReport }) {
 }
 
 function OfflineNote() {
+  const { t } = useTranslation(["usage", "common"]);
   const status = useApp((state) => state.connection.status);
   if (status === "online") return null;
   return (
@@ -705,19 +729,20 @@ function OfflineNote() {
         <TriangleAlertIcon className="q-icon s20" strokeWidth={1.5} aria-hidden />
       </span>
       <div style={{ flex: 1 }}>
-        <div style={{ fontWeight: 600 }}>Showing the last report</div>
+        <div style={{ fontWeight: 600 }}>{t("offline.title")}</div>
         <div className="q-muted" style={{ marginTop: 2, fontSize: 13 }}>
-          The daemon is {status}. Numbers stay as last read; refresh when it reconnects.
+          {t(`offline.${status}`)}
         </div>
       </div>
       <button type="button" className="q-btn secondary" onClick={refreshUsage}>
-        <RefreshCwIcon className="q-icon s14" strokeWidth={1.5} aria-hidden /> Retry
+        <RefreshCwIcon className="q-icon s14" strokeWidth={1.5} aria-hidden /> {t("common:retry")}
       </button>
     </div>
   );
 }
 
 function EmptyOrError({ report }: { report: UsageReport | null }) {
+  const { t } = useTranslation(["usage", "common"]);
   const loading = useUsage((state) => state.reportLoading);
   const error = useUsage((state) => state.reportError);
   if (error && !report) {
@@ -725,10 +750,10 @@ function EmptyOrError({ report }: { report: UsageReport | null }) {
       <div className="q-empty" style={{ padding: "28px 0" }}>
         <p style={{ margin: 0 }}>{error.message}</p>
         <p className="q-faint" style={{ margin: "4px 0 12px" }}>
-          {error.hint ?? "Try a wider range or refresh."}
+          {error.hint ?? t("error.hint")}
         </p>
         <button type="button" className="q-btn secondary" onClick={() => void loadUsage()}>
-          Try again
+          {t("common:tryAgain")}
         </button>
       </div>
     );
@@ -744,6 +769,7 @@ function EmptyOrError({ report }: { report: UsageReport | null }) {
 }
 
 export function UsagePage() {
+  const { t } = useTranslation("usage");
   const isPhone = useIsPhone();
   const report = useUsage((state) => state.report);
   const tableView = useUsage((state) => state.query.tableView);
@@ -782,17 +808,17 @@ export function UsagePage() {
       : scope === "machine"
         ? thread.host
         : thread.title
-    : "All threads on every machine";
+    : t("allThreads");
 
   if (isPhone) {
     return (
-      <main className="q-main" aria-label="Usage">
+      <main className="q-main" aria-label={t("title")}>
         <div className="q-ph-nav">
           <span style={{ width: 44 }} />
           <span className="ttl" />
           <ScopePicker compact />
         </div>
-        <h1 className="q-ph-lt">Usage</h1>
+        <h1 className="q-ph-lt">{t("title")}</h1>
         <div className="q-ph-body">
           <div style={{ padding: "0 16px 10px" }}>
             <RangePicker compact />
@@ -819,11 +845,11 @@ export function UsagePage() {
             {report ? <Legend report={report} /> : null}
             {!report ? <EmptyOrError report={report} /> : null}
           </div>
-          <div className="q-ph-gh">Limits</div>
+          <div className="q-ph-gh">{t("limits.title")}</div>
           <div className="q-ph-group" style={{ padding: "4px 16px 10px" }}>
             <LimitsPanel />
           </div>
-          <div className="q-ph-gh">By {groupBy}</div>
+          <div className="q-ph-gh">{t(`breakdown.title.${groupBy}`)}</div>
           <div className="q-ph-group" style={{ padding: "4px 16px 12px" }}>
             <Breakdown report={report ?? emptyReport()} />
           </div>
@@ -833,17 +859,17 @@ export function UsagePage() {
   }
 
   return (
-    <main className="q-main" aria-label="Usage">
+    <main className="q-main" aria-label={t("title")}>
       <header className="q-page-head">
-        <h1>Usage</h1>
+        <h1>{t("title")}</h1>
         <span className="grow" />
         <ScopePicker />
         <RangePicker />
         <button
           type="button"
           className="q-btn secondary"
-          title="Refresh usage"
-          aria-label="Refresh usage"
+          title={t("refresh")}
+          aria-label={t("refresh")}
           onClick={refreshUsage}
         >
           <RefreshCwIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
@@ -865,8 +891,9 @@ export function UsagePage() {
             <div className="q-sec" style={{ margin: 0 }}>
               <div className="q-sec-h">
                 <h2>
-                  {metric === "cost" ? "Cost" : "Tokens"} per{" "}
-                  {report?.bucket === "hour" ? "hour" : "day"} by {groupBy}
+                  {t(
+                    `chart.title.${metric}.${report?.bucket === "hour" ? "hour" : "day"}.${groupBy}`,
+                  )}
                 </h2>
                 <button
                   type="button"
@@ -874,7 +901,7 @@ export function UsagePage() {
                   style={{ height: 24 }}
                   onClick={() => setTableView(!tableView)}
                 >
-                  {tableView ? "View as chart" : "View as table"}
+                  {tableView ? t("chart.viewChart") : t("chart.viewTable")}
                 </button>
               </div>
               <div
@@ -914,8 +941,7 @@ export function UsagePage() {
           {report ? <Breakdown report={report} /> : null}
           <ResetHistory />
           <p className="q-faint" style={{ fontSize: 12, marginTop: 16 }}>
-            <ClockIcon className="q-icon s12" aria-hidden /> Usage is counted by h4rn itself; a
-            missing price shows “—” rather than $0.00. Costs are estimates, not billing.
+            <ClockIcon className="q-icon s12" aria-hidden /> {t("footnote")}
           </p>
         </div>
       </div>
