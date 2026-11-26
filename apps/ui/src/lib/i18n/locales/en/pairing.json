@@ -42,8 +42,8 @@
     "mustApprove": "{{name}} must approve this phone before it can connect.",
     "scanned": "Scanned code. Compare it before you trust the host.",
     "typed": "Paired through a typed code. Compare it before you trust the host.",
-    "waitingNote": "On {{name}}, open Settings → Devices and confirm the same code. This screen updates when it approves this phone.",
-    "compareNote": "{{name}} shows this code under Settings → Devices. If it reads the same, the connection is private. If it does not, something between you and the host changed the key.",
+    "waitingNote": "On {{name}}, open Settings → Devices and confirm the same code. This screen updates when {{name}} approves this phone.",
+    "compareNote": "{{name}} shows this code under Settings → Devices. If it reads the same, no third party can read this connection. If it is different, someone between you and the host has replaced the key.",
     "waitingFor": "Waiting for {{name}}",
     "approvalRequired": "Host approval is required: after you confirm here, approve the same code on {{name}}.",
     "differ": "They differ",
@@ -56,7 +56,7 @@
     "signInToScan": "Sign in to h4rn-connect first, then scan the pairing code again.",
     "signInToType": "Sign in to h4rn-connect first, then enter the code again.",
     "otherConnect": "This code belongs to {{url}}. Sign out and sign in there first.",
-    "claimFailed": "Could not claim that pairing.",
+    "claimFailed": "Could not complete that pairing.",
     "notApproved": "{{name}} has not approved this device yet. Open Settings → Devices on {{name}}, confirm the same code, then try again.",
     "codesDiffer": "The codes did not match, so this device was revoked. Pair again from a network you trust."
   },
@@ -69,7 +69,7 @@
     "loading": "Loading hosts",
     "emptyTitle": "No hosts yet.",
     "emptyBody": "A host is a machine running the h4rn daemon. Pair this device or add a host on your tailnet to give agents somewhere to run.",
-    "lastSeen": "last seen {{age}} ago",
+    "lastSeen": "last seen {{when}}",
     "note": "Presence is a dot plus a word. A WSL distribution is its own host, so pairing the Windows host does not grant the distribution."
   }
 }

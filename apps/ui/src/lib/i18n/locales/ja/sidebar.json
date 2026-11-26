@@ -86,6 +86,9 @@
     "toasts": {
       "machineGone": "そのマシンはもう利用できません。",
       "selectFailed": "そのマシンを選択できませんでした。"
+    },
+    "errors": {
+      "noNoiseKey": "{{name}} はまだ接続キーを公開していません。そのマシンで {{command}} をもう一度実行してください。"
     }
   },
   "snoozed": {

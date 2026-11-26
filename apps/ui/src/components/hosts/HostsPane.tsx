@@ -8,7 +8,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { useNow } from "@/hooks/use-now";
 import { harnessLabel, hostPlatformLabel, machineSeed } from "@/lib/entities";
-import { formatAge } from "@/lib/i18n";
+import { formatAge, formatRelativeTime } from "@/lib/i18n";
 import { useApp } from "@/lib/store/appStore";
 
 export function HostsPane() {
@@ -80,7 +80,9 @@ export function HostsPane() {
                       {hostPlatformLabel(host.platform)} ·{" "}
                       {host.online
                         ? t("sidebar:hosts.dot.online")
-                        : t("hostsPane.lastSeen", { age: formatAge(host.last_seen ?? "", now) })}
+                        : t("hostsPane.lastSeen", {
+                            when: formatRelativeTime(host.last_seen, now),
+                          })}
                     </p>
                   </div>
                   <div className="hidden flex-wrap items-center gap-1 sm:flex">

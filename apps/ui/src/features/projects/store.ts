@@ -175,6 +175,7 @@ export async function addProject(
       source,
       name: name?.trim() ? name.trim() : null,
     });
+    // i18n-ignore-next-line: a reply of the wrong type is a daemon bug, not a state to word
     if (response.type !== "project") throw new Error(`Unexpected answer \`${response.type}\`.`);
     const project = response.project;
     set({
@@ -230,6 +231,7 @@ export async function browseDirectories(
   if (!host) return { error: i18n.t("sidebar:projects.noHost") };
   try {
     const response = await send({ type: "browse_directories", host, path });
+    // i18n-ignore-next-line: a reply of the wrong type is a daemon bug, not a state to word
     if (response.type !== "directories") throw new Error(`Unexpected answer \`${response.type}\`.`);
     return { listing: response.listing };
   } catch (error) {

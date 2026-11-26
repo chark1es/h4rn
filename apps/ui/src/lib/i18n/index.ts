@@ -199,7 +199,11 @@ i18n.use(initReactI18next).init({
     escapeValue: false,
   },
   returnNull: false,
-  returnEmptyString: false,
+  // An empty value is deliberate (no second line, no space between Chinese
+  // or Japanese sentences), so it is returned as is, not replaced by English.
+  // The catalogue test allows "" only where English is empty too or the key
+  // is a sentence separator.
+  returnEmptyString: true,
 });
 
 i18n.on("languageChanged", (lng) => {

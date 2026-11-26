@@ -86,6 +86,9 @@
     "toasts": {
       "machineGone": "该机器已不可用。",
       "selectFailed": "无法选择该机器。"
+    },
+    "errors": {
+      "noNoiseKey": "{{name}} 尚未发布其连接密钥。请在该机器上重新运行 {{command}}。"
     }
   },
   "snoozed": {
@@ -171,6 +174,6 @@
   },
   "phoneNav": {
     "label": "主导航",
-    "pulls": "拉取请求"
+    "pulls": "PR"
   }
 }

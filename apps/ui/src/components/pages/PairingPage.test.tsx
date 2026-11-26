@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 vi.mock("@/lib/store/appStore", () => ({ navigate: vi.fn() }));
 
 import { pairMachine, remoteStore } from "@/features/remote/remoteStore";
-import { setLocalePreference } from "@/lib/i18n";
+import { i18n, setLocalePreference } from "@/lib/i18n";
 
 import { PairingPage } from "./PairingPage";
 
@@ -89,7 +89,8 @@ describe("Pairing page", () => {
     expect(screen.getByText("Gestionar hosts y dispositivos")).toBeTruthy();
     expect(screen.getAllByText("No incluido")).toHaveLength(3);
     expect(screen.getAllByText("Incluido")).toHaveLength(2);
-    expect(screen.getByText("relay.test · por relay")).toBeTruthy();
+    expect(screen.getByText("relay.test · vía relay")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Vincular este teléfono" })).toBeTruthy();
     // The store's error is written in the language that was active.
     expect(
       screen.getByText(
@@ -112,11 +113,64 @@ describe("Pairing page", () => {
     expect(screen.getByTestId("pair-sas").textContent).toBe("1234 5678 9012");
   });
 
+  it("says what matching and different codes mean, plainly, in every language", async () => {
+    sasState(false);
+    render(<PairingPage />);
+    for (const [locale, note] of [
+      [
+        "system",
+        "atlas shows this code under Settings → Devices. If it reads the same, no third party can read this connection. If it is different, someone between you and the host has replaced the key.",
+      ],
+      [
+        "ja",
+        "atlas の「設定 → デバイス」にこのコードが表示されます。同じであれば、この接続を第三者が読み取ることはできません。異なる場合は、あなたとホストの間で何者かが鍵を差し替えています。",
+      ],
+      [
+        "zh-CN",
+        "atlas 会在“设置 → 设备”下显示此代码。如果两者相同，连接不会被第三者读取。如果不同，说明你和主机之间有人替换了密钥。",
+      ],
+      [
+        "es",
+        "atlas muestra este código en Ajustes → Dispositivos. Si coincide, ningún tercero puede leer esta conexión. Si es distinto, alguien entre tú y el host ha cambiado la clave.",
+      ],
+    ] as const) {
+      await act(() => setLocalePreference(locale));
+      expect(screen.getByText(note), locale).toBeTruthy();
+    }
+  });
+
+  it("says a failed pairing could not be completed, in every language", async () => {
+    for (const [locale, claimFailed] of [
+      ["system", "Could not complete that pairing."],
+      ["zh-CN", "无法完成该配对。"],
+      ["es", "No se pudo completar la vinculación."],
+      ["ja", "ペアリングを完了できませんでした。"],
+    ] as const) {
+      await act(() => setLocalePreference(locale));
+      expect(i18n.t("pairing:errors.claimFailed"), locale).toBe(claimFailed);
+    }
+    await act(() => setLocalePreference("es"));
+    expect(i18n.t("settings:devices.toasts.pairingFailed")).toBe(
+      "No se pudo crear la vinculación.",
+    );
+  });
+
   it("waits for the host in the active language", async () => {
     await act(() => setLocalePreference("ja"));
     sasState(true);
     render(<PairingPage />);
     expect(screen.getByTestId("pair-waiting").textContent).toBe("atlas を待っています");
     expect(screen.getByRole("button", { name: "ホストを待っています…" })).toBeTruthy();
+  });
+
+  it("names the host that has to approve the phone in Spanish", async () => {
+    await act(() => setLocalePreference("es"));
+    sasState(true);
+    render(<PairingPage />);
+    expect(
+      screen.getByText(
+        "En atlas, abre Ajustes → Dispositivos y confirma el mismo código. Esta pantalla se actualiza cuando atlas apruebe este teléfono.",
+      ),
+    ).toBeTruthy();
   });
 });

@@ -91,6 +91,9 @@
     "toasts": {
       "machineGone": "That machine is no longer available.",
       "selectFailed": "Could not select that machine."
+    },
+    "errors": {
+      "noNoiseKey": "{{name}} has not published its connection key yet. Run {{command}} on it again."
     }
   },
   "snoozed": {

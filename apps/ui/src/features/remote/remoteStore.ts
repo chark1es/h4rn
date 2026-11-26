@@ -152,7 +152,7 @@ function tauriInvoke<T>(command: string, args?: Record<string, unknown>): Promis
       };
     }
   ).__TAURI_INTERNALS__;
-  if (!internals) throw new Error("This shell cannot open a sign-in window.");
+  if (!internals) throw new Error(i18n.t("settings:connect.errors.noSignInWindow"));
   return internals.invoke<T>(command, args);
 }
 
@@ -794,7 +794,9 @@ function daemonKeyFor(machine: MachineSummary, devices: ConnectDevice[]): string
   );
   const key = daemon?.noise_static_public_key;
   if (!key) {
-    throw new Error(`${machine.name} has not published a Noise key yet. Re-run h4rnd login.`);
+    throw new Error(
+      i18n.t("sidebar:hosts.errors.noNoiseKey", { name: machine.name, command: "h4rnd login" }),
+    );
   }
   return base64UrlToHex(key);
 }

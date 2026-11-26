@@ -1,7 +1,7 @@
 {
   "title": "Vincular un host",
   "pairWith": "Vincular con {{name}}",
-  "viaRelay": "{{address}} · por relay",
+  "viaRelay": "{{address}} · vía relay",
   "signedInAs": "Sesión iniciada en h4rn-connect como {{account}}",
   "signInFirst": "Inicia sesión en h4rn-connect antes de vincular",
   "thisPhoneCan": "Este teléfono puede",
@@ -32,7 +32,7 @@
   "actions": {
     "openThreads": "Abrir hilos",
     "pairing": "Vinculando…",
-    "pairPhone": "Vincular teléfono",
+    "pairPhone": "Vincular este teléfono",
     "pairCode": "Vincular con código"
   },
   "sas": {
@@ -43,8 +43,8 @@
     "mustApprove": "{{name}} debe aprobar este teléfono antes de que pueda conectarse.",
     "scanned": "Código escaneado. Compáralo antes de confiar en el host.",
     "typed": "Vinculado con un código escrito. Compáralo antes de confiar en el host.",
-    "waitingNote": "En {{name}}, abre Ajustes → Dispositivos y confirma el mismo código. Esta pantalla se actualiza cuando apruebe este teléfono.",
-    "compareNote": "{{name}} muestra este código en Ajustes → Dispositivos. Si coincide, la conexión es privada. Si no, algo entre tú y el host cambió la clave.",
+    "waitingNote": "En {{name}}, abre Ajustes → Dispositivos y confirma el mismo código. Esta pantalla se actualiza cuando {{name}} apruebe este teléfono.",
+    "compareNote": "{{name}} muestra este código en Ajustes → Dispositivos. Si coincide, ningún tercero puede leer esta conexión. Si es distinto, alguien entre tú y el host ha cambiado la clave.",
     "waitingFor": "Esperando a {{name}}",
     "approvalRequired": "Se requiere la aprobación del host: después de confirmar aquí, aprueba el mismo código en {{name}}.",
     "differ": "No coinciden",
@@ -57,7 +57,7 @@
     "signInToScan": "Inicia sesión en h4rn-connect primero y vuelve a escanear el código de vinculación.",
     "signInToType": "Inicia sesión en h4rn-connect primero y vuelve a escribir el código.",
     "otherConnect": "Este código pertenece a {{url}}. Cierra sesión e inicia sesión allí primero.",
-    "claimFailed": "No se pudo reclamar esa vinculación.",
+    "claimFailed": "No se pudo completar la vinculación.",
     "notApproved": "{{name}} aún no ha aprobado este dispositivo. Abre Ajustes → Dispositivos en {{name}}, confirma el mismo código y vuelve a intentarlo.",
     "codesDiffer": "Los códigos no coincidían, así que se revocó este dispositivo. Vuelve a vincularlo desde una red de confianza."
   },
@@ -70,7 +70,7 @@
     "loading": "Cargando hosts",
     "emptyTitle": "Aún no hay hosts.",
     "emptyBody": "Un host es una máquina que ejecuta el daemon de h4rn. Vincula este dispositivo o añade un host de tu tailnet para que los agentes tengan dónde ejecutarse.",
-    "lastSeen": "visto hace {{age}}",
+    "lastSeen": "visto {{when}}",
     "note": "La presencia es un punto más una palabra. Una distribución WSL es su propio host, así que vincular el host Windows no da acceso a la distribución."
   }
 }

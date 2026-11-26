@@ -40,7 +40,7 @@ describe("Phone tab bar", () => {
   it("uses the sidebar's names for each destination in every language", async () => {
     render(<PhoneNav />);
     for (const [locale, nav, names] of [
-      ["zh-CN", "主导航", ["收件箱", "拉取请求", "用量", "主机", "设置"]],
+      ["zh-CN", "主导航", ["收件箱", "PR", "用量", "主机", "设置"]],
       ["es", "Principal", ["Bandeja", "PRs", "Uso", "Hosts", "Ajustes"]],
       ["ja", "メイン", ["受信トレイ", "PR", "使用量", "ホスト", "設定"]],
     ] as const) {
