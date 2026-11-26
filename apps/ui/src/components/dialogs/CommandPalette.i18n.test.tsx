@@ -118,7 +118,7 @@ describe("command palette in another language", () => {
     expect(screen.getByRole("combobox").getAttribute("placeholder")).toBe(
       "Busca hilos, hosts, archivos o comandos",
     );
-    expect(screen.getByText("Ir a")).toBeTruthy();
+    expect(screen.getByText("Navegación")).toBeTruthy();
     // One name per command, shared with Settings → Shortcuts.
     expect(commandName("tab.working")).toBe("Mostrar «En curso»");
     expect(screen.getByText("Mostrar «En curso»")).toBeTruthy();
@@ -176,7 +176,7 @@ describe("command palette in another language", () => {
     const footer = document.querySelector("[data-slot='command-footer']");
     if (!(footer instanceof HTMLElement)) throw new Error("no palette footer");
     expect(within(footer).getByText("Esc")).toBeTruthy();
-    expect(footer.textContent).toContain("移動");
+    expect(footer.textContent).toContain("選択");
     expect(footer.textContent).toContain("検索対象：このマシン");
   });
 });
