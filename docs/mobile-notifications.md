@@ -175,7 +175,8 @@ The Android app words the alert in the phone's language (English, Simplified
 Chinese, Spanish or Japanese, and English for any other) from the state,
 project, count and titles: "h4rn · 已完成", "Requiere aprobación", "エージェント
 3 件が対応待ち". The notification channel's name and description follow the
-phone's language too, and are renamed when it changes. The English `title`
+phone's language too; after a language change they are renamed with the next
+alert. The English `title`
 and `body` are what an app from before this change shows, and what a newer
 app shows when a relay from before this change sends no `thread_title`. A
 group too large to repeat its titles within FCM's 4096-byte limit is sent

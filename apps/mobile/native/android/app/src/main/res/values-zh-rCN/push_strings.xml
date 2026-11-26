@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="push_channel_name">智能体提醒</string>
-    <string name="push_channel_description">智能体完成、失败或需要你处理时</string>
+    <string name="push_channel_description">智能体完成、失败或需要你处理时通知你</string>
     <string name="push_untitled_thread">对话</string>
     <string name="push_working">进行中</string>
     <string name="push_finished">已完成</string>

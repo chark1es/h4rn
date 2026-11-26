@@ -8,7 +8,7 @@
     <string name="push_failed">Fallido</string>
     <string name="push_needs_approval">Requiere aprobación</string>
     <string name="push_asks_for_input">Pide una respuesta</string>
-    <string name="push_stopped_at_limit">Se detuvo en un límite</string>
+    <string name="push_stopped_at_limit">Se detuvo al llegar a un límite</string>
     <string name="push_waiting_for_approval">Esperando aprobación</string>
     <string name="push_asked_a_question">Hizo una pregunta</string>
     <plurals name="push_agents_need_attention">

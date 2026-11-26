@@ -14,7 +14,7 @@ private object SpanishWords : AlertWords {
   override fun failed() = "Fallido"
   override fun needsApproval() = "Requiere aprobación"
   override fun asksForInput() = "Pide una respuesta"
-  override fun stoppedAtLimit() = "Se detuvo en un límite"
+  override fun stoppedAtLimit() = "Se detuvo al llegar a un límite"
   override fun waitingForApproval() = "Esperando aprobación"
   override fun askedAQuestion() = "Hizo una pregunta"
   override fun agentsNeedAttention(count: Int) = "$count agentes necesitan atención"
@@ -161,7 +161,7 @@ class PushContentTest {
       "failed" to "h4rn · Fallido",
       "approval" to "Requiere aprobación",
       "input" to "Pide una respuesta",
-      "limit" to "Se detuvo en un límite",
+      "limit" to "Se detuvo al llegar a un límite",
       "working" to "h4rn · En curso",
     )
     for ((state, body) in expected) {
