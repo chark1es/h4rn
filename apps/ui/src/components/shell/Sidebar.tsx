@@ -1098,7 +1098,7 @@ function SettingsSidebar() {
 }
 
 /** Health as a glyph plus an accessible word, never colour alone (DESIGN rule 3). */
-function McpHealthGlyph({ status }: { status: ReturnType<typeof serverStatus> }) {
+export function McpHealthGlyph({ status }: { status: ReturnType<typeof serverStatus> }) {
   const common = { className: "q-icon s14", strokeWidth: 1.5, role: "img" } as const;
   const label = status.label;
   if (status.tone === "ok")

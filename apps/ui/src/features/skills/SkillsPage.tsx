@@ -155,7 +155,7 @@ function Conflicts({ conflicts }: { conflicts: SkillConflict[] }) {
                 </div>
               </div>
               <ChipSelect
-                label={t("dialogs:mcp.import.resolutionFor", { name: conflict.name })}
+                label={t("library:skills.conflicts.resolutionFor", { name: conflict.name })}
                 value={choice}
                 options={[
                   { value: "keep_local", label: t("skills.conflicts.keepLocal") },

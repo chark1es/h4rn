@@ -136,8 +136,8 @@
       "more_one": "+{{count, number}} more",
       "more_other": "+{{count, number}} more",
       "needsYou": "Needs you",
-      "expires": "Shared MCP server · expires {{when}}",
-      "expiring": "Shared MCP server · expiring now",
+      "expires": "Shared MCP server · request expires {{when}}",
+      "expiring": "Shared MCP server · request expiring now",
       "noArgs": "No arguments",
       "reconnect": "Reconnect to answer. Nothing runs until you approve.",
       "deny": "Deny",
@@ -181,6 +181,7 @@
       "review": "Review"
     },
     "conflicts": {
+      "resolutionFor": "Resolution for {{name}}",
       "title": "Conflicts",
       "aside": "Settle these before the next sync",
       "versions": "{{reason}} · local <v>{{local}}</v> → remote <v>{{remote}}</v>",

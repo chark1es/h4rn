@@ -14,7 +14,7 @@
     "import": "Importar",
     "empty": {
       "title": "Aún no hay servidores MCP",
-      "body": "Añade un servidor una vez y h4rn lo entrega a los harness y máquinas que elijas. Los secretos se quedan en la máquina que lo ejecuta."
+      "body": "Añade un servidor una vez y h4rn lo entrega a los harnesses y máquinas que elijas. Los secretos se quedan en la máquina que lo ejecuta."
     },
     "detail": "Detalle del servidor MCP",
     "loading": "Cargando servidor",
@@ -74,7 +74,7 @@
     "status": {
       "unreachable": "Inaccesible",
       "sharedFrom": "Compartido desde {{host}}",
-      "needsCredential": "Sin credencial",
+      "needsCredential": "Revisar credencial",
       "ready": "Correcto",
       "starting": "Iniciando",
       "error": "Error",
@@ -141,8 +141,8 @@
       "more_many": "+{{count, number}} más",
       "more_other": "+{{count, number}} más",
       "needsYou": "Te necesita",
-      "expires": "Servidor MCP compartido · caduca {{when}}",
-      "expiring": "Servidor MCP compartido · caduca ahora",
+      "expires": "Servidor MCP compartido · la solicitud caduca {{when}}",
+      "expiring": "Servidor MCP compartido · la solicitud caduca ahora",
       "noArgs": "Sin argumentos",
       "reconnect": "Vuelve a conectarte para responder. No se ejecuta nada hasta que lo apruebes.",
       "deny": "Denegar",
@@ -152,12 +152,12 @@
   },
   "skills": {
     "loadingRegistry": "Leyendo el registro de skills…",
-    "summaryShort_one": "{{installed, number}} instaladas · {{count, number}} harness",
-    "summaryShort_many": "{{installed, number}} instaladas · {{count, number}} harness",
-    "summaryShort_other": "{{installed, number}} instaladas · {{count, number}} harness",
-    "summary_one": "{{installed, number}} instaladas · {{count, number}} harness detectado · disponibles donde elijas",
-    "summary_many": "{{installed, number}} instaladas · {{count, number}} harness detectados · disponibles donde elijas",
-    "summary_other": "{{installed, number}} instaladas · {{count, number}} harness detectados · disponibles donde elijas",
+    "summaryShort_one": "instaladas: {{installed, number}} · {{count, number}} harness",
+    "summaryShort_many": "instaladas: {{installed, number}} · {{count, number}} harnesses",
+    "summaryShort_other": "instaladas: {{installed, number}} · {{count, number}} harnesses",
+    "summary_one": "instaladas: {{installed, number}} · {{count, number}} harness detectado · disponibles donde elijas",
+    "summary_many": "instaladas: {{installed, number}} · {{count, number}} harnesses detectados · disponibles donde elijas",
+    "summary_other": "instaladas: {{installed, number}} · {{count, number}} harnesses detectados · disponibles donde elijas",
     "findExisting": "Buscar existentes",
     "import": "Importar",
     "loading": "Cargando skills",
@@ -170,8 +170,8 @@
       "idle": "Inactivo",
       "lastSync": "última sincronización {{when}}",
       "noSync": "ninguna sincronización completada",
-      "pushed": "{{pushed, number}} enviadas",
-      "pulled": "{{pulled, number}} recibidas",
+      "pushed": "enviadas: {{pushed, number}}",
+      "pulled": "recibidas: {{pulled, number}}",
       "offlineDetail": "Las skills locales siguen funcionando; la sincronización se reanuda cuando el daemon esté en línea.",
       "idleDetail": "Ejecuta un ciclo para publicar los cambios locales y traer el registro compartido.",
       "conflicts_one": "{{count, number}} conflicto por resolver.",
@@ -190,6 +190,7 @@
       "review": "Revisar"
     },
     "conflicts": {
+      "resolutionFor": "Resolución para {{name}}",
       "title": "Conflictos",
       "aside": "Resuélvelos antes de la próxima sincronización",
       "versions": "{{reason}} · local <v>{{local}}</v> → remota <v>{{remote}}</v>",
@@ -204,15 +205,15 @@
       "title": "Skills instaladas",
       "aside": "Cada harness recibe una copia gestionada; las versiones pueden diferir hasta la próxima sincronización",
       "emptyTitle": "Aún no hay skills",
-      "emptyBody": "Añade una carpeta con un SKILL.md, clona una desde git o importa lo que tus harness ya instalaron."
+      "emptyBody": "Añade una carpeta con un SKILL.md, clona una desde git o importa lo que tus harnesses ya instalaron."
     },
     "row": {
       "conflicts_one": "{{count, number}} conflicto",
       "conflicts_many": "{{count, number}} conflictos",
       "conflicts_other": "{{count, number}} conflictos",
       "installs_one": "{{installed, number}} de {{count, number}} harness · {{source}}",
-      "installs_many": "{{installed, number}} de {{count, number}} harness · {{source}}",
-      "installs_other": "{{installed, number}} de {{count, number}} harness · {{source}}",
+      "installs_many": "{{installed, number}} de {{count, number}} harnesses · {{source}}",
+      "installs_other": "{{installed, number}} de {{count, number}} harnesses · {{source}}",
       "toggle": "{{skill}} para {{harness}}",
       "noDirectory": "{{harness}} no tiene directorio de skills en este host",
       "version": "{{harness}} · {{version}}",
@@ -220,7 +221,7 @@
       "missingCopy": "Activada en el registro, pero no se encontró ninguna copia gestionada"
     },
     "directories": {
-      "title": "Directorios de los harness",
+      "title": "Directorios de los harnesses",
       "aside": "Dónde instala h4rn las copias gestionadas en esta máquina",
       "noUserRoot": "Sin directorio de skills del usuario",
       "detected": "Detectado",

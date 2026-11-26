@@ -131,13 +131,13 @@
       "wantsToRun": "{{machine}} 想要运行 <tool>{{tool}}</tool>",
       "more_other": "另有 {{count, number}} 个",
       "needsYou": "需要你处理",
-      "expires": "共享的 MCP 服务器 · {{when}}过期",
-      "expiring": "共享的 MCP 服务器 · 即将过期",
+      "expires": "共享的 MCP 服务器 · 请求{{when}}过期",
+      "expiring": "共享的 MCP 服务器 · 请求即将过期",
       "noArgs": "无参数",
       "reconnect": "重新连接后才能回复。在你批准之前不会运行任何内容。",
       "deny": "拒绝",
       "answering": "正在回复…",
-      "approveOnce": "批准一次"
+      "approveOnce": "仅批准这一次"
     }
   },
   "skills": {
@@ -172,6 +172,7 @@
       "review": "查看"
     },
     "conflicts": {
+      "resolutionFor": "{{name}} 的处理方式",
       "title": "冲突",
       "aside": "请在下次同步前处理",
       "versions": "{{reason}} · 本地 <v>{{local}}</v> → 远程 <v>{{remote}}</v>",

@@ -131,8 +131,8 @@
       "wantsToRun": "{{machine}} が <tool>{{tool}}</tool> を実行しようとしています",
       "more_other": "ほか {{count, number}} 件",
       "needsYou": "対応待ち",
-      "expires": "共有 MCP サーバー · {{when}}に期限切れ",
-      "expiring": "共有 MCP サーバー · まもなく期限切れ",
+      "expires": "共有 MCP サーバー · リクエストは{{when}}に期限切れ",
+      "expiring": "共有 MCP サーバー · リクエストはまもなく期限切れ",
       "noArgs": "引数なし",
       "reconnect": "応答するには再接続してください。承認するまで何も実行されません。",
       "deny": "拒否",
@@ -172,6 +172,7 @@
       "review": "確認"
     },
     "conflicts": {
+      "resolutionFor": "{{name}} の解決方法",
       "title": "競合",
       "aside": "次の同期の前に解決してください",
       "versions": "{{reason}} · ローカル <v>{{local}}</v> → リモート <v>{{remote}}</v>",
