@@ -1,10 +1,19 @@
 // @vitest-environment jsdom
 
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { ForgeIssueSummary, LinearIssueSummary } from "@/gen";
+import { i18n, setLocalePreference } from "@/lib/i18n";
 
-import { forgeIssueRow, groupLabel, ISSUE_FILTERS, issueKey, linearIssueRow } from "./store";
+import {
+  forgeIssueRow,
+  groupLabel,
+  ISSUE_FILTERS,
+  issueKey,
+  issueStateLabel,
+  linearIssueRow,
+  relativeIssueAge,
+} from "./store";
 
 const repo = {
   forge: "github" as const,
@@ -89,12 +98,42 @@ describe("issue rows", () => {
   });
 
   it("offers every filter the brief names", () => {
-    expect(ISSUE_FILTERS.map((filter) => filter.label)).toEqual([
+    expect(ISSUE_FILTERS.map((filter) => i18n.t(`issues:filters.${filter}`))).toEqual([
       "Open",
       "Closed",
       "Assigned to me",
       "Opened by me",
       "Mentioning me",
     ]);
+  });
+});
+
+describe("issue words in another language", () => {
+  afterEach(async () => {
+    vi.useRealTimers();
+    await setLocalePreference("en");
+  });
+
+  it("names the state and the age in the active language", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-03-10T12:00:00Z"));
+    expect(relativeIssueAge("2026-03-10T11:59:40Z")).toBe("just now");
+    expect(relativeIssueAge("2026-03-10T09:00:00Z")).toBe("3 hours ago");
+    await setLocalePreference("es");
+    expect(issueStateLabel("closed")).toBe("Cerrado");
+    expect(relativeIssueAge("2026-03-10T11:59:40Z")).toBe("ahora mismo");
+    expect(relativeIssueAge("2026-03-10T09:00:00Z")).toBe("hace 3 horas");
+    await setLocalePreference("ja");
+    // Ages inside a sentence are written out, never the narrow "3h" of a column.
+    expect(relativeIssueAge("2026-03-10T09:00:00Z")).toBe("3 時間前");
+    expect(relativeIssueAge("2026-03-08T12:00:00Z")).toBe("一昨日");
+    expect(relativeIssueAge("2026-03-07T12:00:00Z")).toBe("3 日前");
+    // A clock that runs ahead reads as just now, never "in 3 hours".
+    expect(relativeIssueAge("2026-03-10T15:00:00Z")).toBe("たった今");
+    await setLocalePreference("zh-CN");
+    expect(issueStateLabel("open")).toBe("开放");
+    expect(relativeIssueAge("2026-03-10T09:00:00Z")).toBe("3小时前");
+    // A month or more reads as the date, in the language's own order.
+    expect(relativeIssueAge("2026-01-02T12:00:00Z")).toBe("2026/1/2");
   });
 });

@@ -8,6 +8,7 @@ import {
   UnlinkIcon,
 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { Trans, useTranslation } from "react-i18next";
 
 import { ChipSelect } from "@/components/common/ChipSelect";
 import { Markdown } from "@/components/thread/Markdown";
@@ -40,6 +41,7 @@ import type {
   LinearProjectTeam,
   ThreadIssue,
 } from "@/gen";
+import { formatList, formatNumber } from "@/lib/i18n";
 import { getClient, pushToast, useApp } from "@/lib/store/appStore";
 
 import {
@@ -164,6 +166,7 @@ function filterSupported(groups: Group[], filter: ForgeIssueFilter): boolean {
  * not offered.
  */
 export function IssuesPage() {
+  const { t } = useTranslation(["issues", "common"]);
   const projects = useProjects((state) => state.projects);
   const selectedThreadId = useApp((state) => state.ui.selectedThreadId);
   const connection = useApp((state) => state.connection.status);
@@ -595,7 +598,7 @@ export function IssuesPage() {
     });
   };
 
-  const filters = ISSUE_FILTERS.filter((item) => filterSupported(groups, item.key));
+  const filters = ISSUE_FILTERS.filter((key) => filterSupported(groups, key));
   const threadId = selectedThreadId;
   const chooseAccount = (projectId: string, accountId: string) => {
     setAccountChoices((current) => {
@@ -629,12 +632,12 @@ export function IssuesPage() {
           });
 
   return (
-    <main className="q-main" aria-label="Issues">
+    <main className="q-main" aria-label={t("title")}>
       <header className="q-page-head q-issues-head">
-        <h1>Issues</h1>
+        <h1>{t("title")}</h1>
         <form
           className="q-issues-search"
-          aria-label="Search issues"
+          aria-label={t("search.label")}
           onSubmit={(event) => {
             event.preventDefault();
             runSearch(searchInput.trim());
@@ -642,8 +645,8 @@ export function IssuesPage() {
         >
           <SearchIcon className="q-icon s14 q-faint" strokeWidth={1.5} aria-hidden />
           <input
-            aria-label="Search issues"
-            placeholder="Search the tracker"
+            aria-label={t("search.label")}
+            placeholder={t("search.placeholder")}
             value={searchInput}
             onChange={(event) => setSearchInput(event.target.value)}
           />
@@ -656,36 +659,36 @@ export function IssuesPage() {
                 runSearch("");
               }}
             >
-              Clear
+              {t("search.clear")}
             </button>
           ) : null}
         </form>
-        <div className="q-seg" role="tablist" aria-label="Issue filters">
-          {filters.map((item) => (
+        <div className="q-seg" role="tablist" aria-label={t("filters.label")}>
+          {filters.map((key) => (
             <button
-              key={item.key}
+              key={key}
               type="button"
               role="tab"
-              aria-selected={filter === item.key}
-              onClick={() => changeFilter(item.key)}
+              aria-selected={filter === key}
+              onClick={() => changeFilter(key)}
             >
-              {item.label}
+              {t(`filters.${key}`)}
             </button>
           ))}
         </div>
         <span className="grow" />
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
-            <button type="button" className="q-btn ghost" aria-label="Projects">
-              Projects
+            <button type="button" className="q-btn ghost" aria-label={t("projects.label")}>
+              {t("projects.label")}
             </button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end" className="w-64 max-h-80 overflow-y-auto">
-            <DropdownMenuLabel>Projects</DropdownMenuLabel>
+            <DropdownMenuLabel>{t("projects.label")}</DropdownMenuLabel>
             <DropdownMenuSeparator />
             {projects.length === 0 ? (
               <p className="q-faint" style={{ padding: "6px 8px", fontSize: 12 }}>
-                No projects yet.
+                {t("projects.none")}
               </p>
             ) : (
               projects.map((project) => {
@@ -708,7 +711,7 @@ export function IssuesPage() {
                       <DropdownMenuRadioGroup
                         value={chosen?.account_id ?? ""}
                         onValueChange={(accountId) => chooseAccount(project.id, accountId)}
-                        aria-label={`Account for ${project.name}`}
+                        aria-label={t("projects.accountFor", { name: project.name })}
                       >
                         {candidates.map((candidate) => (
                           <DropdownMenuRadioItem
@@ -732,7 +735,7 @@ export function IssuesPage() {
         <div className="q-issues-list">
           {loading ? (
             <p className="q-faint q-issues-note" role="status">
-              Reading trackers…
+              {t("reading")}
             </p>
           ) : null}
           {accountsError ? (
@@ -747,8 +750,12 @@ export function IssuesPage() {
           ) : null}
           {unavailableProjects.map((project) => (
             <div key={project.id} className="q-issues-note" role="note">
-              <strong>{project.name}</strong>: Bitbucket Cloud has no issue API. Atlassian removed
-              it in August 2026, so this project shows pull requests only.
+              <Trans
+                t={t}
+                i18nKey="bitbucket"
+                values={{ name: project.name }}
+                components={{ strong: <strong /> }}
+              />
             </div>
           ))}
           {unmatchedProjects.map((project) => {
@@ -756,8 +763,12 @@ export function IssuesPage() {
             if (!repo) return null;
             return (
               <div key={project.id} className="q-issues-note" role="note">
-                <strong>{project.name}</strong>: No {forgeLabel(repo.forge)} account matches this
-                repository.
+                <Trans
+                  t={t}
+                  i18nKey="noAccount"
+                  values={{ name: project.name, forge: forgeLabel(repo.forge) }}
+                  components={{ strong: <strong /> }}
+                />
               </div>
             );
           })}
@@ -769,18 +780,15 @@ export function IssuesPage() {
           unmatchedProjects.length === 0 ? (
             <div className="q-empty q-issues-empty">
               <CircleDotIcon className="q-icon s22 q-faint" strokeWidth={1.5} aria-hidden />
-              <h3>No issues to show</h3>
-              <p>
-                Add a project with a forge remote, or choose a Linear team in Settings → Source
-                control &amp; issues.
-              </p>
+              <h3>{t("empty.title")}</h3>
+              <p>{t("empty.body")}</p>
             </div>
           ) : null}
           {groups.map((group) => (
             <section key={group.key} className="q-issues-group" aria-label={group.label}>
               <header className="q-issues-group-head">
                 <span>{group.label}</span>
-                <span className="q-faint">{group.rows.length}</span>
+                <span className="q-faint">{formatNumber(group.rows.length)}</span>
               </header>
               {group.error ? <p className="q-issues-note q-danger">{group.error}</p> : null}
               {group.rows.map((row) => (
@@ -812,7 +820,7 @@ export function IssuesPage() {
                   disabled={group.loading || group.generation !== generation}
                   onClick={() => void loadMore(group)}
                 >
-                  {group.loading ? "Loading…" : "Load more"}
+                  {group.loading ? t("common:loading") : t("loadMore")}
                 </button>
               ) : null}
             </section>
@@ -840,8 +848,8 @@ export function IssuesPage() {
           ) : (
             <div className="q-empty q-issues-empty">
               <CircleDotIcon className="q-icon s22 q-faint" strokeWidth={1.5} aria-hidden />
-              <h3>Select an issue</h3>
-              <p>Its description, comments and actions open here.</p>
+              <h3>{t("select.title")}</h3>
+              <p>{t("select.body")}</p>
             </div>
           )}
         </div>
@@ -888,6 +896,7 @@ function IssueDetail({
   onChanged: () => void;
   onLinkChange: () => void;
 }) {
+  const { t } = useTranslation(["issues", "common"]);
   const [forge, setForge] = useState<ForgeIssue | null>(null);
   const [linear, setLinear] = useState<LinearIssue | null>(null);
   const [comments, setComments] = useState<ForgeIssueComment[]>([]);
@@ -899,7 +908,9 @@ function IssueDetail({
   const [busy, setBusy] = useState(false);
   const [title, setTitle] = useState(row.title);
   const [body, setBody] = useState("");
+  // i18n-ignore-next-line: the editable Labels field's value, split on commas when saved
   const [labels, setLabels] = useState(row.labels.map((label) => label.name).join(", "));
+  // i18n-ignore-next-line: the editable Assignees field's value, split on commas when saved
   const [assignees, setAssignees] = useState(row.assignees.join(", "));
   const [comment, setComment] = useState("");
   const [closeReason, setCloseReason] = useState<CloseReason>("completed");
@@ -925,8 +936,12 @@ function IssueDetail({
           setReadOnly(detail.readOnly);
           setTitle(detail.issue.summary.title);
           setBody(detail.issue.body);
+          // i18n-ignore-next-line: the editable Labels field's value, split on commas when saved
           setLabels(detail.issue.summary.labels.map((label) => label.name).join(", "));
-          setAssignees(detail.issue.summary.assignees.map((person) => person.login).join(", "));
+          setAssignees(
+            // i18n-ignore-next-line: the editable Assignees field's value, split on commas when saved
+            detail.issue.summary.assignees.map((person) => person.login).join(", "),
+          );
           setLoading(false);
         })
         .catch((cause: unknown) => {
@@ -944,7 +959,9 @@ function IssueDetail({
           setReadOnly(readOnlyIssue);
           setTitle(issue.summary.title);
           setBody(issue.description);
+          // i18n-ignore-next-line: the editable Labels field's value, split on commas when saved
           setLabels(issue.summary.labels.join(", "));
+          // i18n-ignore-next-line: the editable Assignees field's value, split on commas when saved
           setAssignees(issue.summary.assignees.join(", "));
           setLoading(false);
         })
@@ -987,7 +1004,7 @@ function IssueDetail({
       await action();
     } catch (cause) {
       pushToast({
-        title: "The tracker did not accept that.",
+        title: t("detail.rejected"),
         description: issueError(cause),
         variant: "error",
       });
@@ -1013,7 +1030,9 @@ function IssueDetail({
       setReadOnly(result.readOnly);
       setTitle(result.issue.summary.title);
       setBody(result.issue.body);
+      // i18n-ignore-next-line: the editable Labels field's value, split on commas when saved
       setLabels(result.issue.summary.labels.map((label) => label.name).join(", "));
+      // i18n-ignore-next-line: the editable Assignees field's value, split on commas when saved
       setAssignees(result.issue.summary.assignees.map((person) => person.login).join(", "));
       onChanged();
     });
@@ -1074,7 +1093,8 @@ function IssueDetail({
   if (loading) {
     return (
       <div className="q-issues-note" role="status">
-        <LoaderCircleIcon className="q-icon s14" strokeWidth={1.5} aria-hidden /> Reading the issue…
+        <LoaderCircleIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />{" "}
+        {t("detail.reading")}
       </div>
     );
   }
@@ -1106,7 +1126,7 @@ function IssueDetail({
   };
 
   return (
-    <article className="q-issues-detail-inner" aria-label="Issue">
+    <article className="q-issues-detail-inner" aria-label={t("detail.label")}>
       <header className="q-issues-detail-head">
         <span className={`q-issue-state ${stateTone(state)}`}>{issueStateLabel(state)}</span>
         <span className="q-faint">{row.number}</span>
@@ -1117,7 +1137,7 @@ function IssueDetail({
           href={webUrl}
           target="_blank"
           rel="noopener noreferrer"
-          aria-label="Open on the tracker"
+          aria-label={t("detail.openOnTracker")}
         >
           <ExternalLinkIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
         </a>
@@ -1125,7 +1145,7 @@ function IssueDetail({
           type="button"
           className="q-btn ghost"
           disabled={!threadId || busy}
-          title={threadId ? undefined : "Open a thread to link this issue"}
+          title={threadId ? undefined : t("detail.linkNeedsThread")}
           onClick={() => void toggleLink()}
         >
           {linked ? (
@@ -1133,20 +1153,18 @@ function IssueDetail({
           ) : (
             <LinkIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
           )}
-          {linked ? "Unlink" : "Link to this thread"}
+          {linked ? t("detail.unlink") : t("detail.link")}
         </button>
       </header>
       {readOnly ? (
         <p className="q-issues-note">
-          {row.scope.tracker === "linear"
-            ? "This Linear team is not attached to a project, so its issues are read-only. Choose the team for a project in Settings → Source control."
-            : "This project does not own the repository, so the issue is read-only."}
+          {row.scope.tracker === "linear" ? t("detail.readOnlyLinear") : t("detail.readOnlyForge")}
         </p>
       ) : null}
       {canWrite ? (
         <input
           className="q-issue-title-input"
-          aria-label="Issue title"
+          aria-label={t("detail.titleLabel")}
           value={title}
           onChange={(event) => setTitle(event.target.value)}
           onBlur={() => {
@@ -1160,7 +1178,9 @@ function IssueDetail({
       )}
       <div className="q-issues-detail-meta">
         {summary && "author" in summary && summary.author ? <span>{summary.author}</span> : null}
-        {detailAssignees.length > 0 ? <span>{detailAssignees.join(", ")}</span> : null}
+        {detailAssignees.length > 0 ? (
+          <span>{formatList(detailAssignees, "conjunction", "narrow")}</span>
+        ) : null}
         {detailLabels.length > 0 ? (
           <span className="q-issue-labels">
             {detailLabels.map((label) => (
@@ -1174,7 +1194,7 @@ function IssueDetail({
       {canWrite ? (
         <textarea
           className="q-issue-body-input"
-          aria-label="Issue description"
+          aria-label={t("detail.descriptionLabel")}
           rows={8}
           value={body}
           onChange={(event) => setBody(event.target.value)}
@@ -1184,14 +1204,14 @@ function IssueDetail({
         />
       ) : (
         <div className="q-issue-description">
-          <Markdown text={body || "_No description._"} />
+          <Markdown text={body || t("detail.noDescription")} />
         </div>
       )}
       {canWrite && (capabilities.labels || capabilities.assignees) ? (
         <div className="q-issues-fields">
           {capabilities.labels ? (
             <label>
-              <span>Labels</span>
+              <span>{t("detail.labels")}</span>
               <input
                 value={labels}
                 onChange={(event) => setLabels(event.target.value)}
@@ -1205,13 +1225,13 @@ function IssueDetail({
                     void update({ labels: next });
                   }
                 }}
-                placeholder="bug, frontend"
+                placeholder={t("detail.labelsPlaceholder")}
               />
             </label>
           ) : null}
           {capabilities.assignees ? (
             <label>
-              <span>Assignees</span>
+              <span>{t("detail.assignees")}</span>
               <input
                 value={assignees}
                 onChange={(event) => setAssignees(event.target.value)}
@@ -1225,7 +1245,7 @@ function IssueDetail({
                     void update({ assignees: next });
                   }
                 }}
-                placeholder="alice, bob"
+                placeholder={t("detail.assigneesPlaceholder")}
               />
             </label>
           ) : null}
@@ -1237,12 +1257,12 @@ function IssueDetail({
             <>
               {capabilities.close_reason ? (
                 <ChipSelect
-                  label="Close reason"
+                  label={t("detail.closeReason")}
                   value={closeReason}
                   options={[
-                    { value: "completed", label: "Completed" },
-                    { value: "not_planned", label: "Not planned" },
-                    { value: "duplicate", label: "Duplicate" },
+                    { value: "completed", label: t("detail.reasons.completed") },
+                    { value: "not_planned", label: t("detail.reasons.not_planned") },
+                    { value: "duplicate", label: t("detail.reasons.duplicate") },
                   ]}
                   onChange={(value) => setCloseReason(value as CloseReason)}
                 />
@@ -1250,9 +1270,9 @@ function IssueDetail({
               {capabilities.close_reason && closeReason === "duplicate" ? (
                 <input
                   className="q-issue-duplicate"
-                  aria-label="Duplicate of issue number"
+                  aria-label={t("detail.duplicateLabel")}
                   inputMode="numeric"
-                  placeholder="Issue number"
+                  placeholder={t("detail.duplicatePlaceholder")}
                   value={duplicateNumber}
                   onChange={(event) => setDuplicateNumber(event.target.value)}
                 />
@@ -1261,10 +1281,10 @@ function IssueDetail({
                 type="button"
                 className="q-btn secondary"
                 disabled={busy || duplicateInvalid}
-                title={duplicateInvalid ? "Name the issue this one duplicates" : undefined}
+                title={duplicateInvalid ? t("detail.duplicateMissing") : undefined}
                 onClick={() => void update(closeChange())}
               >
-                Close issue
+                {t("detail.close")}
               </button>
             </>
           ) : (
@@ -1274,14 +1294,14 @@ function IssueDetail({
               disabled={busy}
               onClick={() => void update({ state: "open" })}
             >
-              Reopen issue
+              {t("detail.reopen")}
             </button>
           )}
         </div>
       ) : null}
       {linkedPrs.length > 0 || linearPrs.length > 0 ? (
         <section className="q-issues-section">
-          <h3>Linked pull requests</h3>
+          <h3>{t("detail.linkedPrs")}</h3>
           {linkedPrs.map((pr) => (
             <a
               key={pr.web_url}
@@ -1311,14 +1331,15 @@ function IssueDetail({
       ) : null}
       <section className="q-issues-section">
         <h3>
-          <MessageSquareIcon className="q-icon s14" strokeWidth={1.5} aria-hidden /> Comments
+          <MessageSquareIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />{" "}
+          {t("detail.comments")}
         </h3>
-        {commentsFor.length === 0 ? <p className="q-faint">No comments yet.</p> : null}
+        {commentsFor.length === 0 ? <p className="q-faint">{t("detail.noComments")}</p> : null}
         {commentsFor.map((item) =>
           "comment_id" in item ? (
             <div key={item.comment_id} className="q-issue-comment">
               <header>
-                <b>{item.author || "Someone"}</b>
+                <b>{item.author || t("detail.someone")}</b>
                 <span className="q-faint">{relativeIssueAge(item.created_at)}</span>
               </header>
               <Markdown text={item.body} />
@@ -1326,7 +1347,7 @@ function IssueDetail({
           ) : (
             <div key={item.id} className="q-issue-comment">
               <header>
-                <b>{item.author || "Someone"}</b>
+                <b>{item.author || t("detail.someone")}</b>
                 <span className="q-faint">{relativeIssueAge(item.created_at)}</span>
               </header>
               <Markdown text={item.body} />
@@ -1340,7 +1361,7 @@ function IssueDetail({
             disabled={busy}
             onClick={() => void loadMoreComments()}
           >
-            {busy ? "Loading…" : "Load more comments"}
+            {busy ? t("common:loading") : t("detail.loadMoreComments")}
           </button>
         ) : null}
         {!forge && linearCommentsCursor ? (
@@ -1350,16 +1371,16 @@ function IssueDetail({
             disabled={busy}
             onClick={() => void loadMoreLinearComments()}
           >
-            {busy ? "Loading…" : "Load more comments"}
+            {busy ? t("common:loading") : t("detail.loadMoreComments")}
           </button>
         ) : null}
         {canComment ? (
           <div className="q-issues-comment-form">
             <textarea
               className="q-issue-notes"
-              aria-label="New comment"
+              aria-label={t("detail.newComment")}
               rows={3}
-              placeholder="Write a comment"
+              placeholder={t("detail.writeComment")}
               value={comment}
               onChange={(event) => setComment(event.target.value)}
             />
@@ -1369,7 +1390,7 @@ function IssueDetail({
               disabled={busy || !comment.trim()}
               onClick={() => void postComment()}
             >
-              {busy ? "Sending…" : "Comment"}
+              {busy ? t("detail.sending") : t("detail.comment")}
             </button>
           </div>
         ) : null}

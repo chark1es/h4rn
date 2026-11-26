@@ -29,6 +29,7 @@ import type {
   ResponseBody,
   ThreadPullRequest,
 } from "@/gen";
+import { formatNumber, i18n } from "@/lib/i18n";
 
 /**
  * Typed forge requests for the PR surfaces.
@@ -412,26 +413,29 @@ export function stateLabel(state: ForgePrState): {
 } {
   switch (state) {
     case "open":
-      return { label: "Open", tone: "ok" };
+      return { label: i18n.t("pullRequests:state.open"), tone: "ok" };
     case "draft":
-      return { label: "Draft", tone: "" };
+      return { label: i18n.t("pullRequests:state.draft"), tone: "" };
     case "merged":
-      return { label: "Merged", tone: "ok" };
+      return { label: i18n.t("pullRequests:state.merged"), tone: "ok" };
     case "closed":
-      return { label: "Closed", tone: "danger" };
+      return { label: i18n.t("pullRequests:state.closed"), tone: "danger" };
   }
 }
 
 export function checksLabel(state: ForgeChecksState, passed: number, total: number): string {
   switch (state) {
     case "passing":
-      return `${passed} of ${total} checks passed`;
+      return i18n.t("pullRequests:checksState.passing", {
+        passed: formatNumber(passed),
+        total: formatNumber(total),
+      });
     case "failing":
-      return `${total - passed} failing`;
+      return i18n.t("pullRequests:checksState.failing", { count: total - passed });
     case "pending":
-      return "Checks running";
+      return i18n.t("pullRequests:checksState.pending");
     case "unknown":
-      return "No checks";
+      return i18n.t("pullRequests:checksState.unknown");
   }
 }
 
@@ -444,11 +448,11 @@ export function checksLabel(state: ForgeChecksState, passed: number, total: numb
 export function summaryChecksLabel(state: ForgeChecksState): string | null {
   switch (state) {
     case "passing":
-      return "All checks passed";
+      return i18n.t("pullRequests:summaryChecks.passing");
     case "failing":
-      return "Checks failing";
+      return i18n.t("pullRequests:summaryChecks.failing");
     case "pending":
-      return "Checks running";
+      return i18n.t("pullRequests:summaryChecks.pending");
     case "unknown":
       return null;
   }
@@ -461,13 +465,13 @@ export function reviewChip(state: ForgeReviewState): {
 } | null {
   switch (state) {
     case "changes_requested":
-      return { label: "Changes requested", tone: "warn" };
+      return { label: i18n.t("pullRequests:reviewChip.changes_requested"), tone: "warn" };
     case "approved":
-      return { label: "Approved", tone: "ok" };
+      return { label: i18n.t("pullRequests:reviewChip.approved"), tone: "ok" };
     case "pending":
-      return { label: "Review requested", tone: "you" };
+      return { label: i18n.t("pullRequests:reviewChip.pending"), tone: "you" };
     case "commented":
-      return { label: "Review comments", tone: "" };
+      return { label: i18n.t("pullRequests:reviewChip.commented"), tone: "" };
     case "dismissed":
       return null;
   }
@@ -480,9 +484,9 @@ export function mergeableLabel(state: ForgeMergeable): {
 } | null {
   switch (state) {
     case "mergeable":
-      return { label: "No conflicts", tone: "ok" };
+      return { label: i18n.t("pullRequests:mergeable.mergeable"), tone: "ok" };
     case "conflicting":
-      return { label: "Merge conflicts", tone: "danger" };
+      return { label: i18n.t("pullRequests:mergeable.conflicting"), tone: "danger" };
     case "unknown":
       return null;
   }
@@ -563,10 +567,13 @@ export function rerunAction(checks: ForgeChecks): RerunAction {
   if (!checks.rerun.supported) {
     return {
       kind: "unsupported",
-      reason: checks.rerun.reason ?? "This forge cannot re-run checks",
+      // The daemon's reason is shown as sent; only the fallback is ours.
+      reason: checks.rerun.reason ?? i18n.t("pullRequests:rerun.unsupported"),
     };
   }
-  if (checks.failed === 0) return { kind: "nothing", reason: "No checks failed" };
+  if (checks.failed === 0) {
+    return { kind: "nothing", reason: i18n.t("pullRequests:rerun.nothing") };
+  }
   return { kind: "ready" };
 }
 
@@ -578,7 +585,7 @@ export function logCheck(checks: ForgeChecks): ForgeChecks["checks"][number] | n
 
 /** The faint "required" mark after a check name, or `null` when unknown or optional. */
 export function requiredMark(check: ForgeChecks["checks"][number]): string | null {
-  return check.required === true ? "required" : null;
+  return check.required === true ? i18n.t("pullRequests:required") : null;
 }
 
 /** First 7 characters of a commit id, the way forges abbreviate it. */

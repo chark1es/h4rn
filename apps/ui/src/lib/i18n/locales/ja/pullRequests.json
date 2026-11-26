@@ -1,0 +1,212 @@
+{
+  "title": "プルリクエスト",
+  "loading": "プルリクエストを読み込み中",
+  "repository": "リポジトリ",
+  "refresh": "プルリクエストを更新",
+  "loadMore": "さらに読み込む",
+  "filters": {
+    "label": "プルリクエストのフィルター",
+    "open": "オープン",
+    "mine": "自分",
+    "review": "レビュー",
+    "branch": "このブランチ"
+  },
+  "noForge": {
+    "title": "Forge を接続",
+    "body": "プルリクエストは GitHub、GitLab、Gitea、Forgejo、Bitbucket Cloud、Azure DevOps にあります。アカウントを追加すると、トークンはこのホストに保存されます。",
+    "action": "Forge アカウントを追加"
+  },
+  "noRepo": {
+    "title": "リポジトリが見つかりません",
+    "body": "GitHub、GitLab、Gitea、Forgejo、Bitbucket Cloud、Azure DevOps のリモートがある git チェックアウトでスレッドを開くか、設定でセルフホストのホストを追加してください。",
+    "action": "Forge の設定を開く"
+  },
+  "accountsFailed": "Forge アカウントを読み込めませんでした",
+  "listFailed": "プルリクエストを読み込めませんでした",
+  "empty": {
+    "open": "プルリクエストはありません",
+    "review": "レビュー待ちはありません",
+    "branch": "このブランチのプルリクエストはありません",
+    "openBody": "このリポジトリにオープンなプルリクエストはありません。",
+    "mineBody": "このリポジトリで自分が作成したオープンなプルリクエストはありません。",
+    "reviewBody": "プルリクエストのレビューを依頼されていません。",
+    "branchBody": "{{branch}} を head にしたオープンなプルリクエストはありません。",
+    "thisBranchBody": "このブランチを head にしたオープンなプルリクエストはありません。"
+  },
+  "state": {
+    "open": "オープン",
+    "draft": "ドラフト",
+    "merged": "マージ済み",
+    "closed": "クローズ"
+  },
+  "checksState": {
+    "passing": "{{total}} 件中 {{passed}} 件のチェックに成功",
+    "failing_other": "{{count, number}} 件失敗",
+    "pending": "チェック実行中",
+    "unknown": "チェックなし"
+  },
+  "summaryChecks": {
+    "passing": "すべてのチェックに成功",
+    "failing": "チェック失敗",
+    "pending": "チェック実行中"
+  },
+  "reviewChip": {
+    "changes_requested": "変更要求あり",
+    "approved": "承認済み",
+    "pending": "レビュー依頼中",
+    "commented": "レビューコメントあり"
+  },
+  "mergeable": {
+    "mergeable": "コンフリクトなし",
+    "conflicting": "マージコンフリクト"
+  },
+  "rerun": {
+    "unsupported": "この Forge ではチェックを再実行できません",
+    "nothing": "失敗したチェックはありません"
+  },
+  "required": "必須",
+  "open": {
+    "button": "PR を作成",
+    "needsThread": "先にこのリポジトリでスレッドを開いてください。スレッドのブランチが PR の head になります",
+    "noAccount": "このリポジトリに一致する {{forge}} アカウントがありません",
+    "title": "{{branch}} からプルリクエストを作成",
+    "description": "デーモンが必要に応じてスレッドのブランチをプッシュし、{{forge}} でリクエストを作成します。",
+    "titleField": "タイトル",
+    "titleLabel": "プルリクエストのタイトル",
+    "base": "ベースブランチ",
+    "descriptionField": "説明",
+    "descriptionLabel": "プルリクエストの説明",
+    "submit": "プルリクエストを作成",
+    "submitting": "作成中…",
+    "opened": "{{repo}}#{{number}} を作成しました。",
+    "failed": "プルリクエストを作成できませんでした。"
+  },
+  "detail": {
+    "label": "プルリクエスト",
+    "failed": "このプルリクエストを読み込めませんでした",
+    "noDetail": "Forge から詳細が返されませんでした。",
+    "back": "一覧に戻る",
+    "breadcrumb": "パンくずリスト",
+    "commits_other": "{{count, number}} 件のコミット",
+    "openedBy": "{{author}} が {{when}}に作成",
+    "openedByNow": "{{author}} がたった今作成",
+    "onForge": "{{forge}} の {{repo}}",
+    "openOn": "{{forge}} で開く"
+  },
+  "tabs": {
+    "conversation": "会話",
+    "commits": "コミット",
+    "checks": "チェック",
+    "files": "ファイル",
+    "filesUnknown": "変更されたファイル数を Forge が報告しませんでした"
+  },
+  "conversation": {
+    "noDescription": "説明はありません。",
+    "loading": "コメントを読み込み中…",
+    "failed": "コメントを読み込めませんでした",
+    "sending": "送信中…",
+    "line": "{{line}} 行目",
+    "resolved": "解決済み",
+    "unresolved": "未解決",
+    "outdated": "古い",
+    "replyTo": "{{name}} に返信",
+    "replyToReview": "レビューに返信",
+    "replyLabel": "{{path}} に返信",
+    "sendReply": "返信を送信",
+    "sendingReply": "送信中…",
+    "reply": "返信",
+    "sendTo": "{{title}} に送る",
+    "needsThread": "エージェントがワークスペースを使えるよう、先にスレッドを開いてください",
+    "handing": "引き渡し中…",
+    "handToAgent": "エージェントに渡す",
+    "commentOn": "#{{number}} にコメント",
+    "posting": "投稿中…",
+    "comment": "コメント",
+    "you": "自分"
+  },
+  "commits": {
+    "loading": "コミットを読み込み中…",
+    "failed": "コミットを読み込めませんでした",
+    "openCommit": "このコミットを開く",
+    "truncated_other": "最初の {{count, number}} 件のコミットを表示しています。残りは {{forge}} で PR を開いて確認してください。",
+    "none": "コミットなし",
+    "noneBody": "このプルリクエストにはコミットがありません。"
+  },
+  "checks": {
+    "loading": "チェックを読み込み中…",
+    "failed": "チェックを読み込めませんでした",
+    "viewLog": "ログを表示",
+    "rerunning": "再実行中…",
+    "rerunFailed": "失敗分を再実行",
+    "none": "チェックなし",
+    "noneBody": "この Forge は現在のコミットのチェックを報告していません。"
+  },
+  "files": {
+    "loading": "差分を読み込み中…",
+    "failed": "差分を読み込めませんでした",
+    "binary": "バイナリファイル",
+    "truncated": "パッチは Forge によって切り詰められました",
+    "noPatch": "インラインのパッチはありません",
+    "loadMore": "さらにファイルを読み込む"
+  },
+  "side": {
+    "merge": "マージ",
+    "checks": "チェック",
+    "passedOf": "{{total}} 件中 {{passed}} 件成功",
+    "checksFailed": "チェックを読み込めませんでした。",
+    "noChecks": "報告されたチェックはありません。",
+    "reviews": "レビュー",
+    "noReviews": "まだレビューはありません。",
+    "reviewState": {
+      "approved": "承認",
+      "changes_requested": "変更要求",
+      "commented": "コメント",
+      "pending": "保留中",
+      "dismissed": "却下"
+    },
+    "linkedThreads": "リンクされたスレッド",
+    "noLinkedThreads": "このプルリクエストをリンクしたスレッドはありません。スレッドから ⌘K でリンクできます。",
+    "watching": "このプルリクエストをウォッチ中",
+    "agentThread": "エージェントのスレッド",
+    "noAgentThread": "このリポジトリでスレッドを開くと、レビューをエージェントに渡せます。",
+    "handPr": "PR をエージェントに渡す",
+    "noAccount": "このホストに一致するアカウントがありません。",
+    "addOne": "追加する"
+  },
+  "toast": {
+    "rerunStarted": "失敗したチェックを再実行しています。",
+    "rerunFailed": "チェックを再実行できませんでした。",
+    "diffMoreFailed": "残りの差分を読み込めませんでした。",
+    "replyFailed": "返信を投稿できませんでした。",
+    "commentFailed": "コメントを投稿できませんでした。",
+    "openThreadFirst": "先にスレッドを開いてください。",
+    "openThreadFirstBody": "PR を受け取るには、エージェントにワークスペース、harness、モデルが必要です。",
+    "handed": "#{{number}} を {{title}} に渡しました。",
+    "handedBody": "エージェントは PR のコンテキストを持って開始し、承認なしにプッシュしません。",
+    "handFailed": "PR をエージェントに渡せませんでした。"
+  },
+  "linked": {
+    "items": "リンクされた項目",
+    "pullUnavailable": "プルリクエストを取得できません",
+    "stateUnavailable": "状態を取得できません",
+    "stopWatching": "ウォッチをやめる",
+    "watch": "変更をウォッチ",
+    "unlink": "リンクを解除",
+    "unlinkIssue": "Issue のリンクを解除",
+    "linearIssue": "Linear の Issue",
+    "issueUnavailable": "Issue を取得できません",
+    "changeFailed": "リンクされた項目を変更できませんでした。"
+  },
+  "linkDialog": {
+    "title": "プルリクエストをリンク",
+    "pickFrom": "リンクを貼り付けるか、{{repo}} のオープンなプルリクエストを選んでください。",
+    "noRemote": "プルリクエストのリンクを貼り付けてください。このワークスペースには Forge のリモートがないため、選べるリポジトリはありません。",
+    "urlLabel": "プルリクエストの URL",
+    "link": "リンク",
+    "invalid": "h4rn が読み取れるプルリクエストのリンク（GitHub、GitLab、Gitea、Forgejo、Bitbucket、Azure DevOps）ではありません。番号を含むページの URL を貼り付けてください。",
+    "reading": "リポジトリを読み込み中…",
+    "openList": "オープンなプルリクエスト",
+    "noneOpen": "{{repo}} にオープンなプルリクエストはありません。",
+    "linked": "#{{number}} をこのスレッドにリンクしました。"
+  }
+}

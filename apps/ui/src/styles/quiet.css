@@ -1253,6 +1253,15 @@ fieldset.q-seg-fs {
 .q-row-status.danger {
   color: var(--danger);
 }
+/* A pull request's chips wrap to a second line rather than run off a phone
+   when they do not fit (Spanish at 360 px). */
+.q-pr-rows .q-row-l2 {
+  flex-wrap: wrap;
+  row-gap: 2px;
+}
+.q-pr-rows .q-row-status {
+  white-space: nowrap;
+}
 .q-ph-pg .q-row-meta,
 .q-ph-pg .q-row-status {
   font-size: 14px;
@@ -6739,6 +6748,13 @@ fieldset.q-seg-fs {
 /* Issues: a quiet list beside a reading pane. */
 .q-issues-head {
   gap: 12px;
+  /* Wraps instead of pushing Projects off the edge when the filters run long
+     (Spanish, or a narrow window); at its usual width it is one 52 px row. */
+  flex-wrap: wrap;
+  row-gap: 8px;
+  height: auto;
+  min-height: 52px;
+  padding-block: 8px;
 }
 .q-issues-search {
   display: flex;
