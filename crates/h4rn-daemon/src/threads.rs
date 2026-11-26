@@ -1439,6 +1439,9 @@ enum DeliveryClaim {
     /// The grant that asked for the turn was revoked. The turn was settled
     /// under the claim's own record lock; the prompt was never written.
     Revoked,
+    /// Another thread's rewind is restoring this checkout. The turn was
+    /// settled under the claim's own record lock; the prompt was never written.
+    Refused,
 }
 
 /// The one row a turn shows when its outside grant was revoked before it ran.
@@ -6143,6 +6146,14 @@ impl ThreadManager {
                     ));
                 }
             }
+            // Reserve the tree before the overlap scan, and keep it from
+            // before the first write through the commit. A thread or agent
+            // session whose turn begins after this is refused when its prompt
+            // is claimed or its session starts; one that began earlier is
+            // already active when the scan reads its record, and the rewind
+            // refuses instead. Reserving only after the scan left a window in
+            // which neither side saw the other.
+            reservation = Some(self.inner.reserve_restore(&workspace));
             let facts = self.inner.thread_facts(thread_id).await;
             let descendants = descendants_of(thread_id, &facts);
             for fact in &facts {
@@ -6165,9 +6176,6 @@ impl ThreadManager {
                     ),
                 });
             }
-            // Reserve the tree from before the first write through the commit,
-            // so no thread or agent session can start inside it meanwhile.
-            reservation = Some(self.inner.reserve_restore(&workspace));
             let workspace = workspace.clone();
             let thread = thread_id.clone();
             let turns = removed.clone();
@@ -13267,9 +13275,9 @@ impl Inner {
                         // The repository could not be captured at all: there is
                         // no complete checkpoint, and the restore says so.
                         Ok(None) => {}
-                        // The capture itself cannot be complete (an older git,
-                        // too many ignored paths). Keep the reason so the
-                        // restore names it instead of a generic refusal.
+                        // The capture itself cannot be complete (more ignored
+                        // paths than a checkpoint records). Keep the reason so
+                        // the restore names it instead of a generic refusal.
                         Err(reason) => {
                             let _ = store
                                 .record_checkpoint_incomplete(&workspace, &thread, &turn, &reason);
@@ -13292,10 +13300,11 @@ impl Inner {
                 self.recover_delivery(&handle, &dispatch).await;
                 return;
             }
-            DeliveryClaim::Revoked => {
-                // The grant was revoked before the prompt could be written.
-                // The claim settled the turn; nothing reaches the harness, and
-                // whatever the settlement promoted still needs a session.
+            DeliveryClaim::Revoked | DeliveryClaim::Refused => {
+                // The grant was revoked, or a rewind holds the checkout, before
+                // the prompt could be written. The claim settled the turn;
+                // nothing reaches the harness, and whatever the settlement
+                // promoted still needs a session.
                 drop(guard);
                 self.spawn_advance(handle);
                 return;
@@ -13590,6 +13599,29 @@ impl Inner {
             self.settle_turn_locked(&mut record, &dispatch.turn_id, end)
                 .await;
             return DeliveryClaim::Revoked;
+        }
+        // Another thread's rewind is restoring this checkout. A session that
+        // is already live never passes the startup check, so the reservation
+        // is checked here too, under the same record lock the rewind's overlap
+        // scan reads: a turn that began before that scan makes the rewind
+        // refuse, and one that began after it is refused here, before its
+        // prompt can change files under the restore.
+        if let Some(conflict) = self.restore_conflict(Path::new(&record.meta.workspace_path)) {
+            if record.mark_promoted_claim(&dispatch.turn_id, QueuedClaimState::Refused) {
+                self.save_claim_change(&mut record, "a prompt held back by a rewind")
+                    .await;
+            }
+            let end = TurnEnd::failed(
+                format!(
+                    "{} is being rewound; wait for that to finish before starting this turn",
+                    conflict.display()
+                ),
+                Some("Send the message again once the rewind finishes.".into()),
+                true,
+            );
+            self.settle_turn_locked(&mut record, &dispatch.turn_id, end)
+                .await;
+            return DeliveryClaim::Refused;
         }
         let Some(generation) = record.session.generation() else {
             return DeliveryClaim::Lost;

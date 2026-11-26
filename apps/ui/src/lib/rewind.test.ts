@@ -3,8 +3,8 @@
 import { describe, expect, it } from "vitest";
 
 import type { QueuedMessage, ThreadSummary } from "@/gen";
-import { rewindRefusal } from "./store/appStore";
-import { createThreadLog } from "./store/projection";
+import { filesRewindAvailable, rewindRefusal } from "./store/appStore";
+import { createThreadLog, foldEvent, type ThreadLog } from "./store/projection";
 
 function summary(overrides: Partial<ThreadSummary> = {}): ThreadSummary {
   return {
@@ -111,5 +111,69 @@ describe("rewindRefusal", () => {
       changes: null,
     });
     expect(rewindRefusal(summary(), log)).toContain("approval");
+  });
+});
+
+const usage = {
+  input_tokens: 0,
+  output_tokens: 0,
+  cached_input_tokens: 0,
+  cost_micros: 0,
+  duration_ms: 0,
+  generation_ms: 0,
+  tps: 0,
+};
+
+/** One daemon turn folded the way the live stream delivers it. */
+function foldTurn(log: ThreadLog, turn: string, item: string, complete: boolean | null) {
+  let next = foldEvent(log, {
+    type: "turn_started",
+    thread_id: "t1",
+    turn_id: turn,
+    started_at: "2026-01-01T00:00:00.000Z",
+  });
+  next = foldEvent(next, {
+    type: "item_completed",
+    thread_id: "t1",
+    turn_id: turn,
+    item: { kind: "message", item_id: item, role: "user", text: `prompt ${turn}`, attachments: [] },
+  });
+  return foldEvent(next, {
+    type: "turn_completed",
+    thread_id: "t1",
+    turn_id: turn,
+    status: "completed",
+    usage,
+    ...(complete === null
+      ? {}
+      : { changes: { thread_id: "t1", turn_id: turn, files: [], complete, note: null } }),
+  });
+}
+
+describe("filesRewindAvailable", () => {
+  it("reads the removed daemon turns, not the message's own cue row", () => {
+    let log = createThreadLog();
+    log = foldTurn(log, "turn_1", "item_user_1", true);
+    log = foldTurn(log, "turn_2", "item_user_2", true);
+    // The row that holds the message is a cue with `changes: null`; it must
+    // not decide whether the turns behind it have a checkpoint.
+    expect(log.turns.find((turn) => turn.id === "cue:user:item_user_1")?.changes).toBeNull();
+    expect(filesRewindAvailable(log, "item_user_1")).toBe(true);
+    expect(filesRewindAvailable(log, "item_user_2")).toBe(true);
+  });
+
+  it("is false when the selected message's own turn has no complete checkpoint", () => {
+    let log = createThreadLog();
+    log = foldTurn(log, "turn_1", "item_user_1", false);
+    log = foldTurn(log, "turn_2", "item_user_2", true);
+    expect(filesRewindAvailable(log, "item_user_1")).toBe(false);
+    expect(filesRewindAvailable(log, "item_user_2")).toBe(true);
+  });
+
+  it("is false when a later removed turn reported no checkpoint at all", () => {
+    let log = createThreadLog();
+    log = foldTurn(log, "turn_1", "item_user_1", true);
+    log = foldTurn(log, "turn_2", "item_user_2", null);
+    expect(filesRewindAvailable(log, "item_user_1")).toBe(false);
   });
 });

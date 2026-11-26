@@ -124,7 +124,11 @@ Checkpoints are only captured while the Labs switch is on, so a turn sent while
 it was off has none; turning the switch on does not invent one for work that
 already ran. Turns recorded without a complete checkpoint — an older thread, or
 a harness that never recorded it — refuse **Revert files too** with a clear
-message rather than restoring a partial set.
+message rather than restoring a partial set. When the daemon says the choice is
+not available, the dialog names the likely reason from the removed turns'
+own checkpoint reports — the selected message's turn and every turn after it —
+so a worktree that cannot be restored right now is not described as a message
+with no checkpoint.
 
 The selected message's own checkpoint decides the restore. A later removed
 turn's checkpoint never overrides it: rewinding to before the chosen message
@@ -166,17 +170,30 @@ rewound. This is a plain note, not an error.
 
 A checkpoint is taken without conversion: every path is hashed with
 `git hash-object --no-filters` and written to a fresh scratch index with
-`update-index --cacheinfo`, so no attribute source can convert or filter what is
-stored — not `.gitattributes`, not `.git/info/attributes`, and not the global
+`update-index --index-info`, so no attribute source can convert or filter what
+is stored — not `.gitattributes`, not `.git/info/attributes`, and not the global
 `core.attributesFile` — and `core.autocrlf` never runs. Restore reads the raw
 blob back, so a CRLF file comes back with its CRLF and a filtered file comes
-back with its working-tree bytes, whatever the rules say now. The plan's diff
-reads attributes from an empty tree, which needs git 2.40 or newer; on an older
-git the checkpoint is incomplete and the restore refuses with a message naming
-the version.
+back with its working-tree bytes, whatever the rules say now.
+
+The plan never reads the worktree through git's conversion rules either. It
+builds a second tree of the worktree as it is now with the same builder, and
+compares the two trees with `git diff-tree -r --no-renames`. A turn that only
+changed a file's line endings (`a\nb\n` to `a\r\nb\r\n` under a
+`*.txt text eol=crlf` rule in `.git/info/attributes` or a global attributes
+file) is a real change, and it is put back. No particular git version is
+needed for this.
+
+Regular files are hashed in one `hash-object --stdin-paths` process, so a
+checkpoint of a few thousand files takes well under a second instead of one
+process per file (about 62 seconds for 3,000 files before). A path the line
+protocol cannot carry (one with a newline, or starting with a quote) and every
+symlink target are hashed on their own.
 
 The permission bits on disk are kept — only the executable bit is set or
-cleared, and it comes from the checkpoint. A file the restore has to recreate
+cleared, and it comes from the checkpoint. A file counts as executable by git's
+own rule, the owner's execute bit: a file that only its group or others can
+run is recorded as `100644`, as git records it. A file the restore has to recreate
 gets the bits a capture recorded before the turn, so a 0600 file is never
 recreated as 0644; with no recorded bits it gets the conventional 0644 or 0755.
 A rollback puts back the exact bits each file had, and never writes through a
@@ -186,7 +203,10 @@ that is now a symlink is replaced rather than followed.
 An untracked nested git repository is left out of the plan: git records it as a
 gitlink the real index does not have, and it is not a file the restore can put
 back. A submodule the real index does name still refuses the restore when its
-pointer changed.
+pointer changed. A folder counts as its own repository only when git run inside
+it names that folder as its top level; an uninitialised submodule is an empty
+folder, where git would walk up to the parent repository, so the checkpoint
+records the real index's pointer for it and it never blocks a restore.
 
 Git paths are relative to the repository root. A thread created in a
 subdirectory of the repository resolves them there, and a change outside that
@@ -197,6 +217,14 @@ a folder inside it, or a folder that contains it. Completed subagents of the
 same thread do not block the restore only when they are terminal and have no
 queued or active work, no pending approval, question or guest request, and no
 background task such as a PR watch.
+
+The workspace is reserved before that check runs, and stays reserved through
+the commit. A turn that began before the check is active when the check reads
+its thread, so the restore refuses. One that begins after it is refused when its
+prompt is claimed — even on a session that is already live, such as an idle
+subagent's — or when its session starts, so no prompt reaches an agent in the
+tree while the restore writes it. A turn refused this way fails with a note to
+send the message again once the rewind finishes.
 
 The dialog warns that **Revert files too also undoes edits you made yourself**
 after the chosen message. The restore wants the whole tree at the checkpoint.
@@ -217,7 +245,8 @@ restore back; a committed cut is kept and its journal removed. Both a live
 rollback and startup recovery walk every recorded parent without following a
 link and prove the nearest real folder is still inside the journal's root; a
 folder that has become a symlink refuses the rollback, which then keeps its
-journal. A missing blob, a
+journal. The root itself is checked the same way: a recorded root that is now a
+symlink refuses the rollback rather than writing into whatever it points at. A missing blob, a
 file too large to capture, a failed `git` read, a path that now escapes the
 worktree, a target that is now a folder, a failed unlink and a failed write
 refuse or roll back the whole rewind. A failed `git` read is never read as a

@@ -1982,6 +1982,77 @@ async fn a_restore_reserves_its_worktree_until_the_cut_commits() {
     );
 }
 
+/// An idle subagent of the same thread does not block a restore, and keeps its
+/// live session. A prompt sent to it while the restore is still being
+/// committed must not reach that session: the reservation is checked when the
+/// prompt is claimed, not only when a session starts.
+#[tokio::test]
+async fn a_live_subagent_session_gets_no_prompt_while_a_restore_commits() {
+    let (_base, _repo, worktree) = git_worktree();
+    let fixture = make_fixture(FakeHarness::new().with_native_rewind()).await;
+    let mut events = fixture.manager.subscribe();
+    let parent = fixture
+        .manager
+        .create_thread(thread_request(
+            &fixture.host,
+            &worktree,
+            "parent [[write:from-parent.txt]]from the parent",
+        ))
+        .await
+        .expect("create parent");
+    let mut first = events.resubscribe();
+    wait_turn(&mut first).await;
+    drain(&mut events);
+
+    let mut child_request = thread_request(&fixture.host, &worktree, "child");
+    child_request.parent_thread_id = Some(parent.thread_id.clone());
+    let child = fixture
+        .manager
+        .create_thread(child_request)
+        .await
+        .expect("create child");
+    let (_, _) = next_user_item(&mut events).await;
+    wait_turn(&mut events).await;
+    drain(&mut events);
+
+    let gate = fixture.manager.pause_next_append();
+    let manager = Arc::clone(&fixture.manager);
+    let thread_id = parent.thread_id.clone();
+    let item = format!(
+        "item_user_{}",
+        parent.turn_id.as_str().trim_start_matches("turn_")
+    );
+    let rewind = tokio::spawn(async move { manager.rewind_thread(&thread_id, &item, true).await });
+    gate.arrived().await;
+
+    // The restore has written the files and waits to commit its cut. The
+    // child's session is still live, so nothing but the claim stands between
+    // this prompt and the checkout.
+    fixture
+        .manager
+        .send_message(
+            &child.thread_id,
+            "late [[write:late.txt]]from the child".into(),
+            Vec::new(),
+        )
+        .await
+        .expect("the send is accepted");
+    let status = wait_turn(&mut events).await;
+    assert_eq!(status, TurnStatus::Failed, "the child's turn is refused");
+    assert!(
+        !worktree.join("late.txt").exists(),
+        "the child's prompt never reached its session during the restore"
+    );
+
+    gate.release();
+    let prompt = rewind
+        .await
+        .expect("the rewind task finished")
+        .expect("the rewind committed");
+    assert!(prompt.files_restored);
+    assert!(!worktree.join("from-parent.txt").exists());
+}
+
 #[tokio::test]
 async fn a_finished_subagent_with_a_background_task_blocks_the_restore() {
     let (_base, _repo, worktree) = git_worktree();

@@ -2356,13 +2356,20 @@ without conversion: each path is hashed with `hash-object --no-filters` into a
 fresh scratch index, so no attribute source (including `.git/info/attributes`
 and the global `core.attributesFile`) or filter converts it, and its blobs are
 read back raw, so a CRLF file or one under a filter attribute returns exactly
-the bytes it had rather than a converted form. The plan's `--attr-source` needs
-git 2.40 or newer; an older git makes the checkpoint incomplete and the refusal
-names the version. The file's existing permission bits are kept and
-only the executable bit is set or cleared; a recreated file gets the bits a
+the bytes it had rather than a converted form. The plan builds a second tree of
+the worktree as it is now with the same builder and compares the two with
+`diff-tree`, so it never reads the working tree through an attribute rule
+either: a turn that only changed line endings under `.git/info/attributes` or a
+global attributes file is a real change. Regular files are hashed in one
+`--stdin-paths` process, so a checkpoint costs one git process rather than one
+per file. The file's existing permission bits are kept and
+only the executable bit is set or cleared, with git's own owner-bit rule
+deciding what counts as executable; a recreated file gets the bits a
 capture recorded before the turn, never a blanket 0644, and an untracked nested
 repository is left out of the plan while a submodule the real index names still
-refuses when its pointer changed. The restore writes a durable
+refuses when its pointer changed. A folder is its own repository only when git
+names it as its top level; an uninitialised submodule's empty folder takes the
+real index's pointer, so it never blocks a restore. The restore writes a durable
 journal with the replaced bytes and their modes, flushes backups,
 files and folders (a folder chain one level at a time in its parent), applies
 the files, commits the cut and the record changes together, and only then
@@ -2373,11 +2380,15 @@ crash between apply and commit is rolled back at the next startup, while a
 committed cut keeps its files. Startup recovery re-checks the worktree identity
 and that the journal's root is still the workspace's repository root before
 touching anything, and both it and a live rollback refuse an entry whose parent
-is now a symlink or leads outside that root, keeping the journal; a journal that
+— or the recorded root itself — is now a symlink or leads outside that root,
+keeping the journal; a journal that
 cannot be read is not an uncommitted restore:
 it is kept, nothing is rolled back, the error is shown on its thread and the
-daemon keeps booting. The workspace is reserved through the commit so nothing
-starts inside it mid-restore. A symlink is restored as a directory entry and
+daemon keeps booting. The workspace is reserved before the overlap scan and
+through the commit, and the reservation is checked both when a session starts
+and when a prompt is claimed, under the record lock the scan reads, so a turn
+either makes the restore refuse or is itself refused; nothing reaches an agent
+in the tree mid-restore, not even an idle subagent's live session. A symlink is restored as a directory entry and
 never followed, a failed unlink stops the restore, and a failed `git` read
 refuses it rather than becoming a deletion. A rollback writes a temporary file
 and renames it into place, so it too never writes through a link that now sits
