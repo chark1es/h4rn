@@ -88,7 +88,7 @@
       "selectFailed": "そのマシンを選択できませんでした。"
     },
     "errors": {
-      "noNoiseKey": "{{name}} はまだ接続キーを公開していません。そのマシンで {{command}} をもう一度実行してください。"
+      "noNoiseKey": "{{name}} はまだ接続用の鍵を公開していません。そのマシンで {{command}} をもう一度実行してください。"
     }
   },
   "snoozed": {

@@ -70,7 +70,7 @@
     "loading": "Cargando hosts",
     "emptyTitle": "Aún no hay hosts.",
     "emptyBody": "Un host es una máquina que ejecuta el daemon de h4rn. Vincula este dispositivo o añade un host de tu tailnet para que los agentes tengan dónde ejecutarse.",
-    "lastSeen": "visto {{when}}",
+    "lastSeen": "visto por última vez {{when}}",
     "note": "La presencia es un punto más una palabra. Una distribución WSL es su propio host, así que vincular el host Windows no da acceso a la distribución."
   }
 }

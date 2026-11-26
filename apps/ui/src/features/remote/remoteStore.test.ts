@@ -285,7 +285,7 @@ describe("selecting a machine", () => {
 
     expect(selected).toBe(false);
     const expected =
-      "atlas はまだ接続キーを公開していません。そのマシンで h4rnd login をもう一度実行してください。";
+      "atlas はまだ接続用の鍵を公開していません。そのマシンで h4rnd login をもう一度実行してください。";
     expect(getRemoteState().error).toBe(expected);
     expect(host.toasts.at(-1)).toEqual({
       variant: "error",

@@ -68,7 +68,7 @@ describe("Hosts pane", () => {
     render(<HostsPane />);
     await act(() => setLocalePreference("es"));
     const line = presenceLine();
-    expect(line).toMatch(/· visto (ahora|hace \d+ segundos?)$/);
+    expect(line).toMatch(/· visto por última vez (ahora|hace \d+ segundos?)$/);
     expect(line).not.toContain("hace ahora");
   });
 

@@ -98,7 +98,7 @@
       "selectFailed": "No se pudo seleccionar esa máquina."
     },
     "errors": {
-      "noNoiseKey": "{{name}} aún no ha publicado su clave de conexión. Vuelve a ejecutar {{command}} en ese equipo."
+      "noNoiseKey": "{{name}} aún no ha publicado su clave de conexión. Vuelve a ejecutar {{command}} en esa máquina."
     }
   },
   "snoozed": {
