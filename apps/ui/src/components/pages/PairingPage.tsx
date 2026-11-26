@@ -1,8 +1,15 @@
 import { CheckIcon } from "lucide-react";
 import { useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
-import { isCompleteShortCode, maskShortCode, SCOPE_OPTIONS } from "@/features/remote/pairingScopes";
+import {
+  isCompleteShortCode,
+  maskShortCode,
+  SCOPE_OPTIONS,
+  scopeLabel,
+  scopeSub,
+} from "@/features/remote/pairingScopes";
 import {
   confirmPairingSas,
   pairByCode,
@@ -11,25 +18,20 @@ import {
   rejectPairingSas,
   useRemote,
 } from "@/features/remote/remoteStore";
-import type { PairScope } from "@/gen";
 import { useNow } from "@/hooks/use-now";
 import { machineSeed } from "@/lib/entities";
+import { formatNumber } from "@/lib/i18n";
 import { navigate } from "@/lib/store/appStore";
 import { cn } from "@/lib/utils";
 
-/**
- * The phone's pairing screen is still English (the pairing area converts it
- * later), so it keeps its own scope words instead of Settings' translated ones.
- */
-const SCOPE_COPY: Record<PairScope, { label: string; sub: string }> = {
-  view: { label: "View threads", sub: "Always included" },
-  approve: { label: "Approve and reply", sub: "" },
-  terminal: { label: "Terminal", sub: "Type into shells" },
-  files: { label: "Files and edits", sub: "" },
-  admin: { label: "Manage hosts and devices", sub: "Admin" },
-};
+/** How long a typed pairing code lives, as the host mints it. */
+const CODE_TTL_MINUTES = 5;
+
+/** The typed code's shape. It is the same in every language, so it is not translated. */
+const CODE_SHAPE = "ABCD-EFGH";
 
 function ScopeRow({ label, sub, on }: { label: string; sub?: string; on: boolean }) {
+  const { t } = useTranslation("pairing");
   return (
     <div className={cn("q-ph-li", !on && "off")}>
       <span className="q-scope-mark" aria-hidden>
@@ -39,14 +41,17 @@ function ScopeRow({ label, sub, on }: { label: string; sub?: string; on: boolean
         {label}
         {sub ? <div className="s">{sub}</div> : null}
       </div>
-      <span className="sr-only">{on ? "Included" : "Not included"}</span>
+      <span className="sr-only">{on ? t("scopes.included") : t("scopes.notIncluded")}</span>
     </div>
   );
 }
 
+/** A countdown as `m:ss`, with the minutes in the active language's digits. */
 function formatRemaining(ms: number): string {
   const seconds = Math.max(0, Math.floor(ms / 1_000));
-  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+  const minutes = formatNumber(Math.floor(seconds / 60));
+  const rest = formatNumber(seconds % 60, { minimumIntegerDigits: 2 });
+  return `${minutes}:${rest}`;
 }
 
 /**
@@ -59,6 +64,7 @@ function formatRemaining(ms: number): string {
  * link, the 8-character code from the host does the same job.
  */
 export function PairingPage() {
+  const { t } = useTranslation(["pairing", "common", "sidebar"]);
   const [code, setCode] = useState("");
   const [claiming, setClaiming] = useState(false);
   const user = useRemote((state) => state.user);
@@ -75,7 +81,6 @@ export function PairingPage() {
     : null;
   // A typed code could be for any host, so no host is named until a link says which.
   const machineName = pending ? (pendingMachine?.name ?? pending.payload.machineId) : null;
-  const hostLabel = machineName ?? "the host";
   const alreadyPaired =
     pending !== null && active !== null && active.machineId === pending.payload.machineId;
   const expired =
@@ -95,13 +100,13 @@ export function PairingPage() {
         className="q-main"
         aria-label={
           waiting
-            ? `Waiting for ${sasConfirm.machineName} to approve this phone`
-            : `Check the code for ${sasConfirm.machineName}`
+            ? t("sas.waitingLabel", { name: sasConfirm.machineName })
+            : t("sas.checkLabel", { name: sasConfirm.machineName })
         }
       >
         <div className="q-ph-nav">
           <span style={{ width: 60 }} />
-          <span className="ttl">{waiting ? "Waiting for approval" : "Check the code"}</span>
+          <span className="ttl">{waiting ? t("sas.waitingTitle") : t("sas.checkTitle")}</span>
           <span style={{ width: 60 }} />
         </div>
         <div className="q-ph-body q-pair-body">
@@ -109,10 +114,10 @@ export function PairingPage() {
             <div className="ttl">{sasConfirm.machineName}</div>
             <div className="note">
               {waiting
-                ? `${sasConfirm.machineName} must approve this phone before it can connect.`
+                ? t("sas.mustApprove", { name: sasConfirm.machineName })
                 : sasConfirm.method === "qr"
-                  ? "Scanned code. Compare it before you trust the host."
-                  : "Paired through a typed code. Compare it before you trust the host."}
+                  ? t("sas.scanned")
+                  : t("sas.typed")}
             </div>
           </div>
           <div className="q-sas">
@@ -121,17 +126,16 @@ export function PairingPage() {
             </div>
             <p className="q-pair-note">
               {waiting
-                ? `On ${sasConfirm.machineName}, open Settings → Devices and confirm the same code. This screen updates when it approves this phone.`
-                : `${sasConfirm.machineName} shows this code under Settings → Devices. If it reads the same, the connection is private. If it does not, something between you and the host changed the key.`}
+                ? t("sas.waitingNote", { name: sasConfirm.machineName })
+                : t("sas.compareNote", { name: sasConfirm.machineName })}
             </p>
             {waiting ? (
               <div className="q-sas-waiting" data-testid="pair-waiting" role="status">
-                Waiting for {sasConfirm.machineName}
+                {t("sas.waitingFor", { name: sasConfirm.machineName })}
               </div>
             ) : (
               <p className="q-pair-note">
-                Host approval is required: after you confirm here, approve the same code on{" "}
-                {sasConfirm.machineName}.
+                {t("sas.approvalRequired", { name: sasConfirm.machineName })}
               </p>
             )}
             {error ? <p className="q-pair-note q-danger">{error}</p> : null}
@@ -139,7 +143,7 @@ export function PairingPage() {
         </div>
         <div className="q-pair-foot">
           <button type="button" className="q-btn secondary" onClick={() => void rejectPairingSas()}>
-            They differ
+            {t("sas.differ")}
           </button>
           <button
             type="button"
@@ -151,15 +155,16 @@ export function PairingPage() {
               });
             }}
           >
-            {waiting ? "Waiting for host…" : "They match"}
+            {waiting ? t("sas.waitingHost") : t("sas.match")}
           </button>
         </div>
       </main>
     );
   }
 
+  const title = machineName ? t("pairWith", { name: machineName }) : t("title");
   return (
-    <main className="q-main" aria-label={machineName ? `Pair with ${machineName}` : "Pair a host"}>
+    <main className="q-main" aria-label={title}>
       <div className="q-ph-nav">
         <button
           type="button"
@@ -168,9 +173,9 @@ export function PairingPage() {
             navigate({ kind: "placeholder", surface: "settings", path: "/settings/devices" })
           }
         >
-          Cancel
+          {t("common:cancel")}
         </button>
-        <span className="ttl">{machineName ? `Pair with ${machineName}` : "Pair a host"}</span>
+        <span className="ttl">{title}</span>
         <span style={{ width: 60 }} />
       </div>
       <div className="q-ph-body q-pair-body">
@@ -185,60 +190,59 @@ export function PairingPage() {
               />
               <div className="ttl">{machineName}</div>
               <div className="sub">
-                {`${pending.payload.connectUrl.replace(/^https?:\/\//, "")} · via relay`}
+                {t("viaRelay", {
+                  address: pending.payload.connectUrl.replace(/^https?:\/\//, ""),
+                })}
               </div>
             </>
           ) : null}
           <div className="note">
             {user
-              ? `Signed in to h4rn-connect as ${user.email ?? user.display_name ?? user.id}`
-              : "Sign in to h4rn-connect before pairing"}
+              ? t("signedInAs", { account: user.email ?? user.display_name ?? user.id })
+              : t("signInFirst")}
           </div>
         </div>
 
-        {pending ? (
+        {pending && machineName ? (
           <>
-            <div className="q-ph-gh">This phone can</div>
+            <div className="q-ph-gh">{t("thisPhoneCan")}</div>
             <div className="q-ph-group">
               {SCOPE_OPTIONS.map((option) => (
                 <ScopeRow
                   key={option.id}
-                  label={SCOPE_COPY[option.id].label}
+                  label={scopeLabel(option.id)}
                   sub={
                     option.id === "terminal"
-                      ? `Type into shells on ${hostLabel}`
-                      : SCOPE_COPY[option.id].sub
+                      ? t("scopes.terminalOn", { host: machineName })
+                      : scopeSub(option.id)
                   }
                   on={option.locked || pending.payload.scopes.includes(option.id)}
                 />
               ))}
             </div>
-            <p className="q-pair-note">Set on {hostLabel}.</p>
-            <div className="q-ph-gh">Also included</div>
+            <p className="q-pair-note">{t("scopes.setOn", { host: machineName })}</p>
+            <div className="q-ph-gh">{t("alsoIncluded")}</div>
             <div className="q-ph-group">
               <div className="q-ph-li">
                 <EntityAvatar
-                  seed={machineSeed(`${hostLabel}-hosts`)}
+                  seed={machineSeed(`${machineName}-hosts`)}
                   kind="machine"
-                  label="Hosts"
+                  label={t("sidebar:hosts.title")}
                   size={22}
                 />
                 <div className="grow">
-                  Every host on {hostLabel}
-                  <div className="s">WSL distros included</div>
+                  {t("everyHost", { host: machineName })}
+                  <div className="s">{t("wslIncluded")}</div>
                 </div>
               </div>
             </div>
           </>
         ) : (
           <div className="q-pair-empty">
-            <h3>Scan a pairing code</h3>
-            <p>
-              Open the code on the host from Settings → Devices, then scan it with this device. The
-              link brings you back here to confirm.
-            </p>
+            <h3>{t("empty.title")}</h3>
+            <p>{t("empty.body")}</p>
             <label className="q-pair-code">
-              <span className="q-muted">Or type the code under the QR</span>
+              <span className="q-muted">{t("empty.typeCode")}</span>
               <input
                 className="q-input"
                 inputMode="text"
@@ -246,8 +250,8 @@ export function PairingPage() {
                 autoComplete="off"
                 autoCorrect="off"
                 spellCheck={false}
-                placeholder="ABCD-EFGH"
-                aria-label="Pairing code"
+                placeholder={CODE_SHAPE}
+                aria-label={t("empty.codeLabel")}
                 value={code}
                 onChange={(event) => setCode(maskShortCode(event.target.value))}
                 onKeyDown={(event) => {
@@ -261,21 +265,19 @@ export function PairingPage() {
         )}
 
         <p className="q-pair-note">
-          Credentials stay on {hostLabel}. You can revoke this phone from any other device.
+          {machineName ? t("credentials", { host: machineName }) : t("credentialsUnnamed")}
         </p>
         {error || expired ? (
-          <p className="q-pair-note q-danger">
-            {expired ? "That pairing code has expired. Generate a new one on the host." : error}
-          </p>
+          <p className="q-pair-note q-danger">{expired ? t("errors.expired") : error}</p>
         ) : null}
       </div>
       <div className="q-pair-foot">
         <div className="q-faint num">
           {pending
             ? expired
-              ? "Link expired"
-              : `Link expires in ${formatRemaining(pending.payload.expiresAt - now)}`
-            : "Codes work once and expire in 5 minutes"}
+              ? t("foot.linkExpired")
+              : t("foot.expiresIn", { time: formatRemaining(pending.payload.expiresAt - now) })
+            : t("foot.codesOnce", { count: CODE_TTL_MINUTES })}
         </div>
         <button
           type="button"
@@ -288,12 +290,12 @@ export function PairingPage() {
           onClick={() => (alreadyPaired ? navigate({ kind: "inbox" }) : void claim())}
         >
           {alreadyPaired
-            ? "Open threads"
+            ? t("actions.openThreads")
             : claiming || busy
-              ? "Pairing…"
+              ? t("actions.pairing")
               : pending
-                ? "Pair this phone"
-                : "Pair with code"}
+                ? t("actions.pairPhone")
+                : t("actions.pairCode")}
         </button>
       </div>
     </main>

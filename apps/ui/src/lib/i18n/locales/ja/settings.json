@@ -612,7 +612,8 @@
     "errors": {
       "callbackState": "サインインのコールバックに state がありません。",
       "denied": "サインインが拒否されました。",
-      "expired": "コードの有効期限が切れました。"
+      "expired": "コードの有効期限が切れました。",
+      "noSignInWindow": "このアプリではサインイン用のウィンドウを開けません。"
     }
   },
   "localMachine": {

@@ -6,8 +6,12 @@ import enCommands from "./locales/en/commands.json";
 import enCommon from "./locales/en/common.json";
 import enComposer from "./locales/en/composer.json";
 import enDialogs from "./locales/en/dialogs.json";
+import enIssues from "./locales/en/issues.json";
+import enPairing from "./locales/en/pairing.json";
+import enPullRequests from "./locales/en/pullRequests.json";
 import enSettings from "./locales/en/settings.json";
 import enSidebar from "./locales/en/sidebar.json";
+import enThread from "./locales/en/thread.json";
 
 /**
  * UI translations.
@@ -30,8 +34,12 @@ export const NAMESPACES = [
   "commands",
   "composer",
   "dialogs",
+  "issues",
+  "pairing",
+  "pullRequests",
   "settings",
   "sidebar",
+  "thread",
 ] as const;
 export type Namespace = (typeof NAMESPACES)[number];
 
@@ -50,8 +58,12 @@ export const englishResources = {
   commands: enCommands,
   composer: enComposer,
   dialogs: enDialogs,
+  issues: enIssues,
+  pairing: enPairing,
+  pullRequests: enPullRequests,
   settings: enSettings,
   sidebar: enSidebar,
+  thread: enThread,
 } as const;
 
 const STORAGE_KEY = "h4rn.locale";
@@ -190,7 +202,11 @@ i18n.use(initReactI18next).init({
     escapeValue: false,
   },
   returnNull: false,
-  returnEmptyString: false,
+  // An empty value is deliberate (no second line, no space between Chinese
+  // or Japanese sentences), so it is returned as is, not replaced by English.
+  // The catalogue test allows "" only where English is empty too or the key
+  // is a sentence separator.
+  returnEmptyString: true,
 });
 
 i18n.on("languageChanged", (lng) => {

@@ -1,0 +1,212 @@
+{
+  "title": "拉取请求",
+  "loading": "正在加载拉取请求",
+  "repository": "仓库",
+  "refresh": "刷新拉取请求",
+  "loadMore": "加载更多",
+  "filters": {
+    "label": "拉取请求筛选",
+    "open": "开放",
+    "mine": "我的",
+    "review": "待评审",
+    "branch": "此分支"
+  },
+  "noForge": {
+    "title": "连接代码托管平台",
+    "body": "拉取请求位于 GitHub、GitLab、Gitea、Forgejo、Bitbucket Cloud 或 Azure DevOps 上。添加账户后，令牌会保存在此主机上。",
+    "action": "添加平台账户"
+  },
+  "noRepo": {
+    "title": "未检测到仓库",
+    "body": "请在带有 GitHub、GitLab、Gitea、Forgejo、Bitbucket Cloud 或 Azure DevOps 远程仓库的 git 检出目录中打开一个对话，或在设置中添加自托管主机。",
+    "action": "打开平台设置"
+  },
+  "accountsFailed": "平台账户未能加载",
+  "listFailed": "拉取请求未能加载",
+  "empty": {
+    "open": "没有拉取请求",
+    "review": "没有等待评审的拉取请求",
+    "branch": "此分支上没有拉取请求",
+    "openBody": "此仓库没有开放的拉取请求。",
+    "mineBody": "你在此仓库中没有开放的拉取请求。",
+    "reviewBody": "没有人请你评审拉取请求。",
+    "branchBody": "没有以 {{branch}} 为源分支的开放的拉取请求。",
+    "thisBranchBody": "没有以此分支为源分支的开放的拉取请求。"
+  },
+  "state": {
+    "open": "开放",
+    "draft": "草稿",
+    "merged": "已合并",
+    "closed": "已关闭"
+  },
+  "checksState": {
+    "passing": "{{passed}}/{{total}} 项检查通过",
+    "failing_other": "{{count, number}} 项失败",
+    "pending": "检查运行中",
+    "unknown": "没有检查"
+  },
+  "summaryChecks": {
+    "passing": "所有检查均通过",
+    "failing": "检查失败",
+    "pending": "检查运行中"
+  },
+  "reviewChip": {
+    "changes_requested": "要求修改",
+    "approved": "已批准",
+    "pending": "请求评审",
+    "commented": "有评审意见"
+  },
+  "mergeable": {
+    "mergeable": "无冲突",
+    "conflicting": "合并冲突"
+  },
+  "rerun": {
+    "unsupported": "此平台无法重新运行检查",
+    "nothing": "没有失败的检查"
+  },
+  "required": "必需",
+  "open": {
+    "button": "创建 PR",
+    "needsThread": "请先在此仓库中打开一个对话；对话的分支将作为 PR 的源分支",
+    "noAccount": "没有与此仓库匹配的 {{forge}} 账户",
+    "title": "从 {{branch}} 创建拉取请求",
+    "description": "守护进程会在需要时推送对话分支，并在 {{forge}} 上创建请求。",
+    "titleField": "标题",
+    "titleLabel": "拉取请求标题",
+    "base": "目标分支",
+    "descriptionField": "描述",
+    "descriptionLabel": "拉取请求描述",
+    "submit": "创建拉取请求",
+    "submitting": "正在创建…",
+    "opened": "已创建 {{repo}}#{{number}}。",
+    "failed": "未能创建拉取请求。"
+  },
+  "detail": {
+    "label": "拉取请求",
+    "failed": "此拉取请求未能加载",
+    "noDetail": "平台未返回详情。",
+    "back": "返回列表",
+    "breadcrumb": "面包屑导航",
+    "commits_other": "{{count, number}} 个提交",
+    "openedBy": "{{author}} 创建于 {{when}}",
+    "openedByNow": "{{author}} 刚刚创建",
+    "onForge": "{{forge}} 上的 {{repo}}",
+    "openOn": "在 {{forge}} 上打开"
+  },
+  "tabs": {
+    "conversation": "讨论",
+    "commits": "提交",
+    "checks": "检查",
+    "files": "文件",
+    "filesUnknown": "平台未报告更改了多少个文件"
+  },
+  "conversation": {
+    "noDescription": "没有描述。",
+    "loading": "正在加载评论…",
+    "failed": "评论未能加载",
+    "sending": "发送中…",
+    "line": "第 {{line}} 行",
+    "resolved": "已解决",
+    "unresolved": "未解决",
+    "outdated": "已过时",
+    "replyTo": "回复 {{name}}",
+    "replyToReview": "回复评审",
+    "replyLabel": "回复 {{path}}",
+    "sendReply": "发送回复",
+    "sendingReply": "正在发送…",
+    "reply": "回复",
+    "sendTo": "发送到 {{title}}",
+    "needsThread": "请先打开一个对话，让智能体拥有工作区",
+    "handing": "正在移交…",
+    "handToAgent": "交给智能体",
+    "commentOn": "评论 #{{number}}",
+    "posting": "正在发布…",
+    "comment": "评论",
+    "you": "你"
+  },
+  "commits": {
+    "loading": "正在加载提交…",
+    "failed": "提交未能加载",
+    "openCommit": "打开此提交",
+    "truncated_other": "仅显示前 {{count, number}} 个提交。其余提交请在 {{forge}} 上打开 PR 查看。",
+    "none": "没有提交",
+    "noneBody": "此拉取请求没有提交。"
+  },
+  "checks": {
+    "loading": "正在加载检查…",
+    "failed": "检查未能加载",
+    "viewLog": "查看日志",
+    "rerunning": "正在重新运行…",
+    "rerunFailed": "重新运行失败项",
+    "none": "没有检查",
+    "noneBody": "此平台没有报告当前提交的检查。"
+  },
+  "files": {
+    "loading": "正在加载差异…",
+    "failed": "差异未能加载",
+    "binary": "二进制文件",
+    "truncated": "补丁已被平台截断",
+    "noPatch": "没有内联补丁",
+    "loadMore": "加载更多文件"
+  },
+  "side": {
+    "merge": "合并",
+    "checks": "检查",
+    "passedOf": "{{passed}}/{{total}} 项通过",
+    "checksFailed": "检查未能加载。",
+    "noChecks": "没有报告检查。",
+    "reviews": "评审",
+    "noReviews": "暂无评审。",
+    "reviewState": {
+      "approved": "已批准",
+      "changes_requested": "要求修改",
+      "commented": "已评论",
+      "pending": "待处理",
+      "dismissed": "已驳回"
+    },
+    "linkedThreads": "关联的对话",
+    "noLinkedThreads": "还没有对话关联此拉取请求。可在对话中用 ⌘K 关联。",
+    "watching": "正在关注此拉取请求",
+    "agentThread": "智能体对话",
+    "noAgentThread": "在此仓库中打开一个对话，即可把评审交给智能体。",
+    "handPr": "把 PR 交给智能体",
+    "noAccount": "没有与此主机匹配的账户。",
+    "addOne": "添加账户"
+  },
+  "toast": {
+    "rerunStarted": "正在重新运行失败的检查。",
+    "rerunFailed": "无法重新运行检查。",
+    "diffMoreFailed": "其余差异未能加载。",
+    "replyFailed": "回复未发布。",
+    "commentFailed": "评论未发布。",
+    "openThreadFirst": "请先打开一个对话。",
+    "openThreadFirstBody": "智能体需要工作区、harness 和模型才能接收 PR。",
+    "handed": "已将 #{{number}} 交给 {{title}}。",
+    "handedBody": "智能体会带着 PR 上下文开始工作，未经审批不会推送。",
+    "handFailed": "未能将 PR 交给智能体。"
+  },
+  "linked": {
+    "items": "关联项",
+    "pullUnavailable": "拉取请求不可用",
+    "stateUnavailable": "状态不可用",
+    "stopWatching": "停止关注",
+    "watch": "关注变更",
+    "unlink": "取消关联",
+    "unlinkIssue": "取消关联议题",
+    "linearIssue": "Linear 议题",
+    "issueUnavailable": "议题不可用",
+    "changeFailed": "关联项未更改。"
+  },
+  "linkDialog": {
+    "title": "关联拉取请求",
+    "pickFrom": "粘贴链接，或从 {{repo}} 中选择一个开放的拉取请求。",
+    "noRemote": "粘贴拉取请求链接。此工作区没有平台远程仓库，因此没有可选择的仓库。",
+    "urlLabel": "拉取请求 URL",
+    "link": "关联",
+    "invalid": "这不是 h4rn 能识别的拉取请求链接（GitHub、GitLab、Gitea、Forgejo、Bitbucket 或 Azure DevOps）。请粘贴包含编号的页面 URL。",
+    "reading": "正在读取仓库…",
+    "openList": "开放的拉取请求",
+    "noneOpen": "{{repo}} 中没有开放的拉取请求。",
+    "linked": "已将 #{{number}} 关联到此对话。"
+  }
+}

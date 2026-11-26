@@ -7,6 +7,7 @@ import {
   isCompleteShortCode,
   maskShortCode,
   orderedScopes,
+  scopeSub,
   scopesLabel,
   toggleScope,
 } from "./pairingScopes";
@@ -41,6 +42,15 @@ describe("pairing scopes", () => {
       expect(scopesLabel(["view", "approve", "files"])).toBe("承認と返信、ファイルと編集");
       await setLocalePreference("es");
       expect(scopesLabel(["view", "approve", "terminal", "files"])).toMatch(/, .+ y /);
+    });
+
+    it("gives a scope with no second line an empty one, never its key", async () => {
+      for (const locale of ["system", "zh-CN", "es", "ja"] as const) {
+        await setLocalePreference(locale);
+        expect(scopeSub("approve"), locale).toBe("");
+        expect(scopeSub("files"), locale).toBe("");
+        expect(scopeSub("view"), locale).not.toBe("");
+      }
     });
   });
 });

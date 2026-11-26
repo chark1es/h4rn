@@ -1,0 +1,215 @@
+{
+  "title": "Pull requests",
+  "loading": "Loading pull requests",
+  "repository": "Repository",
+  "refresh": "Refresh pull requests",
+  "loadMore": "Load more",
+  "filters": {
+    "label": "Pull request filters",
+    "open": "Open",
+    "mine": "Mine",
+    "review": "Review",
+    "branch": "This branch"
+  },
+  "noForge": {
+    "title": "Connect a forge",
+    "body": "Pull requests live on GitHub, GitLab, Gitea, Forgejo, Bitbucket Cloud or Azure DevOps. Add an account and the token stays on this host.",
+    "action": "Add a forge account"
+  },
+  "noRepo": {
+    "title": "No repository detected",
+    "body": "Open a thread in a git checkout with a GitHub, GitLab, Gitea, Forgejo, Bitbucket Cloud or Azure DevOps remote, or add a self-hosted host in Settings.",
+    "action": "Open forge settings"
+  },
+  "accountsFailed": "Forge accounts did not load",
+  "listFailed": "The pull requests did not load",
+  "empty": {
+    "open": "No pull requests",
+    "review": "No reviews waiting",
+    "branch": "No pull requests on this branch",
+    "openBody": "This repository has no open pull requests.",
+    "mineBody": "Nothing you opened is open on this repository.",
+    "reviewBody": "No one has asked you to review a pull request.",
+    "branchBody": "No open pull request uses {{branch}} as its head.",
+    "thisBranchBody": "No open pull request uses this branch as its head."
+  },
+  "state": {
+    "open": "Open",
+    "draft": "Draft",
+    "merged": "Merged",
+    "closed": "Closed"
+  },
+  "checksState": {
+    "passing": "{{passed}} of {{total}} checks passed",
+    "failing_one": "{{count, number}} failing",
+    "failing_other": "{{count, number}} failing",
+    "pending": "Checks running",
+    "unknown": "No checks"
+  },
+  "summaryChecks": {
+    "passing": "All checks passed",
+    "failing": "Checks failing",
+    "pending": "Checks running"
+  },
+  "reviewChip": {
+    "changes_requested": "Changes requested",
+    "approved": "Approved",
+    "pending": "Review requested",
+    "commented": "Review comments"
+  },
+  "mergeable": {
+    "mergeable": "No conflicts",
+    "conflicting": "Merge conflicts"
+  },
+  "rerun": {
+    "unsupported": "This forge cannot re-run checks",
+    "nothing": "No checks failed"
+  },
+  "required": "required",
+  "open": {
+    "button": "Open PR",
+    "needsThread": "Open a thread in this repository first; the thread branch becomes the PR head",
+    "noAccount": "No {{forge}} account matches this repository",
+    "title": "Open a pull request from {{branch}}",
+    "description": "The daemon pushes the thread branch when needed and opens the request on {{forge}}.",
+    "titleField": "Title",
+    "titleLabel": "Pull request title",
+    "base": "Base branch",
+    "descriptionField": "Description",
+    "descriptionLabel": "Pull request description",
+    "submit": "Open pull request",
+    "submitting": "Opening…",
+    "opened": "Opened {{repo}}#{{number}}.",
+    "failed": "The pull request was not opened."
+  },
+  "detail": {
+    "label": "Pull request",
+    "failed": "This pull request did not load",
+    "noDetail": "The forge returned no detail.",
+    "back": "Back to list",
+    "breadcrumb": "Breadcrumb",
+    "commits_one": "{{count, number}} commit",
+    "commits_other": "{{count, number}} commits",
+    "openedBy": "opened by {{author}} {{when}}",
+    "openedByNow": "opened by {{author}} now",
+    "onForge": "{{repo}} on {{forge}}",
+    "openOn": "Open on {{forge}}"
+  },
+  "tabs": {
+    "conversation": "Conversation",
+    "commits": "Commits",
+    "checks": "Checks",
+    "files": "Files",
+    "filesUnknown": "The forge did not report how many files changed"
+  },
+  "conversation": {
+    "noDescription": "No description.",
+    "loading": "Loading comments…",
+    "failed": "Comments did not load",
+    "sending": "sending…",
+    "line": "line {{line}}",
+    "resolved": "Resolved",
+    "unresolved": "Unresolved",
+    "outdated": "outdated",
+    "replyTo": "Reply to {{name}}",
+    "replyToReview": "Reply to review",
+    "replyLabel": "Reply to {{path}}",
+    "sendReply": "Send reply",
+    "sendingReply": "Sending…",
+    "reply": "Reply",
+    "sendTo": "Send to {{title}}",
+    "needsThread": "Open a thread first so the agent has a workspace",
+    "handing": "Handing…",
+    "handToAgent": "Hand to agent",
+    "commentOn": "Comment on #{{number}}",
+    "posting": "Posting…",
+    "comment": "Comment",
+    "you": "you"
+  },
+  "commits": {
+    "loading": "Loading commits…",
+    "failed": "Commits did not load",
+    "openCommit": "Open this commit",
+    "truncated_one": "Showing the first {{count, number}} commit. Open the PR on {{forge}} for the rest.",
+    "truncated_other": "Showing the first {{count, number}} commits. Open the PR on {{forge}} for the rest.",
+    "none": "No commits",
+    "noneBody": "This pull request has no commits."
+  },
+  "checks": {
+    "loading": "Loading checks…",
+    "failed": "Checks did not load",
+    "viewLog": "View log",
+    "rerunning": "Re-running…",
+    "rerunFailed": "Re-run failed",
+    "none": "No checks",
+    "noneBody": "This forge reports no checks for the current commit."
+  },
+  "files": {
+    "loading": "Loading the diff…",
+    "failed": "The diff did not load",
+    "binary": "Binary file",
+    "truncated": "Patch truncated by the forge",
+    "noPatch": "No inline patch",
+    "loadMore": "Load more files"
+  },
+  "side": {
+    "merge": "Merge",
+    "checks": "Checks",
+    "passedOf": "{{passed}} of {{total}} passed",
+    "checksFailed": "Checks did not load.",
+    "noChecks": "No checks reported.",
+    "reviews": "Reviews",
+    "noReviews": "No reviews yet.",
+    "reviewState": {
+      "approved": "approved",
+      "changes_requested": "changes requested",
+      "commented": "commented",
+      "pending": "pending",
+      "dismissed": "dismissed"
+    },
+    "linkedThreads": "Linked threads",
+    "noLinkedThreads": "No thread has linked this pull request. Link it from a thread with ⌘K.",
+    "watching": "Watching this pull request",
+    "agentThread": "Agent thread",
+    "noAgentThread": "Open a thread in this repository to hand reviews to an agent.",
+    "handPr": "Hand PR to agent",
+    "noAccount": "No account matches this host.",
+    "addOne": "Add one"
+  },
+  "toast": {
+    "rerunStarted": "Re-running the failed checks.",
+    "rerunFailed": "Could not re-run the checks.",
+    "diffMoreFailed": "The rest of the diff did not load.",
+    "replyFailed": "The reply was not posted.",
+    "commentFailed": "The comment was not posted.",
+    "openThreadFirst": "Open a thread first.",
+    "openThreadFirstBody": "The agent needs a workspace, harness and model to receive the PR.",
+    "handed": "Handed #{{number}} to {{title}}.",
+    "handedBody": "The agent starts with the PR context and won't push without approval.",
+    "handFailed": "The PR was not handed to an agent."
+  },
+  "linked": {
+    "items": "Linked items",
+    "pullUnavailable": "Pull request unavailable",
+    "stateUnavailable": "State unavailable",
+    "stopWatching": "Stop watching",
+    "watch": "Watch for changes",
+    "unlink": "Unlink",
+    "unlinkIssue": "Unlink issue",
+    "linearIssue": "Linear issue",
+    "issueUnavailable": "Issue unavailable",
+    "changeFailed": "The linked item did not change."
+  },
+  "linkDialog": {
+    "title": "Link pull request",
+    "pickFrom": "Paste a link, or pick an open pull request from {{repo}}.",
+    "noRemote": "Paste a pull request link. This workspace has no forge remote, so there is no repository to pick from.",
+    "urlLabel": "Pull request URL",
+    "link": "Link",
+    "invalid": "That is not a pull request link h4rn can read (GitHub, GitLab, Gitea, Forgejo, Bitbucket or Azure DevOps). Paste the page URL, including the number.",
+    "reading": "Reading the repository…",
+    "openList": "Open pull requests",
+    "noneOpen": "No open pull requests in {{repo}}.",
+    "linked": "Linked #{{number}} to this thread."
+  }
+}

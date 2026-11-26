@@ -24,6 +24,15 @@ All notable changes to h4rn are recorded here. The format follows
   queue toasts follow the Language choice. A snooze with under a minute left
   now reads "wakes soon", and the sidebar's host and thread counts use the
   language's number format.
+- **The pull requests and issues pages in Chinese, Spanish and Japanese.**
+  Lists, filters, empty states, the pull request detail and the issue pane,
+  the open-PR and comment forms, state, checks and review chips, the linked
+  items badge with its watch and unlink actions, and the Link pull request
+  dialog follow the Language choice; titles, bodies, labels and branch names
+  stay as the forge sends them. On a phone, a pull request's chips wrap to a
+  second line instead of running off the screen, and the Issues header wraps
+  instead of pushing Projects out of reach. Ages in a sentence are written
+  out in the language ("3 時間前", "hace 3 horas") rather than "3h前".
 - **The command palette in Chinese, Spanish and Japanese.** Every row, group,
   the search field and the footer follow the Language choice, and a command
   has one name everywhere: the palette, Settings → Shortcuts and the Keyboard
@@ -32,6 +41,25 @@ All notable changes to h4rn are recorded here. The format follows
   stay the same in every language. In English, palette rows that run a
   shortcut now use that shortcut's name (for example "Show Working" instead of
   "Go to Working", "Settle thread" instead of "Settle now").
+- **The thread view in Chinese, Spanish and Japanese.** The thread header and
+  its menu, the harness switch, messages' timestamps and actions, tool cards,
+  approval and guest request cards, plans, usage-limit and failure notices,
+  the Changes, Subagents and terminal panels, and the agent status orb's label
+  follow the Language choice; agent output, tool output, file names and diffs
+  stay as written. Token counts, costs and durations use the language's own
+  formats, and palette rows that open a dialog now end in "…".
+- **Phone pairing and the phone tab bar in Chinese, Spanish and Japanese.**
+  The pairing screen, its code check, the scopes it shows, pairing errors and
+  the "Paired with" toast follow the Language choice, and the tab bar uses the
+  sidebar's name for each place. Pairing codes, host names and URLs stay as
+  they are. Settings → Devices no longer shows a raw key such as
+  `devices.scopes.approve.sub` under a scope that has no second line. The
+  hosts pane says when an offline host was last seen as a whole phrase in
+  each language ("last seen 3 hours ago", "最終確認：3 時間前"), the code check
+  says plainly what a match and a mismatch mean, and the errors for a host
+  with no published key or a shell that cannot open a sign-in window are
+  translated. Japanese and Chinese no longer put a space after 。 between
+  two sentences in Settings → Worktrees.
 - **Dialogs and confirmations in Chinese, Spanish and Japanese.** New thread,
   rename, edit from here (rewind), the branch and pull request dialogs, Share
   with guest, Delegate a subagent, Add project and its import pane, and the

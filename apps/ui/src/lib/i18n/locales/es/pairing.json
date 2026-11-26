@@ -1,0 +1,76 @@
+{
+  "title": "Vincular un host",
+  "pairWith": "Vincular con {{name}}",
+  "viaRelay": "{{address}} · vía relay",
+  "signedInAs": "Sesión iniciada en h4rn-connect como {{account}}",
+  "signInFirst": "Inicia sesión en h4rn-connect antes de vincular",
+  "thisPhoneCan": "Este teléfono puede",
+  "scopes": {
+    "terminalOn": "Escribir en shells de {{host}}",
+    "included": "Incluido",
+    "notIncluded": "No incluido",
+    "setOn": "Definido en {{host}}."
+  },
+  "alsoIncluded": "También incluido",
+  "everyHost": "Todos los hosts de {{host}}",
+  "wslIncluded": "Distribuciones WSL incluidas",
+  "empty": {
+    "title": "Escanea un código de vinculación",
+    "body": "Abre el código en el host desde Ajustes → Dispositivos y escanéalo con este dispositivo. El enlace te trae de vuelta aquí para confirmar.",
+    "typeCode": "O escribe el código que hay bajo el QR",
+    "codeLabel": "Código de vinculación"
+  },
+  "credentials": "Las credenciales se quedan en {{host}}. Puedes revocar este teléfono desde cualquier otro dispositivo.",
+  "credentialsUnnamed": "Las credenciales se quedan en el host. Puedes revocar este teléfono desde cualquier otro dispositivo.",
+  "foot": {
+    "linkExpired": "Enlace caducado",
+    "expiresIn": "El enlace caduca en {{time}}",
+    "codesOnce_one": "Los códigos sirven una vez y caducan en {{count, number}} minuto",
+    "codesOnce_many": "Los códigos sirven una vez y caducan en {{count, number}} minutos",
+    "codesOnce_other": "Los códigos sirven una vez y caducan en {{count, number}} minutos"
+  },
+  "actions": {
+    "openThreads": "Abrir hilos",
+    "pairing": "Vinculando…",
+    "pairPhone": "Vincular este teléfono",
+    "pairCode": "Vincular con código"
+  },
+  "sas": {
+    "waitingLabel": "Esperando a que {{name}} apruebe este teléfono",
+    "checkLabel": "Comprueba el código de {{name}}",
+    "waitingTitle": "Esperando aprobación",
+    "checkTitle": "Comprueba el código",
+    "mustApprove": "{{name}} debe aprobar este teléfono antes de que pueda conectarse.",
+    "scanned": "Código escaneado. Compáralo antes de confiar en el host.",
+    "typed": "Vinculado con un código escrito. Compáralo antes de confiar en el host.",
+    "waitingNote": "En {{name}}, abre Ajustes → Dispositivos y confirma el mismo código. Esta pantalla se actualiza cuando {{name}} apruebe este teléfono.",
+    "compareNote": "{{name}} muestra este código en Ajustes → Dispositivos. Si coincide, ningún tercero puede leer esta conexión. Si es distinto, alguien entre tú y el host ha cambiado la clave.",
+    "waitingFor": "Esperando a {{name}}",
+    "approvalRequired": "Se requiere la aprobación del host: después de confirmar aquí, aprueba el mismo código en {{name}}.",
+    "differ": "No coinciden",
+    "match": "Coinciden",
+    "waitingHost": "Esperando al host…"
+  },
+  "errors": {
+    "notPairingLink": "Ese código QR no es un enlace de vinculación de h4rn.",
+    "expired": "Ese código de vinculación ha caducado. Genera uno nuevo en el host.",
+    "signInToScan": "Inicia sesión en h4rn-connect primero y vuelve a escanear el código de vinculación.",
+    "signInToType": "Inicia sesión en h4rn-connect primero y vuelve a escribir el código.",
+    "otherConnect": "Este código pertenece a {{url}}. Cierra sesión e inicia sesión allí primero.",
+    "claimFailed": "No se pudo completar la vinculación.",
+    "notApproved": "{{name}} aún no ha aprobado este dispositivo. Abre Ajustes → Dispositivos en {{name}}, confirma el mismo código y vuelve a intentarlo.",
+    "codesDiffer": "Los códigos no coincidían, así que se revocó este dispositivo. Vuelve a vincularlo desde una red de confianza."
+  },
+  "toasts": {
+    "paired": "Vinculado con {{name}}."
+  },
+  "hostsPane": {
+    "pairDevice": "Vincular un dispositivo",
+    "pairingLater": "La vinculación llega en la fase 2",
+    "loading": "Cargando hosts",
+    "emptyTitle": "Aún no hay hosts.",
+    "emptyBody": "Un host es una máquina que ejecuta el daemon de h4rn. Vincula este dispositivo o añade un host de tu tailnet para que los agentes tengan dónde ejecutarse.",
+    "lastSeen": "visto por última vez {{when}}",
+    "note": "La presencia es un punto más una palabra. Una distribución WSL es su propio host, así que vincular el host Windows no da acceso a la distribución."
+  }
+}

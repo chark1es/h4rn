@@ -1,5 +1,6 @@
 import { CheckIcon, ChevronDownIcon, CircleXIcon, FileIcon, PlusIcon } from "lucide-react";
 import { type ReactNode, useEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { AgentGlyph } from "@/components/agent/AgentGlyph";
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
@@ -14,7 +15,8 @@ import {
 import type { SubagentView, ThreadSummary } from "@/gen";
 import { glyphForAgentState } from "@/lib/agent";
 import { harnessLabel, harnessSeed, machineSeed, subagentSeed } from "@/lib/entities";
-import { absoluteTime, tokens } from "@/lib/format";
+import { absoluteTime, formatTokens } from "@/lib/format";
+import { formatNumber, i18n } from "@/lib/i18n";
 import { openInIde, openThread, setPanelTab, useApp } from "@/lib/store/appStore";
 import { FileDiff } from "./FileDiff";
 import { usePanelChanges } from "./usePanelChanges";
@@ -69,15 +71,21 @@ function SubagentRow({
 
 function phoneState(view: SubagentView): string {
   if (view.state === "awaiting_approval") {
-    return `Needs approval${view.budget.max_turns ? ` · turn ${view.progress.turns_started + 1} of ${view.budget.max_turns}` : ""}`;
+    return view.budget.max_turns
+      ? i18n.t("thread:subagents.phone.needsApprovalTurn", {
+          turn: view.progress.turns_started + 1,
+          cap: view.budget.max_turns,
+        })
+      : i18n.t("thread:subagents.state.awaiting_approval");
   }
   if (view.state === "failed" || view.state === "budget_exceeded") {
-    return view.result?.error ?? (view.state === "failed" ? "Failed" : "Budget exceeded");
+    return view.result?.error ?? i18n.t(`thread:subagents.state.${view.state}`);
   }
-  if (view.state === "completed") return `Done · ${tokens(view.progress.tokens)} tokens`;
-  if (view.state === "cancelled") return "Cancelled";
-  if (view.state === "starting") return "Starting";
-  return `Running · ${tokens(view.progress.tokens)} tokens`;
+  const tokens = formatTokens(view.progress.tokens);
+  if (view.state === "completed") return i18n.t("thread:subagents.phone.doneTokens", { tokens });
+  if (view.state === "cancelled") return i18n.t("thread:subagents.state.cancelled");
+  if (view.state === "starting") return i18n.t("thread:subagents.state.starting");
+  return i18n.t("thread:subagents.phone.runningTokens", { tokens });
 }
 
 function PhoneSubagent({
@@ -89,6 +97,7 @@ function PhoneSubagent({
   parentThreadId: string;
   onReview: () => void;
 }) {
+  const { t } = useTranslation("thread");
   const waiting = view.state === "awaiting_approval";
   const failed = view.state === "failed" || view.state === "budget_exceeded";
   return (
@@ -110,7 +119,7 @@ function PhoneSubagent({
           <EntityAvatar
             seed={subagentSeed(view.host, parentThreadId, view.subagent_id)}
             kind="subagent"
-            label="subagent"
+            label={t("subagents.avatar")}
             size={14}
           />
           <EntityAvatar seed={machineSeed(view.host)} kind="machine" label={view.host} size={14} />
@@ -131,10 +140,10 @@ function PhoneSubagent({
               if (view.child_thread_id) openThread(view.child_thread_id);
             }}
           >
-            Details
+            {t("approval.phone.details")}
           </button>
           <button type="button" className="q-btn primary sm" style={{ flex: 1 }} onClick={onReview}>
-            Review
+            {t("approval.phone.review")}
           </button>
         </div>
       ) : null}
@@ -158,6 +167,7 @@ export function PhonePanelSheet({
   onClose: () => void;
   onReview?: () => void;
 }) {
+  const { t } = useTranslation(["thread", "common"]);
   const [tab, setTab] = useState(initialTab);
   const sheetRef = useRef<HTMLDivElement | null>(null);
   const changes = usePanelChanges(thread);
@@ -194,7 +204,7 @@ export function PhonePanelSheet({
       <button
         type="button"
         className="q-ph-scrim"
-        aria-label="Close changes and subagents"
+        aria-label={t("changes.phone.close")}
         onClick={onClose}
       />
       <div
@@ -202,7 +212,7 @@ export function PhonePanelSheet({
         className="q-ph-sheet large"
         role="dialog"
         aria-modal="true"
-        aria-label="Thread panel"
+        aria-label={t("panel.label")}
         tabIndex={-1}
       >
         <div className="q-grab" />
@@ -210,18 +220,21 @@ export function PhonePanelSheet({
           <span style={{ width: 64 }} />
           <span className="ttl">{thread.title}</span>
           <button type="button" className="navbtn" onClick={onClose}>
-            Done
+            {t("common:done")}
           </button>
         </div>
         <div className="q-ph-seg" style={{ padding: "0 16px 10px" }}>
-          <div className="q-seg" role="tablist" aria-label="Changes, preview and subagents">
+          <div className="q-seg" role="tablist" aria-label={t("changes.phone.tabs")}>
             <button
               type="button"
               role="tab"
               aria-selected={tabState === "changes"}
               onClick={() => setTab("changes")}
             >
-              Changes {files.length > 0 ? <span className="c q-num">{files.length}</span> : null}
+              {t("panel.changes")}{" "}
+              {files.length > 0 ? (
+                <span className="c q-num">{formatNumber(files.length)}</span>
+              ) : null}
             </button>
             {previewPath ? (
               <button
@@ -233,7 +246,7 @@ export function PhonePanelSheet({
                   setTab("preview");
                 }}
               >
-                Preview
+                {t("panel.preview")}
               </button>
             ) : null}
             <button
@@ -245,10 +258,12 @@ export function PhonePanelSheet({
                 setTab("subagents");
               }}
             >
-              Subagents{" "}
-              {subagents.total > 0 ? <span className="c q-num">{subagents.total}</span> : null}
+              {t("panel.subagents")}{" "}
+              {subagents.total > 0 ? (
+                <span className="c q-num">{formatNumber(subagents.total)}</span>
+              ) : null}
               {subagents.waiting > 0 ? (
-                <span className="q-pip" role="img" aria-label="needs you" />
+                <span className="q-pip" role="img" aria-label={t("panel.needsYou")} />
               ) : null}
             </button>
           </div>
@@ -266,27 +281,24 @@ export function PhonePanelSheet({
             <div className="q-ph-gh" style={{ display: "flex", alignItems: "center", gap: 8 }}>
               <span>
                 {subagents.total === 0
-                  ? "No subagents"
-                  : `${subagents.total} subagent${subagents.total === 1 ? "" : "s"}${
-                      subagents.waiting > 0 ? ` · ${subagents.waiting} waiting on you` : ""
-                    }`}
+                  ? t("subagents.none")
+                  : subagents.waiting > 0
+                    ? `${t("subagents.count", { count: subagents.total })} · ${t("subagents.waiting", { count: subagents.waiting })}`
+                    : t("subagents.count", { count: subagents.total })}
               </span>
               <span className="grow" />
               <button type="button" className="q-btn ghost sm" onClick={openDelegate}>
                 <PlusIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-                Delegate
+                {t("subagents.delegate")}
               </button>
             </div>
             {views.length === 0 ? (
               <div className="q-empty q-sub-empty">
-                <h3>Nothing delegated</h3>
-                <p>
-                  When {harnessLabel(thread.harness)} hands work to a subagent, it shows here with
-                  where it runs, its budget, and what it’s waiting on.
-                </p>
+                <h3>{t("subagents.emptyTitle")}</h3>
+                <p>{t("subagents.emptyBody", { harness: harnessLabel(thread.harness) })}</p>
                 <button type="button" className="q-btn secondary" onClick={openDelegate}>
                   <PlusIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-                  Delegate
+                  {t("subagents.delegate")}
                 </button>
               </div>
             ) : (
@@ -306,7 +318,9 @@ export function PhonePanelSheet({
                         {thread.host} · {harnessLabel(thread.harness)}
                       </>
                     }
-                    status={`Parent · ${thread.agent_state.replace(/_/g, " ")}`}
+                    status={t("subagents.phone.parent", {
+                      state: glyphForAgentState(thread.agent_state).label,
+                    })}
                   />
                   {views.map((view) => (
                     <PhoneSubagent
@@ -321,8 +335,7 @@ export function PhonePanelSheet({
                   ))}
                 </div>
                 <p className="q-ph-note" style={{ marginTop: -8 }}>
-                  A subagent’s approval always comes to its parent thread, so it also shows above
-                  the composer.
+                  {t("subagents.phone.note")}
                 </p>
               </>
             )}
@@ -331,7 +344,7 @@ export function PhonePanelSheet({
           <div className="q-ph-body">
             <div className="q-ph-sum">
               <span className="q-btn secondary sm">
-                {changes.turns.length > 1 ? `All ${changes.turns.length} turns` : "1 turn"}{" "}
+                {t("changes.phone.allTurns", { count: Math.max(1, changes.turns.length) })}{" "}
                 <ChevronDownIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
               </span>
               <span className="grow" />
@@ -347,14 +360,17 @@ export function PhonePanelSheet({
                 label={harnessLabel(thread.harness)}
                 size={14}
               />
-              {harnessLabel(thread.harness)} on {thread.host} · since{" "}
-              {absoluteTime(thread.last_activity)}
+              {t("changes.phone.since", {
+                harness: harnessLabel(thread.harness),
+                host: thread.host,
+                time: absoluteTime(thread.last_activity),
+              })}
             </div>
             {changes.error ? (
               <p className="q-ph-note">{changes.error}</p>
             ) : files.length === 0 ? (
               <p className="q-ph-note">
-                {changes.loading ? "Loading changes…" : "No changes in this thread yet."}
+                {changes.loading ? t("changes.phone.loading") : t("changes.phone.empty")}
               </p>
             ) : (
               <>
@@ -418,7 +434,7 @@ export function PhonePanelSheet({
                 ) : null}
               </>
             )}
-            <p className="q-ph-desktop-only">Files and the IDE are on desktop.</p>
+            <p className="q-ph-desktop-only">{t("changes.phone.desktopOnly")}</p>
           </div>
         )}
       </div>

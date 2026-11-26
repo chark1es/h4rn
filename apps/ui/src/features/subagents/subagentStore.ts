@@ -19,6 +19,8 @@ import type {
   SubagentView,
   ThreadId,
 } from "@/gen";
+import { harnessLabel } from "@/lib/entities";
+import { i18n } from "@/lib/i18n";
 import { getClient, onAppEvent, pushToast } from "@/lib/store/appStore";
 
 export type SubagentEntry = {
@@ -292,12 +294,21 @@ export async function spawnSubagent(input: SpawnInput): Promise<boolean> {
     });
     if (response.type !== "subagent") return false;
     upsert(input.parentThread, response.subagent, { selected: true });
-    pushToast({ variant: "success", title: `Delegated to ${response.subagent.harness}.` });
+    pushToast({
+      variant: "success",
+      title: i18n.t("thread:subagents.toasts.delegated", {
+        harness: harnessLabel(response.subagent.harness),
+      }),
+    });
     return true;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     patch({ error: message });
-    pushToast({ variant: "error", title: "Could not delegate.", description: message });
+    pushToast({
+      variant: "error",
+      title: i18n.t("thread:subagents.toasts.delegateFailed"),
+      description: message,
+    });
     return false;
   } finally {
     patch({ spawning: false });
@@ -315,11 +326,15 @@ export async function cancelSubagent(view: SubagentView): Promise<void> {
     if (response.type === "subagent") {
       upsert(response.subagent.parent_thread_id, response.subagent);
     }
-    pushToast({ variant: "success", title: "Subagent cancelled." });
+    pushToast({ variant: "success", title: i18n.t("thread:subagents.toasts.cancelled") });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     patch({ error: message });
-    pushToast({ variant: "error", title: "Could not cancel.", description: message });
+    pushToast({
+      variant: "error",
+      title: i18n.t("thread:subagents.toasts.cancelFailed"),
+      description: message,
+    });
   } finally {
     patch({ cancelling: null });
   }

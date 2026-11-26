@@ -11,6 +11,7 @@ import {
 } from "@/features/changes/store";
 import type { FsDiff, FsTurnChanges, ThreadSummary, TurnId } from "@/gen";
 import { toProtoError } from "@/lib/client/errors";
+import { formatNumber, i18n, useActiveLocale } from "@/lib/i18n";
 import { getClient, pushToast, useApp } from "@/lib/store/appStore";
 import { isRealTurn, latestRealTurn } from "@/lib/store/projection";
 
@@ -42,13 +43,16 @@ export type PanelChanges = {
 export function usePanelChanges(thread: ThreadSummary | null): PanelChanges {
   const threadId = thread?.thread_id ?? null;
   const log = useApp((state) => (threadId ? state.logs[threadId] : undefined));
+  // The labels are worded when the list is built, so a language switch rebuilds it.
+  const locale = useActiveLocale();
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the locale words the labels.
   const turns = useMemo(
     () =>
       (log?.turns ?? []).filter(isRealTurn).map((turn, index) => ({
         id: turn.id,
-        label: `Turn ${index + 1}`,
+        label: i18n.t("thread:changes.turnNumber", { number: formatNumber(index + 1) }),
       })),
-    [log?.turns],
+    [log?.turns, locale],
   );
 
   const [pickedTurn, setPickedTurn] = useState<TurnId | null>(null);
@@ -155,13 +159,16 @@ export function usePanelChanges(thread: ThreadSummary | null): PanelChanges {
       pushToast({
         title:
           done === total
-            ? `Reverted ${done} ${done === 1 ? "file" : "files"}.`
-            : `Reverted ${done} of ${total} files.`,
+            ? i18n.t("thread:changes.reverted", { count: done })
+            : i18n.t("thread:changes.revertedSome", { done, total }),
         ...(failed.length > 0
           ? {
               description: failed
                 .slice(0, 2)
-                .map((result) => `${result.path}: ${result.message ?? "failed"}`)
+                .map(
+                  (result) =>
+                    `${result.path}: ${result.message ?? i18n.t("thread:changes.failed")}`,
+                )
                 .join(" · "),
             }
           : {}),

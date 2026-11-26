@@ -42,6 +42,7 @@ import {
   writeThreadDraft,
 } from "@/lib/drafts";
 import { harnessLabel } from "@/lib/entities";
+import { useActiveLocale } from "@/lib/i18n";
 import { chordFromEvent, matchCommand, titleWithShortcut } from "@/lib/keybindings";
 import { openPhonePanel } from "@/lib/phonePanels";
 import {
@@ -210,6 +211,10 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
 
   const terminalOpen = useApp((state) => state.ui.layout.terminalOpen);
   const view = useApp((state) => state.ui.layout.view);
+  // The labels are read from the catalogue when the list is built, so a
+  // language switch must rebuild it.
+  const language = useActiveLocale();
+  // biome-ignore lint/correctness/useExhaustiveDependencies: language changes the labels composerCommands reads.
   const commands = useMemo(
     () =>
       composerCommands(summary, {
@@ -218,7 +223,7 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
         phone: isPhone,
         openPhonePanel,
       }),
-    [summary, terminalOpen, view, isPhone],
+    [summary, terminalOpen, view, isPhone, language],
   );
   const workspaceTarget = useMemo(
     () => ({ host: summary.host, workspace: summary.workspace_path }),

@@ -1,4 +1,5 @@
 import { XIcon } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 import { Resizer } from "@/components/shell/Resizer";
 import { PreviewPanel } from "@/features/preview/PreviewPanel";
@@ -6,6 +7,7 @@ import { SubagentsPanel } from "@/features/subagents/SubagentsPanel";
 import { useSubagentCount } from "@/features/subagents/subagentStore";
 import type { ThreadSummary } from "@/gen";
 import { harnessLabel } from "@/lib/entities";
+import { formatNumber } from "@/lib/i18n";
 import { titleWithShortcut } from "@/lib/keybindings";
 import { openPreview, setPanelTab, setPanelWidth, togglePanel, useApp } from "@/lib/store/appStore";
 import { ChangesSection } from "./ChangesSection";
@@ -18,6 +20,7 @@ function workspaceName(path: string): string {
 
 /** The one right panel: Changes, Files, Preview and Subagents for the active thread. */
 export function RightPanel({ thread, ide = false }: { thread: ThreadSummary; ide?: boolean }) {
+  const { t } = useTranslation("thread");
   const tab = useApp((state) => state.ui.layout.panelTab);
   const width = useApp((state) => state.ui.layout.panelWidth);
   const ideActivePath = useApp((state) => state.ui.ideActivePath);
@@ -31,56 +34,63 @@ export function RightPanel({ thread, ide = false }: { thread: ThreadSummary; ide
   return (
     <aside
       className="q-rp"
-      aria-label="Thread panel"
+      aria-label={t("panel.label")}
       style={{ ["--rp-w" as string]: `${width}px` }}
     >
-      <div className="q-rp-head" role="tablist" aria-label="Panel">
+      <div className="q-rp-head" role="tablist" aria-label={t("panel.tabs")}>
         <button
           type="button"
           role="tab"
           aria-selected={tab === "changes"}
           className="q-rp-tab"
+          title={t("panel.changes")}
           onClick={() => setPanelTab("changes")}
         >
-          Changes {changeCount > 0 ? <span className="c q-num">{changeCount}</span> : null}
+          <span className="q-rp-tab-name">{t("panel.changes")}</span>
+          {changeCount > 0 ? <span className="c q-num">{formatNumber(changeCount)}</span> : null}
         </button>
         <button
           type="button"
           role="tab"
           aria-selected={tab === "files"}
           className="q-rp-tab"
+          title={t("panel.files")}
           onClick={() => setPanelTab("files")}
         >
-          Files
+          <span className="q-rp-tab-name">{t("panel.files")}</span>
         </button>
         <button
           type="button"
           role="tab"
           aria-selected={tab === "preview"}
           className="q-rp-tab"
-          title={previewPath ?? "Preview an HTML file"}
+          title={previewPath ?? t("panel.previewHint")}
           onClick={() => setPanelTab("preview")}
         >
-          Preview
+          <span className="q-rp-tab-name">{t("panel.preview")}</span>
         </button>
         <button
           type="button"
           role="tab"
           aria-selected={tab === "subagents"}
           className="q-rp-tab"
+          title={t("panel.subagents")}
           onClick={() => setPanelTab("subagents")}
         >
-          Subagents {subagentTotal > 0 ? <span className="c q-num">{subagentTotal}</span> : null}
+          <span className="q-rp-tab-name">{t("panel.subagents")}</span>
+          {subagentTotal > 0 ? (
+            <span className="c q-num">{formatNumber(subagentTotal)}</span>
+          ) : null}
           {subagents.waiting > 0 ? (
-            <span className="q-pip" role="img" aria-label="needs you" />
+            <span className="q-pip" role="img" aria-label={t("panel.needsYou")} />
           ) : null}
         </button>
         <span className="grow" />
         <button
           type="button"
           className="q-ibtn"
-          aria-label="Close panel"
-          title={titleWithShortcut("Close panel", "panel.toggle")}
+          aria-label={t("panel.close")}
+          title={titleWithShortcut(t("panel.close"), "panel.toggle")}
           onClick={togglePanel}
         >
           <XIcon className="q-icon" strokeWidth={1.5} aria-hidden />
@@ -115,7 +125,7 @@ export function RightPanel({ thread, ide = false }: { thread: ThreadSummary; ide
         width={width}
         min={320}
         max={640}
-        label="Resize panel"
+        label={t("panel.resize")}
         onChange={setPanelWidth}
       />
     </aside>

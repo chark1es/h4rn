@@ -1,4 +1,4 @@
-import { describe, expect, test, vi } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 
 import type {
   ForgeAccount,
@@ -12,6 +12,7 @@ import type {
   ForgeReviewComment,
   ForgeReviewThread,
 } from "@/gen";
+import { setLocalePreference } from "@/lib/i18n";
 
 import {
   accountForRepo,
@@ -649,5 +650,25 @@ describe("Bitbucket and Azure DevOps pull request links", () => {
         7,
       ),
     ).toBe("https://dev.azure.com/acme/Project/_git/api/pullrequest/7");
+  });
+});
+
+describe("forge words in another language", () => {
+  afterEach(async () => {
+    await setLocalePreference("en");
+  });
+
+  test("states, checks, review chips and re-run reasons follow the language", async () => {
+    await setLocalePreference("es");
+    expect(stateLabel("merged")).toEqual({ label: "Fusionado", tone: "ok" });
+    expect(checksLabel("passing", 1200, 1500)).toBe("1200 de 1500 comprobaciones superadas");
+    expect(checksLabel("failing", 4, 5)).toBe("1 con fallos");
+    expect(reviewChip("changes_requested")?.label).toBe("Cambios solicitados");
+    expect(mergeableLabel("conflicting")?.label).toBe("Conflictos de fusión");
+    await setLocalePreference("ja");
+    expect(summaryChecksLabel("failing")).toBe("チェック失敗");
+    expect(checksLabel("passing", 4, 5)).toBe("5 件中 4 件のチェックに成功");
+    await setLocalePreference("zh-CN");
+    expect(checksLabel("failing", 1000, 3000)).toBe("2,000 项失败");
   });
 });

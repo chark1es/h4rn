@@ -32,7 +32,10 @@ export function scopeLabel(scope: PairScope): string {
   return i18n.t(`settings:devices.scopes.${scope}.label`);
 }
 
-/** A scope's second line in the active language, or "" when it has none. */
+/**
+ * A scope's second line in the active language, or "" when it has none (the
+ * catalogue keeps an empty value for a scope without one).
+ */
 export function scopeSub(scope: PairScope): string {
   return i18n.t(`settings:devices.scopes.${scope}.sub`);
 }

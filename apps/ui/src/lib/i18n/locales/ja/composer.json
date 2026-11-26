@@ -93,7 +93,7 @@
   "attachments": {
     "label": "添付ファイル",
     "file": "ファイル",
-    "remove": "{{name}} を削除",
+    "remove": "{{name}} を外す",
     "notAttached": "{{name}} は添付されませんでした。",
     "status": {
       "notAttached": "未添付",

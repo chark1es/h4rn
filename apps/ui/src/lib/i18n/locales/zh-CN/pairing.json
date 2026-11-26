@@ -1,0 +1,74 @@
+{
+  "title": "配对主机",
+  "pairWith": "与 {{name}} 配对",
+  "viaRelay": "{{address}} · 经由中继",
+  "signedInAs": "已用 {{account}} 登录 h4rn-connect",
+  "signInFirst": "配对前请先登录 h4rn-connect",
+  "thisPhoneCan": "此手机可以",
+  "scopes": {
+    "terminalOn": "在 {{host}} 的 shell 中输入",
+    "included": "已包含",
+    "notIncluded": "未包含",
+    "setOn": "在 {{host}} 上设置。"
+  },
+  "alsoIncluded": "同时包含",
+  "everyHost": "{{host}} 上的所有主机",
+  "wslIncluded": "包括 WSL 发行版",
+  "empty": {
+    "title": "扫描配对码",
+    "body": "在主机上从“设置 → 设备”打开配对码，然后用此设备扫描。链接会带你回到这里确认。",
+    "typeCode": "或输入二维码下方的代码",
+    "codeLabel": "配对码"
+  },
+  "credentials": "凭据保留在 {{host}} 上。你可以从任何其他设备撤销此手机。",
+  "credentialsUnnamed": "凭据保留在主机上。你可以从任何其他设备撤销此手机。",
+  "foot": {
+    "linkExpired": "链接已过期",
+    "expiresIn": "链接将在 {{time}} 后过期",
+    "codesOnce_other": "代码只能使用一次，{{count, number}} 分钟后过期"
+  },
+  "actions": {
+    "openThreads": "打开对话",
+    "pairing": "正在配对…",
+    "pairPhone": "配对此手机",
+    "pairCode": "用代码配对"
+  },
+  "sas": {
+    "waitingLabel": "正在等待 {{name}} 批准此手机",
+    "checkLabel": "核对 {{name}} 的代码",
+    "waitingTitle": "正在等待批准",
+    "checkTitle": "核对代码",
+    "mustApprove": "{{name}} 必须先批准此手机，手机才能连接。",
+    "scanned": "已扫描代码。信任主机前请先核对。",
+    "typed": "已通过输入的代码配对。信任主机前请先核对。",
+    "waitingNote": "在 {{name}} 上打开“设置 → 设备”，确认相同的代码。{{name}} 批准此手机后，此屏幕会更新。",
+    "compareNote": "{{name}} 会在“设置 → 设备”下显示此代码。如果两者相同，任何第三方都无法读取此连接。如果不同，说明你和主机之间有人替换了密钥。",
+    "waitingFor": "正在等待 {{name}}",
+    "approvalRequired": "需要主机批准：在这里确认后，请在 {{name}} 上批准相同的代码。",
+    "differ": "不一致",
+    "match": "一致",
+    "waitingHost": "正在等待主机…"
+  },
+  "errors": {
+    "notPairingLink": "该二维码不是 h4rn 配对链接。",
+    "expired": "该配对码已过期。请在主机上生成新的配对码。",
+    "signInToScan": "请先登录 h4rn-connect，然后重新扫描配对码。",
+    "signInToType": "请先登录 h4rn-connect，然后重新输入代码。",
+    "otherConnect": "此代码属于 {{url}}。请先退出登录，再在那里登录。",
+    "claimFailed": "无法完成该配对。",
+    "notApproved": "{{name}} 尚未批准此设备。请在 {{name}} 上打开“设置 → 设备”，确认相同的代码，然后重试。",
+    "codesDiffer": "代码不一致，因此此设备已被撤销。请在你信任的网络中重新配对。"
+  },
+  "toasts": {
+    "paired": "已与 {{name}} 配对。"
+  },
+  "hostsPane": {
+    "pairDevice": "配对设备",
+    "pairingLater": "配对将在第 2 阶段推出",
+    "loading": "正在加载主机",
+    "emptyTitle": "还没有主机。",
+    "emptyBody": "主机是运行 h4rn 守护进程的机器。配对此设备，或在你的 tailnet 上添加主机，让智能体有地方运行。",
+    "lastSeen": "最后在线：{{when}}",
+    "note": "在线状态由一个圆点加一个词表示。WSL 发行版是独立的主机，因此配对 Windows 主机不会授予该发行版的访问权限。"
+  }
+}
