@@ -568,7 +568,9 @@ impl HarnessSession for AcpSession {
                 .map(|alias| (*alias).to_string())
                 .collect(),
             efforts: self.info.efforts.clone(),
-            fast: false,
+            fast: None,
+            // An ACP agent's handshake names models, not their service tiers.
+            fast_by_model: Default::default(),
             switch_mode: true,
             switch_model: true,
             // Attempt an effort switch even when the agent advertised no

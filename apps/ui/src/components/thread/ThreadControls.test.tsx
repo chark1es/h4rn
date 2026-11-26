@@ -107,7 +107,9 @@ describe("ThreadControls", () => {
 
   it("offers effort and fast only where the harness has them", () => {
     const { unmount } = render(
-      <ThreadControls summary={summary({ harness: "codex", reasoning_effort: "high" })} />,
+      <ThreadControls
+        summary={summary({ harness: "codex", reasoning_effort: "high", fast_available: true })}
+      />,
     );
     fireEvent.click(screen.getByText("claude-sonnet-5-5"));
     expect(screen.getByLabelText("Reasoning effort")).toBeTruthy();
@@ -119,6 +121,55 @@ describe("ThreadControls", () => {
     fireEvent.click(screen.getByText("claude-sonnet-5-5"));
     expect(screen.queryByLabelText("Reasoning effort")).toBeNull();
     expect(screen.queryByText("Fast")).toBeNull();
+  });
+
+  it("hides the Fast row when the model's tier is unknown", () => {
+    // Nothing has described this model (an older daemon, or a model this
+    // thread never ran): the harness-wide answer must not offer the row.
+    render(<ThreadControls summary={summary({ harness: "codex", model: "gpt-c" })} />);
+    fireEvent.click(screen.getByText("gpt-c"));
+    expect(screen.queryByText("Fast")).toBeNull();
+  });
+
+  it("drops the Fast row when a switch lands on a model without one", () => {
+    render(
+      <ThreadControls
+        summary={summary({
+          harness: "codex",
+          model: "gpt-a",
+          models: ["gpt-a", "gpt-b"],
+          fast_available: true,
+        })}
+      />,
+    );
+    fireEvent.click(screen.getByText("gpt-a"));
+    expect(screen.getByText("Fast")).toBeTruthy();
+    cleanup();
+
+    // The daemon reports the new model has no service tier: the row is gone.
+    render(
+      <ThreadControls
+        summary={summary({
+          harness: "codex",
+          model: "gpt-b",
+          models: ["gpt-a", "gpt-b"],
+          fast_available: false,
+        })}
+      />,
+    );
+    fireEvent.click(screen.getByText("gpt-b"));
+    expect(screen.queryByText("Fast")).toBeNull();
+  });
+
+  it("keeps a checked Fast row when the model has no tier, so it can be turned off", () => {
+    render(
+      <ThreadControls
+        summary={summary({ harness: "codex", model: "gpt-b", fast: true, fast_available: false })}
+      />,
+    );
+    fireEvent.click(screen.getByText("gpt-b"));
+    fireEvent.click(screen.getByRole("menuitemradio", { name: /^Fast/ }));
+    expect(mock.actions.setThreadFast).toHaveBeenCalledWith("th_1", false);
   });
 
   it("shows no permission rows for an agent whose modes are unknown", () => {

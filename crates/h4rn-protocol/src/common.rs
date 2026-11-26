@@ -457,19 +457,44 @@ pub struct ThreadSummary {
     /// here rather than guessing.
     #[serde(default)]
     pub reasoning_efforts: Vec<String>,
-    /// Model ids the live session advertised.
+    /// Model ids the last session advertised.
     ///
-    /// Empty until a session names a catalogue. Codex publishes its
+    /// Kept with the thread, including across a daemon restart, so a thread
+    /// with no live session still offers its last catalogue. Empty until a
+    /// session names one. Codex publishes its
     /// `model/list` at session start, and the picker offers exactly those ids
     /// (plus the current one) instead of the adapter's static guess. An older
     /// daemon's thread has none, so the picker falls back to the static list.
     #[serde(default)]
     pub models: Vec<String>,
-    /// Whether the thread asks the harness for its fast tier.
+    /// Whether the thread asks for the harness's fast tier.
     ///
     /// Only harnesses with a real fast tier (Codex service tiers) report this.
     #[serde(default)]
     pub fast: bool,
+    /// Fast answers for the models this thread's sessions described.
+    ///
+    /// The thread keeps every per-model answer its sessions' catalogues
+    /// reported, not only the one for its current model, so a client can answer
+    /// for a model the thread no longer runs (the new-thread dialog does).
+    /// `fast_available` is this map's entry for `model`; a model missing from
+    /// it is unknown. `None` is an older daemon that reported only the current
+    /// model's answer.
+    #[serde(default)]
+    #[ts(optional)]
+    pub fast_models: Option<std::collections::BTreeMap<String, bool>>,
+    /// Whether the thread's current model offers a fast tier.
+    ///
+    /// The fast tier belongs to the model, not the harness: Codex's catalogue
+    /// names it per model, and a thread switched to a model without one must
+    /// not be offered the row. The daemon keeps the answer for every model a
+    /// session has described, so a switch made with no live session still
+    /// answers correctly. `None` means the tier for this model is genuinely
+    /// unknown (no session has described it, or an older daemon), and the
+    /// client shows no Fast row rather than falling back to the harness.
+    #[serde(default)]
+    #[ts(optional)]
+    pub fast_available: Option<bool>,
     /// Derived tab placement.
     pub tab: ThreadTab,
     /// Whether the current tab is where the person just placed the thread.
@@ -946,6 +971,8 @@ mod tests {
             reasoning_efforts: Vec::new(),
             models: Vec::new(),
             fast: false,
+            fast_models: None,
+            fast_available: None,
             tab: ThreadTab::Working,
             placed_by_user: false,
             pinned: false,

@@ -606,6 +606,8 @@ mod tests {
             reasoning_efforts: Vec::new(),
             models: Vec::new(),
             fast: false,
+            fast_models: None,
+            fast_available: None,
             tab: ThreadTab::Working,
             placed_by_user: false,
             pinned: false,
