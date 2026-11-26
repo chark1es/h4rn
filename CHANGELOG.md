@@ -941,6 +941,11 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Changed
 
+- **CI runs the Android app's unit tests.** The Android job used to only build
+  the APKs, so the Kotlin tests never ran, including the one that fails when a
+  language misses an alert string. It now runs them after the build with
+  `scripts/mobile-android.sh test`, and a failing test fails the job and
+  names the language and string. Editing a translation reruns them locally.
 - **The `thread.acknowledge` shortcut moved off `Mod+Shift+A`.** It is now
   `Mod+Alt+A` (`⌘⌥A` / `Ctrl+Alt+A`); `Mod+Shift+A` opens the new permission
   picker. Shortcuts help and the command palette show the new binding.

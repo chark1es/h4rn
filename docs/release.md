@@ -424,6 +424,9 @@ packaging/scripts/build-daemon-archives.sh x86_64-unknown-linux-gnu dist/daemon
 export JAVA_HOME="$HOME/.local/jdk/jdk-21.0.13+9"
 scripts/mobile-android.sh build-release
 
+# Android JVM unit tests, as CI's mobile-android job runs them after its build
+scripts/mobile-android.sh build && scripts/mobile-android.sh test
+
 # Relay image, single platform (Docker Desktop's docker.exe works from WSL)
 docker.exe buildx build --platform linux/amd64 -f deploy/Dockerfile -t h4rn/connect:dev .
 

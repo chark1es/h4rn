@@ -65,6 +65,10 @@ scripts/mobile-android.sh build
 # Restrict the build to one ABI when iterating.
 H4RN_ANDROID_TARGETS=x86_64 scripts/mobile-android.sh build
 
+# Run the app's JVM unit tests (app/src/test) after a build. Use the same
+# H4RN_ANDROID_TARGETS as the build so Gradle reuses what it compiled.
+H4RN_ANDROID_TARGETS=x86_64 scripts/mobile-android.sh test
+
 # Start the emulator if needed, start a fake-harness daemon, wire adb reverse,
 # install, launch with a pairing deep link, wait, screenshot and dump logcat.
 scripts/mobile-android.sh run
@@ -80,6 +84,12 @@ bindings: the source is checked in, the generated tree is not. The overlay manif
 `h4rn://` `<intent-filter>` inside the `DEEP LINK PLUGIN. AUTO-GENERATED` comment block:
 `tauri-plugin-deep-link` rewrites that block from `plugins.deep-link.mobile` whenever its build
 script runs, and the filter survives when cargo decides the plugin is already up to date.
+
+`test` needs a project that `build` has built: the Rust build writes `tauri.settings.gradle`,
+without which Gradle cannot configure the project. The unit tests themselves need no Rust
+library, emulator or Firebase project, and running them does not rebuild the Rust. CI's
+`mobile-android` job runs `build` and then `test`, so a failing Kotlin test (for example
+`PushResourcesTest`, when a language misses an alert string) fails the job.
 
 ## How the emulator reaches the daemon
 

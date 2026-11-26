@@ -17,6 +17,9 @@
 #                ANDROID_KEYSTORE_PATH/_PASSWORD, ANDROID_KEY_ALIAS and
 #                ANDROID_KEY_PASSWORD; without them Gradle signs with the debug
 #                key so locally produced artifacts stay installable.
+#   test         Run the app's JVM unit tests (app/src/test) in the project
+#                `build` produced, for the first ABI in H4RN_ANDROID_TARGETS.
+#                Run `build` first: Gradle needs the files its Rust build writes.
 #   install      Install the newest APK on the running emulator/device
 #   run          build + install + daemon + adb reverse + deep-link launch + screenshot
 #   screenshot   Capture the emulator screen to apps/mobile/screenshots/
@@ -230,6 +233,44 @@ build_release() {
   log "APK ${apk}"
 }
 
+# The Gradle product flavor Tauri's Rust plugin creates for a Rust target.
+gradle_flavor() {
+  case "$1" in
+    x86_64) printf 'X86_64' ;;
+    aarch64) printf 'Arm64' ;;
+    armv7) printf 'Arm' ;;
+    i686) printf 'X86' ;;
+    *) die "unknown Android target $1 (expected x86_64, aarch64, armv7 or i686)" ;;
+  esac
+}
+
+run_unit_tests() {
+  setup_env
+  # Copy the overlay again so the tests and resources under test are the
+  # checked-in ones, even if they changed since the last build.
+  ensure_android_project
+  # `tauri.settings.gradle` (the Tauri Android library and plugin projects)
+  # is written by the Rust build, so the project cannot configure before one.
+  [[ -f "${GEN_DIR}/tauri.settings.gradle" ]] \
+    || die "the Android project has not been built yet; run scripts/mobile-android.sh build first"
+
+  local -a targets
+  read -r -a targets <<<"${TARGETS}"
+  # The tests are plain JVM code, the same for every ABI. Use a flavor
+  # `build` already compiled, so Gradle reuses its classes and resources and
+  # the dependencies it downloaded instead of building another variant:
+  # `build` compiles the universal flavor for one target and one flavor per
+  # ABI for several (--split-per-abi). The unit-test task does not depend on
+  # the Rust library, so no Rust is rebuilt.
+  local flavor="Universal"
+  if [[ "${#targets[@]}" -gt 1 ]]; then
+    flavor="$(gradle_flavor "${targets[0]}")"
+  fi
+  local task="test${flavor}DebugUnitTest"
+  log "Running the JVM unit tests (${task})"
+  (cd "${GEN_DIR}" && ./gradlew --console=plain "${task}")
+}
+
 newest_apk() {
   local preferred="${1:-}"
   local found
@@ -402,6 +443,9 @@ case "${command}" in
   build-release)
     build_release
     ;;
+  test)
+    run_unit_tests
+    ;;
   install)
     setup_env
     install_apk
@@ -431,6 +475,6 @@ case "${command}" in
     printf 'Token: %s\n' "${TOKEN}"
     ;;
   *)
-    die "unknown command ${command}; expected init, build, build-release, install, run, screenshot, logs or daemon"
+    die "unknown command ${command}; expected init, build, build-release, test, install, run, screenshot, logs or daemon"
     ;;
 esac
