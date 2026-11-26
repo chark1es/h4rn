@@ -3021,6 +3021,9 @@ mod tests {
 
     /// Takes `turn`'s checkpoint as a turn's start does (see threads.rs): a
     /// reason the capture cannot be complete is recorded, and returned.
+    ///
+    /// Only the Unix permission tests use it, so it is Unix-only too.
+    #[cfg(unix)]
     fn capture_turn(fixture: &Fixture, turn: &str) -> Option<String> {
         let turn = TurnId::new(turn);
         match crate::worktrees::git::checkpoint_commit(&fixture.repo) {
