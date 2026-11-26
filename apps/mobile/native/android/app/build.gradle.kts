@@ -3,8 +3,10 @@
 // This file is checked in under `native/android/app/` and copied over the
 // generated project by `scripts/mobile-android.sh` so the release signing
 // configuration survives every regeneration. Keep it in sync with the Tauri CLI
-// 2.12.x template; the only h4rn addition is the `signingConfigs` block.
+// 2.12.x template; the h4rn additions are the Google Services switch, the
+// `signingConfigs` block, the unit-test settings and the extra dependencies.
 import java.util.Properties
+import org.gradle.api.tasks.testing.logging.TestExceptionFormat
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 // Firebase Messaging compiles into every build, but the Google Services plugin
@@ -130,6 +132,23 @@ kotlin {
 
 rust {
     rootDirRel = "../../../"
+}
+
+// PushResourcesTest reads every language's push_strings.xml straight from
+// src/main/res. Declare that folder as a test input so editing a translation
+// reruns the tests instead of leaving them up to date. A failure prints its
+// assertion message (which language and which string), so the CI log says
+// what broke without downloading the report.
+tasks.withType<Test>().configureEach {
+    inputs.dir("src/main/res")
+        .withPropertyName("pushResources")
+        .withPathSensitivity(PathSensitivity.RELATIVE)
+    // Every test is listed, so a green CI log shows the tests really ran;
+    // a failure also prints its assertion message.
+    testLogging {
+        events("passed", "skipped", "failed")
+        exceptionFormat = TestExceptionFormat.FULL
+    }
 }
 
 dependencies {

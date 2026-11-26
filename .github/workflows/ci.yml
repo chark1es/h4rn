@@ -137,7 +137,7 @@ jobs:
       - run: cargo test --manifest-path apps/mobile/src-tauri/Cargo.toml
 
   mobile-android:
-    name: Android APKs build
+    name: Android APKs build and unit tests
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -168,6 +168,19 @@ jobs:
       # It also compiles the checked-in release signing configuration, so a
       # broken Gradle overlay fails on the PR rather than at release time.
       - run: scripts/mobile-android.sh build
+      # The app's JVM unit tests: the alert wording, and PushResourcesTest,
+      # which fails when a language misses an alert string, a plural quantity
+      # or a %d. They run in the project the build just generated, on the
+      # same Gradle home, daemon and compiled flavor, so the only new
+      # download is JUnit and no Rust is rebuilt. A failing test fails the job.
+      - run: scripts/mobile-android.sh test
+      - name: Upload the unit test report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-unit-test-report
+          path: apps/mobile/src-tauri/gen/android/app/build/reports/tests/
+          if-no-files-found: ignore
 
   mobile-ios:
     name: iOS simulator build
