@@ -19,6 +19,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::panic::AssertUnwindSafe;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
@@ -256,23 +257,52 @@ pub fn group_activities(activities: &[AgentActivity]) -> Vec<PushAlert> {
 #[derive(Default)]
 struct PendingGroup {
     activities: Vec<AgentActivity>,
-    scheduled: bool,
+    /// The window this group's timer was started for, once it has one.
+    ///
+    /// A turn start can take the group away before its timer fires, and the
+    /// account's next group gets a fresh window. The old timer still wakes up,
+    /// so it carries this number and only flushes a group that still has it:
+    /// otherwise it would send the next group early and split one burst into
+    /// two alerts.
+    window: Option<u64>,
 }
 
 impl PendingGroup {
-    /// Records one transition and says whether to start a flush timer.
+    /// Records one transition and returns the window to start a timer for.
     ///
     /// Only the first transition of a window starts the timer; later ones are
     /// carried by the flush it already owns. A service built for a caller that
-    /// flushes itself never starts one.
-    fn push(&mut self, activity: AgentActivity, auto_flush: bool) -> bool {
+    /// flushes itself never starts one. `next_window` is only called when a
+    /// timer is started.
+    fn push(
+        &mut self,
+        activity: AgentActivity,
+        auto_flush: bool,
+        next_window: impl FnOnce() -> u64,
+    ) -> Option<u64> {
         self.activities.push(activity);
-        if !auto_flush || self.scheduled {
-            return false;
+        if !auto_flush || self.window.is_some() {
+            return None;
         }
-        self.scheduled = true;
-        true
+        let window = next_window();
+        self.window = Some(window);
+        Some(window)
     }
+}
+
+/// Takes the account's collecting group if it still belongs to this window.
+///
+/// A timer whose group a turn start already took finds either nothing or the
+/// account's next group, which has its own timer; it leaves that one alone.
+fn take_window(
+    pending: &mut HashMap<Uuid, PendingGroup>,
+    user_id: Uuid,
+    window: u64,
+) -> Option<Vec<AgentActivity>> {
+    if pending.get(&user_id)?.window != Some(window) {
+        return None;
+    }
+    pending.remove(&user_id).map(|group| group.activities)
 }
 
 /// Takes the account's collecting group when it holds this thread.
@@ -393,6 +423,8 @@ pub struct AlertService {
     /// calls `flush` itself turns this off.
     auto_flush: bool,
     pending: Mutex<HashMap<Uuid, PendingGroup>>,
+    /// The number the next group window's timer gets.
+    next_window: AtomicU64,
     /// Each account's delivery worker, while it has work.
     ///
     /// A worker drains its queue in arrival order, so a deferred group and a
@@ -426,6 +458,7 @@ impl AlertService {
             max_age,
             auto_flush: true,
             pending: Mutex::new(HashMap::new()),
+            next_window: AtomicU64::new(0),
             workers: StdMutex::new(HashMap::new()),
             #[cfg(test)]
             ingested: std::sync::atomic::AtomicUsize::new(0),
@@ -494,20 +527,40 @@ impl AlertService {
             self.enqueue(user_id, DeliveryJob::Working { activity, before });
             return;
         }
-        let schedule = {
+        let window = {
             let mut pending = self.pending.lock().await;
             pending
                 .entry(user_id)
                 .or_default()
-                .push(activity, self.auto_flush)
+                .push(activity, self.auto_flush, || {
+                    self.next_window.fetch_add(1, Ordering::Relaxed)
+                })
         };
-        if schedule {
+        if let Some(window) = window {
             let service = Arc::clone(self);
-            let window = self.group_window;
+            let delay = self.group_window;
             tokio::spawn(async move {
-                tokio::time::sleep(window).await;
-                service.queue_flush(user_id, None).await;
+                tokio::time::sleep(delay).await;
+                service.queue_window(user_id, window).await;
             });
+        }
+    }
+
+    /// Queues the group a window timer was started for, if it is still
+    /// collecting.
+    ///
+    /// The group is taken and queued under the `pending` lock, like every
+    /// other flush, so the queue keeps the order Connect saw the transitions.
+    async fn queue_window(self: &Arc<Self>, user_id: Uuid, window: u64) {
+        let mut pending = self.pending.lock().await;
+        if let Some(activities) = take_window(&mut pending, user_id, window) {
+            self.enqueue(
+                user_id,
+                DeliveryJob::Flush {
+                    activities,
+                    done: None,
+                },
+            );
         }
     }
 
@@ -515,18 +568,21 @@ impl AlertService {
     ///
     /// Queuing under the lock keeps the queue in the order Connect saw the
     /// transitions: a turn-start that takes the group with it is queued under
-    /// the same lock.
-    async fn queue_flush(self: &Arc<Self>, user_id: Uuid, done: Option<oneshot::Sender<()>>) {
+    /// the same lock. The group's own window timer, if it has one, then finds
+    /// nothing to send.
+    async fn queue_flush(self: &Arc<Self>, user_id: Uuid, done: oneshot::Sender<()>) {
         let mut pending = self.pending.lock().await;
         let activities = pending
             .remove(&user_id)
             .map(|group| group.activities)
             .unwrap_or_default();
-        if activities.is_empty() && done.is_none() {
-            // A turn-start already took this window's group with it.
-            return;
-        }
-        self.enqueue(user_id, DeliveryJob::Flush { activities, done });
+        self.enqueue(
+            user_id,
+            DeliveryJob::Flush {
+                activities,
+                done: Some(done),
+            },
+        );
     }
 
     /// Sends the collecting group now and waits until the account's queue,
@@ -535,7 +591,7 @@ impl AlertService {
     /// Public so tests can drain without waiting for the window.
     pub async fn flush(self: &Arc<Self>, user_id: Uuid) {
         let (done, finished) = oneshot::channel();
-        self.queue_flush(user_id, Some(done)).await;
+        self.queue_flush(user_id, done).await;
         let _ = finished.await;
     }
 
@@ -937,17 +993,53 @@ mod tests {
     #[test]
     fn one_window_timer_covers_every_transition_it_collects() {
         let mut group = PendingGroup::default();
-        assert!(group.push(activity(AgentAlertState::Completed, "one"), true));
-        assert!(!group.push(activity(AgentAlertState::Completed, "two"), true));
+        assert_eq!(
+            group.push(activity(AgentAlertState::Completed, "one"), true, || 7),
+            Some(7)
+        );
+        assert_eq!(
+            group.push(activity(AgentAlertState::Completed, "two"), true, || {
+                panic!("a second timer was started for one window")
+            }),
+            None
+        );
         assert_eq!(group.activities.len(), 2);
     }
 
     #[test]
     fn a_manual_service_never_starts_a_window() {
         let mut group = PendingGroup::default();
-        assert!(!group.push(activity(AgentAlertState::Completed, "one"), false));
-        assert!(!group.push(activity(AgentAlertState::Completed, "two"), false));
+        let never = || -> u64 { panic!("a manual service started a window") };
+        assert_eq!(
+            group.push(activity(AgentAlertState::Completed, "one"), false, never),
+            None
+        );
+        assert_eq!(
+            group.push(activity(AgentAlertState::Completed, "two"), false, never),
+            None
+        );
         assert_eq!(group.activities.len(), 2);
+    }
+
+    #[test]
+    fn a_window_timer_only_takes_the_group_it_was_started_for() {
+        let user = Uuid::now_v7();
+        let mut pending: HashMap<Uuid, PendingGroup> = HashMap::new();
+        // A turn start took the first window's group; the next group has its
+        // own window.
+        let next = pending.entry(user).or_default();
+        next.push(activity(AgentAlertState::Completed, "c"), true, || 2);
+        assert!(take_window(&mut pending, user, 1).is_none());
+        assert_eq!(
+            pending[&user].activities.len(),
+            1,
+            "the next group was taken"
+        );
+        let taken = take_window(&mut pending, user, 2).expect("its own timer takes it");
+        assert_eq!(taken.len(), 1);
+        assert!(!pending.contains_key(&user));
+        // A timer whose group is gone finds nothing.
+        assert!(take_window(&mut pending, user, 2).is_none());
     }
 
     #[test]

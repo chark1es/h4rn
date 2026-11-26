@@ -838,6 +838,12 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Fixed
 
+- **A burst of finishing agents after a turn start stays one phone alert.**
+  When a turn start sent the collecting alert group early, that group's timer
+  could still fire and send the next group before its own window closed, so
+  agents finishing together arrived as separate "C finished" and "D finished"
+  alerts instead of "2 agents finished". Each group now waits out its own
+  window.
 - **Outside-agent revocation is cheap to refuse and leaves other work alone.** A made-up token no
   longer waits on an admitted call before it is answered, so it cannot serialize every outside RPC,
   and `DELETE /mcp` is counted against the same aggregate limit as the OAuth routes. Revoking one
