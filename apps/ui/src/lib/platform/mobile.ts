@@ -25,6 +25,7 @@ import { openThread } from "@/lib/store/appStore";
 
 import { parsePairingUrl as classifyPairingUrl, isDirectPairingUrl } from "./pairingUrl";
 import { rememberConnectPair, rememberOidcCallback } from "./pending";
+import { nativeTakePendingPushLink } from "./push";
 import { getSecret, peekSecret, prepareSecrets, rememberSecret, setSecret } from "./secrets";
 
 const PAIRING_KEY = "h4rn.pairing";
@@ -205,6 +206,21 @@ async function coldStartThread(): Promise<void> {
   } catch {
     // Older shells may not expose the command; taps still work while warm.
   }
+}
+
+/**
+ * Opens the thread from a notification tap that cold-started the app.
+ *
+ * iOS holds the tap natively because there was no page to receive its event;
+ * this reads it once, after {@link watchDeepLinks} has installed the listener,
+ * and takes the same route a warm tap does. A tap that arrives later is
+ * dispatched as `h4rn-deep-link` instead, so nothing opens twice.
+ */
+export async function openPendingPushTap(): Promise<void> {
+  const link = await nativeTakePendingPushLink();
+  if (!link) return;
+  const thread = parseThreadUrl(link);
+  if (thread) openThreadLink(thread);
 }
 
 async function coldStartPairing(): Promise<Pairing | null> {
@@ -496,8 +512,10 @@ function renderConnect(initialMessage?: string): void {
 async function boot(): Promise<void> {
   safeAreaStyle();
   // A tapped alert that cold-started the app names a thread; pair first only
-  // when there is no stored daemon to open it on.
+  // when there is no stored daemon to open it on. `watchDeepLinks` ran first,
+  // so the link this reads is handled like any other tap.
   await coldStartThread();
+  await openPendingPushTap();
 
   // 1. A warm link or a cold-start intent wins over stored state: the person
   //    just chose to pair with a specific daemon.

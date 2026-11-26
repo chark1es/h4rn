@@ -30,7 +30,8 @@ h4rn-skills.workspace = true
 hex.workspace = true
 openidconnect.workspace = true
 rand.workspace = true
-reqwest = { workspace = true, features = ["form"] }
+reqwest = { workspace = true, features = ["form", "http2"] }
+p256 = { version = "0.13.2", features = ["ecdsa", "pem"] }
 rsa = { version = "0.9.10", features = ["sha2"] }
 sha2.workspace = true
 serde.workspace = true
