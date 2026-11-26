@@ -140,9 +140,10 @@ impl PushMessage<'_> {
 
     /// The APNs payload (ADR-052).
     ///
-    /// The alert block carries the same title and body Android composes
-    /// locally, and the custom keys are the documented record fields only:
-    /// no prompt, reply, tool output, path or credential can ride along.
+    /// The alert block carries Connect's English title and body, which iOS
+    /// shows as sent (ADR-054), and the custom keys are the documented record
+    /// fields only: no prompt, reply, tool output, path or credential can ride
+    /// along.
     /// `mutable-content` lets a Notification Service Extension re-check the
     /// phone's flag before the alert is shown.
     pub fn apns_payload(&self) -> serde_json::Value {
@@ -168,7 +169,8 @@ impl PushMessage<'_> {
 /// The only custom keys an iOS payload may carry (ADR-052).
 ///
 /// `title` and `body` are not repeated: they are the alert itself. Everything
-/// else in [`PushMessage::data`] exists for Android's local rendering.
+/// else in [`PushMessage::data`], including the raw thread titles Android words
+/// its alerts from, exists for Android's local rendering.
 pub const IOS_CUSTOM_FIELDS: &[&str] = &["h4rn_alert", "state", "thread_id", "count"];
 
 /// The FCM sender and its cached OAuth2 token.

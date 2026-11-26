@@ -5,6 +5,22 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
+/** Spanish words, so a test can tell local wording from Connect's English. */
+private object SpanishWords : AlertWords {
+  override fun untitledThread() = "Un hilo"
+  override fun withProject(project: String, word: String) = "$project · $word"
+  override fun working() = "En curso"
+  override fun finished() = "Terminado"
+  override fun failed() = "Fallido"
+  override fun needsApproval() = "Requiere aprobación"
+  override fun asksForInput() = "Pide una respuesta"
+  override fun stoppedAtLimit() = "Se detuvo al llegar a un límite"
+  override fun waitingForApproval() = "Esperando aprobación"
+  override fun askedAQuestion() = "Hizo una pregunta"
+  override fun agentsNeedAttention(count: Int) = "$count agentes necesitan atención"
+  override fun agentsFinished(count: Int) = "$count agentes terminaron"
+}
+
 /** Pure alert content rules; no Firebase, credentials or emulator needed. */
 class PushContentTest {
   private fun data(
@@ -19,6 +35,16 @@ class PushContentTest {
     "body" to "Needs approval",
     "project" to "h4rn",
     "count" to count.toString(),
+  )
+
+  /** What a Connect that sends the raw titles adds (ADR-054). */
+  private fun structured(
+    state: String,
+    threadTitle: String = "Fix the thing",
+    project: String = "h4rn",
+  ): Map<String, String> = data(state = state) + mapOf(
+    "thread_title" to threadTitle,
+    "project" to project,
   )
 
   @Test
@@ -114,15 +140,94 @@ class PushContentTest {
   fun aRunningTurnIsAnOngoingLiveUpdate() {
     val working = PushContent.from(data(state = "working"))
     assertTrue(working.isLiveUpdate())
-    assertEquals("h4rn · Working", working.liveBody())
+    assertEquals("h4rn · En curso", working.liveBody(SpanishWords))
 
     val approval = PushContent.from(data(state = "approval"))
     assertTrue(approval.isLiveUpdate())
-    assertEquals("h4rn · Waiting for approval", approval.liveBody())
+    assertEquals("h4rn · Esperando aprobación", approval.liveBody(SpanishWords))
 
     val input = PushContent.from(data(state = "input"))
     assertTrue(input.isLiveUpdate())
-    assertEquals("h4rn · Asked a question", input.liveBody())
+    assertEquals("h4rn · Hizo una pregunta", input.liveBody(SpanishWords))
+
+    val noProject = PushContent.from(structured("working", project = ""))
+    assertEquals("En curso", noProject.liveBody(SpanishWords))
+  }
+
+  @Test
+  fun aSingleAlertIsWordedInThePhonesLanguage() {
+    val expected = mapOf(
+      "completed" to "h4rn · Terminado",
+      "failed" to "h4rn · Fallido",
+      "approval" to "Requiere aprobación",
+      "input" to "Pide una respuesta",
+      "limit" to "Se detuvo al llegar a un límite",
+      "working" to "h4rn · En curso",
+    )
+    for ((state, body) in expected) {
+      val content = PushContent.from(structured(state))
+      assertEquals(state, "Fix the thing", content.displayTitle(SpanishWords))
+      assertEquals(state, body, content.displayBody(SpanishWords))
+    }
+    // Without a project a finish is the bare word.
+    assertEquals(
+      "Terminado",
+      PushContent.from(structured("completed", project = "")).displayBody(SpanishWords),
+    )
+  }
+
+  @Test
+  fun anUntitledThreadIsNamedInThePhonesLanguage() {
+    // Connect's English title for it is "A thread"; the raw title is empty.
+    val content = PushContent.from(structured("approval", threadTitle = "") + ("title" to "A thread"))
+    assertEquals("Un hilo", content.displayTitle(SpanishWords))
+  }
+
+  @Test
+  fun anOlderConnectsAlertKeepsItsEnglishWords() {
+    // No thread_title: the relay predates local wording, so its title and
+    // body are shown as sent, for a single alert and a group alike.
+    val single = PushContent.from(data(state = "completed") + ("body" to "h4rn · Finished"))
+    assertEquals("Fix the thing", single.displayTitle(SpanishWords))
+    assertEquals("h4rn · Finished", single.displayBody(SpanishWords))
+
+    val group = PushContent.from(
+      data(thread = "", count = 2, state = "completed") +
+        mapOf("title" to "2 agents finished", "body" to "one · two"),
+    )
+    assertEquals("2 agents finished", group.displayTitle(SpanishWords))
+    assertEquals("one · two", group.displayBody(SpanishWords))
+  }
+
+  @Test
+  fun anUnknownStateKeepsConnectsWords() {
+    // A state a newer Connect adds has no local word yet.
+    val content = PushContent.from(structured("paused") + ("body" to "Paused"))
+    assertEquals("Paused", content.displayBody(SpanishWords))
+    assertEquals("Paused", content.liveBody(SpanishWords))
+    val group = PushContent.from(
+      structured("paused", threadTitle = "") + mapOf("thread_id" to "", "count" to "3", "title" to "3 paused"),
+    )
+    assertEquals("3 paused", group.displayTitle(SpanishWords))
+  }
+
+  @Test
+  fun aGroupIsCountedAndListedInThePhonesLanguage() {
+    fun group(state: String, titles: String?): PushContent {
+      val fields = data(thread = "", count = 3, state = state) +
+        mapOf("thread_title" to "", "title" to "3 agents …", "body" to "one · A thread · two")
+      return PushContent.from(if (titles == null) fields else fields + ("thread_titles" to titles))
+    }
+    for (state in listOf("approval", "input", "limit")) {
+      assertEquals(state, "3 agentes necesitan atención", group(state, "one\n\ntwo").displayTitle(SpanishWords))
+    }
+    for (state in listOf("completed", "failed")) {
+      assertEquals(state, "3 agentes terminaron", group(state, "one\n\ntwo").displayTitle(SpanishWords))
+    }
+    // An untitled thread in the list is named locally, in Connect's order.
+    assertEquals("one · Un hilo · two", group("completed", "one\n\ntwo").displayBody(SpanishWords))
+    // A group too large to repeat its titles falls back to Connect's list.
+    assertEquals("one · A thread · two", group("completed", null).displayBody(SpanishWords))
   }
 
   @Test

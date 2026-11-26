@@ -1,7 +1,6 @@
 package dev.h4rn.app
 
 import android.app.Notification
-import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
@@ -56,7 +55,7 @@ class H4rnMessagingService : FirebaseMessagingService() {
       }
       return
     }
-    ensureChannel()
+    AlertChannel.ensure(this)
     val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
     val live = content.isLiveUpdate() &&
       preferences.getBoolean(PushPlugin.LIVE_UPDATES_KEY, false)
@@ -93,24 +92,14 @@ class H4rnMessagingService : FirebaseMessagingService() {
     )
   }
 
-  private fun ensureChannel() {
-    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
-    val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-    if (manager.getNotificationChannel(PushContent.CHANNEL_ID) != null) return
-    manager.createNotificationChannel(
-      NotificationChannel(
-        PushContent.CHANNEL_ID,
-        PushContent.CHANNEL_NAME,
-        NotificationManager.IMPORTANCE_HIGH,
-      ),
-    )
-  }
-
   private fun buildNotification(content: PushContent, live: Boolean): Notification {
-    val text = if (live) content.liveBody() else content.body
+    // Worded in the phone's language from Connect's fields, or Connect's own
+    // English words when it sent none (an older relay).
+    val words = ResourceAlertWords(this)
+    val text = if (live) content.liveBody(words) else content.displayBody(words)
     val builder = NotificationCompat.Builder(this, PushContent.CHANNEL_ID)
       .setSmallIcon(R.mipmap.ic_launcher)
-      .setContentTitle(content.title)
+      .setContentTitle(content.displayTitle(words))
       .setContentText(text)
       .setPriority(NotificationCompat.PRIORITY_HIGH)
       .setContentIntent(intentFor(content.threadId))

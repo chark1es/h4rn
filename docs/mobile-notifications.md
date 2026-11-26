@@ -162,15 +162,30 @@ Connect records the platform on each phone's registration row and sends that
 phone the shape its OS needs. Both shapes are built from the same record and are
 sent to one phone at a time.
 
-**Android** receives an FCM data message with the display strings under
-`data` (`h4rn_alert`, `state`, `thread_id`, `title`, `body`, `project`,
-`count`). The app composes the notification itself, which is what lets a
+**Android** receives an FCM data message under `data`: `h4rn_alert`,
+`state`, `thread_id`, `project`, `count`, `thread_title` (the raw title, empty
+when the thread has none) and, for a grouped alert, `thread_titles` (one title
+per line, an empty line for an untitled thread), plus `title` and `body` in
+English. The app composes the notification itself, which is what lets a
 foreground alert for the thread already on screen never appear in the tray at
 all, and lets a running turn become an ongoing Live Update. `working` is sent to
 Android phones only; iOS is never sent it.
 
-**iOS** receives an APNs alert. The `aps` block carries the same title and body
-Android composes locally, `sound`, and `mutable-content: 1`; the only custom keys
+The Android app words the alert in the phone's language (English, Simplified
+Chinese, Spanish or Japanese, and English for any other) from the state,
+project, count and titles: "h4rn · 已完成", "Requiere aprobación", "エージェント
+3 件が対応待ち". The notification channel's name and description follow the
+phone's language too; after a language change they are renamed with the next
+alert. The English `title`
+and `body` are what an app from before this change shows, and what a newer
+app shows when a relay from before this change sends no `thread_title`. A
+group too large to repeat its titles within FCM's 4096-byte limit is sent
+without `thread_titles`; the phone then shows the English list in `body`.
+The words live in Android string resources (`push_strings.xml`), described in
+[i18n.md](i18n.md#phone-alerts).
+
+**iOS** receives an APNs alert. The `aps` block carries Connect's English
+title and body, `sound`, and `mutable-content: 1`; the only custom keys
 are the fixed record's `h4rn_alert`, `state`, `thread_id` and `count`. The title
 and body are not repeated as custom data. A grouped alert has an empty
 `thread_id`, so a tap opens h4rn. `apns-expiration` gives the alert the same
@@ -340,6 +355,11 @@ never reached Connect.
   kept, and goes away with that thread's next final alert, with the switch, or
   on sign-out.
 - Android needs Google Play services. A device without them cannot receive FCM.
+- iOS alerts are in English whatever the phone's language. The system shows
+  the `aps` alert before any h4rn code runs, and wording it on the phone needs
+  a Notification Service Extension (its own Xcode target) or localized strings
+  at the root of the app bundle. The repository has no step that adds either to
+  the generated iOS project yet (ADR-054).
 - iOS needs a signed build with the push entitlement, installed on a real
   device, and an operator-configured APNs key on the relay. A simulator cannot
   receive a remote push, and a development build must use the sandbox APNs host.
@@ -369,4 +389,5 @@ never reached Connect.
 - Subagent threads are not published separately; their parent thread's
   approvals are.
 - Connect keeps no conversation history for push, and the notification text is
-  produced from the six fields above.
+  produced from the six fields above, by Connect in English and by the Android
+  app in the phone's language.

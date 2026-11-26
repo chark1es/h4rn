@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="push_channel_name">エージェントの通知</string>
+    <string name="push_channel_description">エージェントが完了・失敗したときや、対応が必要なとき</string>
+    <string name="push_untitled_thread">スレッド</string>
+    <string name="push_working">作業中</string>
+    <string name="push_finished">完了</string>
+    <string name="push_failed">失敗</string>
+    <string name="push_needs_approval">承認が必要</string>
+    <string name="push_asks_for_input">回答を求めています</string>
+    <string name="push_stopped_at_limit">上限で停止しました</string>
+    <string name="push_waiting_for_approval">承認待ち</string>
+    <string name="push_asked_a_question">質問があります</string>
+    <plurals name="push_agents_need_attention">
+        <item quantity="other">エージェント %d 件が対応待ち</item>
+    </plurals>
+    <plurals name="push_agents_finished">
+        <item quantity="other">エージェント %d 件が完了</item>
+    </plurals>
+</resources>
