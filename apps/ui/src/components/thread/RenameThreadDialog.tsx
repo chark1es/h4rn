@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import {
   Dialog,
@@ -26,6 +27,7 @@ export function RenameThreadDialog({
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }) {
+  const { t } = useTranslation(["dialogs", "common"]);
   const [value, setValue] = useState(initial);
   const [saving, setSaving] = useState(false);
   // The name the dialog opened with, and the thread it was opened for.
@@ -68,15 +70,13 @@ export function RenameThreadDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-[420px]">
         <DialogHeader>
-          <DialogTitle>Rename thread</DialogTitle>
-          <DialogDescription>
-            A model may still be writing a title. Your name wins and is kept.
-          </DialogDescription>
+          <DialogTitle>{t("rename.title")}</DialogTitle>
+          <DialogDescription>{t("rename.description")}</DialogDescription>
         </DialogHeader>
         <input
           ref={input}
           className="q-input"
-          aria-label="Thread title"
+          aria-label={t("rename.field")}
           value={value}
           maxLength={200}
           onChange={(event) => setValue(event.target.value)}
@@ -89,7 +89,7 @@ export function RenameThreadDialog({
         />
         <DialogFooter>
           <button type="button" className="q-btn ghost" onClick={() => onOpenChange(false)}>
-            Cancel
+            {t("common:cancel")}
           </button>
           <button
             type="button"
@@ -97,7 +97,7 @@ export function RenameThreadDialog({
             disabled={saving || !value.trim()}
             onClick={() => void submit()}
           >
-            {saving ? "Saving…" : "Save name"}
+            {saving ? t("common:saving") : t("rename.save")}
           </button>
         </DialogFooter>
       </DialogContent>

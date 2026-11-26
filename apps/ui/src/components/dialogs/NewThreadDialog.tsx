@@ -1,6 +1,7 @@
 import { ArrowRightIcon, CheckIcon, GitBranchIcon, PaperclipIcon, PlusIcon } from "lucide-react";
 import type * as React from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Trans, useTranslation } from "react-i18next";
 import { ChipSelect } from "@/components/common/ChipSelect";
 import { ENTER, Kbd, MOD } from "@/components/common/Kbd";
 import { Button } from "@/components/ui/button";
@@ -56,6 +57,13 @@ const DEFAULT_MODELS = Object.fromEntries(
 
 const HARNESSES: HarnessKind[] = ["claude_code", "codex", "opencode", "antigravity"];
 
+/** How each harness names its thinking control, under the model field. */
+const THINKING_KEYS = {
+  claude_code: "newThread.thinking.effort",
+  codex: "newThread.thinking.reasoningEffort",
+  antigravity: "newThread.thinking.modelLevel",
+} as const;
+
 /** A path with one separator style and no trailing separators, for comparison. */
 function folderKey(path: string): string {
   return path.trim().replace(/\\/g, "/").replace(/\/+$/, "");
@@ -92,6 +100,7 @@ function FieldLabel({
 }
 
 export function NewThreadDialog() {
+  const { t } = useTranslation(["dialogs", "common"]);
   const open = useApp((state) => state.ui.newThreadOpen);
   const hosts = useApp((state) => state.hosts);
   const localHostId = useApp((state) => state.localHostId);
@@ -410,7 +419,7 @@ export function NewThreadDialog() {
   ];
   const attachments = useAttachmentDrafts("new-thread", {
     enabled: !offline && Boolean(boundHost),
-    disabledReason: offline ? "Reconnect to attach files." : "Pick an online host first.",
+    disabledReason: offline ? t("newThread.reconnectToAttach") : t("newThread.pickHostFirst"),
   });
 
   useAttachShortcut(attachments.openPicker, open && !offline && Boolean(boundHost));
@@ -483,27 +492,20 @@ export function NewThreadDialog() {
         showCloseButton={!isPhone}
       >
         <DialogHeader>
-          <DialogTitle>New thread</DialogTitle>
-          <DialogDescription>
-            Pick where it runs, then describe the task. Everything after Start is visible in the
-            stream.
-          </DialogDescription>
+          <DialogTitle>{t("newThread.title")}</DialogTitle>
+          <DialogDescription>{t("newThread.description")}</DialogDescription>
         </DialogHeader>
 
         <div className="grid gap-3 sm:grid-cols-3">
           <div className="flex flex-col gap-1">
-            <FieldLabel htmlFor="new-thread-host">Host</FieldLabel>
+            <FieldLabel htmlFor="new-thread-host">{t("fields.host")}</FieldLabel>
             <ChipSelect
               id="new-thread-host"
               block
-              label="Host"
-              placeholder="No online hosts"
+              label={t("fields.host")}
+              placeholder={t("fields.noOnlineHosts")}
               value={host}
-              options={localOnlyHostOptions(
-                onlineHosts,
-                localHostId,
-                "Not yet: new threads run on this host",
-              )}
+              options={localOnlyHostOptions(onlineHosts, localHostId, t("newThread.hostLocalOnly"))}
               onChange={(value) => {
                 if (value === "") return;
                 const nextHost = hosts[value];
@@ -530,12 +532,12 @@ export function NewThreadDialog() {
           </div>
 
           <div className="flex flex-col gap-1">
-            <FieldLabel htmlFor="new-thread-harness">Harness</FieldLabel>
+            <FieldLabel htmlFor="new-thread-harness">{t("fields.harness")}</FieldLabel>
             <ChipSelect
               id="new-thread-harness"
               block
-              label="Harness"
-              placeholder="No harness detected"
+              label={t("fields.harness")}
+              placeholder={t("newThread.noHarness")}
               value={
                 harnessValue === harness && !harnessChoices.includes(harness) ? "" : harnessValue
               }
@@ -563,7 +565,7 @@ export function NewThreadDialog() {
           </div>
 
           <div className="flex flex-col gap-1">
-            <FieldLabel htmlFor="new-thread-model">Model</FieldLabel>
+            <FieldLabel htmlFor="new-thread-model">{t("fields.model")}</FieldLabel>
             <Input
               id="new-thread-model"
               value={model}
@@ -579,24 +581,31 @@ export function NewThreadDialog() {
             {harness === "acp" ? (
               <span className="text-small text-fg-3">
                 {probing
-                  ? "Reading the agent's models…"
+                  ? t("newThread.agent.readingModels")
                   : probe?.error
                     ? probe.error
                     : probeError
-                      ? `${probeError} Type a model or leave \`default\`.`
+                      ? t("newThread.agent.probeFailed", { error: probeError })
                       : agentModels.length > 0
-                        ? `${agentModels.length} models from ${selectedAgent?.name ?? "the agent"}.`
+                        ? t("newThread.agent.models", {
+                            count: agentModels.length,
+                            agent: selectedAgent?.name ?? t("newThread.agent.theAgent"),
+                          })
                         : selectedAgent && !selectedAgent.installed
-                          ? "This command is not installed on the host yet. Type a model or leave `default`."
-                          : "No models read yet. Type one or leave `default`."}
+                          ? t("newThread.agent.notInstalled")
+                          : t("newThread.agent.noModels")}
               </span>
-            ) : modelInfo.thinking ? (
-              <span className="text-small text-fg-3">{modelInfo.thinking.kind}</span>
+            ) : modelInfo.thinking && harness in THINKING_KEYS ? (
+              <span className="text-small text-fg-3">
+                {t(THINKING_KEYS[harness as keyof typeof THINKING_KEYS])}
+              </span>
             ) : null}
             {proxyActive ? (
               <span className="text-small text-fg-3">
-                {proxyModels.length} models from {proxyActive.profile.name}; the harness routes
-                through it.
+                {t("newThread.proxyModels", {
+                  count: proxyModels.length,
+                  profile: proxyActive.profile.name,
+                })}
               </span>
             ) : null}
           </div>
@@ -606,16 +615,16 @@ export function NewThreadDialog() {
           <div className="grid gap-3 sm:grid-cols-2">
             {efforts.length > 0 ? (
               <div className="flex flex-col gap-1">
-                <FieldLabel htmlFor="new-thread-effort" hint="the harness default when unset">
-                  Reasoning effort
+                <FieldLabel htmlFor="new-thread-effort" hint={t("newThread.effortHint")}>
+                  {t("newThread.effort")}
                 </FieldLabel>
                 <ChipSelect
                   id="new-thread-effort"
                   block
-                  label="Reasoning effort"
+                  label={t("newThread.effort")}
                   value={reasoningEffort}
                   options={[
-                    { value: "default", label: "Default" },
+                    { value: "default", label: t("common:default") },
                     ...efforts.map((effort) => ({ value: effort, label: effortLabel(effort) })),
                   ]}
                   onChange={setReasoningEffort}
@@ -624,17 +633,17 @@ export function NewThreadDialog() {
             ) : null}
             {fastAvailable ? (
               <div className="flex flex-col gap-1">
-                <FieldLabel htmlFor="new-thread-fast">Speed</FieldLabel>
+                <FieldLabel htmlFor="new-thread-fast">{t("newThread.speed")}</FieldLabel>
                 <button
                   type="button"
                   id="new-thread-fast"
                   className="q-switch"
                   role="switch"
                   aria-checked={fast}
-                  aria-label="Fast mode"
+                  aria-label={t("newThread.fastMode")}
                   onClick={() => setFast((value) => !value)}
                 />
-                <span className="text-small text-fg-3">Priority service tier. Higher usage.</span>
+                <span className="text-small text-fg-3">{t("newThread.fastHint")}</span>
               </div>
             ) : null}
           </div>
@@ -642,14 +651,14 @@ export function NewThreadDialog() {
 
         <div className="grid gap-3 sm:grid-cols-[1fr_1.2fr]">
           <div className="flex flex-col gap-1">
-            <FieldLabel htmlFor="new-thread-mode">Mode</FieldLabel>
+            <FieldLabel htmlFor="new-thread-mode">{t("newThread.mode")}</FieldLabel>
             {modeManagedByAgent ? (
               <>
                 <span id="new-thread-mode" className="py-1.5 text-small text-fg-2">
-                  Mode is managed by the agent.
+                  {t("newThread.modeManaged")}
                 </span>
                 <span className="text-small text-fg-3">
-                  {probing ? "Reading the agent's modes…" : "The agent decides its own approvals."}
+                  {probing ? t("newThread.readingModes") : t("newThread.agentDecides")}
                 </span>
               </>
             ) : (
@@ -657,14 +666,12 @@ export function NewThreadDialog() {
                 <ChipSelect
                   id="new-thread-mode"
                   block
-                  label="Mode"
+                  label={t("newThread.mode")}
                   value={runtimeMode}
                   options={runtimeModeChoices}
                   onChange={setRuntimeMode}
                 />
-                <span className="text-small text-fg-3">
-                  Can be changed later from the composer.
-                </span>
+                <span className="text-small text-fg-3">{t("newThread.modeLater")}</span>
               </>
             )}
           </div>
@@ -672,9 +679,9 @@ export function NewThreadDialog() {
           <div className="flex flex-col gap-1">
             <FieldLabel
               htmlFor="new-thread-workspace"
-              hint={fixedWorkspace ? "fixed by the agent" : "on the host"}
+              hint={fixedWorkspace ? t("newThread.whereFixed") : t("newThread.whereHost")}
             >
-              Where
+              {t("newThread.where")}
             </FieldLabel>
             <Input
               id="new-thread-workspace"
@@ -700,10 +707,10 @@ export function NewThreadDialog() {
             <span className="flex items-center gap-1 text-small text-fg-3">
               <GitBranchIcon className="size-3" aria-hidden />
               {fixedWorkspace
-                ? "This agent always runs in its configured directory."
+                ? t("newThread.whereNote.fixed")
                 : gitProject
-                  ? "The agent works here, or in its own checkout when you ask for one."
-                  : "The agent works in this directory."}
+                  ? t("newThread.whereNote.git")
+                  : t("newThread.whereNote.plain")}
             </span>
           </div>
         </div>
@@ -723,25 +730,28 @@ export function NewThreadDialog() {
               <span className={cn("q-check", worktreeEnabled && "on")} aria-hidden>
                 {worktreeEnabled ? <CheckIcon className="q-icon s12" strokeWidth={2} /> : null}
               </span>
-              Run in a new worktree
+              {t("newThread.worktree.toggle")}
             </label>
             {worktreeEnabled ? (
               <Input
                 id="new-thread-worktree-branch"
                 value={worktreeBranch}
                 onChange={(event) => setWorktreeBranch(event.target.value)}
-                placeholder="Branch name (optional)"
+                placeholder={t("newThread.worktree.branchPlaceholder")}
                 className="max-w-[360px] font-mono"
                 spellCheck={false}
-                aria-label="New worktree branch name"
+                aria-label={t("newThread.worktree.branchLabel")}
               />
             ) : null}
             <span className="text-small text-fg-3">
               {worktreeEnabled
                 ? worktreeBranch.trim()
-                  ? `Starts on ${worktreeBranch.trim()} in a separate checkout, leaving ${effectiveWorkspace} untouched.`
-                  : "The daemon names the branch and leaves your main checkout untouched."
-                : "A separate branch and checkout keep this thread's changes out of the main folder."}
+                  ? t("newThread.worktree.named", {
+                      branch: worktreeBranch.trim(),
+                      workspace: effectiveWorkspace,
+                    })
+                  : t("newThread.worktree.daemonNames")
+                : t("newThread.worktree.off")}
             </span>
           </div>
         ) : null}
@@ -750,22 +760,24 @@ export function NewThreadDialog() {
           <div className="flex items-center justify-between">
             <FieldLabel
               htmlFor="new-thread-task"
-              hint={prompt.trim() ? `${prompt.trim().length} chars` : undefined}
+              hint={
+                prompt.trim() ? t("newThread.chars", { count: prompt.trim().length }) : undefined
+              }
             >
-              Task
+              {t("fields.task")}
             </FieldLabel>
             <button
               type="button"
               disabled={offline || !boundHost}
               onClick={attachments.openPicker}
-              aria-label="Attach files"
-              title={offline ? "Reconnect to attach files." : "Attach files (Ctrl/Cmd U)"}
+              aria-label={t("newThread.attachFiles")}
+              title={offline ? t("newThread.reconnectToAttach") : t("newThread.attachTitle")}
               className="flex h-8 items-center gap-1 rounded-sm px-1.5 text-small text-fg-2 transition-colors duration-[var(--dur-instant)] hover:bg-bg-side hover:text-fg focus-visible:ring-2 focus-visible:ring-focus focus-visible:outline-none"
             >
               <PaperclipIcon className="size-3.5" aria-hidden />
               {attachments.attachments.length > 0
-                ? `${attachments.attachments.length} attached`
-                : "Attach"}
+                ? t("newThread.attached", { count: attachments.attachments.length })
+                : t("newThread.attach")}
             </button>
           </div>
 
@@ -774,7 +786,7 @@ export function NewThreadDialog() {
             type="file"
             multiple
             accept={FILE_ACCEPT}
-            aria-label="Attach files"
+            aria-label={t("newThread.attachFiles")}
             className="sr-only"
             tabIndex={-1}
             onChange={(event) => attachments.onInputChange(event.target.files)}
@@ -812,33 +824,33 @@ export function NewThreadDialog() {
                 void submit();
               }
             }}
-            placeholder={
-              boundHost
-                ? "Describe the task. Use @ for files and hosts, / for commands. Paste or drop images too."
-                : "Connecting…"
-            }
+            placeholder={boundHost ? t("newThread.placeholder") : t("newThread.connecting")}
             className="min-h-32"
           />
         </div>
 
         <p className="rounded-sm border border-line bg-bg-side px-2.5 py-1.5 text-small text-fg-2">
           {selectedHost ? (
-            <>
-              Starts{" "}
-              <span className="font-mono">
-                {harness === "acp"
-                  ? (selectedAgent?.command ?? HARNESS_SLUGS.acp)
-                  : HARNESS_SLUGS[harness]}
-              </span>{" "}
-              {harness === "acp" ? `(${threadHarnessLabel(harness, agentId)})` : null} on{" "}
-              <span className="font-medium text-fg">{selectedHost.name}</span> in{" "}
-              <span className="font-mono">
-                {effectiveWorkspace || DEFAULT_NEW_THREAD_WORKSPACE}
-              </span>
-              .
-            </>
+            <Trans
+              t={t}
+              i18nKey={harness === "acp" ? "newThread.startsAgent" : "newThread.starts"}
+              values={{
+                command:
+                  harness === "acp"
+                    ? (selectedAgent?.command ?? HARNESS_SLUGS.acp)
+                    : HARNESS_SLUGS[harness],
+                agent: threadHarnessLabel(harness, agentId),
+                host: selectedHost.name,
+                path: effectiveWorkspace || DEFAULT_NEW_THREAD_WORKSPACE,
+              }}
+              components={{
+                cmd: <span className="font-mono" />,
+                host: <span className="font-medium text-fg" />,
+                path: <span className="font-mono" />,
+              }}
+            />
           ) : (
-            "Pair an online host before starting a thread."
+            t("newThread.pairHost")
           )}
         </p>
 
@@ -847,11 +859,11 @@ export function NewThreadDialog() {
             <Kbd>
               {MOD} {ENTER}
             </Kbd>{" "}
-            start
+            {t("newThread.startShortcut")}
           </span>
           <div className="flex items-center gap-2">
             <Button variant="ghost" onClick={closeNewThread}>
-              Cancel
+              {t("common:cancel")}
             </Button>
             <Button
               disabled={
@@ -878,16 +890,20 @@ export function NewThreadDialog() {
               title={
                 attachments.blockedReason ??
                 (offline
-                  ? "Reconnect to start a thread."
+                  ? t("newThread.reconnectToStart")
                   : !boundHost || !hostEligible(boundHost)
-                    ? "No online host is available."
+                    ? t("newThread.noHostAvailable")
                     : !prompt.trim() && attachments.attachments.length === 0
-                      ? "Describe the task first."
+                      ? t("newThread.describeFirst")
                       : undefined)
               }
             >
               {starting ? <PlusIcon aria-hidden /> : <ArrowRightIcon aria-hidden />}
-              {offline ? "Offline" : starting ? "Starting…" : "Start"}
+              {offline
+                ? t("newThread.offline")
+                : starting
+                  ? t("newThread.starting")
+                  : t("newThread.start")}
             </Button>
           </div>
         </DialogFooter>

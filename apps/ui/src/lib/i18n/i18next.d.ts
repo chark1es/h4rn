@@ -3,6 +3,7 @@ import "i18next";
 import type enCommands from "./locales/en/commands.json";
 import type enCommon from "./locales/en/common.json";
 import type enComposer from "./locales/en/composer.json";
+import type enDialogs from "./locales/en/dialogs.json";
 import type enSettings from "./locales/en/settings.json";
 import type enSidebar from "./locales/en/sidebar.json";
 
@@ -15,6 +16,7 @@ declare module "i18next" {
       common: typeof enCommon;
       commands: typeof enCommands;
       composer: typeof enComposer;
+      dialogs: typeof enDialogs;
       settings: typeof enSettings;
       sidebar: typeof enSidebar;
     };

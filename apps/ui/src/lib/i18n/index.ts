@@ -5,6 +5,7 @@ import { initReactI18next } from "react-i18next";
 import enCommands from "./locales/en/commands.json";
 import enCommon from "./locales/en/common.json";
 import enComposer from "./locales/en/composer.json";
+import enDialogs from "./locales/en/dialogs.json";
 import enSettings from "./locales/en/settings.json";
 import enSidebar from "./locales/en/sidebar.json";
 
@@ -24,7 +25,14 @@ export type Locale = (typeof LOCALES)[number];
 export type LocalePreference = "system" | Locale;
 
 /** Every namespace, one per UI area plus `common` for shared words. */
-export const NAMESPACES = ["common", "commands", "composer", "settings", "sidebar"] as const;
+export const NAMESPACES = [
+  "common",
+  "commands",
+  "composer",
+  "dialogs",
+  "settings",
+  "sidebar",
+] as const;
 export type Namespace = (typeof NAMESPACES)[number];
 
 export const DEFAULT_LOCALE: Locale = "en";
@@ -41,6 +49,7 @@ export const englishResources = {
   common: enCommon,
   commands: enCommands,
   composer: enComposer,
+  dialogs: enDialogs,
   settings: enSettings,
   sidebar: enSidebar,
 } as const;

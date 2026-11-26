@@ -1,5 +1,6 @@
 import { CheckIcon, CopyIcon, LinkIcon, LoaderCircleIcon, ShieldIcon } from "lucide-react";
 import { useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import {
   Dialog,
@@ -10,7 +11,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { useNow } from "@/hooks/use-now";
-import { absoluteDateTime } from "@/lib/format";
+import { formatDateTime, formatDuration, i18n } from "@/lib/i18n";
 import { pushToast, useApp } from "@/lib/store/appStore";
 import { cn } from "@/lib/utils";
 import {
@@ -33,18 +34,19 @@ function isLoopbackLink(url: string): boolean {
   }
 }
 
-function expiryText(expiresAt: string, now: number): string {
+/** When a guest link stops working, to the minute within a day. */
+export function expiryText(expiresAt: string, now: number): string {
   const left = new Date(expiresAt).getTime() - now;
-  if (!Number.isFinite(left) || left <= 0) return "Expired";
-  const minutes = Math.round(left / 60_000);
-  if (minutes < 60) return `Expires in ${minutes} min`;
-  const hours = Math.floor(minutes / 60);
-  const rest = minutes % 60;
-  if (hours < 24) return rest ? `Expires in ${hours} h ${rest} min` : `Expires in ${hours} h`;
-  return `Expires ${absoluteDateTime(expiresAt)}`;
+  if (!Number.isFinite(left) || left <= 0) return i18n.t("dialogs:guest.expired");
+  const minutes = Math.max(1, Math.round(left / 60_000));
+  if (minutes < 24 * 60) {
+    return i18n.t("dialogs:guest.expiresIn", { duration: formatDuration(minutes * 60_000) });
+  }
+  return i18n.t("dialogs:guest.expiresAt", { date: formatDateTime(expiresAt) });
 }
 
 export function GuestShareDialog() {
+  const { t } = useTranslation(["dialogs", "common"]);
   const threadId = useGuest().dialogThreadId;
   const sharing = useGuest().sharing[threadId ?? ""];
   const loading = useGuest().sharingLoading[threadId ?? ""] ?? false;
@@ -79,8 +81,8 @@ export function GuestShareDialog() {
     } else {
       pushToast({
         variant: "info",
-        title: "Copy the link from the field above.",
-        description: "This browser would not let h4rn write to the clipboard.",
+        title: t("guest.copyFallback.title"),
+        description: t("guest.copyFallback.description"),
       });
     }
   };
@@ -89,10 +91,9 @@ export function GuestShareDialog() {
     <Dialog open={open} onOpenChange={(value) => (value ? undefined : closeGuestShare())}>
       <DialogContent className="max-w-[520px]" aria-describedby="guest-share-description">
         <DialogHeader>
-          <DialogTitle>Share with guest</DialogTitle>
+          <DialogTitle>{t("guest.title")}</DialogTitle>
           <DialogDescription id="guest-share-description">
-            One thread, one browser, no account. The link expires after 24 hours, and every message
-            the guest writes waits for you.
+            {t("guest.description")}
           </DialogDescription>
         </DialogHeader>
 
@@ -101,10 +102,9 @@ export function GuestShareDialog() {
             <div className="q-guest-off">
               <ShieldIcon className="q-icon s16" strokeWidth={1.5} aria-hidden />
               <div>
-                <div style={{ fontWeight: 500 }}>Guest links are off.</div>
+                <div style={{ fontWeight: 500 }}>{t("guest.off.title")}</div>
                 <p className="q-muted" style={{ margin: "2px 0 0" }}>
-                  Turn on Settings → Labs → Guest links for this machine. While it is off, every
-                  existing link stops working.
+                  {t("guest.off.body")}
                 </p>
               </div>
             </div>
@@ -123,10 +123,10 @@ export function GuestShareDialog() {
                 {busy === "settings" || settingsSaving ? (
                   <LoaderCircleIcon className="q-icon s14 q-spin" aria-hidden />
                 ) : null}
-                Turn on guest links
+                {t("guest.off.turnOn")}
               </button>
               <button type="button" className="q-btn ghost" onClick={closeGuestShare}>
-                Close
+                {t("common:close")}
               </button>
             </DialogFooter>
           </div>
@@ -134,26 +134,26 @@ export function GuestShareDialog() {
           <div style={{ display: "grid", gap: 14 }}>
             <div className="q-field" style={{ padding: 0, border: 0 }}>
               <div className="lab">
-                <div className="t">Thread</div>
+                <div className="t">{t("guest.thread")}</div>
                 <div className="s">{thread.title}</div>
               </div>
             </div>
 
             {loading && !sharing ? (
               <div className="q-faint" aria-live="polite" style={{ fontSize: 12 }}>
-                Reading the current link…
+                {t("guest.reading")}
               </div>
             ) : link ? (
               <>
                 <div style={{ display: "grid", gap: 6 }}>
                   <span className="q-faint" style={{ fontSize: 12 }}>
-                    Link
+                    {t("guest.link")}
                   </span>
                   {link.url ? (
                     <div style={{ display: "flex", gap: 8 }}>
                       <input
                         id="guest-link-url"
-                        aria-label="Guest link"
+                        aria-label={t("guest.linkLabel")}
                         className="q-input q-mono"
                         style={{ fontSize: 11.5 }}
                         value={link.url}
@@ -171,44 +171,32 @@ export function GuestShareDialog() {
                         ) : (
                           <CopyIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
                         )}
-                        {copied ? "Copied" : "Copy"}
+                        {copied ? t("common:copied") : t("common:copy")}
                       </button>
                     </div>
                   ) : link.no_serving_listener ? (
                     <p className="q-danger" role="note" style={{ margin: 0, fontSize: 12.5 }}>
-                      This machine has no address a guest link can open on. Add a loopback listener,
-                      or link this machine to Connect, then share this thread again. Until then the
-                      link cannot be opened.
+                      {t("guest.noListener")}
                     </p>
                   ) : (
                     <p className="q-muted" style={{ margin: 0, fontSize: 12.5 }}>
-                      The link is still valid for the guest, but this device cannot show its URL.
-                      Only an admin device can copy it; after a daemon restart, create a new link to
-                      copy it again. The old one stops working.
+                      {t("guest.noUrl")}
                     </p>
                   )}
                   <div className="q-faint" style={{ fontSize: 11.5 }}>
                     {expiryText(link.expires_at, now)}
                     {link.no_serving_listener ? null : (
-                      <>
-                        {" "}
-                        ·{" "}
-                        {link.bound ? "Bound to the first browser" : "First browser that opens it"}
-                      </>
+                      <> · {link.bound ? t("guest.bound") : t("guest.unbound")}</>
                     )}
                   </div>
                   {link.url && isLoopbackLink(link.url) ? (
                     <p className="q-danger" role="note" style={{ margin: 0, fontSize: 12 }}>
-                      This link only works on this machine. Turn on Connect and share again to send
-                      a link to a teammate on another machine. A direct link is never sent over a
-                      plain network connection.
+                      {t("guest.loopback")}
                     </p>
                   ) : null}
                 </div>
                 <p className="q-muted" style={{ margin: 0, fontSize: 12.5 }}>
-                  The guest sees this thread&rsquo;s messages, the agent&rsquo;s replies and its
-                  tool output, including anything the agent printed. They cannot see diffs, other
-                  threads, files or terminals, and they cannot answer the agent for you.
+                  {t("guest.sees")}
                 </p>
                 <DialogFooter>
                   <button
@@ -224,7 +212,7 @@ export function GuestShareDialog() {
                     {stopping ? (
                       <LoaderCircleIcon className="q-icon s14 q-spin" aria-hidden />
                     ) : null}
-                    Stop sharing
+                    {t("guest.stop")}
                   </button>
                   <button
                     type="button"
@@ -242,15 +230,14 @@ export function GuestShareDialog() {
                     ) : (
                       <LinkIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
                     )}
-                    New link
+                    {t("guest.newLink")}
                   </button>
                 </DialogFooter>
               </>
             ) : (
               <>
                 <p className="q-muted" style={{ margin: 0, fontSize: 12.5 }}>
-                  Anyone with the link can follow this thread and suggest messages. You choose which
-                  ones run.
+                  {t("guest.anyone")}
                 </p>
                 <DialogFooter>
                   <button
@@ -269,10 +256,10 @@ export function GuestShareDialog() {
                     ) : (
                       <LinkIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
                     )}
-                    Create link
+                    {t("guest.create")}
                   </button>
                   <button type="button" className="q-btn ghost" onClick={closeGuestShare}>
-                    Cancel
+                    {t("common:cancel")}
                   </button>
                 </DialogFooter>
               </>

@@ -1,3 +1,5 @@
+import { useTranslation } from "react-i18next";
+
 import {
   Dialog,
   DialogContent,
@@ -23,6 +25,7 @@ export function ConfirmDialog({
   onOpenChange: (open: boolean) => void;
   onConfirm: () => void;
 }) {
+  const { t } = useTranslation("common");
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-[420px]">
@@ -32,7 +35,7 @@ export function ConfirmDialog({
         </DialogHeader>
         <DialogFooter>
           <button type="button" className="q-btn ghost" onClick={() => onOpenChange(false)}>
-            Cancel
+            {t("cancel")}
           </button>
           <button
             type="button"
