@@ -10,6 +10,7 @@ import {
   scopeLabel,
   scopeSub,
 } from "@/features/remote/pairingScopes";
+import { remoteErrorText } from "@/features/remote/remoteError";
 import {
   confirmPairingSas,
   pairByCode,
@@ -138,7 +139,7 @@ export function PairingPage() {
                 {t("sas.approvalRequired", { name: sasConfirm.machineName })}
               </p>
             )}
-            {error ? <p className="q-pair-note q-danger">{error}</p> : null}
+            {error ? <p className="q-pair-note q-danger">{remoteErrorText(error)}</p> : null}
           </div>
         </div>
         <div className="q-pair-foot">
@@ -268,7 +269,9 @@ export function PairingPage() {
           {machineName ? t("credentials", { host: machineName }) : t("credentialsUnnamed")}
         </p>
         {error || expired ? (
-          <p className="q-pair-note q-danger">{expired ? t("errors.expired") : error}</p>
+          <p className="q-pair-note q-danger">
+            {expired ? t("errors.expired") : error ? remoteErrorText(error) : null}
+          </p>
         ) : null}
       </div>
       <div className="q-pair-foot">

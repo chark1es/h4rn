@@ -17,7 +17,7 @@ vi.mock("@/lib/store/appStore", () => ({
 
 import type { MachineSummary, PairingInfo } from "@/gen";
 import { setLocalePreference } from "@/lib/i18n";
-
+import { remoteErrorText } from "./remoteError";
 import {
   activateMachine,
   confirmPairingSas,
@@ -171,7 +171,10 @@ describe("QR pairing", () => {
 
     expect(await confirmation).toBe(false);
     expect(getRemoteState().sasConfirm).toMatchObject({ method: "qr", waiting: false });
-    expect(getRemoteState().error).toContain("has not approved this device yet");
+    expect(getRemoteState().error).toEqual({ kind: "notApproved", params: { name: "atlas" } });
+    expect(remoteErrorText(getRemoteState().error ?? { kind: "sent", text: "" })).toContain(
+      "has not approved this device yet",
+    );
     expect(host.toasts.some((toast) => toast.title?.includes("Paired with"))).toBe(false);
   });
 });
@@ -286,7 +289,8 @@ describe("selecting a machine", () => {
     expect(selected).toBe(false);
     const expected =
       "atlas はまだ接続用の鍵を公開していません。そのマシンで h4rnd login をもう一度実行してください。";
-    expect(getRemoteState().error).toBe(expected);
+    expect(getRemoteState().error).toEqual({ kind: "noNoiseKey", params: { name: "atlas" } });
+    expect(remoteErrorText(getRemoteState().error ?? { kind: "sent", text: "" })).toBe(expected);
     expect(host.toasts.at(-1)).toEqual({
       variant: "error",
       title: "そのマシンを選択できませんでした。",

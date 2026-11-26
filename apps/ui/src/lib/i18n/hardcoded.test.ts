@@ -35,6 +35,7 @@ import { describe, expect, it } from "vitest";
  */
 const CONVERTED = [
   "src/features/remote/remoteStore.ts",
+  "src/features/remote/remoteError.ts",
   "src/features/remote/QrCode.tsx",
   "src/components/shell/PhoneNav.tsx",
   "src/components/pages/PairingPage.tsx",

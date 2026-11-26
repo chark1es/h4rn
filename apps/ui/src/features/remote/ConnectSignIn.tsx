@@ -12,6 +12,7 @@ import { Trans, useTranslation } from "react-i18next";
 import type { ProviderInfo } from "@/gen";
 import { i18n } from "@/lib/i18n";
 import { listProviders } from "./connect";
+import { remoteErrorText } from "./remoteError";
 import {
   cancelLogin,
   DEFAULT_CONNECT_URL,
@@ -242,7 +243,7 @@ export function ConnectSignIn({ compact = false }: { compact?: boolean }) {
           </div>
           <div className="ctl">
             <span className="q-danger" style={{ fontSize: 12 }}>
-              {error}
+              {remoteErrorText(error)}
             </span>
           </div>
         </div>
