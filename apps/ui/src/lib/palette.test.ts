@@ -45,6 +45,12 @@ describe("paletteScore", () => {
     expect(paletteScore("ガイド", "ガイ")).toBe(1);
   });
 
+  it("matches letters in order across characters outside the BMP", () => {
+    // 𠀀 and 𠀁 are one code point each but two UTF-16 units; the last-resort
+    // match counts both sides by code point.
+    expect(paletteScore("a𠀀b𠀁c", "𠀀𠀁c")).toBe(0.1);
+  });
+
   it("searches the keywords as well as the shown name", () => {
     expect(
       paletteScore("Resolver el hilo", "settle", ["Settle thread", "settle now archive"]),

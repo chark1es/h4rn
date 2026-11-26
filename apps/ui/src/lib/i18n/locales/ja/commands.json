@@ -83,7 +83,7 @@
     "groups": {
       "thisThread": "このスレッド",
       "threads": "スレッド",
-      "goTo": "移動",
+      "goTo": "ナビゲーション",
       "view": "表示"
     },
     "items": {
@@ -106,7 +106,7 @@
       "reconnect": "デーモンに再接続"
     },
     "footer": {
-      "move": "移動",
+      "move": "選択",
       "run": "実行",
       "close": "閉じる",
       "searchesHosts": "検索対象：{{hosts}}",

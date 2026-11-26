@@ -23,7 +23,8 @@ not revive them. Share again to make a new link.
 Choose **Stop sharing** to end the link at once. Creating a new link, settling
 (archiving) the thread, turning the Labs setting off, or the 24 hours passing
 also ends it. A settled thread cannot be shared again until it is reopened: the
-menu, the command palette and the header hide **Share with guest…**, and the
+menu and the header hide **Share with guest…**, the command palette hides
+**Share with guest**, and the
 daemon refuses a new link, a submission or a Send on it. An expired link and its
 waiting files are swept at daemon startup and every ten minutes after that; the
 sweep also ends a link left on a thread that settled while the daemon was off.

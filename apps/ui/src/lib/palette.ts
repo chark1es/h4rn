@@ -37,10 +37,13 @@ export function paletteScore(value: string, search: string, keywords?: string[])
 }
 
 function isSubsequence(needle: string, word: string): boolean {
+  // Both sides by code point, so an astral character (a CJK Extension B
+  // ideograph or an emoji) counts once, as the length guard above does.
+  const chars = [...needle];
   let index = 0;
   for (const char of word) {
-    if (char === needle[index]) index += 1;
-    if (index === needle.length) return true;
+    if (char === chars[index]) index += 1;
+    if (index === chars.length) return true;
   }
   return false;
 }
