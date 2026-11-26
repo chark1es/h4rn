@@ -1274,23 +1274,7 @@ pub fn checkpoint_commit(workspace: &Path) -> Result<Option<Checkpoint>, String>
 /// git understands `--attr-source`.
 fn checkpoint_attr_source(workspace: &Path) -> Result<String, String> {
     let printed = run_with_timeout(workspace, ["--version"], OBSERVATION_GIT_TIMEOUT)?;
-    let version = printed.strip_prefix("git version ").unwrap_or(&printed);
-    let mut numbers = version.split(|character: char| !character.is_ascii_digit());
-    let major = numbers.next().and_then(|number| number.parse::<u32>().ok());
-    let minor = numbers.next().and_then(|number| number.parse::<u32>().ok());
-    match (major, minor) {
-        (Some(major), Some(minor)) if (major, minor) >= ATTR_SOURCE_GIT => {}
-        (Some(major), Some(minor)) => {
-            return Err(format!(
-                "git {major}.{minor} is older than 2.40, which is needed to checkpoint a worktree's exact bytes, so this message's files cannot be restored"
-            ));
-        }
-        _ => {
-            return Err(format!(
-                "the git version could not be read from {version:?}, so this message's files cannot be restored"
-            ));
-        }
-    }
+    check_git_version(&printed)?;
     let mut command = command(workspace);
     command.arg("mktree").stdin(Stdio::null());
     let (status, stdout, stderr) = run_raw_command(&mut command, OBSERVATION_GIT_TIMEOUT)?;
@@ -1303,6 +1287,24 @@ fn checkpoint_attr_source(workspace: &Path) -> Result<String, String> {
     String::from_utf8(stdout)
         .map(|tree| tree.trim().to_owned())
         .map_err(|_| "git printed an empty-tree id that is not valid UTF-8".to_owned())
+}
+
+/// Refuses a git older than the one `--attr-source` needs, naming its version.
+fn check_git_version(printed: &str) -> Result<(), String> {
+    let version = printed.strip_prefix("git version ").unwrap_or(printed);
+    let mut numbers = version.split(|character: char| !character.is_ascii_digit());
+    let major = numbers.next().and_then(|number| number.parse::<u32>().ok());
+    let minor = numbers.next().and_then(|number| number.parse::<u32>().ok());
+    match (major, minor) {
+        (Some(major), Some(minor)) if (major, minor) >= ATTR_SOURCE_GIT => Ok(()),
+        (Some(major), Some(minor)) => Err(format!(
+            "git {major}.{minor} is older than {}.{}, which is needed to checkpoint a worktree's exact bytes, so this message's files cannot be restored",
+            ATTR_SOURCE_GIT.0, ATTR_SOURCE_GIT.1
+        )),
+        _ => Err(format!(
+            "the git version could not be read from {version:?}, so this message's files cannot be restored"
+        )),
+    }
 }
 
 /// Repository-relative paths git ignores in this worktree, sorted.
@@ -2859,5 +2861,23 @@ pub fn mentions_worktree(input: &Value) -> bool {
         Value::Array(items) => items.iter().any(mentions_worktree),
         Value::Object(map) => map.values().any(mentions_worktree),
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::check_git_version;
+
+    #[test]
+    fn an_older_git_cannot_take_an_exact_byte_checkpoint() {
+        assert!(check_git_version("git version 2.40.0").is_ok());
+        assert!(check_git_version("git version 2.47.3 (Apple Git-152)").is_ok());
+
+        let error = check_git_version("git version 2.39.5").unwrap_err();
+        assert!(error.contains("git 2.39"), "{error}");
+        assert!(error.contains("older than 2.40"), "{error}");
+
+        let error = check_git_version("not a version").unwrap_err();
+        assert!(error.contains("could not be read"), "{error}");
     }
 }
