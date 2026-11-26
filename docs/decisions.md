@@ -2684,7 +2684,9 @@ which iOS shows when the app has no extension (a build from before this
 change), when the extension fails, and when it runs out of time: on
 `serviceExtensionTimeWillExpire` it hands back the alert as it arrived. An
 alert without `thread_title` (a relay from before ADR-054) and a state the app
-does not know keep the English too.
+does not know keep the English too. That is a little stricter than Android,
+which still words an untitled thread's title for an unknown state; the
+difference only shows for a state a newer relay adds.
 
 APNs refuses a payload over 4096 bytes, like FCM. `thread_titles` keeps
 ADR-054's 1 KiB cap, but that cap counts raw bytes, and JSON writes a control

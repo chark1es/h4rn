@@ -81,9 +81,25 @@ final class AlertResourcesTests: XCTestCase {
     }
   }
 
+  /// Android words iOS does not show: the Live Update lines, the channel's
+  /// Settings name and description, and the fixed "project · word" join
+  /// (iOS joins in Swift).
+  private static let androidOnly: Set<String> = [
+    "push_with_project", "push_channel_name", "push_channel_description",
+    "push_waiting_for_approval", "push_asked_a_question",
+  ]
+
   func testTheWordsAreAndroidsWords() throws {
     for language in Self.languages {
       let android = try AndroidStrings(Self.androidFile(language.android))
+      // Both ways: a word Android starts showing in an alert must reach iOS too.
+      XCTAssertEqual(
+        Set(android.strings.keys).subtracting(Self.androidOnly),
+        Set(AlertWord.allCases.map(\.rawValue)),
+        "\(language.android) has alert words iOS lacks, or iOS has words Android lacks")
+      XCTAssertEqual(
+        Set(android.plurals.keys), Set(AlertCountWord.allCases.map(\.rawValue)),
+        "\(language.android) plurals differ from iOS's")
       let strings = try Self.strings(language.ios)
       for word in AlertWord.allCases {
         XCTAssertEqual(

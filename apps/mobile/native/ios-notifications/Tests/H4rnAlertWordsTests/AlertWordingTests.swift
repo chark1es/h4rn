@@ -221,9 +221,10 @@ final class AlertWordingTests: XCTestCase {
       XCTAssertEqual(words.text(.agentsNeedAttention, count: 3), "3 agentes necesitan atención")
       XCTAssertEqual(words.text(.agentsFinished, count: 1), "1 agente terminó")
       XCTAssertEqual(words.text(.agentsFinished, count: 2), "2 agentes terminaron")
-      // CLDR's `many` (a million) reads like `other`.
+      // CLDR's `many` (a million) reads like `other`. Foundation groups the
+      // digits the Spanish way; a real group is far too small to show it.
       XCTAssertEqual(
-        words.text(.agentsFinished, count: 1_000_000), "1000000 agentes terminaron")
+        words.text(.agentsFinished, count: 1_000_000), "1.000.000 agentes terminaron")
       let group = alert(["state": "approval", "count": "3", "thread_title": "", "thread_titles": "a\nb\n"])
       XCTAssertEqual(group.displayTitle(words), "3 agentes necesitan atención")
     }
