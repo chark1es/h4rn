@@ -1989,13 +1989,16 @@ async fn alert_service_drops_stale_completions_groups_and_deletes_a_dead_token()
     let apns = Arc::new(h4rn_connect::apns::ApnsClient::disabled(
         reqwest::Client::new(),
     ));
-    let service = Arc::new(AlertService::new(
-        state.store.clone(),
-        fcm,
-        apns,
-        Duration::from_millis(100),
-        Duration::from_secs(120),
-    ));
+    let service = Arc::new(
+        AlertService::new(
+            state.store.clone(),
+            fcm,
+            apns,
+            Duration::from_millis(100),
+            Duration::from_secs(120),
+        )
+        .manual_flush(),
+    );
 
     // A completion older than the cutoff is recorded but never sent.
     let stale = ThreadId::new_uuid_v7();
@@ -2012,7 +2015,9 @@ async fn alert_service_drops_stale_completions_groups_and_deletes_a_dead_token()
         .await;
     service.flush(kept.user.id).await;
 
-    // Two completions inside the window become one grouped alert.
+    // Two completions inside the window become one grouped alert. The window
+    // is drained by hand: with a timer, a slow database write could let it
+    // expire between the two ingests and send two single alerts instead.
     let first = ThreadId::new_uuid_v7();
     let second = ThreadId::new_uuid_v7();
     service
@@ -2027,7 +2032,7 @@ async fn alert_service_drops_stale_completions_groups_and_deletes_a_dead_token()
             alert_activity(&second, AgentAlertState::Completed, Utc::now(), "second"),
         )
         .await;
-    tokio::time::sleep(Duration::from_millis(400)).await;
+    service.flush(kept.user.id).await;
 
     let sends: Vec<wiremock::Request> = server
         .received_requests()
@@ -2065,6 +2070,96 @@ async fn alert_service_drops_stale_completions_groups_and_deletes_a_dead_token()
             .unwrap()
             .is_some()
     );
+}
+
+/// The production path: `ingest` starts the window timer, and the timer sends.
+///
+/// The grouping tests drain their window by hand so a slow database write
+/// cannot split it. This one keeps the default timer and ingests a single
+/// transition, which has nothing to straddle a window with, then waits for the
+/// send the timer must make. Without it, a relay whose timer never fired
+/// would pass every other test.
+#[tokio::test]
+#[ignore = "requires H4RN_TEST_DATABASE_URL (use ./scripts/test-connect.sh)"]
+async fn the_window_timer_sends_an_ingested_alert() {
+    use h4rn_protocol::{AgentAlertState, ThreadId};
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "access_token": "test-access-token",
+            "expires_in": 3600,
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/projects/demo/messages:send"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"name": "x"})))
+        .mount(&server)
+        .await;
+
+    let state = test_state().await;
+    let phone = actor_with_subject(
+        &state,
+        ConnectDeviceKind::Mobile,
+        None,
+        &Uuid::now_v7().to_string(),
+    )
+    .await;
+    state
+        .store
+        .register_push_device(
+            phone.user.id,
+            &phone.device.id.to_string(),
+            "timer-token",
+            "android",
+            None,
+            None,
+        )
+        .await
+        .expect("register phone");
+
+    let config = Config {
+        fcm_service_account: Some(service_account(&server, "demo")),
+        fcm_token_url: format!("{}/token", server.uri()),
+        fcm_url: server.uri(),
+        ..Config::default()
+    };
+    let service = Arc::new(AlertService::new(
+        state.store.clone(),
+        Arc::new(FcmClient::new(&config, reqwest::Client::new())),
+        Arc::new(h4rn_connect::apns::ApnsClient::disabled(
+            reqwest::Client::new(),
+        )),
+        Duration::from_millis(100),
+        Duration::from_secs(120),
+    ));
+
+    let thread = ThreadId::new_uuid_v7();
+    service
+        .ingest(
+            phone.user.id,
+            alert_activity(&thread, AgentAlertState::Completed, Utc::now(), "timer"),
+        )
+        .await;
+
+    // Nothing drains the window here: only the timer `ingest` started can.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let sends = loop {
+        let sends = server
+            .received_requests()
+            .await
+            .expect("requests")
+            .into_iter()
+            .filter(|request| request.url.path().ends_with("messages:send"))
+            .count();
+        if sends > 0 || std::time::Instant::now() >= deadline {
+            break sends;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    assert_eq!(sends, 1, "the window timer never sent the ingested alert");
 }
 
 #[tokio::test]
@@ -2142,16 +2237,22 @@ async fn an_alert_goes_to_each_phones_own_transport() {
         .await
         .expect("register the iPhone");
 
-    let service = Arc::new(AlertService::new(
-        state.store.clone(),
-        Arc::new(FcmClient::new(&config, reqwest::Client::new())),
-        Arc::new(h4rn_connect::apns::ApnsClient::new(
-            &config,
-            reqwest::Client::new(),
-        )),
-        Duration::from_millis(100),
-        Duration::from_secs(120),
-    ));
+    // Drained by hand: a window timer could fire between the ingest and the
+    // flush below, leaving the flush nothing to send and the assertion no
+    // requests yet.
+    let service = Arc::new(
+        AlertService::new(
+            state.store.clone(),
+            Arc::new(FcmClient::new(&config, reqwest::Client::new())),
+            Arc::new(h4rn_connect::apns::ApnsClient::new(
+                &config,
+                reqwest::Client::new(),
+            )),
+            Duration::from_millis(100),
+            Duration::from_secs(120),
+        )
+        .manual_flush(),
+    );
     let thread = ThreadId::new_uuid_v7();
     service
         .ingest(
