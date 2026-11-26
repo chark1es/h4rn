@@ -1587,21 +1587,44 @@ Every removal of a request raises `GuestRequestResolved` before its row is
 deleted, and the resolved event names its request. A crash between the claim and
 the event therefore leaves a row the startup sweep can resolve, and a repeated
 event from that sweep cannot clear another guest's hand. The answer is journaled
-once: the writer claims the row's `resolution_emitted` marker with a conditional
-update before appending, so a Dismiss and a sweep that both hold the finished
-row cannot both emit it and the loser does nothing. The periodic sweep
-leaves a `sending` or `reserving` row alone while a task may still be reading
-it; only the startup pass, where no reader can exist, recovers it, and a
-`publishing` row is left alone while its submission still holds the submission
-lock and finished by the periodic sweep once no writer is left. A Send's
+once, and the row's `resolution_emitted` marker is written only after the append
+is durable. In-process writers take turns, and the writer asks the thread's
+journal before it appends, so a Dismiss and a sweep that both hold the finished
+row cannot both emit it and a crash after the append but before the marker is
+recognised by the check instead of appending a second answer. A crash in the
+other window, before the append, leaves the marker unset; startup compares every
+finished row with the journal and raises an answer that is missing. A `publishing`
+row whose card reached the journal only needs its row made answerable and the
+card re-announced. The re-announcement re-applies the durable
+`MessageReceived` and `GuestRequestAdded` (both idempotent, so the thread's
+pending request comes back) and appends the card under a fresh sequence, because
+a live client drops any frame at or below the last sequence it applied and the
+original copy predates the failure; the guest's snapshot keeps the newest card
+per request id, so the page shows one. Startup reconciles every finished row
+before it ends any link, and cleanup asks the journal instead of trusting a
+row's marker, so an answer an older build claimed but never appended is raised
+even when its link expired while the daemon was down. The
+periodic sweep leaves a `sending` or `reserving` row alone while a task may still
+be reading it; only the startup pass, where no reader can exist, recovers it, and
+a `publishing` row is left alone while its submission still holds the submission
+lock and finished by the periodic sweep once no writer is left. The guest row
+lives on the journal's single-connection pool, and its commit runs inside the
+daemon-wide append lock together with the card's append and broadcast: sequence
+numbers come from one journal-wide counter, so a broadcast that slipped past
+another thread's append would be dropped live, and a replay that read the gap
+could hand out a card before its row was answerable. The row write is one short
+statement on the connection the append just used. A Send's
 acceptance is the thread's journal, not a flag beside it: the message is named
 by the item id `item_guest_<request_id>`, and that id travels with the send
 through the queue — a prompt that arrives while a turn runs waits in the queue
 recorded under the same id, is promoted under it, and a restart restores it
 under it — so the journal says whether the thread owns the message in every
-state a crash can leave. Nothing becomes deliverable before the append that
-takes the message commits, so a prompt whose append failed is not left queued
-and the owner's retry delivers it exactly once.
+state a crash can leave. A queue row a restart shows as **May have been
+delivered** is the owner's decision to resend, and that second delivery is a
+message of its own: it drops the request's item id so the transcript keeps both
+rows, since a client keys user messages by item id. Nothing becomes deliverable
+before the append that takes the message commits, so a prompt whose append
+failed is not left queued and the owner's retry delivers it exactly once.
 The references the Send takes for its thread's attachments are recorded under a
 hold named for the request in the same transaction that takes them, so recovery
 releases exactly those (the reference and the per-thread copy) when the message

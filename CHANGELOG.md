@@ -795,6 +795,30 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Fixed
 
+- **A harness switch keeps the whole reply around its handoff.** Text the adapter
+  reports while the switch is recording that the new harness took the prompt is
+  merged like live output, so a long reply is no longer cut off at the hold's bound;
+  a stream that ends inside that window applies its reply before the turn is
+  settled; and a journal that refuses the acceptance or the handoff clear is
+  retried with a backoff instead of being reported as durable (a Stop still ends the turn), so a request never stays marked
+  undelivered beside the turn it ran.
+
+- **A guest link's answers and repeated messages survive a crash.** A guest
+  request's resolution could be marked as sent before its event was durable, so
+  a crash in between lost the owner's answer; the marker is now written only
+  after the journal holds it, and startup compares every finished request with
+  the journal and raises an answer that is missing. A second delivery of a guest
+  prompt that may already have reached the agent now gets its own transcript id,
+  so both messages show instead of the second disappearing behind the first.
+  Recovering a card whose row update failed gives the thread its pending request
+  back (so the link is not treated as idle and auto-settled) and announces the
+  card again under a new sequence, which is what a live owner needs to hear it;
+  the guest's page still shows one card. Every thread's append, its guest row
+  write and its broadcast remain one ordered step, so a client never loses an
+  event because another thread's event slipped in between. Startup raises a
+  finished request's answer before an expired link's rows are cleaned up, and an
+  answer is found by its request id rather than by reading the thread's whole
+  event log.
 - **Rewind and fork stay honest about messages still being delivered.** An edit
   now waits for a steer's write to return instead of cutting the turn it was
   about to join, a queued steer is marked in flight before its `sending` write
