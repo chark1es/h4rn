@@ -1,16 +1,19 @@
-import { relativeAge } from "@/lib/format";
+import { useTranslation } from "react-i18next";
+
+import { formatRelativeTime, i18n } from "@/lib/i18n";
 import { updateShell } from "@/lib/platform/appUpdate";
 import { useApp } from "@/lib/store/appStore";
 
 import { checkForAppUpdates, setAutoCheck, useAppUpdate } from "./appUpdateStore";
 
-function checkedLabel(checkedAtMs: number): string {
-  const age = relativeAge(new Date(checkedAtMs).toISOString());
-  return age === "now" ? "Just now" : `${age} ago`;
+function checkedLabel(checkedAtMs: number, now = Date.now()): string {
+  if (now - checkedAtMs < 60_000) return i18n.t("settings:about.justNow");
+  return formatRelativeTime(checkedAtMs, now);
 }
 
 /** Settings → General → About: version, update check and the auto-check toggle. */
 export function AboutSettings() {
+  const { t } = useTranslation(["settings", "common"]);
   const supported = useAppUpdate((state) => state.supported);
   const version = useAppUpdate((state) => state.currentVersion);
   const available = useAppUpdate((state) => state.availableVersion);
@@ -24,10 +27,10 @@ export function AboutSettings() {
   if (!supported) {
     return (
       <div className="q-group">
-        <h2>About</h2>
+        <h2>{t("about.title")}</h2>
         <div className="q-field">
           <div className="lab">
-            <div className="t">Daemon version</div>
+            <div className="t">{t("about.daemonVersion")}</div>
           </div>
           <div className="ctl">
             <span className="q-mono q-muted">{daemonVersion ?? "—"}</span>
@@ -35,11 +38,9 @@ export function AboutSettings() {
         </div>
         <div className="q-field">
           <div className="lab">
-            <div className="t">Updates</div>
+            <div className="t">{t("about.updates")}</div>
             <div className="s">
-              {shell === "mobile"
-                ? "Mobile updates come through the App Store and Google Play."
-                : "The web build updates when its host serves a new version."}
+              {shell === "mobile" ? t("about.mobileUpdates") : t("about.webUpdates")}
             </div>
           </div>
         </div>
@@ -48,21 +49,21 @@ export function AboutSettings() {
   }
 
   const status = checking
-    ? "Checking…"
+    ? t("common:checking")
     : error
       ? error
       : available
-        ? `h4rn ${available} is available`
+        ? t("about.available", { version: available })
         : checkedAt
-          ? "You're up to date"
-          : "Not checked yet";
+          ? t("about.upToDate")
+          : t("about.notChecked");
 
   return (
     <div className="q-group">
-      <h2>About</h2>
+      <h2>{t("about.title")}</h2>
       <div className="q-field">
         <div className="lab">
-          <div className="t">Version</div>
+          <div className="t">{t("about.version")}</div>
           <div className="s">{status}</div>
         </div>
         <div className="ctl">
@@ -74,22 +75,22 @@ export function AboutSettings() {
             disabled={checking}
             onClick={() => void checkForAppUpdates()}
           >
-            Check for updates
+            {t("about.checkForUpdates")}
           </button>
         </div>
       </div>
       <div className="q-field">
         <div className="lab">
-          <div className="t">Last checked</div>
+          <div className="t">{t("about.lastChecked")}</div>
         </div>
         <div className="ctl">
-          <span className="q-muted">{checkedAt ? checkedLabel(checkedAt) : "Never"}</span>
+          <span className="q-muted">{checkedAt ? checkedLabel(checkedAt) : t("about.never")}</span>
         </div>
       </div>
       <div className="q-field">
         <div className="lab">
-          <div className="t">Check automatically</div>
-          <div className="s">On launch, then every 6 hours</div>
+          <div className="t">{t("about.checkAutomatically")}</div>
+          <div className="s">{t("about.checkAutomaticallyHint")}</div>
         </div>
         <div className="ctl">
           <button
@@ -97,14 +98,14 @@ export function AboutSettings() {
             className="q-switch"
             role="switch"
             aria-checked={autoCheck}
-            aria-label="Check for updates automatically"
+            aria-label={t("about.checkAutomaticallyLabel")}
             onClick={() => void setAutoCheck(!autoCheck)}
           />
         </div>
       </div>
       <div className="q-field">
         <div className="lab">
-          <div className="t">Daemon version</div>
+          <div className="t">{t("about.daemonVersion")}</div>
         </div>
         <div className="ctl">
           <span className="q-mono q-muted">{daemonVersion ?? "—"}</span>

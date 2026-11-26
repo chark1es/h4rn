@@ -9,6 +9,7 @@ import type {
 } from "@/gen";
 import type { H4rnClient } from "@/lib/client/client";
 import { toProtoError } from "@/lib/client/errors";
+import { i18n } from "@/lib/i18n";
 import { getClient } from "@/lib/store/appStore";
 
 /**
@@ -126,11 +127,11 @@ export function settledWorktrees(rows: TrackedWorktree[]): TrackedWorktree[] {
 }
 
 /** The origin in words. */
-const ORIGIN_TEXT: Record<WorktreeOrigin, string> = {
-  subagent: "Subagent worktree",
-  thread: "Thread workspace",
-  harness: "Created by an agent",
-};
+const ORIGIN_KEY = {
+  subagent: "settings:worktrees.origin.subagent",
+  thread: "settings:worktrees.origin.thread",
+  harness: "settings:worktrees.origin.harness",
+} as const satisfies Record<WorktreeOrigin, string>;
 
 /**
  * Where it came from, who used it, and anything worth knowing before removal.
@@ -142,16 +143,16 @@ const ORIGIN_TEXT: Record<WorktreeOrigin, string> = {
  */
 export function worktreeSubline(row: TrackedWorktree): string {
   const users = [...new Set(row.accessed_by.map((access) => access.title).filter(Boolean))];
-  const parts = [ORIGIN_TEXT[row.origin]];
+  const parts: string[] = [i18n.t(ORIGIN_KEY[row.origin])];
   if (users.length > 0) parts.push(users.join(", "));
-  if (row.status === "orphaned") parts.push("Left behind after a restart");
+  if (row.status === "orphaned") parts.push(i18n.t("settings:worktrees.orphaned"));
   else if (!row.exists)
     parts.push(
       row.origin === "subagent" && row.branch
-        ? "Directory removed, branch kept"
-        : "Directory removed, registration left",
+        ? i18n.t("settings:worktrees.removedBranchKept")
+        : i18n.t("settings:worktrees.removedRegistrationLeft"),
     );
-  if (row.dirty) parts.push("Uncommitted changes");
+  if (row.dirty) parts.push(i18n.t("settings:worktrees.uncommitted"));
   return parts.join(" · ");
 }
 
@@ -236,21 +237,26 @@ export function forceCanFix(reason: string): boolean {
  * h4rn deletes; an unowned row can only lose uncommitted changes.
  */
 export function removeDescription(row: TrackedWorktree): string {
-  const base = row.exists
-    ? `The checkout at ${row.path} is deleted from disk. Ignored files such as build output are deleted with it.${
-        row.owned && row.branch ? ` The ${row.branch} branch h4rn created is deleted too.` : ""
-      }`
-    : row.owned && row.branch
-      ? `No checkout remains on disk. Its ${row.branch} branch is deleted.`
-      : row.branch
-        ? "No checkout remains on disk."
-        : "No checkout remains on disk; its registration is removed.";
-  const skipped = row.owned
-    ? "Uncommitted changes or unmerged work are skipped."
-    : "Uncommitted changes are skipped.";
-  return `${base} ${skipped}${
-    row.origin === "thread" ? " Its thread may still be resumed there." : ""
-  }`;
+  const sentences: string[] = [];
+  if (row.exists) {
+    sentences.push(i18n.t("settings:worktrees.remove.checkoutDeleted", { path: row.path }));
+    if (row.owned && row.branch) {
+      sentences.push(i18n.t("settings:worktrees.remove.ownedBranchToo", { branch: row.branch }));
+    }
+  } else if (row.owned && row.branch) {
+    sentences.push(i18n.t("settings:worktrees.remove.goneBranchDeleted", { branch: row.branch }));
+  } else if (row.branch) {
+    sentences.push(i18n.t("settings:worktrees.remove.gone"));
+  } else {
+    sentences.push(i18n.t("settings:worktrees.remove.goneRegistration"));
+  }
+  sentences.push(
+    row.owned
+      ? i18n.t("settings:worktrees.remove.skipsUnmerged")
+      : i18n.t("settings:worktrees.remove.skipsUncommitted"),
+  );
+  if (row.origin === "thread") sentences.push(i18n.t("settings:worktrees.remove.threadResume"));
+  return joinSentences(sentences);
 }
 
 /**
@@ -258,11 +264,19 @@ export function removeDescription(row: TrackedWorktree): string {
  * when thread workspaces are among the rows.
  */
 export function forceRemoveDescription(threadNote: string): string {
-  return (
-    "Uncommitted changes and unmerged commits in these worktrees are lost. Any rebase, merge, " +
-    "cherry-pick or bisect in progress — including its autostash — and staged changes are lost. " +
-    `Any checkout now at these paths is deleted. This can't be undone.${threadNote}`
-  );
+  return joinSentences([i18n.t("settings:worktrees.force.description"), threadNote]);
+}
+
+/**
+ * Sentences in one paragraph. Latin scripts separate them with a space;
+ * Chinese and Japanese full stops already end the sentence.
+ */
+export function joinSentences(sentences: string[]): string {
+  const separator = i18n.t("settings:worktrees.sentenceSeparator");
+  return sentences
+    .map((sentence) => sentence.trim())
+    .filter(Boolean)
+    .join(separator);
 }
 
 /**
@@ -273,11 +287,10 @@ export function forceRemoveDescription(threadNote: string): string {
  * the count of thread workspaces already left out of the rows shown.
  */
 export function clearAllDescription(keptThreads: number): string {
-  const kept =
-    keptThreads > 0
-      ? ` ${keptThreads === 1 ? "One thread workspace is" : `${keptThreads} thread workspaces are`} kept; remove ${keptThreads === 1 ? "it" : "them"} one at a time.`
-      : "";
-  return `Checkouts are deleted from disk and h4rn/sa-* branches h4rn created are deleted. Worktrees with uncommitted changes or unmerged work are skipped. Worktrees a thread is working in are kept. Ignored files such as build output are deleted with each checkout.${kept}`;
+  return joinSentences([
+    i18n.t("settings:worktrees.clearAll.description"),
+    keptThreads > 0 ? i18n.t("settings:worktrees.clearAll.kept", { count: keptThreads }) : "",
+  ]);
 }
 
 /** The loaded page's layout: a notice above the groups, or the empty copy. */

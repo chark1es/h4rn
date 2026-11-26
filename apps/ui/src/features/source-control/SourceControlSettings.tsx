@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { ChipSelect } from "@/components/common/ChipSelect";
 import { useHarnesses, useHarnessVersions } from "@/features/harnesses/harnessStore";
@@ -11,12 +12,9 @@ import {
 } from "@/features/text-generation/textGenerationStore";
 import type { HarnessKind, SourceControlModelMode, SourceControlModelSetting } from "@/gen";
 import { HARNESS_LABELS } from "@/lib/entities";
+import { i18n } from "@/lib/i18n";
 
-const MODES: Array<{ value: SourceControlModelMode; label: string }> = [
-  { value: "off", label: "Off" },
-  { value: "coding_agent", label: "Coding agent" },
-  { value: "text_generator", label: "Text generator" },
-];
+const MODES: SourceControlModelMode[] = ["off", "coding_agent", "text_generator"];
 
 type AgentChoice = HarnessKind | "thread";
 const FOLLOW_THREAD = "thread" as const;
@@ -29,22 +27,23 @@ function ModePicker({
   value: SourceControlModelMode;
   onChange: (next: SourceControlModelMode) => void;
 }) {
+  const { t } = useTranslation(["settings", "common"]);
   return (
     <div
       className="q-seg inline q-seg-choice"
       role="radiogroup"
-      aria-label="Commit and pull request model"
+      aria-label={t("sourceControl.modeLabel")}
     >
       {MODES.map((mode) => (
         // biome-ignore lint/a11y/useSemanticElements: a segmented radio group, not a form radio
         <button
-          key={mode.value}
+          key={mode}
           type="button"
           role="radio"
-          aria-checked={value === mode.value}
-          onClick={() => onChange(mode.value)}
+          aria-checked={value === mode}
+          onClick={() => onChange(mode)}
         >
-          {mode.label}
+          {t(`sourceControl.modes.${mode}`)}
         </button>
       ))}
     </div>
@@ -55,20 +54,17 @@ function ModePicker({
 export function sourceControlSummary(
   setting: SourceControlModelSetting | null | undefined,
 ): string {
-  if (!setting) return "Reading the message model…";
-  if (setting.mode === "off") return "Commit and pull request text is written by you.";
+  const t = i18n.getFixedT(null, "settings", "sourceControl.summary");
+  if (!setting) return t("reading");
+  if (setting.mode === "off") return t("off");
   if (setting.mode === "coding_agent") {
-    if (setting.harness === "claude_code") return "Messages are written by Claude Code.";
-    if (setting.harness === "codex") {
-      return "Codex is not used for messages; pick Claude Code or a text generator.";
-    }
+    if (setting.harness === "claude_code") return t("claudeCode");
+    if (setting.harness === "codex") return t("codex");
     return setting.harness
-      ? `${HARNESS_LABELS[setting.harness]} is not used for messages.`
-      : "Claude Code threads use Claude Code; other threads need a text generator, otherwise nothing is generated.";
+      ? t("otherHarness", { harness: HARNESS_LABELS[setting.harness] })
+      : t("followThread");
   }
-  return setting.model
-    ? `Messages are written by a text generator with ${setting.model}.`
-    : "Messages are written by the selected text generator.";
+  return setting.model ? t("generatorModel", { model: setting.model }) : t("generator");
 }
 
 /**
@@ -78,6 +74,7 @@ export function sourceControlSummary(
  * Off starts nothing: Generate leaves the field empty and no model runs.
  */
 export function SourceControlSettings() {
+  const { t } = useTranslation(["settings", "common"]);
   useTextGenerationData({ settings: true });
   useHarnessVersions();
   const settings = useTextGeneration((state) => state.settings);
@@ -134,12 +131,8 @@ export function SourceControlSettings() {
 
   return (
     <div className="q-form">
-      <h1>Source control &amp; issues</h1>
-      <p className="lead">
-        Commit messages and pull request text can be written by a model when you ask for them. A
-        request you write yourself is never replaced, and Generate never commits or opens anything.
-        Linear teams are chosen per project below.
-      </p>
+      <h1>{t("sourceControl.title")}</h1>
+      <p className="lead">{t("sourceControl.lead")}</p>
 
       {settingsError ? (
         <div className="q-banner err" role="alert">
@@ -147,20 +140,19 @@ export function SourceControlSettings() {
         </div>
       ) : null}
 
-      {settingsLoading && !draft ? <p className="q-faint">Reading the setting…</p> : null}
+      {settingsLoading && !draft ? (
+        <p className="q-faint">{t("sourceControl.readingSetting")}</p>
+      ) : null}
 
       {draft ? (
         <>
           <div className="q-group">
-            <h2>Commit &amp; PR messages</h2>
+            <h2>{t("sourceControl.messages")}</h2>
             <p className="desc">{sourceControlSummary(draft)}</p>
             <div className="q-field">
               <div className="lab">
-                <div className="t">Who writes messages</div>
-                <div className="s">
-                  Off leaves the fields empty and starts nothing. A coding agent runs once with no
-                  tools; a text generator is the model you configured under Providers.
-                </div>
+                <div className="t">{t("sourceControl.whoWrites")}</div>
+                <div className="s">{t("sourceControl.whoWritesHint")}</div>
               </div>
               <div className="ctl">
                 <ModePicker value={draft.mode} onChange={chooseMode} />
@@ -170,26 +162,22 @@ export function SourceControlSettings() {
             {draft.mode === "coding_agent" ? (
               <div className="q-field">
                 <div className="lab">
-                  <div className="t">Coding agent</div>
-                  <div className="s">
-                    Follow the thread's agent runs Claude Code for Claude Code threads. Other
-                    threads need a text generator; without one, Generate leaves the fields empty and
-                    nothing runs.
-                  </div>
+                  <div className="t">{t("sourceControl.modes.coding_agent")}</div>
+                  <div className="s">{t("sourceControl.codingAgentHint")}</div>
                   {agents.length === 0 ? (
-                    <div className="s q-faint">No Claude Code is installed on this host yet.</div>
+                    <div className="s q-faint">{t("sourceControl.noClaudeCode")}</div>
                   ) : null}
                 </div>
                 <div className="ctl">
                   <ChipSelect<AgentChoice>
-                    label="Coding agent for messages"
+                    label={t("sourceControl.codingAgentLabel")}
                     value={draft.harness ?? FOLLOW_THREAD}
                     width={220}
                     options={[
                       {
                         value: FOLLOW_THREAD,
-                        label: "Follow the thread's agent",
-                        hint: "Claude Code threads use their own",
+                        label: t("sourceControl.followThread"),
+                        hint: t("sourceControl.followThreadHint"),
                       },
                       ...agents.map((agent) => ({
                         value: agent.harness,
@@ -209,12 +197,12 @@ export function SourceControlSettings() {
               <>
                 <div className="q-field">
                   <div className="lab">
-                    <div className="t">Text generator</div>
-                    <div className="s">The provider is configured under Providers.</div>
+                    <div className="t">{t("sourceControl.modes.text_generator")}</div>
+                    <div className="s">{t("sourceControl.generatorHint")}</div>
                   </div>
                   <div className="ctl">
                     <ChipSelect
-                      label="Text generator"
+                      label={t("sourceControl.modes.text_generator")}
                       value={draft.generator_id ?? ""}
                       width={220}
                       options={generators.map((candidate) => ({
@@ -228,42 +216,37 @@ export function SourceControlSettings() {
                 </div>
                 <div className="q-field">
                   <div className="lab">
-                    <div className="t">Model</div>
-                    <div className="s">Leave empty to use the generator's own model.</div>
+                    <div className="t">{t("sourceControl.model")}</div>
+                    <div className="s">{t("sourceControl.modelHint")}</div>
                   </div>
                   <div className="ctl">
                     <input
                       className="q-input q-mono"
                       style={{ width: 240 }}
-                      aria-label="Model for commit and pull request messages"
-                      placeholder={generator?.model ?? "model name"}
+                      aria-label={t("sourceControl.modelLabel")}
+                      placeholder={generator?.model ?? t("sourceControl.modelPlaceholder")}
                       value={draft.model ?? ""}
                       onChange={(event) => patch({ model: event.target.value || null })}
                     />
                   </div>
                 </div>
                 {generators.length === 0 ? (
-                  <p className="q-faint">
-                    No text generator is configured yet. Add one under Providers.
-                  </p>
+                  <p className="q-faint">{t("sourceControl.noGenerator")}</p>
                 ) : null}
               </>
             ) : null}
 
             {draft.mode !== "off" ? (
               <label className="q-field q-field-block">
-                <span className="t">Custom instructions</span>
-                <span className="s">
-                  Optional. Appended to the trusted instruction for every commit message and pull
-                  request. Never spliced into the repository text.
-                </span>
+                <span className="t">{t("sourceControl.instructions")}</span>
+                <span className="s">{t("sourceControl.instructionsHint")}</span>
                 <textarea
                   className="q-input"
                   rows={3}
                   maxLength={2000}
                   value={draft.instructions ?? ""}
-                  aria-label="Custom instructions for commit and pull request messages"
-                  placeholder="For example: use the imperative mood, and mention the user-visible change."
+                  aria-label={t("sourceControl.instructionsLabel")}
+                  placeholder={t("sourceControl.instructionsPlaceholder")}
                   onChange={(event) => patch({ instructions: event.target.value || null })}
                 />
               </label>
@@ -289,7 +272,7 @@ export function SourceControlSettings() {
               disabled={!changed}
               onClick={() => setDraft(settings?.source_control ?? draft)}
             >
-              Reset
+              {t("common:reset")}
             </button>
             <button
               type="button"
@@ -297,7 +280,7 @@ export function SourceControlSettings() {
               disabled={!changed || !canSave || saving}
               onClick={() => void save()}
             >
-              {saving ? "Saving…" : "Save"}
+              {saving ? t("common:saving") : t("common:save")}
             </button>
           </div>
         </>

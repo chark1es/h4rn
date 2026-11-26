@@ -1,4 +1,5 @@
 import type { ToolStats } from "@/gen";
+import { activeLocale } from "@/lib/i18n";
 
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
@@ -17,7 +18,7 @@ export function relativeAge(iso: string, now = Date.now()): string {
 export function absoluteTime(iso: string): string {
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return "—";
-  return new Intl.DateTimeFormat(undefined, {
+  return new Intl.DateTimeFormat(activeLocale(), {
     hour: "2-digit",
     minute: "2-digit",
     hour12: false,
@@ -27,7 +28,7 @@ export function absoluteTime(iso: string): string {
 export function absoluteDateTime(iso: string): string {
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return "—";
-  return new Intl.DateTimeFormat(undefined, {
+  return new Intl.DateTimeFormat(activeLocale(), {
     month: "short",
     day: "numeric",
     hour: "2-digit",

@@ -8,6 +8,7 @@
  */
 
 import type { PairScope } from "@/gen";
+import { i18n } from "@/lib/i18n";
 
 export type ScopeOption = {
   id: PairScope;
@@ -26,6 +27,16 @@ export const SCOPE_OPTIONS: readonly ScopeOption[] = [
 ];
 
 const ALL_SCOPES: readonly PairScope[] = SCOPE_OPTIONS.map((option) => option.id);
+
+/** A scope's name in the active language. */
+export function scopeLabel(scope: PairScope): string {
+  return i18n.t(`settings:devices.scopes.${scope}.label`);
+}
+
+/** A scope's second line in the active language, or "" when it has none. */
+export function scopeSub(scope: PairScope): string {
+  return i18n.t(`settings:devices.scopes.${scope}.sub`);
+}
 
 /** What the Settings checkboxes start as: view plus approve. */
 export const DEFAULT_PAIR_SCOPES: readonly PairScope[] = ["view", "approve"];
@@ -47,11 +58,13 @@ export function toggleScope(scopes: readonly PairScope[], scope: PairScope): Pai
 
 /** The Scopes column: "All", or the held scopes by name. */
 export function scopesLabel(scopes: readonly PairScope[] | undefined): string {
-  if (!scopes || scopes.length === 0 || scopes.length === ALL_SCOPES.length) return "All";
+  if (!scopes || scopes.length === 0 || scopes.length === ALL_SCOPES.length) {
+    return i18n.t("settings:devices.scopes.all");
+  }
   const names = scopes
     .filter((scope) => scope !== "view")
-    .map((scope) => SCOPE_OPTIONS.find((option) => option.id === scope)?.label ?? scope);
-  return names.length === 0 ? "View only" : names.join(", ");
+    .map((scope) => (ALL_SCOPES.includes(scope) ? scopeLabel(scope) : scope));
+  return names.length === 0 ? i18n.t("settings:devices.scopes.viewOnly") : names.join(", ");
 }
 
 /** Shows an 8-character code as `ABCD-EFGH`. */

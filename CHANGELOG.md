@@ -7,6 +7,10 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Added
 
+- **Settings in Chinese, Spanish and Japanese.** Settings → Appearance →
+  Language picks System, English, 简体中文, Español or 日本語 for this device and
+  applies at once. Every Settings page is translated; other areas follow one
+  at a time (see `docs/i18n.md`).
 - **Android Live Updates show a running agent.** A separate switch under
   Settings → Notifications → Phone alerts shows each running thread as an
   ongoing notification with its project and whether it is working, waiting for

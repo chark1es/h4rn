@@ -1,5 +1,6 @@
 import { RefreshCwIcon } from "lucide-react";
 import { useEffect, useState } from "react";
+import { Trans, useTranslation } from "react-i18next";
 
 import { ConfirmDialog } from "@/components/common/ConfirmDialog";
 import type { TrackedWorktree } from "@/gen";
@@ -61,6 +62,7 @@ function WorktreeRow({
   row: TrackedWorktree;
   action?: { disabled: boolean; onClick: () => void };
 }) {
+  const { t } = useTranslation(["settings", "common"]);
   const title = worktreeTitle(row);
   return (
     <div className="q-field">
@@ -77,10 +79,10 @@ function WorktreeRow({
             type="button"
             className="q-btn secondary"
             disabled={action.disabled}
-            aria-label={`Remove ${title}`}
+            aria-label={t("worktrees.removeLabel", { name: title })}
             onClick={action.onClick}
           >
-            Remove
+            {t("common:remove")}
           </button>
         ) : null}
       </div>
@@ -90,6 +92,7 @@ function WorktreeRow({
 
 /** Settings → Worktrees: what h4rn tracks, what is in use, and a way to clear the rest. */
 export function WorktreeSettings() {
+  const { t } = useTranslation(["settings", "common"]);
   const online = useApp((state) => state.connection.status) === "online";
   useWorktreeList(online);
   // Intentionally discard the last clear's result when the page is left.
@@ -171,34 +174,29 @@ export function WorktreeSettings() {
   const threadNote =
     forceableThreads.length === 0
       ? ""
-      : forceableThreads.length === 1
-        ? " One of these is a thread workspace another tool or you created."
-        : ` ${forceableThreads.length} of these are thread workspaces another tool or you created.`;
+      : t("worktrees.force.threadNote", { count: forceableThreads.length });
 
   return (
     <div className="q-form">
-      <h1>Worktrees</h1>
-      <p className="lead">
-        Git worktrees h4rn created for threads and subagents, and the ones your threads and their
-        subagents worked in. Clearing removes the checkout from disk.
-      </p>
+      <h1>{t("worktrees.title")}</h1>
+      <p className="lead">{t("worktrees.lead")}</p>
 
       <div className="q-group">
         <div className="q-group-head">
-          <h2>New worktrees</h2>
+          <h2>{t("worktrees.newWorktrees")}</h2>
         </div>
-        <p className="desc">
-          Where this machine puts new worktree checkouts, and how it names their branches. Existing
-          worktrees stay where they are.
-        </p>
+        <p className="desc">{t("worktrees.newWorktreesHint")}</p>
         <div className="q-field">
           <div className="lab">
             <label className="t" htmlFor="worktree-location">
-              Location
+              {t("worktrees.location")}
             </label>
             <div className="s">
-              An absolute path or one starting with <span className="q-mono">~/</span>. Empty uses
-              the h4rn data folder.
+              <Trans
+                t={t}
+                i18nKey="worktrees.locationHint"
+                components={{ code: <span className="q-mono" /> }}
+              />
             </div>
           </div>
           <div className="ctl">
@@ -217,12 +215,9 @@ export function WorktreeSettings() {
         <div className="q-field">
           <div className="lab">
             <label className="t" htmlFor="worktree-branch-prefix">
-              Branch prefix
+              {t("worktrees.branchPrefix")}
             </label>
-            <div className="s">
-              Starts daemon-generated branch names. Invalid characters become hyphens; the trailing
-              slash is optional.
-            </div>
+            <div className="s">{t("worktrees.branchPrefixHint")}</div>
           </div>
           <div className="ctl">
             <input
@@ -256,7 +251,7 @@ export function WorktreeSettings() {
                 )
               }
             >
-              {settingsSaving ? "Saving…" : "Save"}
+              {settingsSaving ? t("common:saving") : t("common:save")}
             </button>
             {settingsError ? (
               <span className="q-field-error" role="alert">
@@ -266,7 +261,7 @@ export function WorktreeSettings() {
             ) : null}
             {!settingsError && settings !== null && !settingsDirty ? (
               <span className="q-muted" style={{ fontSize: 12 }}>
-                Saved on this machine.
+                {t("worktrees.saved")}
               </span>
             ) : null}
           </div>
@@ -276,7 +271,7 @@ export function WorktreeSettings() {
       {page.kind === "groups" && inUse.length > 0 ? (
         <div className="q-group">
           <div className="q-group-head">
-            <h2>In use</h2>
+            <h2>{t("worktrees.inUse")}</h2>
           </div>
           {inUse.map((row) => (
             <WorktreeRow key={row.path} row={row} />
@@ -286,7 +281,7 @@ export function WorktreeSettings() {
 
       <div className="q-group">
         <div className="q-group-head">
-          <h2>Settled</h2>
+          <h2>{t("worktrees.settled")}</h2>
           <div style={{ display: "flex", gap: 8 }}>
             <button
               type="button"
@@ -295,7 +290,7 @@ export function WorktreeSettings() {
               onClick={() => void loadWorktrees()}
             >
               <RefreshCwIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-              Refresh
+              {t("common:refresh")}
             </button>
             <button
               type="button"
@@ -310,7 +305,7 @@ export function WorktreeSettings() {
                 )
               }
             >
-              Clear all
+              {t("worktrees.clearAll.button")}
             </button>
           </div>
         </div>
@@ -319,7 +314,7 @@ export function WorktreeSettings() {
           online ? (
             <div className="q-skel" style={{ height: 120 }} />
           ) : (
-            <p className="q-muted">Offline</p>
+            <p className="q-muted">{t("worktrees.offline")}</p>
           )
         ) : (
           <>
@@ -327,7 +322,9 @@ export function WorktreeSettings() {
 
             {outcome || clearError ? (
               <div className="q-harness-out" role="status" aria-live="polite">
-                {outcome ? <p className="res">Removed {outcome.removed}.</p> : null}
+                {outcome ? (
+                  <p className="res">{t("worktrees.removed", { count: outcome.removed })}</p>
+                ) : null}
                 {clearError ? <p className="res bad">{clearError}</p> : null}
                 {skipped.map((item) => (
                   <p className="res" key={item.path}>
@@ -352,7 +349,7 @@ export function WorktreeSettings() {
                       )
                     }
                   >
-                    Remove anyway
+                    {t("worktrees.force.button")}
                   </button>
                 ) : null}
               </div>
@@ -360,12 +357,9 @@ export function WorktreeSettings() {
 
             {settled.length === 0 ? (
               page.empty ? (
-                <p className="q-muted">
-                  No worktrees yet. Subagents that run with worktree isolation, and threads working
-                  in a worktree, show up here.
-                </p>
+                <p className="q-muted">{t("worktrees.empty")}</p>
               ) : rows.length > 0 ? (
-                <p className="q-muted">Nothing has settled.</p>
+                <p className="q-muted">{t("worktrees.nothingSettled")}</p>
               ) : null
             ) : (
               settled.map((row) => (
@@ -385,11 +379,9 @@ export function WorktreeSettings() {
 
       <ConfirmDialog
         open={confirmAll !== null}
-        title={
-          clearAllCount === 1 ? "Remove 1 worktree?" : `Remove up to ${clearAllCount} worktrees?`
-        }
+        title={t("worktrees.clearAll.title", { count: clearAllCount })}
         description={clearAllDescription(keptThreads)}
-        confirmLabel="Clear all"
+        confirmLabel={t("worktrees.clearAll.button")}
         onOpenChange={(open) => {
           if (!open) setConfirmAll(null);
         }}
@@ -403,9 +395,9 @@ export function WorktreeSettings() {
 
       <ConfirmDialog
         open={removing !== null}
-        title="Remove this worktree?"
+        title={t("worktrees.remove.title")}
         description={removing ? removeDescription(removing.row) : ""}
-        confirmLabel="Remove"
+        confirmLabel={t("common:remove")}
         onOpenChange={(open) => {
           if (!open) setRemoving(null);
         }}
@@ -424,9 +416,9 @@ export function WorktreeSettings() {
 
       <ConfirmDialog
         open={forcing !== null}
-        title={`Remove ${forceCount} ${forceCount === 1 ? "worktree" : "worktrees"} anyway?`}
+        title={t("worktrees.force.title", { count: forceCount })}
         description={forceRemoveDescription(threadNote)}
-        confirmLabel="Remove anyway"
+        confirmLabel={t("worktrees.force.button")}
         onOpenChange={(open) => {
           if (!open) setForcing(null);
         }}

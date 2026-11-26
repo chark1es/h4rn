@@ -1,4 +1,5 @@
 import { useSyncExternalStore } from "react";
+import { i18n } from "@/lib/i18n";
 
 /**
  * Every app shortcut is a modifier chord: Cmd on Apple platforms, Ctrl
@@ -465,17 +466,20 @@ export type RebindResult = { ok: true } | { ok: false; reason: string };
 
 export function rebind(id: CommandId, binding: string): RebindResult {
   const chord = parseChord(binding);
-  if (!chord) return { ok: false, reason: "Shortcuts need Cmd or Ctrl plus a key." };
+  if (!chord) return { ok: false, reason: i18n.t("settings:shortcuts.needsModifier") };
   if (!chord.mod && !commandSpec(id).allowBareAlt) {
-    return { ok: false, reason: "Shortcuts need Cmd or Ctrl plus a key." };
+    return { ok: false, reason: i18n.t("settings:shortcuts.needsModifier") };
   }
   if (!chord.mod && !chord.alt) {
-    return { ok: false, reason: "Shortcuts need Cmd or Ctrl plus a key." };
+    return { ok: false, reason: i18n.t("settings:shortcuts.needsModifier") };
   }
   const normalized = formatChord(chord);
   const taken = commandForBinding(normalized, id);
   if (taken) {
-    return { ok: false, reason: `Already used by “${commandSpec(taken).label}”.` };
+    return {
+      ok: false,
+      reason: i18n.t("settings:shortcuts.alreadyUsed", { command: commandSpec(taken).label }),
+    };
   }
   const next = { ...overrides };
   if (normalized === commandSpec(id).binding) delete next[id];

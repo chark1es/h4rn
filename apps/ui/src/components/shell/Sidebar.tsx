@@ -24,6 +24,7 @@ import {
   WifiOffIcon,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { AgentGlyph } from "@/components/agent/AgentGlyph";
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
@@ -65,7 +66,7 @@ import {
   threadsForTab,
 } from "@/lib/inbox";
 import { type CommandId, titleWithShortcut } from "@/lib/keybindings";
-import { SETTINGS_SECTIONS, settingsPath } from "@/lib/settings";
+import { SETTINGS_SECTIONS, type SettingsGroup, settingsPath } from "@/lib/settings";
 import {
   loadThreads,
   navigate,
@@ -902,6 +903,7 @@ function SnoozedSection({
 }
 
 function SettingsSidebar() {
+  const { t } = useTranslation(["settings", "common"]);
   const route = useApp((state) => state.ui.route);
   const layout = useApp((state) => state.ui.layout);
   const connection = useApp((state) => state.connection);
@@ -927,7 +929,7 @@ function SettingsSidebar() {
     route.kind === "placeholder" && route.path.replace(/\/+$/, "").endsWith("/skills");
   const section = route.kind === "placeholder" ? (route.path.split("/")[2] ?? "hosts") : "hosts";
   const destination: Destination = "settings";
-  let group: string | undefined;
+  let group: SettingsGroup | undefined;
 
   const go = (path: string) => navigate({ kind: "placeholder", surface: "settings", path });
   const goLibrary = (path: string) => navigate({ kind: "placeholder", surface: "library", path });
@@ -942,14 +944,18 @@ function SettingsSidebar() {
   };
 
   return (
-    <nav className="q-side q-set-side" aria-label="Settings" style={{ width: layout.sidebarWidth }}>
+    <nav
+      className="q-side q-set-side"
+      aria-label={t("page.label")}
+      style={{ width: layout.sidebarWidth }}
+    >
       <div className="q-side-hd">
         <div className="q-side-top">
           <button
             type="button"
             className="q-ibtn"
-            aria-label="Back to threads"
-            title="Back to threads  Esc"
+            aria-label={t("nav.back")}
+            title={t("nav.backTitle")}
             onClick={() => navigate({ kind: "inbox" })}
           >
             <ChevronRightIcon
@@ -959,11 +965,11 @@ function SettingsSidebar() {
               aria-hidden
             />
           </button>
-          <span className="q-word">Settings</span>
+          <span className="q-word">{t("page.label")}</span>
         </div>
         <label className="q-side-search">
           <SearchIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-          <input placeholder="Search settings" aria-label="Search settings" />
+          <input placeholder={t("nav.search")} aria-label={t("nav.search")} />
         </label>
       </div>
 
@@ -975,7 +981,7 @@ function SettingsSidebar() {
             <div key={item.key} style={{ display: "contents" }}>
               {header ? (
                 <div className="q-side-h" style={{ paddingTop: 18 }}>
-                  <span>{header}</span>
+                  <span>{t(`nav.groups.${header}`)}</span>
                 </div>
               ) : null}
               <button
@@ -989,14 +995,20 @@ function SettingsSidebar() {
                 onClick={() => go(settingsPath(item.key))}
               >
                 <item.icon className="q-icon" strokeWidth={1.5} aria-hidden />
-                <span className="lbl">{item.label}</span>
+                <span className="lbl">{t(`nav.sections.${item.key}`)}</span>
                 {item.key === "harnesses" && harnessUpdates > 0 ? (
-                  <span className="ct q-num" title="Harness updates available">
+                  <span className="ct q-num" title={t("nav.harnessUpdates")}>
                     {harnessUpdates}
                   </span>
                 ) : null}
                 {item.key === "hosts" ? (
-                  <span className="ct q-num" title={`${rows.length} hosts, ${deviceCount} devices`}>
+                  <span
+                    className="ct q-num"
+                    title={t("nav.hostsCount", {
+                      hosts: t("nav.hostCount", { count: rows.length }),
+                      devices: t("nav.deviceCount", { count: deviceCount }),
+                    })}
+                  >
                     {rows.length}
                   </span>
                 ) : null}
@@ -1004,12 +1016,12 @@ function SettingsSidebar() {
               {item.key === "providers" ? (
                 <>
                   <div className="q-side-h">
-                    <span>Tools</span>
+                    <span>{t("nav.tools")}</span>
                     <button
                       type="button"
                       className="q-ibtn s22"
-                      aria-label="Add MCP server"
-                      title="Add MCP server"
+                      aria-label={t("nav.addMcp")}
+                      title={t("nav.addMcp")}
                       onClick={() => {
                         setLibrarySelected("__new");
                         goLibrary("/library");
@@ -1028,7 +1040,7 @@ function SettingsSidebar() {
                     }}
                   >
                     <PlugIcon className="q-icon" strokeWidth={1.5} aria-hidden />
-                    <span className="lbl">MCP servers</span>
+                    <span className="lbl">{t("nav.mcpServers")}</span>
                     <span className="ct q-num">{mcpServers.length}</span>
                   </button>
                   {library && !skillsActive ? (
@@ -1062,7 +1074,7 @@ function SettingsSidebar() {
                     }}
                   >
                     <BlocksIcon className="q-icon" strokeWidth={1.5} aria-hidden />
-                    <span className="lbl">Skills</span>
+                    <span className="lbl">{t("nav.skills")}</span>
                     <span className="ct q-num">{skills.length}</span>
                   </button>
                 </>
