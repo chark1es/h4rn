@@ -3,7 +3,7 @@
   "inbox": "受信トレイ",
   "hide": "サイドバーを隠す",
   "show": "サイドバーを表示",
-  "showNeedsYou_other": "サイドバーを表示。{{count}} 件のスレッドが対応待ちです",
+  "showNeedsYou_other": "サイドバーを表示。{{count, number}} 件のスレッドが対応待ちです",
   "newThread": "新しいスレッド",
   "search": "検索または実行",
   "resize": "サイドバーの幅を変更",
@@ -33,7 +33,7 @@
   "unreachable": {
     "host": "{{name}} に接続できませんでした。",
     "aHost": "ホストに接続できませんでした。",
-    "hosts_other": "{{count}} 台のホストに接続できませんでした。",
+    "hosts_other": "{{count, number}} 台のホストに接続できませんでした。",
     "daemon": "デーモンに接続できませんでした。",
     "cached": "キャッシュされたスレッドを表示しています。"
   },
@@ -49,12 +49,12 @@
     "connecting": "接続中…",
     "offline": "オフライン",
     "none": "ホストなし",
-    "hosts_other": "{{online}}/{{count}} ホスト",
-    "machines_other": "{{online}}/{{count}} マシン"
+    "hosts_other": "{{online}}/{{count, number}} ホスト",
+    "machines_other": "{{online}}/{{count, number}} マシン"
   },
   "hosts": {
     "title": "ホスト",
-    "onlineCount_other": "{{online}}/{{count}} オンライン",
+    "onlineCount_other": "{{online}}/{{count, number}} オンライン",
     "online": "オンライン",
     "active": "使用中",
     "dot": {
@@ -65,7 +65,7 @@
     "path": {
       "tailscale": "Tailscale",
       "relay": "リレー",
-      "direct": "直接"
+      "direct": "直結"
     },
     "local": "ローカル",
     "connection": "{{path}}で {{host}} に接続 · 暗号化",
@@ -90,7 +90,8 @@
   },
   "snoozed": {
     "title": "スヌーズ中",
-    "wakesIn": "{{age}}後に再表示"
+    "wakesIn": "{{age}}後に再表示",
+    "wakesSoon": "まもなく再表示"
   },
   "projects": {
     "title": "プロジェクト",
@@ -120,7 +121,7 @@
     "remove": "サイドバーから削除",
     "newThreadInLabel": "{{host}} の {{name}} で新しいスレッド",
     "newThreadInTitle": "{{name}} で新しいスレッド",
-    "empty": "まだスレッドなし。始める",
+    "empty": "スレッドはまだありません。新しく始める",
     "nameLabel": "プロジェクト名",
     "toasts": {
       "keepFailed": "プロジェクトを残せませんでした。",
@@ -139,12 +140,12 @@
     "harnessOn": "{{host}} の {{harness}}",
     "resumeNow": "今すぐ再開",
     "acknowledge": "確認",
-    "reopen": "再開",
+    "reopen": "再び開く",
     "settleNow": "今すぐ整理",
     "share": "ゲストと共有…",
     "unpin": "「作業中」から外す",
     "keep": "「作業中」に残す",
-    "snoozeHours_other": "{{count}} 時間スヌーズ",
+    "snoozeHours_other": "{{count, number}} 時間スヌーズ",
     "snoozeTomorrow": "明日までスヌーズ",
     "resumes": "{{time}} に再開",
     "status": {

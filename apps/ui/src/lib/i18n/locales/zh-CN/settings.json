@@ -748,7 +748,7 @@
     "force": {
       "button": "仍然移除",
       "title_other": "仍然移除 {{count}} 个 worktree？",
-      "description": "这些 worktree 中未提交的更改和未合并的提交将会丢失。正在进行的 rebase、merge、cherry-pick 或 bisect（包括其 autostash）以及暂存的更改都会丢失。当前位于这些路径的检出目录都会被删除。此操作无法撤销。",
+      "description": "这些 worktree 中未提交的更改和未合并的提交将会丢失。正在进行的 rebase、merge、cherry-pick 或 bisect（包括其 autostash）以及暂存的更改都会丢失。当前位于这些路径的检出目录都会被删除。此操作无法撤消。",
       "threadNote_other": "其中 {{count}} 个是由其他工具或你创建的对话工作区。"
     },
     "clearAll": {

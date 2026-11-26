@@ -51,7 +51,10 @@ function shape(flat: Map<string, string>) {
 }
 
 function placeholders(text: string): string[] {
-  return [...text.matchAll(/\{\{\s*([\w.]+)\s*\}\}/g)].map((match) => match[1] as string).sort();
+  // `{{count, number}}` names `count`; the format after the comma may differ.
+  return [...text.matchAll(/\{\{\s*([\w.]+)\s*(?:,[^}]*)?\}\}/g)]
+    .map((match) => match[1] as string)
+    .sort();
 }
 
 function tags(text: string): string[] {
@@ -99,6 +102,16 @@ describe("translation catalogues", () => {
             if (!allowedEmpty) expect(value.trim(), `${locale} ${key}`).not.toBe("");
           }
         });
+
+        // Converted areas format a shown count for the language ("12,000" /
+        // "12.000"); Settings predates the rule and is converted separately.
+        if (namespace !== "settings") {
+          it("formats every count as a number", () => {
+            for (const [key, value] of flat) {
+              expect(value, `${locale} ${key}`).not.toMatch(/\{\{\s*count\s*\}\}/);
+            }
+          });
+        }
 
         it("keeps the same placeholders and markup as English", () => {
           for (const [key, value] of flat) {

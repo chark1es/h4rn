@@ -29,6 +29,7 @@ import { createClientFromEnv, readBootConfig } from "@/lib/client/config";
 import { toProtoError } from "@/lib/client/errors";
 import type { ConnectionSnapshot, EventEnvelope } from "@/lib/client/types";
 import { drafts, moveLocalThreadDraft } from "@/lib/drafts";
+import { i18n } from "@/lib/i18n";
 import { pushRoute, type Route, readRoute, replaceRoute, routePath } from "@/lib/router";
 import { applyTerminalTheme } from "@/lib/terminalTheme";
 import { createThreadLog, foldEvent, isRealTurn, type ThreadLog } from "./projection";
@@ -1783,11 +1784,13 @@ export async function sendMessage(
     if (response.type === "message_accepted" && response.unrecorded) {
       // The agent has the words but the transcript row was not saved. The send
       // succeeded, so the row stays sent and nothing invites a resend.
-      const host = getState().threads[threadId]?.host ?? "The host";
+      const host = getState().threads[threadId]?.host;
       pushToast({
         variant: "info",
-        title: "Delivered, but this thread couldn't record it.",
-        description: `${host} has your message; its transcript row is missing.`,
+        title: i18n.t("composer:toasts.unrecorded.title"),
+        description: host
+          ? i18n.t("composer:toasts.unrecorded.description", { host })
+          : i18n.t("composer:toasts.unrecorded.descriptionAnyHost"),
       });
     }
     const current = getState();
@@ -1835,8 +1838,8 @@ export async function sendMessage(
       }
       pushToast({
         variant: "info",
-        title: "Delivered, or maybe not.",
-        description: `${proto.message} Your draft stays in the composer until its queue row appears, then clears.`,
+        title: i18n.t("composer:toasts.unclear.title"),
+        description: i18n.t("composer:toasts.unclear.draft", { message: proto.message }),
       });
       return "unclear";
     }
@@ -1854,10 +1857,13 @@ export async function sendMessage(
         },
       });
     }
+    const host = current.threads[threadId]?.host;
     pushToast({
       variant: "error",
-      title: `Couldn't send the reply to ${current.threads[threadId]?.host ?? "the host"}.`,
-      description: `${proto.message} Your draft is still in the composer.`,
+      title: host
+        ? i18n.t("composer:toasts.sendFailed.title", { host })
+        : i18n.t("composer:toasts.sendFailed.titleAnyHost"),
+      description: i18n.t("composer:toasts.sendFailed.description", { message: proto.message }),
     });
     return "failed";
   }
@@ -1876,7 +1882,7 @@ async function runQueueAction(
   threadId: ThreadId,
   messageId: string,
   action: QueueAction,
-  label: string,
+  verb: "edit" | "remove" | "move" | "send" | "steer",
 ): Promise<boolean> {
   try {
     const response = await getClient().request({
@@ -1910,12 +1916,12 @@ async function runQueueAction(
       unclear
         ? {
             variant: "info",
-            title: "Delivered, or maybe not.",
-            description: `${proto.message} Check the turn before trying again.`,
+            title: i18n.t("composer:toasts.unclear.title"),
+            description: i18n.t("composer:toasts.unclear.queue", { message: proto.message }),
           }
         : {
             variant: "error",
-            title: `Couldn't ${label} the queued message.`,
+            title: i18n.t(`composer:toasts.queueFailed.${verb}`),
             description: proto.message,
           },
     );

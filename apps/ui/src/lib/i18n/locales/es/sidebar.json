@@ -3,9 +3,9 @@
   "inbox": "Bandeja",
   "hide": "Ocultar barra lateral",
   "show": "Mostrar barra lateral",
-  "showNeedsYou_one": "Mostrar barra lateral. {{count}} hilo te necesita",
-  "showNeedsYou_many": "Mostrar barra lateral. {{count}} hilos te necesitan",
-  "showNeedsYou_other": "Mostrar barra lateral. {{count}} hilos te necesitan",
+  "showNeedsYou_one": "Mostrar barra lateral. {{count, number}} hilo te necesita",
+  "showNeedsYou_many": "Mostrar barra lateral. {{count, number}} hilos te necesitan",
+  "showNeedsYou_other": "Mostrar barra lateral. {{count, number}} hilos te necesitan",
   "newThread": "Nuevo hilo",
   "search": "Buscar o ejecutar",
   "resize": "Cambiar el ancho de la barra lateral",
@@ -28,16 +28,16 @@
   },
   "offline": {
     "title": "Sin conexión",
-    "asOf": "a las {{time}}",
+    "asOf": "última conexión: {{time}}",
     "cantReach": "No se puede conectar con {{name}}.",
     "reconnect": "Reconectar"
   },
   "unreachable": {
     "host": "No se pudo conectar con {{name}}.",
     "aHost": "No se pudo conectar con un host.",
-    "hosts_one": "No se pudo conectar con {{count}} host.",
-    "hosts_many": "No se pudo conectar con {{count}} hosts.",
-    "hosts_other": "No se pudo conectar con {{count}} hosts.",
+    "hosts_one": "No se pudo conectar con {{count, number}} host.",
+    "hosts_many": "No se pudo conectar con {{count, number}} hosts.",
+    "hosts_other": "No se pudo conectar con {{count, number}} hosts.",
     "daemon": "No se pudo conectar con el daemon.",
     "cached": "Se muestran los hilos en caché."
   },
@@ -53,18 +53,18 @@
     "connecting": "Conectando…",
     "offline": "Sin conexión",
     "none": "Sin hosts",
-    "hosts_one": "{{online}} de {{count}} host",
-    "hosts_many": "{{online}} de {{count}} hosts",
-    "hosts_other": "{{online}} de {{count}} hosts",
-    "machines_one": "{{online}} de {{count}} máquina",
-    "machines_many": "{{online}} de {{count}} máquinas",
-    "machines_other": "{{online}} de {{count}} máquinas"
+    "hosts_one": "{{online}} de {{count, number}} host",
+    "hosts_many": "{{online}} de {{count, number}} hosts",
+    "hosts_other": "{{online}} de {{count, number}} hosts",
+    "machines_one": "{{online}} de {{count, number}} máquina",
+    "machines_many": "{{online}} de {{count, number}} máquinas",
+    "machines_other": "{{online}} de {{count, number}} máquinas"
   },
   "hosts": {
     "title": "Hosts",
-    "onlineCount_one": "{{online}} de {{count}} en línea",
-    "onlineCount_many": "{{online}} de {{count}} en línea",
-    "onlineCount_other": "{{online}} de {{count}} en línea",
+    "onlineCount_one": "{{online}} de {{count, number}} en línea",
+    "onlineCount_many": "{{online}} de {{count, number}} en línea",
+    "onlineCount_other": "{{online}} de {{count, number}} en línea",
     "online": "En línea",
     "active": "Activo",
     "dot": {
@@ -75,18 +75,18 @@
     "path": {
       "tailscale": "Tailscale",
       "relay": "Relé",
-      "direct": "Directa"
+      "direct": "Directo"
     },
     "local": "local",
-    "connection": "{{path}} a {{host}} · cifrada",
-    "connectionLatency": "{{path}} a {{host}} · {{latency}} · cifrada",
+    "connection": "{{path}} a {{host}} · cifrado",
+    "connectionLatency": "{{path}} a {{host}} · {{latency}} · cifrado",
     "connecting": "Conectando…",
     "offline": "Sin conexión",
     "empty": {
       "connected": "Conectado a <b>{{name}}</b>. Su lista de hosts no está disponible ahora mismo.",
       "connecting": "Conectando con <b>{{name}}</b>…",
       "unreachable": "<b>{{name}}</b> no está accesible. Usa esta máquina para seguir trabajando.",
-      "unreachableMobile": "<b>{{name}}</b> no está accesible. Desconéctate para dejar de usarla.",
+      "unreachableMobile": "<b>{{name}}</b> no está accesible. Desconéctate para dejar de usarlo.",
       "none": "Aún no hay hosts. Ejecuta <code>{{command}}</code> en una máquina."
     },
     "disconnect": "Desconectar de {{name}}",
@@ -100,7 +100,8 @@
   },
   "snoozed": {
     "title": "Pospuestos",
-    "wakesIn": "vuelve en {{age}}"
+    "wakesIn": "vuelve en {{age}}",
+    "wakesSoon": "vuelve pronto"
   },
   "projects": {
     "title": "Proyectos",
@@ -154,15 +155,15 @@
     "share": "Compartir con un invitado…",
     "unpin": "Quitar de «En curso»",
     "keep": "Mantener en «En curso»",
-    "snoozeHours_one": "Posponer {{count}} h",
-    "snoozeHours_many": "Posponer {{count}} h",
-    "snoozeHours_other": "Posponer {{count}} h",
+    "snoozeHours_one": "Posponer {{count, number}} h",
+    "snoozeHours_many": "Posponer {{count, number}} h",
+    "snoozeHours_other": "Posponer {{count, number}} h",
     "snoozeTomorrow": "Posponer hasta mañana",
-    "resumes": "Se reanuda a las {{time}}",
+    "resumes": "Se reanuda: {{time}}",
     "status": {
       "request": "Solicitud",
       "needsApproval": "Requiere aprobación",
-      "failed": "Falló",
+      "failed": "Fallido",
       "unreachable": "Host inaccesible",
       "queued": "En cola",
       "scheduled": "Reanudación programada",

@@ -22,7 +22,7 @@
       "acknowledge": "確認（完了）",
       "snooze": "1 時間スヌーズ",
       "pin": "「作業中」に残す",
-      "reopen": "整理済みのスレッドを再開",
+      "reopen": "整理済みのスレッドを再び開く",
       "steerQueuedMessage": "キュー内で最も古いメッセージをステア",
       "editQueuedMessage": "キュー内で最新のメッセージを編集"
     },

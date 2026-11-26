@@ -30,6 +30,16 @@
     "plan": "プラン",
     "full_access": "フルアクセス"
   },
+  "efforts": {
+    "minimal": "最小",
+    "low": "低",
+    "medium": "中",
+    "high": "高",
+    "xhigh": "非常に高い",
+    "max": "最大",
+    "ultra": "ウルトラ"
+  },
+  "fast": "高速",
   "states": {
     "working": "作業中",
     "done": "完了",

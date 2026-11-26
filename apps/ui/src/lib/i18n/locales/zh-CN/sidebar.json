@@ -3,7 +3,7 @@
   "inbox": "收件箱",
   "hide": "隐藏侧边栏",
   "show": "显示侧边栏",
-  "showNeedsYou_other": "显示侧边栏。{{count}} 个对话需要你处理",
+  "showNeedsYou_other": "显示侧边栏。{{count, number}} 个对话需要你处理",
   "newThread": "新建对话",
   "search": "搜索或运行",
   "resize": "调整侧边栏宽度",
@@ -33,7 +33,7 @@
   "unreachable": {
     "host": "无法连接 {{name}}。",
     "aHost": "无法连接一台主机。",
-    "hosts_other": "无法连接 {{count}} 台主机。",
+    "hosts_other": "无法连接 {{count, number}} 台主机。",
     "daemon": "无法连接守护进程。",
     "cached": "正在显示缓存的对话。"
   },
@@ -49,12 +49,12 @@
     "connecting": "正在连接…",
     "offline": "离线",
     "none": "没有主机",
-    "hosts_other": "{{online}}/{{count}} 台主机",
-    "machines_other": "{{online}}/{{count}} 台机器"
+    "hosts_other": "{{online}}/{{count, number}} 台主机",
+    "machines_other": "{{online}}/{{count, number}} 台机器"
   },
   "hosts": {
     "title": "主机",
-    "onlineCount_other": "{{online}}/{{count}} 在线",
+    "onlineCount_other": "{{online}}/{{count, number}} 在线",
     "online": "在线",
     "active": "当前使用",
     "dot": {
@@ -68,8 +68,8 @@
       "direct": "直连"
     },
     "local": "本机",
-    "connection": "{{path}}到 {{host}} · 已加密",
-    "connectionLatency": "{{path}}到 {{host}} · {{latency}} · 已加密",
+    "connection": "经 {{path}} 连接 {{host}} · 已加密",
+    "connectionLatency": "经 {{path}} 连接 {{host}} · {{latency}} · 已加密",
     "connecting": "正在连接…",
     "offline": "离线",
     "empty": {
@@ -90,7 +90,8 @@
   },
   "snoozed": {
     "title": "稍后提醒",
-    "wakesIn": "{{age}}后提醒"
+    "wakesIn": "{{age}}后提醒",
+    "wakesSoon": "即将提醒"
   },
   "projects": {
     "title": "项目",
@@ -144,7 +145,7 @@
     "share": "与访客共享…",
     "unpin": "不再保留在“进行中”",
     "keep": "保留在“进行中”",
-    "snoozeHours_other": "{{count}} 小时后提醒",
+    "snoozeHours_other": "{{count, number}} 小时后提醒",
     "snoozeTomorrow": "明天再提醒",
     "resumes": "{{time}} 继续",
     "status": {

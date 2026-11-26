@@ -1,7 +1,10 @@
+import type { TFunction } from "i18next";
 import { CircleAlertIcon, FileTextIcon, RotateCcwIcon, XIcon } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
+import { formatNumber, i18n } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
-import { formatBytes } from "./upload";
+import { describeUploadFailure, formatBytes } from "./upload";
 import type { AttachmentDraft } from "./use-attachments";
 
 function progressPercent(task: AttachmentDraft): number {
@@ -11,36 +14,45 @@ function progressPercent(task: AttachmentDraft): number {
   return Math.min(99, Math.round((snapshot.sentBytes / snapshot.totalBytes) * 100));
 }
 
-/** Short type label from the extension ("JSON", "PNG"), or "File". */
+/** Short type label from the extension ("JSON", "PNG"), or "File" in the active language. */
 export function fileKind(name: string): string {
   const dot = name.lastIndexOf(".");
-  if (dot <= 0 || dot === name.length - 1) return "File";
-  const ext = name.slice(dot + 1);
-  return ext.length <= 5 ? ext.toUpperCase() : "File";
+  const ext = dot <= 0 ? "" : name.slice(dot + 1);
+  return ext.length > 0 && ext.length <= 5
+    ? ext.toUpperCase()
+    : i18n.t("composer:attachments.file");
 }
 
-function statusLine(task: AttachmentDraft): string {
+type ComposerT = TFunction<["composer", "common"]>;
+
+function statusLine(t: ComposerT, task: AttachmentDraft): string {
   const { snapshot } = task;
-  if (task.invalid) return "Not attached";
+  if (task.invalid) return t("attachments.status.notAttached");
   switch (snapshot.phase) {
     case "queued":
-      return "Waiting";
+      return t("attachments.status.waiting");
     case "hashing":
-      return "Reading";
+      return t("attachments.status.reading");
     case "uploading":
-      return `Uploading ${progressPercent(task)}%`;
+      return t("attachments.status.uploading", {
+        percent: formatNumber(progressPercent(task) / 100, { style: "percent" }),
+      });
     case "committing":
-      return "Finishing";
+      return t("attachments.status.finishing");
     case "done":
-      return `${fileKind(task.file.name)} · ${formatBytes(snapshot.totalBytes)}`;
+      return t("attachments.status.done", {
+        kind: fileKind(task.file.name),
+        size: formatBytes(snapshot.totalBytes),
+      });
     case "failed":
-      return "Failed";
+      return t("attachments.status.failed");
     case "cancelled":
-      return "Cancelled";
+      return t("attachments.status.cancelled");
   }
 }
 
 function Chip({ task, onRemove }: { task: AttachmentDraft; onRemove: () => void }) {
+  const { t } = useTranslation(["composer", "common"]);
   const failed = Boolean(task.failure) && (task.invalid || task.snapshot.phase === "failed");
   const percent = progressPercent(task);
   const busy = !task.invalid && task.snapshot.phase !== "done" && task.snapshot.phase !== "failed";
@@ -61,13 +73,13 @@ function Chip({ task, onRemove }: { task: AttachmentDraft; onRemove: () => void 
       </span>
       <span className="q-att-tx">
         <span className="q-att-nm">{task.file.name}</span>
-        <span className="q-att-meta q-num">{statusLine(task)}</span>
+        <span className="q-att-meta q-num">{statusLine(t, task)}</span>
       </span>
       <button
         type="button"
         onClick={onRemove}
-        aria-label={`Remove ${task.file.name}`}
-        title="Remove"
+        aria-label={t("attachments.remove", { name: task.file.name })}
+        title={t("common:remove")}
         className="q-att-x"
       >
         <XIcon className="q-icon s12" strokeWidth={2} aria-hidden />
@@ -87,44 +99,50 @@ export function AttachmentTray({
   onRemove: (key: string) => void;
   onRetry: (key: string) => void;
 }) {
+  const { t } = useTranslation(["composer", "common"]);
   if (tasks.length === 0) return null;
   const failures = tasks.filter(
     (task) => Boolean(task.failure) && (task.invalid || task.snapshot.phase === "failed"),
   );
 
   return (
-    <fieldset className="q-att-tray" aria-label="Attachments">
+    <fieldset className="q-att-tray" aria-label={t("attachments.label")}>
       <div className="q-att-list">
         {tasks.map((task) => (
           <Chip key={task.key} task={task} onRemove={() => onRemove(task.key)} />
         ))}
       </div>
 
-      {failures.slice(0, 2).map((task) => (
-        <div
-          key={`failure-${task.key}`}
-          className="mt-1.5 flex items-start gap-2 rounded-md border border-danger/40 bg-danger-soft/60 px-2 py-1.5"
-        >
-          <CircleAlertIcon className="mt-0.5 size-3.5 shrink-0 text-danger" aria-hidden />
-          <div className="min-w-0 flex-1">
-            <p className="text-small font-medium text-danger">{task.file.name} was not attached.</p>
-            <p className="text-small leading-relaxed text-danger/85">
-              {task.failure?.message}
-              {task.failure?.hint ? ` ${task.failure.hint}` : ""}
-            </p>
+      {failures.slice(0, 2).map((task) => {
+        const failure = task.failure ? describeUploadFailure(task.failure, task.file.name) : null;
+        return (
+          <div
+            key={`failure-${task.key}`}
+            className="mt-1.5 flex items-start gap-2 rounded-md border border-danger/40 bg-danger-soft/60 px-2 py-1.5"
+          >
+            <CircleAlertIcon className="mt-0.5 size-3.5 shrink-0 text-danger" aria-hidden />
+            <div className="min-w-0 flex-1">
+              <p className="text-small font-medium text-danger">
+                {t("attachments.notAttached", { name: task.file.name })}
+              </p>
+              <p className="text-small leading-relaxed text-danger/85">
+                {failure?.message}
+                {failure?.hint ? ` ${failure.hint}` : ""}
+              </p>
+            </div>
+            {!task.invalid ? (
+              <button
+                type="button"
+                onClick={() => onRetry(task.key)}
+                className="flex h-8 shrink-0 items-center gap-1 rounded-sm border border-danger/40 px-1.5 text-small font-medium text-danger transition-colors duration-[var(--dur-instant)] hover:bg-danger-soft focus-visible:ring-2 focus-visible:ring-focus focus-visible:outline-none sm:h-6"
+              >
+                <RotateCcwIcon className="size-3" aria-hidden />
+                {t("common:retry")}
+              </button>
+            ) : null}
           </div>
-          {!task.invalid ? (
-            <button
-              type="button"
-              onClick={() => onRetry(task.key)}
-              className="flex h-8 shrink-0 items-center gap-1 rounded-sm border border-danger/40 px-1.5 text-small font-medium text-danger transition-colors duration-[var(--dur-instant)] hover:bg-danger-soft focus-visible:ring-2 focus-visible:ring-focus focus-visible:outline-none sm:h-6"
-            >
-              <RotateCcwIcon className="size-3" aria-hidden />
-              Retry
-            </button>
-          ) : null}
-        </div>
-      ))}
+        );
+      })}
     </fieldset>
   );
 }

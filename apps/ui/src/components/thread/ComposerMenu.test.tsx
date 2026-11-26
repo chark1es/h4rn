@@ -3,6 +3,9 @@
 import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+// The app sets up translations in main.tsx; a component test loads them itself.
+import "@/lib/i18n";
+
 import { ComposerMenu, type ComposerMenuRow } from "./ComposerMenu";
 
 const rows: ComposerMenuRow[] = [{ kind: "file", id: "src/main.ts", path: "src/main.ts" }];

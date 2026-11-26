@@ -1,0 +1,174 @@
+{
+  "label": "メッセージのコンポーザー",
+  "replyTo": "{{harness}} に返信",
+  "replyToOn": "{{host}} の {{harness}} に返信",
+  "disabled": {
+    "offline": "返信は下書きとして保存され、{{host}} が再接続すると送信されます",
+    "unreachable": "{{host}} に到達できません。下書きはここに残ります。"
+  },
+  "send": {
+    "sendLabel": "返信を送信",
+    "saveLabel": "キュー内のメッセージを保存",
+    "saveTitle": "キュー内のメッセージを保存",
+    "steerTitle": "実行中のターンへステア（Enter）",
+    "queueTitle": "次のターンのキューに追加（Enter）",
+    "sendTitle": "送信（Enter）"
+  },
+  "edit": {
+    "title": "キュー内のメッセージを編集中",
+    "titleNoSteer": "キュー内のメッセージを編集中 · このエージェントはターンの途中では受け付けられません"
+  },
+  "attach": {
+    "label": "ファイルを添付",
+    "drop": "ドロップしてファイルを添付",
+    "count_other": "{{count, number}} 件を添付"
+  },
+  "mention": "ファイルをメンション",
+  "menu": {
+    "files": "ファイル",
+    "commands": "コマンド",
+    "filesIn": "{{workspace}} のファイル",
+    "searching": "このワークスペースを検索中…",
+    "noFilesMatch": "「{{query}}」に一致するファイルはありません。",
+    "noCommandsMatch": "「{{query}}」に一致するコマンドはありません。",
+    "noFiles": "{{workspace}} にファイルはありません。",
+    "noCommands": "このスレッドで使えるコマンドはありません。",
+    "capped_other": "最初の {{count, number}} 件のファイルを表示しています。",
+    "cappedUnknown": "インデックスが到達できたファイルのみを表示しています。",
+    "keys": {
+      "move": "↑↓ 移動",
+      "choose": "↵ 選択",
+      "close": "esc 閉じる"
+    },
+    "errors": {
+      "unexpected": "デーモンがファイル一覧の要求に別の応答を返しました。",
+      "unreadable": "ワークスペースを読み込めませんでした。"
+    }
+  },
+  "commands": {
+    "stop": {
+      "label": "ターンを停止",
+      "hint": "エージェントの作業を中断"
+    },
+    "changes": {
+      "label": "変更を開く",
+      "hint": "このスレッドが変更したファイルの差分"
+    },
+    "subagents": {
+      "label": "サブエージェントを開く",
+      "hint": "委任した作業とその予算"
+    },
+    "terminal": {
+      "open": "ターミナルを開く",
+      "hide": "ターミナルを隠す",
+      "hint": "このスレッドのワークスペースのシェル"
+    },
+    "ide": {
+      "open": "IDE を開く",
+      "back": "スレッドに戻る",
+      "hint": "{{project}} を編集"
+    },
+    "newThread": {
+      "label": "新しいスレッド",
+      "hint": "{{project}} で開始"
+    }
+  },
+  "controls": {
+    "label": "スレッドの設定",
+    "thread": "スレッド",
+    "nextTurn": "{{harness}} · 次のターンから適用されます。",
+    "model": "モデル",
+    "use": "使用",
+    "permissions": "権限",
+    "permissionMode": "権限モード",
+    "agentManagesMode": "{{mode}} · モードはエージェント自身が管理します。",
+    "effort": "推論の強度",
+    "harnessDefault": "harness のデフォルト",
+    "harnessDefaultHint": "harness 自身の設定を使用",
+    "speed": "速度",
+    "fastHint": "優先サービスティア、使用量が増えます",
+    "noFastTier": "このモデルに高速ティアはありません",
+    "unknownFastTier": "このモデルの高速ティアは不明です"
+  },
+  "attachments": {
+    "label": "添付ファイル",
+    "file": "ファイル",
+    "remove": "{{name}} を削除",
+    "notAttached": "{{name}} は添付されませんでした。",
+    "status": {
+      "notAttached": "未添付",
+      "waiting": "待機中",
+      "reading": "読み込み中",
+      "uploading": "アップロード中 {{percent}}",
+      "finishing": "仕上げ中",
+      "done": "{{kind}} · {{size}}",
+      "failed": "失敗",
+      "cancelled": "キャンセル済み"
+    },
+    "blocked": {
+      "uploading": "添付ファイルのアップロードが終わるまでお待ちください。",
+      "failed": "失敗した添付ファイルを再試行するか、削除してください。",
+      "tooMany_other": "1 件のメッセージに添付できるのは {{max}} 件までです。送信前に {{count, number}} 件削除してください。"
+    },
+    "errors": {
+      "empty": "このファイルは空です。",
+      "emptyHint": "内容のあるファイルを選ぶか、削除してください。",
+      "tooLarge": "{{name}} は {{size}} です。上限は {{limit}} です。",
+      "tooLargeHint": "圧縮するか、小さなファイルに分割してください。",
+      "nameTooLong": "ファイル名が長すぎます。",
+      "nameTooLongHint": "{{max}} 文字以内に名前を変更してから、もう一度添付してください。",
+      "changed": "添付中にファイルが変更されました。",
+      "released": "アップロードが終わる前に添付ファイルのデータが解放されました。",
+      "hashMissing": "添付ファイルのハッシュがありません。",
+      "noStream": "デーモンがアップロードストリームを開きませんでした。",
+      "incomplete": "アップロードストリームが不完全です。",
+      "notConfirmed": "デーモンがアップロードを確認しませんでした。",
+      "stalled": "デーモンが {{percent}} の時点で {{name}} の確認を停止しました。"
+    }
+  },
+  "queue": {
+    "queued": "キュー内",
+    "maybeDelivered": "配信済みの可能性あり",
+    "hint": {
+      "maybeDelivered": "配信済みの可能性があります。もう一度送ると 2 通目が届きます",
+      "steers": "「今すぐ送信」でこのターンへステアします",
+      "waits": "このターンの終了を待ちます",
+      "next": "「今すぐ送信」で次に開始します"
+    },
+    "sendNow": "今すぐ送信",
+    "sendAgain": "もう一度送信",
+    "sendAgainTitle": "このメッセージをもう一度送信します。すでにターンに含まれている可能性があります",
+    "steerTitle": "このメッセージを実行中のターンへステア",
+    "frontTitle": "このメッセージをキューの先頭へ移動",
+    "editTitle": "コンポーザーで編集",
+    "discard": "破棄",
+    "discardTitle": "この行を破棄",
+    "removeTitle": "キューから削除",
+    "moveUp": "上へ移動",
+    "moveDown": "下へ移動"
+  },
+  "toasts": {
+    "unrecorded": {
+      "title": "配信されましたが、このスレッドに記録できませんでした。",
+      "description": "{{host}} はメッセージを受け取りましたが、トランスクリプトの行がありません。",
+      "descriptionAnyHost": "ホストはメッセージを受け取りましたが、トランスクリプトの行がありません。"
+    },
+    "unclear": {
+      "title": "配信されたかどうか不明です。",
+      "draft": "{{message}} 下書きは、キューの行が表示されるまでコンポーザーに残り、その後消去されます。",
+      "queue": "{{message}} 再試行する前にターンを確認してください。"
+    },
+    "sendFailed": {
+      "title": "{{host}} に返信を送信できませんでした。",
+      "titleAnyHost": "ホストに返信を送信できませんでした。",
+      "description": "{{message}} 下書きはコンポーザーに残っています。"
+    },
+    "queueFailed": {
+      "edit": "キュー内のメッセージを編集できませんでした。",
+      "remove": "キュー内のメッセージを削除できませんでした。",
+      "move": "キュー内のメッセージを移動できませんでした。",
+      "send": "キュー内のメッセージを送信できませんでした。",
+      "steer": "キュー内のメッセージをステアできませんでした。"
+    }
+  }
+}

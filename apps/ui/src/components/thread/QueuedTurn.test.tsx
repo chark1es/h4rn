@@ -3,7 +3,8 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { QueuedMessage, ThreadSummary } from "@/gen";
-import { QueuedTurn } from "./ThreadStream";
+import { setLocalePreference } from "@/lib/i18n";
+import { QueuedTurn, sendNowHint } from "./QueuedTurn";
 
 const mock = vi.hoisted(() => ({
   sendQueuedNow: vi.fn(async () => true),
@@ -203,6 +204,34 @@ describe("QueuedTurn", () => {
     expect(screen.getByText("Send now starts it next")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Send now" }).getAttribute("title") ?? "").toContain(
       "front of the queue",
+    );
+  });
+});
+
+describe("QueuedTurn in another language", () => {
+  afterEach(async () => {
+    cleanup();
+    await setLocalePreference("en");
+  });
+
+  it("words the row, its hint and its actions in the active language", async () => {
+    await setLocalePreference("es");
+    render(
+      <QueuedTurn
+        threadId="th_one"
+        summary={summary()}
+        message={message}
+        index={0}
+        total={2}
+        editing={false}
+      />,
+    );
+    expect(screen.getByText("En cola")).toBeTruthy();
+    expect(screen.getByText("«Enviar ahora» lo dirige a este turno")).toBeTruthy();
+    expect(screen.getByRole("button", { name: /Enviar ahora/ })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Bajar" })).toBeTruthy();
+    expect(sendNowHint(summary(), { ...message, delivery_unknown: true })).toBe(
+      "Puede que se haya entregado; enviarlo de nuevo añade una segunda copia",
     );
   });
 });

@@ -1,0 +1,180 @@
+{
+  "label": "Compositor de mensajes",
+  "replyTo": "Responder a {{harness}}",
+  "replyToOn": "Responder a {{harness}} en {{host}}",
+  "disabled": {
+    "offline": "Tu respuesta se guarda como borrador y se envía cuando {{host}} se reconecte",
+    "unreachable": "{{host}} no está accesible. El borrador se queda aquí."
+  },
+  "send": {
+    "sendLabel": "Enviar respuesta",
+    "saveLabel": "Guardar mensaje en cola",
+    "saveTitle": "Guardar el mensaje en cola",
+    "steerTitle": "Dirigir al turno en curso (Enter)",
+    "queueTitle": "Poner en cola para el siguiente turno (Enter)",
+    "sendTitle": "Enviar (Enter)"
+  },
+  "edit": {
+    "title": "Editando un mensaje en cola",
+    "titleNoSteer": "Editando un mensaje en cola · este agente no puede recibirlo a mitad de turno"
+  },
+  "attach": {
+    "label": "Adjuntar archivos",
+    "drop": "Suelta archivos para adjuntarlos",
+    "count_one": "{{count, number}} adjunto",
+    "count_many": "{{count, number}} adjuntos",
+    "count_other": "{{count, number}} adjuntos"
+  },
+  "mention": "Mencionar un archivo",
+  "menu": {
+    "files": "Archivos",
+    "commands": "Comandos",
+    "filesIn": "Archivos en {{workspace}}",
+    "searching": "Buscando en este espacio de trabajo…",
+    "noFilesMatch": "Ningún archivo coincide con «{{query}}».",
+    "noCommandsMatch": "Ningún comando coincide con «{{query}}».",
+    "noFiles": "No hay archivos en {{workspace}}.",
+    "noCommands": "No hay comandos disponibles para este hilo.",
+    "capped_one": "Se muestra solo {{count, number}} archivo.",
+    "capped_many": "Se muestran los primeros {{count, number}} archivos.",
+    "capped_other": "Se muestran los primeros {{count, number}} archivos.",
+    "cappedUnknown": "Se muestran solo los archivos que alcanzó el índice.",
+    "keys": {
+      "move": "↑↓ mover",
+      "choose": "↵ elegir",
+      "close": "esc cerrar"
+    },
+    "errors": {
+      "unexpected": "El daemon respondió a un listado de archivos con otra cosa.",
+      "unreadable": "No se pudo leer el espacio de trabajo."
+    }
+  },
+  "commands": {
+    "stop": {
+      "label": "Detener el turno",
+      "hint": "Interrumpe lo que está haciendo el agente"
+    },
+    "changes": {
+      "label": "Abrir cambios",
+      "hint": "El diff de los archivos que tocó este hilo"
+    },
+    "subagents": {
+      "label": "Abrir subagentes",
+      "hint": "El trabajo delegado y su presupuesto"
+    },
+    "terminal": {
+      "open": "Abrir la terminal",
+      "hide": "Ocultar la terminal",
+      "hint": "La shell en el espacio de trabajo de este hilo"
+    },
+    "ide": {
+      "open": "Abrir el IDE",
+      "back": "Volver al hilo",
+      "hint": "Editar {{project}}"
+    },
+    "newThread": {
+      "label": "Hilo nuevo",
+      "hint": "Empieza uno en {{project}}"
+    }
+  },
+  "controls": {
+    "label": "Ajustes del hilo",
+    "thread": "Hilo",
+    "nextTurn": "{{harness}} · se aplican en el siguiente turno.",
+    "model": "Modelo",
+    "use": "Usar",
+    "permissions": "Permisos",
+    "permissionMode": "Modo de permisos",
+    "agentManagesMode": "{{mode}} · el agente gestiona su propio modo.",
+    "effort": "Esfuerzo de razonamiento",
+    "harnessDefault": "Predeterminado del harness",
+    "harnessDefaultHint": "Usa el ajuste propio del harness",
+    "speed": "Velocidad",
+    "fastHint": "Nivel de servicio prioritario, más uso",
+    "noFastTier": "Este modelo no tiene nivel rápido",
+    "unknownFastTier": "No se conoce un nivel rápido para este modelo"
+  },
+  "attachments": {
+    "label": "Adjuntos",
+    "file": "Archivo",
+    "remove": "Quitar {{name}}",
+    "notAttached": "{{name}} no se adjuntó.",
+    "status": {
+      "notAttached": "Sin adjuntar",
+      "waiting": "En espera",
+      "reading": "Leyendo",
+      "uploading": "Subiendo {{percent}}",
+      "finishing": "Terminando",
+      "done": "{{kind}} · {{size}}",
+      "failed": "Fallido",
+      "cancelled": "Cancelado"
+    },
+    "blocked": {
+      "uploading": "Espera a que terminen de subirse los adjuntos.",
+      "failed": "Reintenta o quita el adjunto fallido.",
+      "tooMany_one": "Un mensaje admite {{max}} adjuntos. Quita {{count, number}} antes de enviarlo.",
+      "tooMany_many": "Un mensaje admite {{max}} adjuntos. Quita {{count, number}} antes de enviarlo.",
+      "tooMany_other": "Un mensaje admite {{max}} adjuntos. Quita {{count, number}} antes de enviarlo."
+    },
+    "errors": {
+      "empty": "Este archivo está vacío.",
+      "emptyHint": "Elige un archivo con contenido o quítalo.",
+      "tooLarge": "{{name}} ocupa {{size}}; el límite es {{limit}}.",
+      "tooLargeHint": "Comprímelo o divídelo en archivos más pequeños.",
+      "nameTooLong": "El nombre del archivo es demasiado largo.",
+      "nameTooLongHint": "Cámbiale el nombre a {{max}} caracteres o menos y vuelve a adjuntarlo.",
+      "changed": "El archivo cambió mientras se adjuntaba.",
+      "released": "Los bytes del adjunto se liberaron antes de terminar la subida.",
+      "hashMissing": "Falta el hash del adjunto.",
+      "noStream": "El daemon no abrió un flujo de subida.",
+      "incomplete": "El flujo de subida está incompleto.",
+      "notConfirmed": "El daemon no confirmó la subida.",
+      "stalled": "El daemon dejó de confirmar {{name}} al {{percent}}."
+    }
+  },
+  "queue": {
+    "queued": "En cola",
+    "maybeDelivered": "Puede que se haya entregado",
+    "hint": {
+      "maybeDelivered": "Puede que se haya entregado; enviarlo de nuevo añade una segunda copia",
+      "steers": "«Enviar ahora» lo dirige a este turno",
+      "waits": "Espera a que termine este turno",
+      "next": "«Enviar ahora» lo inicia a continuación"
+    },
+    "sendNow": "Enviar ahora",
+    "sendAgain": "Enviar de nuevo",
+    "sendAgainTitle": "Envía este mensaje de nuevo; puede que ya esté en el turno",
+    "steerTitle": "Dirige este mensaje al turno en curso",
+    "frontTitle": "Mueve este mensaje al principio de la cola",
+    "editTitle": "Editar en el compositor",
+    "discard": "Descartar",
+    "discardTitle": "Descartar esta fila",
+    "removeTitle": "Quitar de la cola",
+    "moveUp": "Subir",
+    "moveDown": "Bajar"
+  },
+  "toasts": {
+    "unrecorded": {
+      "title": "Entregado, pero este hilo no pudo registrarlo.",
+      "description": "{{host}} tiene tu mensaje; falta su fila en la transcripción.",
+      "descriptionAnyHost": "El host tiene tu mensaje; falta su fila en la transcripción."
+    },
+    "unclear": {
+      "title": "Entregado, o puede que no.",
+      "draft": "{{message}} Tu borrador se queda en el compositor hasta que aparezca su fila en la cola; después se borra.",
+      "queue": "{{message}} Revisa el turno antes de volver a intentarlo."
+    },
+    "sendFailed": {
+      "title": "No se pudo enviar la respuesta a {{host}}.",
+      "titleAnyHost": "No se pudo enviar la respuesta al host.",
+      "description": "{{message}} Tu borrador sigue en el compositor."
+    },
+    "queueFailed": {
+      "edit": "No se pudo editar el mensaje en cola.",
+      "remove": "No se pudo quitar el mensaje en cola.",
+      "move": "No se pudo mover el mensaje en cola.",
+      "send": "No se pudo enviar el mensaje en cola.",
+      "steer": "No se pudo dirigir el mensaje en cola."
+    }
+  }
+}

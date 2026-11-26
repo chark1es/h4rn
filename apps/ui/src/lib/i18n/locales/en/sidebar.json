@@ -3,8 +3,8 @@
   "inbox": "Inbox",
   "hide": "Hide sidebar",
   "show": "Show sidebar",
-  "showNeedsYou_one": "Show sidebar. {{count}} thread needs you",
-  "showNeedsYou_other": "Show sidebar. {{count}} threads need you",
+  "showNeedsYou_one": "Show sidebar. {{count, number}} thread needs you",
+  "showNeedsYou_other": "Show sidebar. {{count, number}} threads need you",
   "newThread": "New thread",
   "search": "Search or run",
   "resize": "Resize sidebar",
@@ -34,8 +34,8 @@
   "unreachable": {
     "host": "Couldn’t reach {{name}}.",
     "aHost": "Couldn’t reach a host.",
-    "hosts_one": "Couldn’t reach {{count}} host.",
-    "hosts_other": "Couldn’t reach {{count}} hosts.",
+    "hosts_one": "Couldn’t reach {{count, number}} host.",
+    "hosts_other": "Couldn’t reach {{count, number}} hosts.",
     "daemon": "Couldn’t reach the daemon.",
     "cached": "Showing cached threads."
   },
@@ -51,15 +51,15 @@
     "connecting": "Connecting…",
     "offline": "Offline",
     "none": "No hosts",
-    "hosts_one": "{{online}} of {{count}} host",
-    "hosts_other": "{{online}} of {{count}} hosts",
-    "machines_one": "{{online}} of {{count}} machine",
-    "machines_other": "{{online}} of {{count}} machines"
+    "hosts_one": "{{online}} of {{count, number}} host",
+    "hosts_other": "{{online}} of {{count, number}} hosts",
+    "machines_one": "{{online}} of {{count, number}} machine",
+    "machines_other": "{{online}} of {{count, number}} machines"
   },
   "hosts": {
     "title": "Hosts",
-    "onlineCount_one": "{{online}} of {{count}} online",
-    "onlineCount_other": "{{online}} of {{count}} online",
+    "onlineCount_one": "{{online}} of {{count, number}} online",
+    "onlineCount_other": "{{online}} of {{count, number}} online",
     "online": "Online",
     "active": "Active",
     "dot": {
@@ -95,7 +95,8 @@
   },
   "snoozed": {
     "title": "Snoozed",
-    "wakesIn": "wakes in {{age}}"
+    "wakesIn": "wakes in {{age}}",
+    "wakesSoon": "wakes soon"
   },
   "projects": {
     "title": "Projects",
@@ -149,8 +150,8 @@
     "share": "Share with guest…",
     "unpin": "Unpin from Working",
     "keep": "Keep in Working",
-    "snoozeHours_one": "Snooze for {{count}} h",
-    "snoozeHours_other": "Snooze for {{count}} h",
+    "snoozeHours_one": "Snooze for {{count, number}} h",
+    "snoozeHours_other": "Snooze for {{count, number}} h",
     "snoozeTomorrow": "Snooze until tomorrow",
     "resumes": "Resumes {{time}}",
     "status": {

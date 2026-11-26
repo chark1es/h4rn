@@ -1,6 +1,7 @@
 import { type RefObject, useCallback, useEffect, useRef, useState } from "react";
 
 import type { Attachment } from "@/gen";
+import { formatNumber, i18n } from "@/lib/i18n";
 import { getClient } from "@/lib/store/appStore";
 
 import { MAX_ATTACHMENTS, pastedTextName, TEXT_ATTACHMENT_THRESHOLD } from "./chunker";
@@ -275,13 +276,14 @@ export function useAttachmentDrafts(
   const blockedReason = !options.enabled
     ? options.disabledReason
     : uploading
-      ? "Wait for the attachments to finish uploading."
+      ? i18n.t("composer:attachments.blocked.uploading")
       : failed
-        ? "Retry or remove the failed attachment."
+        ? i18n.t("composer:attachments.blocked.failed")
         : drafts.length > MAX_ATTACHMENTS
-          ? `A message can carry ${MAX_ATTACHMENTS} attachments. Remove ${
-              drafts.length - MAX_ATTACHMENTS
-            } before sending.`
+          ? i18n.t("composer:attachments.blocked.tooMany", {
+              max: formatNumber(MAX_ATTACHMENTS),
+              count: drafts.length - MAX_ATTACHMENTS,
+            })
           : null;
 
   return {

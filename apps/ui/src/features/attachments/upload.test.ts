@@ -1,9 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
 import type { BlobInfo } from "@/gen";
+import { setLocalePreference } from "@/lib/i18n";
 import { MAX_ATTACHMENT_BYTES } from "./chunker";
 import {
   createUploadSnapshot,
+  describeUploadFailure,
   formatBytes,
   reduceUpload,
   toAttachment,
@@ -75,11 +77,18 @@ describe("upload state machine", () => {
         nextSeq: 1,
         digest: "abc123",
       }),
-      { type: "failed", failure: { message: "Connection dropped.", hint: "Retry." } },
+      {
+        type: "failed",
+        failure: { kind: "error", message: "Connection dropped.", hint: "Retry." },
+      },
     );
 
     expect(failed.phase).toBe("failed");
-    expect(failed.failure).toEqual({ message: "Connection dropped.", hint: "Retry." });
+    expect(failed.failure).toEqual({
+      kind: "error",
+      message: "Connection dropped.",
+      hint: "Retry.",
+    });
     expect(failed).toMatchObject({
       uploadId: "up_1",
       chunkSize: 1024,
@@ -116,7 +125,7 @@ describe("upload state machine", () => {
 
   it("clears the failure when cancelled", () => {
     const state = reduceUpload(
-      snapshot({ phase: "failed", failure: { message: "No.", hint: null } }),
+      snapshot({ phase: "failed", failure: { kind: "error", message: "No.", hint: null } }),
       { type: "cancelled" },
     );
     expect(state).toMatchObject({ phase: "cancelled", failure: null });
@@ -130,20 +139,38 @@ describe("validateFile", () => {
 
   it("rejects an empty file with an action", () => {
     const failure = validateFile(new File([], "empty.txt"));
-    expect(failure?.message).toMatch(/empty/i);
-    expect(failure?.hint).toMatch(/remove/i);
+    expect(failure).toEqual({ kind: "empty" });
+    const text = describeUploadFailure(failure as NonNullable<typeof failure>, "empty.txt");
+    expect(text.message).toMatch(/empty/i);
+    expect(text.hint).toMatch(/remove/i);
   });
 
   it("rejects a file over the daemon limit and names both sizes", () => {
     const failure = validateFile(new File([new Uint8Array(MAX_ATTACHMENT_BYTES + 1)], "huge.bin"));
-    expect(failure?.message).toContain("huge.bin");
-    expect(failure?.message).toContain("50.0 MiB");
-    expect(failure?.hint).toMatch(/compress|split/i);
+    expect(failure).toMatchObject({ kind: "tooLarge" });
+    const text = describeUploadFailure(failure as NonNullable<typeof failure>, "huge.bin");
+    expect(text.message).toContain("huge.bin");
+    expect(text.message).toContain("50.0 MiB");
+    expect(text.hint).toMatch(/compress|split/i);
   });
 
   it("rejects a filename longer than 255 characters", () => {
     const failure = validateFile(new File(["x"], `${"a".repeat(256)}.txt`));
-    expect(failure?.message).toMatch(/name is too long/i);
+    expect(failure).toEqual({ kind: "nameTooLong" });
+    const text = describeUploadFailure(failure as NonNullable<typeof failure>, "a.txt");
+    expect(text.message).toMatch(/name is too long/i);
+    expect(text.hint).toContain("255");
+  });
+
+  it("words a check in the language active when it is shown", async () => {
+    const failure = validateFile(new File([new Uint8Array(MAX_ATTACHMENT_BYTES + 1)], "huge.bin"));
+    await setLocalePreference("es");
+    const text = describeUploadFailure(failure as NonNullable<typeof failure>, "huge.bin");
+    expect(text.message).toBe("huge.bin ocupa 50,0 MiB; el límite es 50,0 MiB.");
+    // A daemon's own text is shown as sent.
+    expect(
+      describeUploadFailure({ kind: "error", message: "Disk full.", hint: null }, "x").message,
+    ).toBe("Disk full.");
   });
 });
 
@@ -162,8 +189,12 @@ describe("toAttachment", () => {
 describe("formatBytes", () => {
   it("uses bytes, KiB and MiB at their boundaries", () => {
     expect(formatBytes(0)).toBe("0 B");
-    expect(formatBytes(1023)).toBe("1023 B");
+    expect(formatBytes(1023)).toBe("1,023 B");
     expect(formatBytes(1024)).toBe("1.0 KiB");
     expect(formatBytes(1024 * 1024)).toBe("1.0 MiB");
   });
+});
+
+afterEach(async () => {
+  await setLocalePreference("en");
 });

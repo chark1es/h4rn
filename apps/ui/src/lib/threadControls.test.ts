@@ -1,6 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
 import type { ThreadSummary } from "@/gen";
+import { setLocalePreference } from "@/lib/i18n";
 import {
   effortLabel,
   fastSupported,
@@ -192,6 +193,19 @@ describe("thread controls", () => {
     expect(modeLabel("auto_accept_edits")).toBe("Auto-accept edits");
     expect(effortLabel("xhigh")).toBe("Extra high");
     expect(effortLabel("medium")).toBe("Medium");
+    // An agent's own effort name is shown as it sent it.
+    expect(effortLabel("turbo")).toBe("Turbo");
+  });
+
+  it("names modes, efforts and Fast in the active language", async () => {
+    await setLocalePreference("ja");
+    expect(modeLabel("full_access")).toBe("フルアクセス");
+    expect(threadModeChoices("codex").map((choice) => choice.label)).toContain("フルアクセス");
+    expect(effortLabel("xhigh")).toBe("非常に高い");
+    expect(effortLabel("turbo")).toBe("Turbo");
+    expect(
+      nonDefaultSettings(summary({ reasoning_effort: "high", fast: true }), "approval_required"),
+    ).toEqual(["高", "高速"]);
   });
 
   it("keeps the current model at the head of the picker", () => {
@@ -236,4 +250,8 @@ describe("thread controls", () => {
       ]),
     ).toBe("claude-sonnet-5-5");
   });
+});
+
+afterEach(async () => {
+  await setLocalePreference("en");
 });

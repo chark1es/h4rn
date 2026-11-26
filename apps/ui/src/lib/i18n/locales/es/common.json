@@ -30,6 +30,16 @@
     "plan": "Plan",
     "full_access": "Acceso completo"
   },
+  "efforts": {
+    "minimal": "Mínimo",
+    "low": "Bajo",
+    "medium": "Medio",
+    "high": "Alto",
+    "xhigh": "Muy alto",
+    "max": "Máximo",
+    "ultra": "Ultra"
+  },
+  "fast": "Rápido",
   "states": {
     "working": "En curso",
     "done": "Terminado",
