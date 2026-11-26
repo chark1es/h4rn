@@ -65,6 +65,13 @@ struct PushEnabledArgs {
     enabled: bool,
 }
 
+#[cfg(target_os = "android")]
+#[derive(serde::Serialize)]
+struct PushReconcileLiveArgs<'a> {
+    #[serde(rename = "stoppedThreadIds")]
+    stopped_thread_ids: &'a [String],
+}
+
 #[cfg(any(target_os = "android", target_os = "ios"))]
 #[derive(serde::Deserialize)]
 struct PushTokenValue {
@@ -305,6 +312,56 @@ fn push_set_enabled(app: tauri::AppHandle, enabled: bool) -> Result<(), String> 
     }
 }
 
+/// Mirrors the Android Live Updates switch into the notification service
+/// (ADR-053). Off also cancels every ongoing entry already showing. iOS has no
+/// Live Updates, so the command is a no-op there.
+#[tauri::command]
+fn push_set_live_updates(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    {
+        let bridge = app.state::<PushBridge>();
+        bridge
+            .0
+            .run_mobile_plugin::<()>("pushSetLiveUpdates", PushEnabledArgs { enabled })
+            .map_err(|error| error.to_string())
+    }
+
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (app, enabled);
+        Ok(())
+    }
+}
+
+/// Cancels the Android Live Updates of `stopped_thread_ids`, the threads the
+/// connected machine lists with no turn running. Threads it does not list are
+/// left alone: another machine may be running them (ADR-053).
+#[tauri::command]
+fn push_reconcile_live(
+    app: tauri::AppHandle,
+    stopped_thread_ids: Vec<String>,
+) -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    {
+        let bridge = app.state::<PushBridge>();
+        bridge
+            .0
+            .run_mobile_plugin::<()>(
+                "pushReconcileLive",
+                PushReconcileLiveArgs {
+                    stopped_thread_ids: &stopped_thread_ids,
+                },
+            )
+            .map_err(|error| error.to_string())
+    }
+
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (app, stopped_thread_ids);
+        Ok(())
+    }
+}
+
 /// Returns the thread link from a notification tap that cold-started the app.
 ///
 /// iOS buffers the tap natively because the page did not exist when it arrived;
@@ -420,6 +477,8 @@ pub fn run() {
             push_token,
             push_set_foreground_thread,
             push_set_enabled,
+            push_set_live_updates,
+            push_reconcile_live,
             push_take_pending_link,
             deep_link_current,
             preview::preview_capabilities,

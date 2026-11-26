@@ -2164,6 +2164,583 @@ async fn the_window_timer_sends_an_ingested_alert() {
 
 #[tokio::test]
 #[ignore = "requires H4RN_TEST_DATABASE_URL (use ./scripts/test-connect.sh)"]
+async fn a_working_update_is_deduped_and_goes_to_android_only() {
+    use h4rn_protocol::{AgentAlertState, ThreadId};
+    use p256::ecdsa::SigningKey;
+    use p256::pkcs8::{EncodePrivateKey, LineEnding};
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "access_token": "test-access-token",
+            "expires_in": 3600,
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/projects/demo/messages:send"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"name": "x"})))
+        .mount(&server)
+        .await;
+
+    let key = SigningKey::random(&mut rand_core::OsRng);
+    let pem = key
+        .to_pkcs8_pem(LineEnding::LF)
+        .expect("encode PKCS#8 PEM")
+        .to_string();
+    let config = Config {
+        fcm_service_account: Some(service_account(&server, "demo")),
+        fcm_token_url: format!("{}/token", server.uri()),
+        fcm_url: server.uri(),
+        apns_key: Some(pem),
+        apns_key_id: Some("KEYID12345".to_string()),
+        apns_team_id: Some("TEAM123456".to_string()),
+        apns_url: server.uri(),
+        apns_topic: "dev.h4rn.app".to_string(),
+        ..Config::default()
+    };
+    let state = test_state().await;
+    let subject = Uuid::now_v7().to_string();
+    let android = actor_with_subject(&state, ConnectDeviceKind::Mobile, None, &subject).await;
+    let iphone = actor_with_subject(&state, ConnectDeviceKind::Mobile, None, &subject).await;
+    let old_android = actor_with_subject(&state, ConnectDeviceKind::Mobile, None, &subject).await;
+    assert_eq!(android.user.id, iphone.user.id, "one account, two phones");
+    assert_eq!(
+        android.user.id, old_android.user.id,
+        "one account, three phones"
+    );
+    state
+        .store
+        .register_push_device(
+            android.user.id,
+            &android.device.id.to_string(),
+            "android-fcm-token",
+            "android",
+            Some("dev.h4rn.app"),
+            Some("1.0.2"),
+        )
+        .await
+        .expect("register the Android phone");
+    // A build from before Live Updates would show "Working" as an alert.
+    state
+        .store
+        .register_push_device(
+            old_android.user.id,
+            &old_android.device.id.to_string(),
+            "old-android-fcm-token",
+            "android",
+            Some("dev.h4rn.app"),
+            Some("1.0.1"),
+        )
+        .await
+        .expect("register the older Android phone");
+    state
+        .store
+        .register_push_device(
+            iphone.user.id,
+            &iphone.device.id.to_string(),
+            &apns_device_token(),
+            "ios",
+            None,
+            None,
+        )
+        .await
+        .expect("register the iPhone");
+
+    let service = Arc::new(AlertService::new(
+        state.store.clone(),
+        Arc::new(FcmClient::new(&config, reqwest::Client::new())),
+        Arc::new(h4rn_connect::apns::ApnsClient::new(
+            &config,
+            reqwest::Client::new(),
+        )),
+        Duration::from_millis(100),
+        Duration::from_secs(120),
+    ));
+    let thread = ThreadId::new_uuid_v7();
+    let working = alert_activity(&thread, AgentAlertState::Working, Utc::now(), "turn-1");
+    // The same transition delivered twice is one update, not two.
+    service.ingest(android.user.id, working.clone()).await;
+    service.ingest(android.user.id, working).await;
+    // A later turn start is its own transition and updates the phone again.
+    service
+        .ingest(
+            android.user.id,
+            alert_activity(&thread, AgentAlertState::Working, Utc::now(), "turn-2"),
+        )
+        .await;
+    // `ingest` only queues; wait for the account's queue to drain.
+    service.flush(android.user.id).await;
+
+    let requests = server.received_requests().await.expect("requests");
+    let fcm: Vec<&wiremock::Request> = requests
+        .iter()
+        .filter(|request| request.url.path().ends_with("messages:send"))
+        .collect();
+    let apns: Vec<&wiremock::Request> = requests
+        .iter()
+        .filter(|request| request.url.path().starts_with("/3/device/"))
+        .collect();
+    assert_eq!(
+        fcm.len(),
+        2,
+        "the replayed working frame was delivered twice"
+    );
+    assert!(
+        apns.is_empty(),
+        "a working frame became an iPhone alert for a turn that did not end"
+    );
+    for request in &fcm {
+        let body: serde_json::Value = serde_json::from_slice(&request.body).expect("FCM payload");
+        assert_eq!(
+            body["message"]["token"], "android-fcm-token",
+            "an app without Live Updates was sent a working frame"
+        );
+    }
+
+    let body: serde_json::Value = serde_json::from_slice(&fcm[0].body).expect("FCM payload");
+    let data = body["message"]["data"].as_object().expect("data object");
+    let mut keys: Vec<&str> = data.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        vec![
+            "body",
+            "count",
+            "h4rn_alert",
+            "project",
+            "state",
+            "thread_id",
+            "title"
+        ],
+        "an undocumented field reached the phone"
+    );
+    assert_eq!(data["state"], "working");
+    assert_eq!(data["project"], "h4rn");
+    assert_eq!(data["thread_id"], thread.to_string());
+    assert_eq!(data["count"], "1");
+}
+
+#[tokio::test]
+#[ignore = "requires H4RN_TEST_DATABASE_URL (use ./scripts/test-connect.sh)"]
+async fn a_queued_turn_start_arrives_after_the_previous_turns_finish() {
+    use h4rn_protocol::{AgentAlertState, ThreadId};
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "access_token": "test-access-token",
+            "expires_in": 3600,
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/projects/demo/messages:send"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"name": "x"})))
+        .mount(&server)
+        .await;
+    let config = Config {
+        fcm_service_account: Some(service_account(&server, "demo")),
+        fcm_token_url: format!("{}/token", server.uri()),
+        fcm_url: server.uri(),
+        ..Config::default()
+    };
+    let state = test_state().await;
+    let phone = actor(&state, ConnectDeviceKind::Mobile, None).await;
+    state
+        .store
+        .register_push_device(
+            phone.user.id,
+            &phone.device.id.to_string(),
+            "android-fcm-token",
+            "android",
+            Some("dev.h4rn.app"),
+            Some("1.0.2"),
+        )
+        .await
+        .expect("register the Android phone");
+    let service = Arc::new(AlertService::new(
+        state.store.clone(),
+        Arc::new(FcmClient::new(&config, reqwest::Client::new())),
+        Arc::new(h4rn_connect::apns::ApnsClient::new(
+            &config,
+            reqwest::Client::new(),
+        )),
+        Duration::from_millis(200),
+        Duration::from_secs(120),
+    ));
+    let thread = ThreadId::new_uuid_v7();
+    // A queued message is promoted: the first turn's finish and the second
+    // turn's start reach Connect back to back.
+    service
+        .ingest(
+            phone.user.id,
+            alert_activity(
+                &thread,
+                AgentAlertState::Completed,
+                Utc::now(),
+                "turn-1-done",
+            ),
+        )
+        .await;
+    service
+        .ingest(
+            phone.user.id,
+            alert_activity(
+                &thread,
+                AgentAlertState::Working,
+                Utc::now(),
+                "turn-2-start",
+            ),
+        )
+        .await;
+    // Let the group window pass so a deferred finish would have gone out.
+    tokio::time::sleep(Duration::from_millis(600)).await;
+
+    let requests = server.received_requests().await.expect("requests");
+    let states: Vec<String> = requests
+        .iter()
+        .filter(|request| request.url.path().ends_with("messages:send"))
+        .map(|request| {
+            let body: serde_json::Value =
+                serde_json::from_slice(&request.body).expect("FCM payload");
+            assert_eq!(body["message"]["data"]["thread_id"], thread.to_string());
+            body["message"]["data"]["state"]
+                .as_str()
+                .expect("state")
+                .to_string()
+        })
+        .collect();
+    assert_eq!(
+        states,
+        vec!["completed".to_string(), "working".to_string()],
+        "the earlier finish replaced the running turn's Live Update"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires H4RN_TEST_DATABASE_URL (use ./scripts/test-connect.sh)"]
+async fn a_slow_push_provider_never_holds_up_ingest() {
+    use h4rn_protocol::{AgentAlertState, ThreadId};
+
+    const FCM_DELAY: Duration = Duration::from_secs(3);
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "access_token": "test-access-token",
+            "expires_in": 3600,
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/projects/demo/messages:send"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({"name": "x"}))
+                .set_delay(FCM_DELAY),
+        )
+        .mount(&server)
+        .await;
+    let config = Config {
+        fcm_service_account: Some(service_account(&server, "demo")),
+        fcm_token_url: format!("{}/token", server.uri()),
+        fcm_url: server.uri(),
+        ..Config::default()
+    };
+    let state = test_state().await;
+    let phone = actor(&state, ConnectDeviceKind::Mobile, None).await;
+    state
+        .store
+        .register_push_device(
+            phone.user.id,
+            &phone.device.id.to_string(),
+            "android-fcm-token",
+            "android",
+            Some("dev.h4rn.app"),
+            Some("1.0.2"),
+        )
+        .await
+        .expect("register the Android phone");
+    let service = Arc::new(AlertService::new(
+        state.store.clone(),
+        Arc::new(FcmClient::new(&config, reqwest::Client::new())),
+        Arc::new(h4rn_connect::apns::ApnsClient::disabled(
+            reqwest::Client::new(),
+        )),
+        Duration::from_millis(50),
+        Duration::from_secs(120),
+    ));
+    let finished = ThreadId::new_uuid_v7();
+    let started = ThreadId::new_uuid_v7();
+
+    // One thread finishes; its group window passes and the flush is now
+    // waiting on the slow provider.
+    service
+        .ingest(
+            phone.user.id,
+            alert_activity(&finished, AgentAlertState::Completed, Utc::now(), "done"),
+        )
+        .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        service.delivery_in_flight(phone.user.id),
+        "the finish should still be on its way to FCM"
+    );
+
+    // Another thread starts a turn while that send is in flight. The relay's
+    // read loop awaits `ingest`, so it must come back without waiting for FCM.
+    let begun = std::time::Instant::now();
+    service
+        .ingest(
+            phone.user.id,
+            alert_activity(&started, AgentAlertState::Working, Utc::now(), "start"),
+        )
+        .await;
+    let took = begun.elapsed();
+    assert!(
+        took < Duration::from_millis(500),
+        "ingest waited {took:?} for a push provider; the relay loop stalls with it"
+    );
+
+    // Both still arrive, in the order Connect saw them.
+    service.flush(phone.user.id).await;
+    let requests = server.received_requests().await.expect("requests");
+    let states: Vec<String> = requests
+        .iter()
+        .filter(|request| request.url.path().ends_with("messages:send"))
+        .map(|request| {
+            let body: serde_json::Value =
+                serde_json::from_slice(&request.body).expect("FCM payload");
+            body["message"]["data"]["state"]
+                .as_str()
+                .expect("state")
+                .to_string()
+        })
+        .collect();
+    assert_eq!(states, vec!["completed".to_string(), "working".to_string()]);
+
+    // An idle account keeps no worker behind.
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while service.delivery_in_flight(phone.user.id) && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        !service.delivery_in_flight(phone.user.id),
+        "an idle account's delivery worker was left in the map"
+    );
+}
+
+/// An alert service for one Android phone whose FCM answers each send only
+/// after `fcm_delay`, so deliveries back up behind it.
+async fn slow_android_alerts(
+    fcm_delay: Duration,
+    window: Duration,
+    manual_flush: bool,
+) -> (MockServer, AppState, Uuid, Arc<AlertService>) {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "access_token": "test-access-token",
+            "expires_in": 3600,
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/projects/demo/messages:send"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({"name": "x"}))
+                .set_delay(fcm_delay),
+        )
+        .mount(&server)
+        .await;
+    let config = Config {
+        fcm_service_account: Some(service_account(&server, "demo")),
+        fcm_token_url: format!("{}/token", server.uri()),
+        fcm_url: server.uri(),
+        ..Config::default()
+    };
+    let state = test_state().await;
+    let phone = actor(&state, ConnectDeviceKind::Mobile, None).await;
+    state
+        .store
+        .register_push_device(
+            phone.user.id,
+            &phone.device.id.to_string(),
+            "android-fcm-token",
+            "android",
+            Some("dev.h4rn.app"),
+            Some("1.0.2"),
+        )
+        .await
+        .expect("register the Android phone");
+    let service = AlertService::new(
+        state.store.clone(),
+        Arc::new(FcmClient::new(&config, reqwest::Client::new())),
+        Arc::new(h4rn_connect::apns::ApnsClient::disabled(
+            reqwest::Client::new(),
+        )),
+        window,
+        Duration::from_secs(120),
+    );
+    let service = Arc::new(if manual_flush {
+        service.manual_flush()
+    } else {
+        service
+    });
+    (server, state, phone.user.id, service)
+}
+
+/// What FCM received, in order, as `<name>:<state>` with each thread named.
+async fn fcm_sends(server: &MockServer, names: &[(&h4rn_protocol::ThreadId, &str)]) -> Vec<String> {
+    let requests = server.received_requests().await.expect("requests");
+    requests
+        .iter()
+        .filter(|request| request.url.path().ends_with("messages:send"))
+        .map(|request| {
+            let body: serde_json::Value =
+                serde_json::from_slice(&request.body).expect("FCM payload");
+            let data = &body["message"]["data"];
+            let thread = data["thread_id"].as_str().expect("thread_id");
+            let name = names
+                .iter()
+                .find(|(id, _)| id.to_string() == thread)
+                .map_or("group", |(_, name)| *name);
+            format!("{name}:{}", data["state"].as_str().expect("state"))
+        })
+        .collect()
+}
+
+#[tokio::test]
+#[ignore = "requires H4RN_TEST_DATABASE_URL (use ./scripts/test-connect.sh)"]
+async fn a_finish_after_a_turn_start_never_overtakes_it_behind_a_slow_provider() {
+    use h4rn_protocol::{AgentAlertState, ThreadId};
+
+    // The window is closed by hand, so the turn's finish is still collecting
+    // when the turn-start update reaches the front of the queue.
+    let (server, _state, user, service) =
+        slow_android_alerts(Duration::from_millis(1500), Duration::from_secs(60), true).await;
+    let first = ThreadId::new_uuid_v7();
+    let busy = ThreadId::new_uuid_v7();
+
+    // One thread finishes and its flush is now waiting on the slow provider.
+    service
+        .ingest(
+            user,
+            alert_activity(&first, AgentAlertState::Completed, Utc::now(), "a-done"),
+        )
+        .await;
+    let in_flight = tokio::spawn({
+        let service = Arc::clone(&service);
+        async move { service.flush(user).await }
+    });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        service.delivery_in_flight(user),
+        "the first finish should still be on its way to FCM"
+    );
+
+    // Another thread starts a turn and finishes it while that send is in
+    // flight.
+    service
+        .ingest(
+            user,
+            alert_activity(&busy, AgentAlertState::Working, Utc::now(), "b-start"),
+        )
+        .await;
+    service
+        .ingest(
+            user,
+            alert_activity(&busy, AgentAlertState::Completed, Utc::now(), "b-done"),
+        )
+        .await;
+    // Let the first send finish and the turn-start update begin before the
+    // finish's own window closes.
+    in_flight.await.expect("the first flush");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    service.flush(user).await;
+
+    assert_eq!(
+        fcm_sends(&server, &[(&first, "A"), (&busy, "B")]).await,
+        vec![
+            "A:completed".to_string(),
+            "B:working".to_string(),
+            "B:completed".to_string(),
+        ],
+        "a finish Connect saw after its turn start was sent ahead of it"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires H4RN_TEST_DATABASE_URL (use ./scripts/test-connect.sh)"]
+async fn a_queued_flush_never_carries_a_finish_seen_after_a_turn_start() {
+    use h4rn_protocol::{AgentAlertState, ThreadId};
+
+    let (server, _state, user, service) = slow_android_alerts(
+        Duration::from_millis(1500),
+        Duration::from_millis(50),
+        false,
+    )
+    .await;
+    let first = ThreadId::new_uuid_v7();
+    let second = ThreadId::new_uuid_v7();
+    let busy = ThreadId::new_uuid_v7();
+
+    // One thread finishes and its flush is now waiting on the slow provider.
+    service
+        .ingest(
+            user,
+            alert_activity(&first, AgentAlertState::Completed, Utc::now(), "a-done"),
+        )
+        .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    // Another finish waits out its window and queues behind that send.
+    service
+        .ingest(
+            user,
+            alert_activity(&second, AgentAlertState::Completed, Utc::now(), "c-done"),
+        )
+        .await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        service.delivery_in_flight(user),
+        "the first finish should still be on its way to FCM"
+    );
+
+    // A third thread starts a turn and finishes it while both are queued. The
+    // queued flush must not take the finish along when it runs.
+    service
+        .ingest(
+            user,
+            alert_activity(&busy, AgentAlertState::Working, Utc::now(), "b-start"),
+        )
+        .await;
+    service
+        .ingest(
+            user,
+            alert_activity(&busy, AgentAlertState::Completed, Utc::now(), "b-done"),
+        )
+        .await;
+    service.flush(user).await;
+
+    assert_eq!(
+        fcm_sends(&server, &[(&first, "A"), (&second, "C"), (&busy, "B")]).await,
+        vec![
+            "A:completed".to_string(),
+            "C:completed".to_string(),
+            "B:working".to_string(),
+            "B:completed".to_string(),
+        ],
+        "a finish Connect saw after its turn start was sent ahead of it"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires H4RN_TEST_DATABASE_URL (use ./scripts/test-connect.sh)"]
 async fn an_alert_goes_to_each_phones_own_transport() {
     use h4rn_protocol::{AgentAlertState, ThreadId};
     use p256::ecdsa::SigningKey;

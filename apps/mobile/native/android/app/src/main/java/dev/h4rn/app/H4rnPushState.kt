@@ -1,9 +1,97 @@
 package dev.h4rn.app
 
+import android.app.NotificationManager
+import android.content.Context
+
 /** Whether the exact thread is on screen in the foreground. */
 object H4rnPushState {
   @Volatile var foreground: Boolean = false
   @Volatile var threadId: String? = null
+}
+
+/**
+ * The ongoing Live Update notifications currently in the tray (ADR-053).
+ *
+ * The ids are persisted because the notification service can outlive the
+ * WebView: sign-out, the live-updates switch and the shared UI's list of
+ * running threads all have to cancel what is already showing, even after a
+ * cold start. Only per-thread ids are tracked; a grouped alert never is one.
+ */
+object H4rnLiveNotifications {
+  private fun ids(context: Context): MutableSet<String> =
+    context
+      .getSharedPreferences(PushPlugin.PREFERENCES, Context.MODE_PRIVATE)
+      .getStringSet(PushPlugin.LIVE_THREADS_KEY, emptySet())
+      ?.toMutableSet()
+      ?: mutableSetOf()
+
+  private fun manager(context: Context): NotificationManager =
+    context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+
+  /** Remembers that this thread has a Live Update showing. */
+  fun track(context: Context, threadId: String) {
+    val ids = ids(context)
+    if (!ids.add(threadId)) return
+    context
+      .getSharedPreferences(PushPlugin.PREFERENCES, Context.MODE_PRIVATE)
+      .edit()
+      .putStringSet(PushPlugin.LIVE_THREADS_KEY, ids)
+      .apply()
+  }
+
+  /** Forgets a thread's Live Update, whether or not it was showing. */
+  fun forget(context: Context, threadId: String) {
+    val ids = ids(context)
+    if (!ids.remove(threadId)) return
+    context
+      .getSharedPreferences(PushPlugin.PREFERENCES, Context.MODE_PRIVATE)
+      .edit()
+      .putStringSet(PushPlugin.LIVE_THREADS_KEY, ids)
+      .apply()
+  }
+
+  /**
+   * Cancels a thread's Live Update only when one is tracked.
+   *
+   * A thread with no tracked Live Update may have its finished, failed or
+   * limit alert under the same notification id, so it is left alone.
+   */
+  fun cancelIfTracked(context: Context, threadId: String?) {
+    if (!PushContent.turnStartClearsEntry(threadId, ids(context))) return
+    threadId?.let { cancel(context, it) }
+  }
+
+  /** Cancels one thread's Live Update and forgets it. */
+  fun cancel(context: Context, threadId: String) {
+    manager(context).cancel(PushContent.notificationId(threadId, 0))
+    forget(context, threadId)
+  }
+
+  /**
+   * Cancels every tracked Live Update whose thread is in [stopped].
+   *
+   * [stopped] is the threads the connected machine lists with no turn in
+   * progress. A thread it does not list is left alone: it may be running on
+   * another machine.
+   */
+  fun cancelStopped(context: Context, stopped: Set<String>) {
+    for (threadId in PushContent.staleLiveThreads(ids(context), stopped)) {
+      cancel(context, threadId)
+    }
+  }
+
+  /** Cancels every Live Update this app posted. */
+  fun cancelAll(context: Context) {
+    val manager = manager(context)
+    for (threadId in ids(context)) {
+      manager.cancel(PushContent.notificationId(threadId, 0))
+    }
+    context
+      .getSharedPreferences(PushPlugin.PREFERENCES, Context.MODE_PRIVATE)
+      .edit()
+      .remove(PushPlugin.LIVE_THREADS_KEY)
+      .apply()
+  }
 }
 
 /**
