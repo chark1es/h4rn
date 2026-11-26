@@ -894,7 +894,7 @@ describe("notification wording", () => {
       "Detenido: el agente llegó a su límite de tokens.",
     );
     expect(finishedBody({ status: "turn_limit", error: null })).toBe(
-      "Detenido: el agente alcanzó su límite de turnos.",
+      "Detenido: el agente llegó a su límite de turnos.",
     );
     const offline = offlineTransitions(
       { host_atlas: { name: "atlas", online: true } },

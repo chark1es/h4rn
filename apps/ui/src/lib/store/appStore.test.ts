@@ -267,6 +267,7 @@ describe("createThread draft handoff", () => {
     fake.response.current = null;
     seedHosts(["handoff_host"]);
   });
+  afterEach(() => setLocalePreference("en"));
 
   it("moves the temporary thread's draft to the id the daemon returns", async () => {
     const realId = "thread_after_create";
@@ -308,7 +309,6 @@ describe("createThread draft handoff", () => {
     const tempId = getState().pendingCreates.at(-1)?.tempId ?? "";
     expect(getState().threads[tempId]?.title).toBe("新对话");
     await created;
-    await setLocalePreference("en");
   });
 
   it("drops the temporary thread's draft when the create fails", async () => {
@@ -523,6 +523,7 @@ describe("rewindThread", () => {
     fake.request.mockClear();
     seedHosts([]);
   });
+  afterEach(() => setLocalePreference("en"));
 
   it("reports the method the daemon really used", async () => {
     fake.response.current = {
@@ -571,7 +572,6 @@ describe("rewindThread", () => {
     expect(getState().toasts.at(-1)?.description).toBe(
       "该智能体已从自己的历史中删除被移除的回合。",
     );
-    await setLocalePreference("en");
   });
 
   it("lists the files it left alone the way the dialog did", async () => {

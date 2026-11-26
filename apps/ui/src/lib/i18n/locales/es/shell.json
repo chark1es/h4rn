@@ -326,7 +326,7 @@
     "failedUnknown": "Falló: el turno terminó con un error.",
     "interrupted": "Detenido: el turno se interrumpió.",
     "tokenLimit": "Detenido: el agente llegó a su límite de tokens.",
-    "turnLimit": "Detenido: el agente alcanzó su límite de turnos.",
+    "turnLimit": "Detenido: el agente llegó a su límite de turnos.",
     "hostOffline": "Host sin conexión: h4rn ya no puede contactar con él."
   },
   "secureStorage": {

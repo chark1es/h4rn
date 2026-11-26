@@ -326,7 +326,7 @@
     "failedUnknown": "失败：本回合因错误而结束。",
     "interrupted": "已停止：本回合被中断。",
     "tokenLimit": "已停止：智能体达到了 token 上限。",
-    "turnLimit": "已停止：智能体达到了回合限额。",
+    "turnLimit": "已停止：智能体达到了回合上限。",
     "hostOffline": "主机离线：h4rn 已无法连接到它。"
   },
   "secureStorage": {
