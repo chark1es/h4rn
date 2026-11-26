@@ -2,6 +2,8 @@
 
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+// Starts i18n with the English catalogue, as main.tsx does in the app.
+import "@/lib/i18n";
 
 import type { ImportProgress, ImportScan } from "@/gen";
 

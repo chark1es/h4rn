@@ -7,6 +7,7 @@
  */
 import { ArrowDownToLineIcon, CheckIcon, FolderGit2Icon, FolderIcon } from "lucide-react";
 import { useEffect } from "react";
+import { useTranslation } from "react-i18next";
 
 import { onImportFrame } from "@/lib/client/frames";
 import { cn } from "@/lib/utils";
@@ -25,6 +26,7 @@ import {
 import { shortPath } from "./store";
 
 export function ImportPanel() {
+  const { t } = useTranslation("dialogs");
   const scan = useImportState((state) => state.scan);
   const loading = useImportState((state) => state.loading);
   const error = useImportState((state) => state.error);
@@ -39,8 +41,16 @@ export function ImportPanel() {
 
   const projects = visibleProjects(scan, reviewAll);
   const groups = [
-    { label: "Repositories", items: projects.filter((project) => project.git) },
-    { label: "Other folders", items: projects.filter((project) => !project.git) },
+    {
+      key: "repositories",
+      label: t("import.repositories"),
+      items: projects.filter((project) => project.git),
+    },
+    {
+      key: "other",
+      label: t("import.otherFolders"),
+      items: projects.filter((project) => !project.git),
+    },
   ].filter((group) => group.items.length > 0);
   const running = progress?.running ?? false;
   const shownTotal = scan?.projects.length ?? 0;
@@ -55,10 +65,10 @@ export function ImportPanel() {
       <div className="q-imp-bar">
         <span className="q-imp-count">
           {loading && !scan
-            ? "Looking for conversations…"
+            ? t("import.looking")
             : scan
-              ? `${projects.length} of ${shownTotal} ${shownTotal === 1 ? "project" : "projects"}`
-              : "No scan yet"}
+              ? t("import.shown", { shown: projects.length, count: shownTotal })
+              : t("import.noScan")}
         </span>
         <span className="grow" />
         <button
@@ -67,7 +77,11 @@ export function ImportPanel() {
           aria-pressed={reviewAll}
           onClick={() => setReviewAll(!reviewAll)}
         >
-          {reviewAll ? "Recommended only" : hiddenRecommended > 0 ? "Review all" : "Reviewing all"}
+          {reviewAll
+            ? t("import.recommendedOnly")
+            : hiddenRecommended > 0
+              ? t("import.reviewAll")
+              : t("import.reviewingAll")}
         </button>
       </div>
 
@@ -77,18 +91,18 @@ export function ImportPanel() {
             {importErrorText(error)}
           </div>
         ) : loading && !scan ? (
-          <div className="q-fb-msg">Reading the harnesses' saved conversations…</div>
+          <div className="q-fb-msg">{t("import.readingSaved")}</div>
         ) : projects.length === 0 ? (
           <div className="q-fb-msg">
             {!scan
-              ? "No scan yet."
+              ? t("import.noScanYet")
               : shownTotal === 0
-                ? "No conversations worth importing were found on this host."
-                : "No recommended projects. Select Review all to see everything found."}
+                ? t("import.noneFound")
+                : t("import.noRecommended")}
           </div>
         ) : (
           groups.map((group) => (
-            <div key={group.label} className="q-imp-group">
+            <div key={group.key} className="q-imp-group">
               <div className="q-imp-group-h">{group.label}</div>
               {group.items.map((project) => {
                 const checked = selected.includes(project.key);
@@ -119,8 +133,8 @@ export function ImportPanel() {
                     </span>
                     <span className="q-imp-meta">
                       {exhausted
-                        ? "Already imported"
-                        : `${project.importable} ${project.importable === 1 ? "conversation" : "conversations"}`}
+                        ? t("import.alreadyImported")
+                        : t("import.conversations", { count: project.importable })}
                     </span>
                   </label>
                 );
@@ -140,19 +154,22 @@ export function ImportPanel() {
 
       <div className="q-imp-foot">
         <button type="button" className="q-imp-link" onClick={selectAllImportProjects}>
-          Select all
+          {t("import.selectAll")}
         </button>
         <button type="button" className="q-imp-link" onClick={selectNoImportProjects}>
-          Select none
+          {t("import.selectNone")}
         </button>
         <span className="grow" />
         {progress ? (
           <span className="q-imp-status" aria-live="polite">
             {progress.running
-              ? `Importing ${progress.conversations_done} of ${progress.conversations_total}…`
+              ? t("import.progress", {
+                  done: progress.conversations_done,
+                  total: progress.conversations_total,
+                })
               : progress.imported > 0
-                ? `Imported ${progress.imported} ${progress.imported === 1 ? "conversation" : "conversations"}.`
-                : "Nothing new to import."}
+                ? t("import.imported", { count: progress.imported })
+                : t("import.nothingNew")}
           </span>
         ) : null}
       </div>
@@ -173,10 +190,7 @@ export function ImportPanel() {
         </div>
       ) : null}
       {progress && progress.failed > 0 ? (
-        <p className="q-faint q-imp-note">
-          {progress.failed} {progress.failed === 1 ? "conversation" : "conversations"} could not be
-          imported.
-        </p>
+        <p className="q-faint q-imp-note">{t("import.failed", { count: progress.failed })}</p>
       ) : null}
     </div>
   );
