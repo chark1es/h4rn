@@ -2059,18 +2059,27 @@ async fn a_plain_pkce_challenge_is_rejected() {
 
 /// Registers and approves a supervised client, starting the PKCE flow.
 async fn supervised_token(daemon: &TestDaemon, client: &reqwest::Client) -> String {
+    approved_agent(daemon, client, "supervised").await.1
+}
+
+/// Registers one agent and approves it at `level`.
+///
+/// Returns the client id and its access token. Each call is its own client and
+/// its own token family, which is what a cross-family test needs.
+async fn approved_agent(
+    daemon: &TestDaemon,
+    client: &reqwest::Client,
+    level: &str,
+) -> (String, String) {
     let redirect = "http://localhost:1455/callback";
     let (_, registered) = register(client, &daemon.base(), redirect).await;
-    let client_id = registered["client_id"].as_str().expect("client id");
-    begin_and_approve(
-        daemon,
-        client,
-        &daemon.base(),
-        client_id,
-        redirect,
-        "supervised",
-    )
-    .await
+    let client_id = registered["client_id"]
+        .as_str()
+        .expect("client id")
+        .to_owned();
+    let token =
+        begin_and_approve(daemon, client, &daemon.base(), &client_id, redirect, level).await;
+    (client_id, token)
 }
 
 #[tokio::test]
@@ -2501,6 +2510,312 @@ async fn a_revoke_drops_the_running_sessions_tool_token() {
         "the revoked grant's session kept its tool token"
     );
     completion.release();
+    daemon.stop().await;
+}
+
+/// A value that names no family never waits for an admitted RPC.
+///
+/// `DELETE /mcp` and `POST /oauth/revoke` must be able to answer at once when
+/// the token is garbage: taking the admission write gate before looking the
+/// token up let anyone serialize every outside call behind made-up values.
+#[tokio::test]
+async fn a_garbage_token_does_not_wait_on_an_admitted_rpc() {
+    let daemon = boot(None).await;
+    let client = http();
+    let token = supervised_token(&daemon, &client).await;
+
+    let gate = daemon.outside.pause_next_admitted_rpc();
+    let admitted = tokio::spawn({
+        let client = client.clone();
+        let url = daemon.outside_url();
+        let token = token.clone();
+        async move {
+            post_rpc(
+                &client,
+                &url,
+                &token,
+                json!({"jsonrpc": "2.0", "id": 7, "method": "ping", "params": {}}),
+            )
+            .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(2), gate.arrived())
+        .await
+        .expect("the request was never admitted");
+
+    // Not a token any sign-in issued, built here rather than committed.
+    let garbage = format!("h4rn_at_{}", "garbage-value");
+    let answered = tokio::time::timeout(
+        Duration::from_secs(1),
+        daemon.outside.revoke_token(&garbage),
+    )
+    .await;
+    let answered = answered.expect("a garbage token waited for an admitted RPC");
+    answered.expect("an unknown token still succeeds (RFC 7009)");
+
+    gate.release();
+    let (status, _) = admitted.await.expect("join the admitted call");
+    assert_eq!(status, StatusCode::OK, "the admitted call was not answered");
+    daemon.stop().await;
+}
+
+/// A `DELETE /mcp` is counted against the same aggregate bucket as the OAuth
+/// mutations, so a revocation cannot be used to spend the daemon's work for
+/// free. A POST on the same route is a tool call and is not counted there.
+#[tokio::test]
+async fn delete_mcp_is_behind_the_aggregate_limit_and_post_is_not() {
+    let daemon = boot(None).await;
+    let client = http();
+    let (_, first) = approved_agent(&daemon, &client, "read_only").await;
+    let (_, second) = approved_agent(&daemon, &client, "read_only").await;
+    daemon
+        .outside
+        .set_aggregate_limits(RateLimiter::new(1, Duration::from_secs(60)));
+
+    let deleted = client
+        .delete(daemon.mcp_url())
+        .bearer_auth(&first)
+        .send()
+        .await
+        .expect("delete");
+    assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+
+    // The one hit is spent, so the next counted mutation is refused.
+    let over = client
+        .post(format!("{}/oauth/revoke", daemon.base()))
+        .form(&[("token", first.as_str())])
+        .send()
+        .await
+        .expect("revoke");
+    assert_eq!(
+        over.status(),
+        StatusCode::TOO_MANY_REQUESTS,
+        "DELETE /mcp did not spend the aggregate bucket"
+    );
+
+    // A tool call on the same route is not part of that bucket.
+    let (status, body) = post_rpc(
+        &client,
+        &daemon.mcp_url(),
+        &second,
+        json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a POST /mcp was counted against the revocation bucket: {body}"
+    );
+    daemon.stop().await;
+}
+
+/// The Settings operations are ordered like the client-facing revokes.
+///
+/// Both go through the protocol surface the Settings page uses, and both must
+/// wait for a prompt write under the family they end. A store-level call would
+/// answer while that write was still landing.
+#[tokio::test]
+async fn the_settings_revoke_and_switch_wait_for_an_in_flight_prompt_write() {
+    let daemon = boot(None).await;
+    let client = http();
+
+    for operation in ["revoke", "switch"] {
+        let (client_id, token) = approved_agent(&daemon, &client, "supervised").await;
+        let store = daemon.outside.store();
+        let grant = store
+            .verify_access(&token, Some(&daemon.outside.mcp_url()))
+            .expect("the approved token is live");
+        let ticket = store
+            .begin_delivery(&grant.family)
+            .expect("the family is live");
+
+        let service = daemon.outside_agents();
+        let call = tokio::spawn(async move {
+            match operation {
+                "revoke" => {
+                    service
+                        .handle(McpRequest::RevokeOutsideAgent {
+                            client_id: client_id.clone(),
+                        })
+                        .await
+                }
+                _ => {
+                    service
+                        .handle(McpRequest::SetOutsideAgentSettingsEnabled { enabled: false })
+                        .await
+                }
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(
+            !call.is_finished(),
+            "the {operation} from Settings answered while a prompt write under its family was in flight"
+        );
+
+        drop(ticket);
+        call.await
+            .expect("join the Settings operation")
+            .expect("the Settings operation succeeds");
+        assert!(
+            !store.grant_is_live(&grant.family),
+            "the {operation} left the family live"
+        );
+    }
+    daemon.stop().await;
+}
+
+/// An idle revoke leaves a live session's tools alone.
+///
+/// The session's last turn was under family A, but nothing is running under A
+/// now: the next turn runs under another, live grant. Dropping the token here
+/// would leave that turn without h4rn's tools for no reason.
+#[tokio::test]
+async fn an_idle_revoke_keeps_the_tools_of_a_session_whose_next_turn_is_another_grant() {
+    let daemon = boot(None).await;
+    let client = http();
+    let (client_a, token_a) = approved_agent(&daemon, &client, "supervised").await;
+    let (_, token_b) = approved_agent(&daemon, &client, "supervised").await;
+    let repo = git_repo_with_remote();
+    let started = call_tool(
+        &client,
+        &daemon.outside_url(),
+        &token_a,
+        "start_thread",
+        json!({
+            "harness": "claude_code",
+            "model": "default",
+            "prompt": "first under A",
+            "workspace_path": repo.path().display().to_string(),
+            "runtime_mode": "approval_required"
+        }),
+    )
+    .await;
+    assert!(started.get("error").is_none(), "{started}");
+    let thread_id = h4rn_protocol::ThreadId::new(
+        started["result"]["structuredContent"]["thread_id"]
+            .as_str()
+            .expect("thread id"),
+    );
+    let first = wait_for_injection(&daemon.mcp, 1).await;
+    let harness_token = first[0].token.clone().expect("harness token");
+    wait_for_turn_end(&daemon, &thread_id).await;
+
+    daemon
+        .outside
+        .revoke_client(&client_a)
+        .await
+        .expect("revoke A while its session is idle");
+    let (status, _) = post_rpc(
+        &client,
+        &daemon.mcp_url(),
+        &harness_token,
+        json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "an idle revoke took the tools of a session whose next turn runs under another grant"
+    );
+
+    // B's next message runs on that same session, with that same token.
+    let sent = call_tool(
+        &client,
+        &daemon.outside_url(),
+        &token_b,
+        "send_thread_message",
+        json!({"thread_id": thread_id, "text": "now under B"}),
+    )
+    .await;
+    assert!(sent.get("error").is_none(), "{sent}");
+    wait_for_turn_end(&daemon, &thread_id).await;
+    assert_eq!(
+        daemon.mcp.get().len(),
+        1,
+        "the session was restarted although its tool token was still valid"
+    );
+    daemon.stop().await;
+}
+
+/// After a revoke drops a session's token, the next turn gets its tools back.
+///
+/// A harness session is handed its token once, so it cannot be revived; the
+/// next turn starts a fresh session, which mints a fresh token.
+#[tokio::test]
+async fn the_next_turn_has_tools_again_after_a_revoke_dropped_its_session_token() {
+    let (fake, completion) = FakeHarness::new().with_completion_gate();
+    let daemon = boot_with(fake, None, None).await;
+    let client = http();
+    let (client_a, token_a) = approved_agent(&daemon, &client, "supervised").await;
+    let repo = git_repo_with_remote();
+    let started = call_tool(
+        &client,
+        &daemon.outside_url(),
+        &token_a,
+        "start_thread",
+        json!({
+            "harness": "claude_code",
+            "model": "default",
+            "prompt": "keep working",
+            "workspace_path": repo.path().display().to_string(),
+            "runtime_mode": "approval_required"
+        }),
+    )
+    .await;
+    assert!(started.get("error").is_none(), "{started}");
+    let thread_id = h4rn_protocol::ThreadId::new(
+        started["result"]["structuredContent"]["thread_id"]
+            .as_str()
+            .expect("thread id"),
+    );
+    let first = wait_for_injection(&daemon.mcp, 1).await;
+    let first_token = first[0].token.clone().expect("harness token");
+
+    // A's turn is in flight, so this revoke drops the session's token.
+    daemon
+        .outside
+        .revoke_client(&client_a)
+        .await
+        .expect("revoke");
+    let (status, _) = post_rpc(
+        &client,
+        &daemon.mcp_url(),
+        &first_token,
+        json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    completion.release();
+    wait_for_turn_end(&daemon, &thread_id).await;
+
+    // The person's own next turn starts a fresh session with a fresh token.
+    daemon
+        .manager
+        .send_message(&thread_id, "keep going".into(), Vec::new())
+        .await
+        .expect("send");
+    let injections = wait_for_injection(&daemon.mcp, 2).await;
+    let second_token = injections[1]
+        .token
+        .clone()
+        .expect("the restarted session's token");
+    assert_ne!(
+        second_token, first_token,
+        "the restarted session reused the dropped token"
+    );
+    let (status, _) = post_rpc(
+        &client,
+        &daemon.mcp_url(),
+        &second_token,
+        json!({"jsonrpc": "2.0", "id": 2, "method": "initialize", "params": {}}),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the next turn's session did not get its h4rn tools back"
+    );
+    wait_for_turn_end(&daemon, &thread_id).await;
     daemon.stop().await;
 }
 

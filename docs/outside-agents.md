@@ -172,8 +172,13 @@ never spends a rate-limit hit.
   warning. Agents reconnect by signing in again.
 - Registration is capped and unused registrations expire after a day. The unauthenticated OAuth
   endpoints — registration, authorize, the token endpoint and revocation — have an aggregate rate
-  limit checked before the body is read, and the per-client buckets are keyed only on identifiers
-  the daemon has registered — a flood of random values grows nothing.
+  limit checked before the body is read, and `DELETE /mcp` shares it, because that is the other way
+  to end a grant. The per-client buckets are keyed only on identifiers the daemon has registered —
+  a flood of random values grows nothing.
+- A revoke with a token that names no family answers at once. It used to take the admission write
+  gate before looking the token up, so anyone could serialize every outside call behind made-up
+  tokens; now the family is looked up read-only first, the gate is taken only when one exists, and
+  the lookup is repeated under the gate.
 
 ### What an outside agent can call
 
@@ -230,6 +235,13 @@ and `DELETE /mcp`. When any of them returns, no admitted call and no in-flight p
 family is still reaching an agent. A turn that already delivered its prompt may finish, but its
 harness session loses the tool token at revocation, so it cannot call h4rn's tools any more.
 
+Only a session with a turn in flight under the revoked family loses its token. A session that last
+delivered that family's turn but is idle keeps its token: its next turn belongs to another, live
+grant or is the person's own, and ending an unrelated grant must not leave that turn without h4rn's
+tools. A session that *did* lose its token cannot be handed another one — the harness reads it at
+start — so its next turn starts a fresh session, which mints a fresh token; the provider
+conversation is resumed as usual.
+
 `thread_status`, `start_thread`, `list_threads` and `get_thread` share one redactor. A thread's
 title is redacted before the 80-character cut, so the journal never stores a credential or a
 fragment of one, and the same redactor also removes a partial owner-token prefix left by an older
@@ -268,7 +280,8 @@ and cannot be reached by an agent on the internet yet.
 
 - A turn that has already delivered its prompt keeps running when its grant's family is revoked or
   the Labs switch is turned off. Its session loses the tool token, so it can no longer call h4rn's
-  tools, but the harness itself is not stopped: only the next delivery is refused.
+  tools, but the harness itself is not stopped: only the next delivery is refused. The next turn
+  starts a fresh session, so it has h4rn's tools again.
 - A grant's level cannot be changed from Settings yet. The level is stored with the family and is
   read again on every request, so a future level change applies at once; today the way to change it
   is to revoke the grant and sign in again.
@@ -288,8 +301,11 @@ and cannot be reached by an agent on the internet yet.
   after queueing, refresh rotation, redacted titles and tool output, and a revocation that cannot be
   saved are proved; and the PR-link tools run against a scripted forge. It also proves that a watch
   binds the turn that admitted it, that a delegation does the same, that a revoke waits for an
-  admitted call and for an in-flight prompt write, and that the outside tool list has no
-  `stop_thread`.
+  admitted call and for an in-flight prompt write, that the Settings revoke and Labs-off switch wait
+  the same way through the protocol surface, that a garbage token answers without waiting, that
+  `DELETE /mcp` spends the aggregate bucket, that an idle revoke leaves another grant's next turn
+  its tools, that a running turn's dropped session gets a fresh token on its next turn, and that the
+  outside tool list has no `stop_thread`.
 - Unit tests in `crates/h4rn-daemon/src/mcp_server/` cover redirect allow-listing, PKCE vectors,
   expiry, one-time codes, replay revocation, resource binding at the token endpoint, the
   revocation-versus-use race, a revocation freeing its registration slot, an approval never writing

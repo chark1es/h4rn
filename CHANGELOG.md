@@ -810,6 +810,14 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Fixed
 
+- **Outside-agent revocation is cheap to refuse and leaves other work alone.** A made-up token no
+  longer waits on an admitted call before it is answered, so it cannot serialize every outside RPC,
+  and `DELETE /mcp` is counted against the same aggregate limit as the OAuth routes. Revoking one
+  grant only drops the tool token of a session with a turn running under that grant: a session whose
+  next turn belongs to another live grant or to the person keeps its tools, and one that did lose
+  them starts a fresh session with a fresh token on its next turn instead of running without h4rn's
+  tools. The Settings revoke and the Labs switch are covered by the same protocol-level ordering
+  test as the client-facing revokes.
 - **Outside-agent access can no longer outlive or slip past a revocation.** A tool call binds the
   turn that admitted it (so a slow delegation or PR watch cannot inherit a later, wider turn), and
   every revoke — Settings, `POST /oauth/revoke` and `DELETE /mcp` — waits for admitted calls and
