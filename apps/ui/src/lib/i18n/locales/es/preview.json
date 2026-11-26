@@ -33,7 +33,7 @@
     "goneTitle": "Este archivo ya no está en el espacio de trabajo.",
     "documentTooLargeTitle": "Este archivo es demasiado grande para la vista previa.",
     "documentTooLarge": "La vista previa lee como máximo {{limit}}; este archivo ocupa {{size}}. Ábrelo en un navegador.",
-    "documentTooLargeEscaped": "Este archivo ocupa {{size}}, demasiado para la vista previa una vez escapado su texto para el envío. Ábrelo en un navegador.",
+    "documentTooLargeEscaped": "Este archivo ocupa {{size}}, pero una vez escapado su texto para el envío es demasiado grande para la vista previa. Ábrelo en un navegador.",
     "pageTooLargeTitle": "Esta página es demasiado grande para la vista previa.",
     "pageTooLarge": "La página preparada ocupa {{size}}; la vista previa incrusta hasta {{limit}} del espacio de trabajo.",
     "notTextTitle": "Este archivo no es texto UTF-8.",

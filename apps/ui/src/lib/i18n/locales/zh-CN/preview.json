@@ -31,7 +31,7 @@
     "goneTitle": "此文件已不在工作区中。",
     "documentTooLargeTitle": "此文件太大，无法预览。",
     "documentTooLarge": "预览最多读取 {{limit}}，而此文件为 {{size}}。请改用浏览器打开它。",
-    "documentTooLargeEscaped": "此文件为 {{size}}，但其文本为传输转义后过大，无法预览。请改用浏览器打开它。",
+    "documentTooLargeEscaped": "此文件为 {{size}}，但其文本经传输转义后过大，无法预览。请改用浏览器打开它。",
     "pageTooLargeTitle": "此页面太大，无法预览。",
     "pageTooLarge": "准备好的页面为 {{size}}；预览最多从工作区嵌入 {{limit}}。",
     "notTextTitle": "此文件不是 UTF-8 文本。",
