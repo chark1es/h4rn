@@ -1,6 +1,6 @@
 /** What the sidebar footer says about the hosts, and which icon goes with it. */
 
-import { i18n } from "@/lib/i18n";
+import { formatNumber, i18n } from "@/lib/i18n";
 
 export type HostStatusRow = {
   name: string;
@@ -40,7 +40,7 @@ export function hostStatus(input: {
   const machines = new Set(rows.map((row) => row.machineId).filter(Boolean)).size;
   const noun = rows.some((row) => row.sub) || rows.length !== machines ? "hosts" : "machines";
   return {
-    text: i18n.t(`sidebar:status.${noun}`, { online, count: rows.length }),
+    text: i18n.t(`sidebar:status.${noun}`, { online: formatNumber(online), count: rows.length }),
     icon: online > 0 ? "dot" : "off",
   };
 }

@@ -69,6 +69,19 @@ describe("hostStatus", () => {
     expect(hostStatus({ loading: false, offline: false, rows }).text).toBe("2 de 3 hosts");
     expect(hostStatus({ loading: false, offline: true, rows }).text).toBe("Sin conexión");
   });
+
+  it("formats both counts as numbers in the active language", async () => {
+    const rows = Array.from({ length: 12_000 }, (_, index) =>
+      row(`h${index}`, { machineId: `m${index}`, online: index > 0 }),
+    );
+    expect(hostStatus({ loading: false, offline: false, rows }).text).toBe(
+      "11,999 of 12,000 machines",
+    );
+    await setLocalePreference("es");
+    expect(hostStatus({ loading: false, offline: false, rows }).text).toBe(
+      "11.999 de 12.000 máquinas",
+    );
+  });
 });
 
 afterEach(async () => {

@@ -35,6 +35,7 @@ const CONVERTED = [
   "src/components/pages/SettingsPage.tsx",
   "src/components/shell/Sidebar.tsx",
   "src/components/shell/hostStatus.ts",
+  "src/components/shell/snoozeWake.ts",
   "src/features/access/AccessSettings.tsx",
   "src/features/forge/ForgeSettings.tsx",
   "src/features/guest/GuestSettings.tsx",

@@ -51,7 +51,10 @@ function shape(flat: Map<string, string>) {
 }
 
 function placeholders(text: string): string[] {
-  return [...text.matchAll(/\{\{\s*([\w.]+)\s*\}\}/g)].map((match) => match[1] as string).sort();
+  // `{{count, number}}` names `count`; the format after the comma may differ.
+  return [...text.matchAll(/\{\{\s*([\w.]+)\s*(?:,[^}]*)?\}\}/g)]
+    .map((match) => match[1] as string)
+    .sort();
 }
 
 function tags(text: string): string[] {
