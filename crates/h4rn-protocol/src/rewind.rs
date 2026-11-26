@@ -29,7 +29,7 @@ pub struct RewindSettings {
 /// the provider boundary was kept, or a conversation that never started a
 /// provider session, can only use a handoff. A preview names the method the
 /// request would use, so the dialog never promises the wrong one.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
 pub struct RewindPlan {
     /// The method the next rewind of this prompt would use.
     #[serde(default)]
@@ -40,6 +40,10 @@ pub struct RewindPlan {
     /// Whether **Revert files too** would be accepted for this prompt.
     #[serde(default)]
     pub files_available: bool,
+    /// Paths the removed turns touched that git ignored when the checkpoint
+    /// was taken, so **Revert files too** leaves them exactly as they are.
+    #[serde(default)]
+    pub left_alone: Vec<String>,
 }
 
 /// How a harness drops the rewound turns from its own history.
@@ -112,6 +116,10 @@ pub struct RewoundPrompt {
     /// Whether the workspace files went back to the pre-message checkpoint.
     #[serde(default)]
     pub files_restored: bool,
+    /// Paths the removed turns touched that git ignored when the checkpoint
+    /// was taken. They were left exactly as they are, never rewound.
+    #[serde(default)]
+    pub left_alone: Vec<String>,
     /// What the harness history did.
     pub method: RewindMethod,
 }
@@ -158,10 +166,12 @@ mod tests {
         assert!(!plan.files_enabled);
         assert!(!plan.files_available);
         assert_eq!(plan.method, RewindMethod::Unsupported);
+        assert!(plan.left_alone.is_empty());
         let plan: RewindPlan =
             serde_json::from_str(r#"{"method":"native","files_enabled":true}"#).unwrap();
         assert!(plan.files_enabled);
         assert!(!plan.files_available, "a missing field is not a yes");
+        assert!(plan.left_alone.is_empty(), "a missing field names nothing");
     }
 
     #[test]
@@ -175,5 +185,6 @@ mod tests {
         let prompt: RewoundPrompt = serde_json::from_value(value).unwrap();
         assert!(prompt.attachments.is_empty());
         assert!(!prompt.files_restored);
+        assert!(prompt.left_alone.is_empty());
     }
 }

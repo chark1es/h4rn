@@ -9,6 +9,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { leftAloneSummary } from "@/features/rewind/left-alone";
 import type { QueuedMessage, RewindPlan, ThreadSummary } from "@/gen";
 import { harnessLabel } from "@/lib/entities";
 import {
@@ -55,6 +56,7 @@ export function RewindDialog({
   const checkpointReady = filesRewindAvailable(log, itemId);
   const filesOffered = plan?.files_enabled === true;
   const canRestoreFiles = filesOffered && plan.files_available === true;
+  const leftAlone = leftAloneSummary(plan?.left_alone ?? []);
 
   useEffect(() => {
     if (!open) {
@@ -164,6 +166,12 @@ export function RewindDialog({
               worktree is touched.
             </span>
           </div>
+        ) : null}
+
+        {canRestoreFiles && choice === "files" && leftAlone ? (
+          <p className="q-rewind-note" role="note">
+            Ignored files stay as they are: {leftAlone}. A restore never rewinds them.
+          </p>
         ) : null}
 
         <p className="q-rewind-note">

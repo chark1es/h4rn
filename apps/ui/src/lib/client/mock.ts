@@ -2474,6 +2474,7 @@ class MockDaemon {
             method: "handoff",
             files_enabled: this.rewindFilesEnabled,
             files_available: false,
+            left_alone: [],
           },
         });
         return;
@@ -2537,6 +2538,7 @@ class MockDaemon {
             prompt: found.text,
             attachments: found.attachments,
             files_restored: false,
+            left_alone: [],
             method: "handoff",
           },
         });
