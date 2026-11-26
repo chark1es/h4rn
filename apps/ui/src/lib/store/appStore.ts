@@ -1,6 +1,5 @@
 import { useSyncExternalStore } from "react";
 import { isPlacementMove, noteManualPlacement } from "@/features/notifications/placement";
-import { leftAloneSummary } from "@/features/rewind/left-alone";
 import type {
   ApprovalDecision,
   Attachment,
@@ -29,7 +28,8 @@ import { createClientFromEnv, readBootConfig } from "@/lib/client/config";
 import { toProtoError } from "@/lib/client/errors";
 import type { ConnectionSnapshot, EventEnvelope } from "@/lib/client/types";
 import { drafts, moveLocalThreadDraft } from "@/lib/drafts";
-import { i18n } from "@/lib/i18n";
+import { formatList, i18n } from "@/lib/i18n";
+import { joinSentences } from "@/lib/i18n/sentences";
 import { pushRoute, type Route, readRoute, replaceRoute, routePath } from "@/lib/router";
 import { applyTerminalTheme } from "@/lib/terminalTheme";
 import { createThreadLog, foldEvent, isRealTurn, type ThreadLog } from "./projection";
@@ -227,7 +227,8 @@ export type AppState = {
    */
   daemonMachineId: string | null;
   pendingCreates: PendingCreate[];
-  pendingActions: Record<ThreadId, string | undefined>;
+  /** What is in flight on a thread, as a kind (`shell:threadActions.*`). */
+  pendingActions: Record<ThreadId, ThreadActionKind | undefined>;
   toasts: Toast[];
   ui: UiState;
 };
@@ -859,10 +860,10 @@ export function noticeRewindFallback(envelope: EventEnvelope): void {
   const harness = getState().threads[envelope.event.thread_id]?.harness;
   pushToast({
     variant: "info",
-    title: "The rewind fell back to a fresh session",
+    title: i18n.t("shell:rewind.fellBack"),
     description: harness
-      ? `${harnessName(harness)} could not use the recorded rewind point. The next turn continues from a handoff of the kept conversation.`
-      : "The recorded rewind point could not be used. The next turn continues from a handoff of the kept conversation.",
+      ? i18n.t("shell:rewind.fellBackNamed", { harness: harnessName(harness) })
+      : i18n.t("shell:rewind.fellBackUnnamed"),
   });
 }
 
@@ -1260,9 +1261,35 @@ export function applyEvent(state: AppState, envelope: EventEnvelope): AppState {
 // Thread actions
 // ---------------------------------------------------------------------------
 
+/** A thread action; its failure toast is `shell:threadActions.<kind>`. */
+export type ThreadActionKind =
+  | "moveToSettled"
+  | "moveToDone"
+  | "moveToWorking"
+  | "acknowledge"
+  | "settle"
+  | "pin"
+  | "unpin"
+  | "snooze"
+  | "wake"
+  | "interrupt"
+  | "mode"
+  | "model"
+  | "effort"
+  | "fastOn"
+  | "fastOff"
+  | "rename"
+  | "switchHarness"
+  | "rewind";
+
+/** The host a thread runs on, or the words for "the host" when it is gone. */
+function threadHost(threadId: ThreadId): string {
+  return getState().threads[threadId]?.host ?? i18n.t("shell:threadActions.theHost");
+}
+
 async function runThreadAction(
   threadId: ThreadId,
-  label: string,
+  label: ThreadActionKind,
   body: Extract<
     ClientRequest,
     {
@@ -1297,7 +1324,7 @@ async function runThreadAction(
     const proto = toProtoError(error);
     pushToast({
       variant: "error",
-      title: `${label} failed on ${getState().threads[threadId]?.host ?? "the host"}.`,
+      title: i18n.t(`shell:threadActions.${label}`, { host: threadHost(threadId) }),
       description: proto.hint ?? proto.message,
     });
     return false;
@@ -1316,7 +1343,7 @@ export async function setThreadTab(
   pinned = false,
 ): Promise<void> {
   const label =
-    tab === "settled" ? "Settling" : tab === "done" ? "Moving to Done" : "Moving to Working";
+    tab === "settled" ? "moveToSettled" : tab === "done" ? "moveToDone" : "moveToWorking";
   await runThreadAction(threadId, label, {
     type: "set_thread_tab",
     thread_id: threadId,
@@ -1326,7 +1353,7 @@ export async function setThreadTab(
 }
 
 export async function acknowledgeThread(threadId: ThreadId): Promise<void> {
-  await runThreadAction(threadId, "Acknowledging", {
+  await runThreadAction(threadId, "acknowledge", {
     type: "set_thread_tab",
     thread_id: threadId,
     tab: "settled",
@@ -1335,7 +1362,7 @@ export async function acknowledgeThread(threadId: ThreadId): Promise<void> {
 }
 
 export async function settleThread(threadId: ThreadId): Promise<void> {
-  await runThreadAction(threadId, "Settling", {
+  await runThreadAction(threadId, "settle", {
     type: "set_thread_tab",
     thread_id: threadId,
     tab: "settled",
@@ -1346,7 +1373,7 @@ export async function settleThread(threadId: ThreadId): Promise<void> {
 export async function togglePin(threadId: ThreadId): Promise<void> {
   const summary = getState().threads[threadId];
   if (!summary) return;
-  await runThreadAction(threadId, summary.pinned ? "Unpinning" : "Pinning", {
+  await runThreadAction(threadId, summary.pinned ? "unpin" : "pin", {
     type: "set_thread_tab",
     thread_id: threadId,
     tab: "working",
@@ -1355,7 +1382,7 @@ export async function togglePin(threadId: ThreadId): Promise<void> {
 }
 
 export async function snoozeThread(threadId: ThreadId, until: string | null): Promise<void> {
-  await runThreadAction(threadId, until ? "Snoozing" : "Waking", {
+  await runThreadAction(threadId, until ? "snooze" : "wake", {
     type: "snooze",
     thread_id: threadId,
     until,
@@ -1363,7 +1390,7 @@ export async function snoozeThread(threadId: ThreadId, until: string | null): Pr
 }
 
 export async function interruptThread(threadId: ThreadId): Promise<void> {
-  await runThreadAction(threadId, "Interrupting", { type: "interrupt", thread_id: threadId });
+  await runThreadAction(threadId, "interrupt", { type: "interrupt", thread_id: threadId });
 }
 
 /** Changes a thread's permission mode; the daemon applies it in place or next turn. */
@@ -1371,7 +1398,7 @@ export async function setThreadRuntimeMode(
   threadId: ThreadId,
   mode: RuntimeMode,
 ): Promise<boolean> {
-  return runThreadAction(threadId, "Changing the mode", {
+  return runThreadAction(threadId, "mode", {
     type: "set_thread_runtime_mode",
     thread_id: threadId,
     mode,
@@ -1380,7 +1407,7 @@ export async function setThreadRuntimeMode(
 
 /** Changes a thread's model; the conversation is kept. */
 export async function setThreadModel(threadId: ThreadId, model: string): Promise<boolean> {
-  return runThreadAction(threadId, "Changing the model", {
+  return runThreadAction(threadId, "model", {
     type: "set_thread_model",
     thread_id: threadId,
     model,
@@ -1392,7 +1419,7 @@ export async function setThreadReasoningEffort(
   threadId: ThreadId,
   effort: string | null,
 ): Promise<boolean> {
-  return runThreadAction(threadId, "Changing the effort", {
+  return runThreadAction(threadId, "effort", {
     type: "set_thread_reasoning_effort",
     thread_id: threadId,
     effort,
@@ -1401,7 +1428,7 @@ export async function setThreadReasoningEffort(
 
 /** Turns a thread's fast tier on or off. */
 export async function setThreadFast(threadId: ThreadId, fast: boolean): Promise<boolean> {
-  return runThreadAction(threadId, fast ? "Turning on fast mode" : "Turning off fast mode", {
+  return runThreadAction(threadId, fast ? "fastOn" : "fastOff", {
     type: "set_thread_fast",
     thread_id: threadId,
     fast,
@@ -1430,7 +1457,7 @@ export async function switchThreadHarness(
   const state = getState();
   setState({
     ...state,
-    pendingActions: { ...state.pendingActions, [threadId]: "Switching harness" },
+    pendingActions: { ...state.pendingActions, [threadId]: "switchHarness" },
   });
   try {
     const response = await getClient().request({
@@ -1448,7 +1475,7 @@ export async function switchThreadHarness(
     const proto = toProtoError(error);
     pushToast({
       variant: "error",
-      title: `Switching harness failed on ${getState().threads[threadId]?.host ?? "the host"}.`,
+      title: i18n.t("shell:threadActions.switchHarness", { host: threadHost(threadId) }),
       description: proto.hint ?? proto.message,
     });
     return { ok: false, message: proto.message, hint: proto.hint ?? null };
@@ -1465,7 +1492,7 @@ export async function switchThreadHarness(
 export async function renameThread(threadId: ThreadId, title: string): Promise<boolean> {
   const trimmed = title.trim();
   if (!trimmed) return false;
-  return runThreadAction(threadId, "Renaming", {
+  return runThreadAction(threadId, "rename", {
     type: "rename_thread",
     thread_id: threadId,
     title: trimmed,
@@ -1536,8 +1563,11 @@ export async function respondApproval(
     }
     pushToast({
       variant: "error",
-      title: `Couldn't send ${decision === "approve" ? "Go" : "Hold"} to ${current.threads[threadId]?.host ?? "the host"}.`,
-      description: `${proto.message} The approval is still pending.`,
+      title: i18n.t(
+        decision === "approve" ? "shell:approval.approveFailed" : "shell:approval.denyFailed",
+        { host: threadHost(threadId) },
+      ),
+      description: joinSentences([proto.message, i18n.t("shell:approval.stillPending")]),
     });
   }
 }
@@ -1563,9 +1593,23 @@ export async function planRewind(threadId: ThreadId, beforeItemId: string): Prom
     before_item_id: beforeItemId,
   });
   if (response.type !== "rewind_plan") {
+    // i18n-ignore-next-line: a reply of the wrong type is a bug, not a state
     throw new Error("The daemon answered a rewind plan with the wrong shape.");
   }
   return response.plan;
+}
+
+/** The ignored paths a rewind left alone, at most four by name. */
+function leftAloneList(paths: string[] | undefined): string | null {
+  if (!paths || paths.length === 0) return null;
+  const shown = paths.slice(0, 4);
+  const rest = paths.length - shown.length;
+  if (rest === 0) return formatList(shown);
+  return formatList([...shown, i18n.t("shell:rewind.more", { count: rest })]);
+}
+
+function rewindFailedTitle(title: string | undefined): string {
+  return title ? i18n.t("shell:rewind.failed", { title }) : i18n.t("shell:rewind.failedUntitled");
 }
 
 /**
@@ -1582,7 +1626,7 @@ export async function rewindThread(
   const state = getState();
   setState({
     ...state,
-    pendingActions: { ...state.pendingActions, [threadId]: "Rewinding" },
+    pendingActions: { ...state.pendingActions, [threadId]: "rewind" },
   });
   try {
     const response = await getClient().request({
@@ -1611,24 +1655,22 @@ export async function rewindThread(
     // Say what the harness really did, not what the thread row advertises: the
     // answer names the method the daemon recorded for this cut.
     const harness = current.threads[threadId]?.harness;
-    const leftAlone = leftAloneSummary(prompt.left_alone);
+    const leftAlone = leftAloneList(prompt.left_alone);
     pushToast({
-      title: "Thread rewound",
-      description: [
+      title: i18n.t("shell:rewind.done"),
+      description: joinSentences([
         prompt.method === "native" && harness
-          ? `${harnessName(harness)} dropped the removed turns from its own history.`
-          : "A fresh session will continue from the kept conversation.",
-        leftAlone ? `Ignored files left as they are: ${leftAlone}.` : null,
-      ]
-        .filter(Boolean)
-        .join(" "),
+          ? i18n.t("shell:rewind.native", { harness: harnessName(harness) })
+          : i18n.t("shell:rewind.handoff"),
+        leftAlone ? i18n.t("shell:rewind.leftAlone", { files: leftAlone }) : null,
+      ]),
     });
     return prompt;
   } catch (error) {
     const proto = toProtoError(error);
     pushToast({
       variant: "error",
-      title: `Couldn't rewind ${getState().threads[threadId]?.title ?? "the thread"}.`,
+      title: rewindFailedTitle(getState().threads[threadId]?.title),
       description: proto.hint ?? proto.message,
     });
     return null;
@@ -2263,8 +2305,10 @@ export async function createThread(input: CreateThreadInput): Promise<boolean> {
     navigate({ kind: "inbox" });
     pushToast({
       variant: "error",
-      title: `Couldn't start the thread on ${getState().hosts[input.host]?.name ?? input.host}.`,
-      description: `${proto.message} Nothing is running.`,
+      title: i18n.t("shell:start.failed", {
+        host: getState().hosts[input.host]?.name ?? input.host,
+      }),
+      description: joinSentences([proto.message, i18n.t("shell:start.nothingRunning")]),
     });
     return false;
   }
@@ -2297,8 +2341,8 @@ export async function forkThread(threadId: ThreadId, turnId: string): Promise<bo
     const proto = toProtoError(error);
     pushToast({
       variant: "error",
-      title: "Couldn't fork that turn.",
-      description: proto.hint ? `${proto.message} ${proto.hint}` : proto.message,
+      title: i18n.t("shell:fork.failed"),
+      description: joinSentences([proto.message, proto.hint]),
     });
     return false;
   }

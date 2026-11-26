@@ -1,0 +1,305 @@
+{
+  "offline": {
+    "reconnecting": "再接続中",
+    "offline": "オフライン",
+    "attempt": "{{attempt}} 回目の試行",
+    "cached": "{{time}} のキャッシュ",
+    "noCache": "キャッシュされたスレッドはありません",
+    "reconnect": "再接続"
+  },
+  "toasts": {
+    "region": "通知",
+    "dismiss": "閉じる"
+  },
+  "start": {
+    "title": "スレッドを開始",
+    "lead": "実行場所を選んでください。エージェントはそのホスト上で選んだディレクトリで作業し、ペアリング済みのどのデバイスからでも見守れます。",
+    "host": "ホスト",
+    "hostChip": "ホスト: {{name}}",
+    "hostChipNone": "ホスト: オンラインのホストなし",
+    "noOnlineHost": "オンラインのホストなし",
+    "noOnlineHosts": "オンラインのホストはありません",
+    "notYet": "未対応",
+    "notYetHint": "未対応: 新しいスレッドはこのホストで実行されます",
+    "harness": "Harness",
+    "harnessChip": "Harness: {{name}}",
+    "folder": "ワークスペースのフォルダー",
+    "projectChip": "プロジェクト: {{name}}",
+    "projects": "プロジェクト",
+    "projectOn": "{{host}} のプロジェクト",
+    "projectOnAnyHost": "ホスト上のプロジェクト",
+    "noProjects": "このホストにはまだプロジェクトがありません",
+    "typePath": "フォルダーのパスを入力…",
+    "addProject": "プロジェクトを追加…",
+    "composer": "スレッド開始用のコンポーザー",
+    "describe": "タスクを説明",
+    "describeFor": "{{host}} の {{harness}} に任せるタスクを説明",
+    "describeForAnyHost": "ホスト上の {{harness}} に任せるタスクを説明",
+    "attachOffline": "ファイルを添付するには再接続してください。",
+    "attachNoHost": "先にオンラインのホストを選んでください。",
+    "send": "スレッドを開始",
+    "blocked": {
+      "offline": "スレッドを開始するには再接続してください。",
+      "noHost": "利用できるオンラインのホストがありません。",
+      "empty": "先にタスクを説明してください。",
+      "starting": "開始しています…",
+      "ready": "開始 (Enter)"
+    },
+    "noHostYet": "ホストがまだありませんか？<pair>デバイスをペアリング</pair>するか、そのマシンで <code>{{command}}</code> を実行してください。",
+    "failed": "{{host}} でスレッドを開始できませんでした。",
+    "nothingRunning": "何も実行されていません。"
+  },
+  "phoneIde": {
+    "title": "IDE はデスクトップ向けの表示です。",
+    "body": "ファイルの閲覧、差分の確認、編集は、大きな画面でスレッドを開いて行ってください。スレッドとその変更はここでも確認できます。",
+    "back": "受信トレイに戻る"
+  },
+  "threadActions": {
+    "theHost": "ホスト",
+    "moveToSettled": "{{host}} で整理できませんでした。",
+    "moveToDone": "{{host}} で「完了」に移動できませんでした。",
+    "moveToWorking": "{{host}} で「作業中」に移動できませんでした。",
+    "acknowledge": "{{host}} で確認できませんでした。",
+    "settle": "{{host}} で整理できませんでした。",
+    "pin": "{{host}} でピン留めできませんでした。",
+    "unpin": "{{host}} でピン留めを解除できませんでした。",
+    "snooze": "{{host}} でスヌーズできませんでした。",
+    "wake": "{{host}} でスヌーズを解除できませんでした。",
+    "interrupt": "{{host}} で中断できませんでした。",
+    "mode": "{{host}} でモードを変更できませんでした。",
+    "model": "{{host}} でモデルを変更できませんでした。",
+    "effort": "{{host}} で推論の強度を変更できませんでした。",
+    "fastOn": "{{host}} で高速モードをオンにできませんでした。",
+    "fastOff": "{{host}} で高速モードをオフにできませんでした。",
+    "rename": "{{host}} で名前を変更できませんでした。",
+    "switchHarness": "{{host}} で harness を切り替えられませんでした。",
+    "rewind": "{{host}} で巻き戻せませんでした。"
+  },
+  "approval": {
+    "approveFailed": "{{host}} に承認を送信できませんでした。",
+    "denyFailed": "{{host}} に拒否を送信できませんでした。",
+    "stillPending": "承認はまだ保留中です。"
+  },
+  "rewind": {
+    "fellBack": "巻き戻しは新しいセッションに切り替わりました",
+    "fellBackNamed": "{{harness}} は記録された巻き戻しポイントを使えませんでした。次のターンは、残した会話の引き継ぎから続きます。",
+    "fellBackUnnamed": "記録された巻き戻しポイントを使えませんでした。次のターンは、残した会話の引き継ぎから続きます。",
+    "done": "スレッドを巻き戻しました",
+    "native": "{{harness}} は削除したターンを自身の履歴から取り除きました。",
+    "handoff": "新しいセッションが、残した会話から続けます。",
+    "leftAlone": "無視されたファイルはそのままです: {{files}}。",
+    "more_other": "ほか {{count, number}} 件",
+    "failed": "{{title}} を巻き戻せませんでした。",
+    "failedUntitled": "スレッドを巻き戻せませんでした。"
+  },
+  "fork": {
+    "failed": "そのターンからフォークできませんでした。"
+  },
+  "mcp": {
+    "listServers": "サーバーの一覧",
+    "saveFailed": "{{name}} を保存できませんでした。",
+    "nothingChanged": "このマシンでは何も変更されていません。",
+    "removeFailed": "{{name}} を削除できませんでした。",
+    "stillConfigured": "サーバーは設定されたままです。",
+    "turnOnFailed": "{{name}} をオンにできませんでした。",
+    "turnOffFailed": "{{name}} をオフにできませんでした。",
+    "switchBack": "スイッチは元に戻りました。デーモンは古い設定のままです。",
+    "readConfigFailed": "その harness の設定を読み込めませんでした。",
+    "checkPath": "パスを確認して、もう一度お試しください。",
+    "importFailed": "インポートを適用できませんでした。",
+    "noneAdded": "新しいサーバーは追加されていません。",
+    "resolveFailed": "{{name}} を解決できませんでした。",
+    "conflictOpen": "競合はまだ解決されていません。",
+    "shareFailed": "{{name}} を共有できませんでした。",
+    "stillLocal": "サーバーはローカル専用のままです。",
+    "unshareFailed": "{{name}} の共有を解除できませんでした。",
+    "stillReachable": "そのマシンからはまだサーバーにアクセスできます。",
+    "toolsFailed": "{{name}} のツールを一覧表示できませんでした。",
+    "stillStarting": "サーバーがまだ起動中の可能性があります。",
+    "callFailed": "{{tool}} を呼び出せませんでした。",
+    "checkServer": "サーバーの状態と引数を確認してください。",
+    "approvalsFailed": "共有ツールの承認を読み込めませんでした。",
+    "answerFailed": "その承認に応答できませんでした。",
+    "callBlocked": "呼び出しはブロックされたままです。"
+  },
+  "skills": {
+    "listSkills": "スキルの一覧",
+    "addFailed": "そのスキルを追加できませんでした。",
+    "checkSkillFile": "SKILL.md が存在し、パスが読み取れることを確認してください。",
+    "updateFailed": "スキルを更新できませんでした。",
+    "unchanged": "現在のバージョンは変わっていません。",
+    "removeFailed": "スキルを削除できませんでした。",
+    "stillRegistered": "まだレジストリに残っています。",
+    "enableFailed": "{{harness}} で {{skill}} を有効にできませんでした。",
+    "disableFailed": "{{harness}} で {{skill}} を無効にできませんでした。",
+    "enableFailedUnnamed": "{{harness}} でスキルを有効にできませんでした。",
+    "disableFailedUnnamed": "{{harness}} でスキルを無効にできませんでした。",
+    "switchBack": "スイッチは元に戻りました。",
+    "scanFailed": "harness のスキルディレクトリをスキャンできませんでした。",
+    "checkDirectories": "harness のディレクトリが読み取れることを確認してください。",
+    "importFailed": "それらのスキルをインポートできませんでした。",
+    "rescan": "再スキャンして、もう一度お試しください。",
+    "resolveFailed": "競合を解決できませんでした。",
+    "stillOpen": "まだ解決されていません。",
+    "syncFailed": "スキルを同期できませんでした。",
+    "localStillWork": "ローカルのスキルは引き続き使えます。",
+    "compareFailed": "それらのバージョンを比較できませんでした。",
+    "pickVersions": "レジストリに残っているバージョンを 2 つ選んでください。"
+  },
+  "guest": {
+    "settingsFailed": "ゲストリンクを変更できませんでした",
+    "sendFailed": "そのゲストメッセージを送信できませんでした。",
+    "dismissFailed": "そのゲストメッセージを破棄できませんでした。"
+  },
+  "projectImport": {
+    "startFailed": "インポートを開始できませんでした。",
+    "chooseFirst": "先にプロジェクトを選んでください。",
+    "checkOne": "インポートするプロジェクトを 1 つ以上選択してください。"
+  },
+  "update": {
+    "unreachable": "アップデートサーバーに接続できませんでした。",
+    "installFailed": "アップデートをインストールできませんでした。"
+  },
+  "errors": {
+    "notConnected": {
+      "message": "デーモンに接続されていません。",
+      "hint": "ステータスバーにオンラインと表示されるまで待ってから、もう一度お試しください。"
+    },
+    "stopped": {
+      "message": "クライアントが停止しました。",
+      "hint": "もう一度起動すると再接続します。"
+    },
+    "handshakeTimeout": {
+      "message": "デーモンとの接続が時間内にハンドシェイクを完了しませんでした。",
+      "hint": "デーモンが混み合っている可能性があります。もう一度試すか、ステータスバーで接続を確認してください。"
+    },
+    "requestTimeout": {
+      "message": "デーモンが {{seconds, number}} 秒以内に `{{request}}` に応答しませんでした。",
+      "hint": "デーモンが混み合っている可能性があります。もう一度試すか、ステータスバーで接続を確認してください。"
+    },
+    "sendFailed": {
+      "message": "フレームを送信できませんでした。",
+      "hint": "接続が回復するのを待ってから、もう一度お試しください。"
+    },
+    "socketClosed": {
+      "message": "ソケットが開いていません。",
+      "hint": "接続が回復するのを待ってから、もう一度お試しください。"
+    },
+    "transportStarting": {
+      "message": "セキュアトランスポートはまだ起動中です。",
+      "hint": "接続が回復するのを待ってから、もう一度お試しください。"
+    },
+    "transportCreate": {
+      "message": "トランスポートを作成できませんでした。",
+      "hint": "デーモンの URL を確認して、もう一度お試しください。"
+    },
+    "transportFailed": {
+      "message": "接続に失敗しました。",
+      "hint": "デーモンが実行中であることを確認してから、再接続してください。"
+    },
+    "urlRejected": {
+      "message": "WebSocket の URL が拒否されました。",
+      "hint": "デーモンが実行中であることを確認してから、再接続してください。"
+    },
+    "noAnswer": {
+      "message": "デーモンが応答しませんでした。停止しているか、到達できない可能性があります。",
+      "hint": "デーモンが実行中であることを確認してから、再接続してください。"
+    },
+    "unreachable": {
+      "message": "{{endpoint}} に到達できませんでした。",
+      "hint": "デーモンが実行中であることを確認してから、再接続してください。"
+    },
+    "secureUrlRejected": {
+      "message": "セキュア URL が拒否されました。",
+      "hint": "デーモンが実行中であることを確認してから、再接続してください。"
+    },
+    "relayBinary": {
+      "message": "リレーがバイナリフレームを送信しました。JSON のみを想定しています。",
+      "hint": "デーモンが実行中であることを確認してから、再接続してください。"
+    },
+    "plaintext": {
+      "message": "デーモンがセキュアパスで平文を送信しました。",
+      "hint": "デーモンが実行中であることを確認してから、再接続してください。"
+    },
+    "relayNotJson": {
+      "message": "リレーが JSON ではないフレームを送信しました。",
+      "hint": "デーモンが実行中であることを確認してから、再接続してください。"
+    },
+    "relayError": {
+      "message": "リレーがエラーを報告しました。",
+      "hint": "デーモンが実行中であることを確認してから、再接続してください。"
+    },
+    "relayBadPayload": {
+      "message": "リレーが無効なデータペイロードを送信しました。",
+      "hint": "デーモンが実行中であることを確認してから、再接続してください。"
+    },
+    "noRoute": {
+      "message": "このマシンへの経路がありません。",
+      "hint": "マシンのデーモンがオフラインの可能性があります。ホストの一覧を確認してから、再接続してください。"
+    },
+    "notPaired": {
+      "message": "このブラウザーはどのデーモンともペアリングされていません。",
+      "hint": "デーモンのペアリングコードをスキャンしてから、アプリを開き直してください。"
+    },
+    "invalidPairingCode": {
+      "message": "ペアリングコードが無効です: {{detail}}",
+      "hint": "デーモンのペアリングコードをスキャンしてから、アプリを開き直してください。"
+    },
+    "invalidPairingCodeBare": {
+      "message": "ペアリングコードが無効です。",
+      "hint": "デーモンのペアリングコードをスキャンしてから、アプリを開き直してください。"
+    },
+    "helloUnexpected": {
+      "message": "デーモンが hello に予期しない応答を返しました。",
+      "hint": "両側の h4rn を更新してください。"
+    },
+    "helloFailed": {
+      "message": "hello ハンドシェイクが完了しませんでした。",
+      "hint": "デーモンのバージョンを確認してから、再接続してください。"
+    },
+    "chunkOrder": {
+      "message": "デーモンの分割フレームが順不同で届きました。",
+      "hint": "接続は再試行されます。"
+    },
+    "notJson": {
+      "message": "デーモンが JSON ではないフレームを送信しました。",
+      "hint": "両側の h4rn を更新してください。接続は再試行されます。"
+    },
+    "closed": {
+      "message": "デーモンが接続を閉じました。",
+      "hint": "クライアントは自動的に再接続します。読み取りは再試行されますが、書き込みは再試行されません。"
+    },
+    "unauthorized": {
+      "message": "デーモンがこのデバイスのトークンを拒否しました。",
+      "hint": "このデバイスをもう一度ペアリングしてください。"
+    },
+    "forbidden": {
+      "message": "このデバイスにはその操作が許可されていません。",
+      "hint": "ホストの所有者にアクセスを依頼してください。"
+    },
+    "offline": {
+      "message": "デーモンとの接続はオフラインです。",
+      "hint": "デーモンを起動するかネットワークを確認してから、「再接続」を押してください。"
+    },
+    "unexpected": {
+      "message": "問題が発生しました。",
+      "hint": "もう一度お試しください。繰り返し発生する場合は、ステータスバーで接続の詳細を開いてください。"
+    },
+    "unreadable": {
+      "message": "デーモンがクライアントで読み取れない内容を返しました。",
+      "hint": "もう一度お試しください。解決しない場合は h4rn を更新してください。"
+    },
+    "noHost": {
+      "message": "デーモンはまだホストを報告していません。",
+      "hint": "ステータスバーにオンラインと表示されるまで待ってから、もう一度お試しください。"
+    },
+    "noAgentTurn": {
+      "message": "このワークスペースには、比較できるエージェントのターンがまだありません。",
+      "hint": "先にターンを実行してから、「ターンの変更」を開いてください。"
+    },
+    "noCommit": {
+      "message": "先に比較するコミットを選んでください。",
+      "hint": "ソースの選択メニューからコミットを選んでください。"
+    }
+  }
+}

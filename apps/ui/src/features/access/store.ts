@@ -154,6 +154,7 @@ export async function respondSignIn(
   });
   try {
     if (decision === "approve" && !level) {
+      // i18n-ignore-next-line: the page always passes a level with Approve; none is a bug
       throw new Error("choose read-only, supervised or full access");
     }
     await request({
@@ -253,6 +254,7 @@ export async function setAgentToolsEnabled(
       request: { type: "set_agent_tools_enabled", harness, enabled },
     });
     if (!applySettings(response)) {
+      // i18n-ignore-next-line: a reply of the wrong type is a bug, not a state
       throw new Error(`The daemon answered \`${response.type}\`, not the tool settings.`);
     }
     return true;
@@ -303,6 +305,7 @@ export async function setOutsideAgentEnabled(enabled: boolean): Promise<boolean>
       request: { type: "set_outside_agent_settings_enabled", enabled },
     });
     if (!applyOutsideSettings(response)) {
+      // i18n-ignore-next-line: a reply of the wrong type is a bug, not a state
       throw new Error(`The daemon answered \`${response.type}\`, not the outside-agent setting.`);
     }
     if (!enabled) set({ agents: [], signIns: [], mcpUrl: "" });

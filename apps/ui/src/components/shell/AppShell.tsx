@@ -7,6 +7,7 @@ import {
   PaperclipIcon,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Trans, useTranslation } from "react-i18next";
 
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
 import { CommandPalette } from "@/components/dialogs/CommandPalette";
@@ -90,6 +91,7 @@ export function InboxDetailEmpty() {
   const hosts = useApp((state) => state.hosts);
   const localHostId = useApp((state) => state.localHostId);
   const connection = useApp((state) => state.connection.status);
+  const { t } = useTranslation(["shell", "composer", "sidebar", "common"]);
   const onlineHosts = useMemo(
     () =>
       Object.values(hosts)
@@ -98,8 +100,8 @@ export function InboxDetailEmpty() {
     [hosts],
   );
   const hostOptions = useMemo(
-    () => localOnlyHostOptions(onlineHosts, localHostId, "Not yet: new threads run on this host"),
-    [onlineHosts, localHostId],
+    () => localOnlyHostOptions(onlineHosts, localHostId, t("start.notYetHint")),
+    [onlineHosts, localHostId, t],
   );
   const [host, setHost] = useState("");
   const [harness, setHarness] = useState<HarnessKind>("claude_code");
@@ -214,13 +216,13 @@ export function InboxDetailEmpty() {
     // picker, so it never offers the bare kind.
     (kind) => kind !== "acp",
   );
-  const hostName = selectedHost?.name ?? "a host";
+  const hostName = selectedHost?.name ?? null;
   const offline = connection !== "online";
   const writable = !offline && Boolean(host);
 
   const attachments = useAttachmentDrafts("start-thread", {
     enabled: writable,
-    disabledReason: offline ? "Reconnect to attach files." : "Pick an online host first.",
+    disabledReason: offline ? t("start.attachOffline") : t("start.attachNoHost"),
   });
   useAttachShortcut(attachments.openPicker, writable && !newThreadOpen);
 
@@ -332,11 +334,10 @@ export function InboxDetailEmpty() {
               color: "var(--fg)",
             }}
           >
-            Start a thread
+            {t("start.title")}
           </h2>
           <p className="q-muted" style={{ margin: "0 0 18px", lineHeight: "19px" }}>
-            Pick where it runs. The agent works in a directory you choose on that host, and you can
-            supervise it from any paired device.
+            {t("start.lead")}
           </p>
 
           <div className="q-chips" style={{ marginBottom: 10 }}>
@@ -345,22 +346,28 @@ export function InboxDetailEmpty() {
                 <button
                   type="button"
                   className="q-chip"
-                  aria-label={`Host: ${selectedHost?.name ?? "no online host"}`}
+                  aria-label={
+                    selectedHost
+                      ? t("start.hostChip", { name: selectedHost.name })
+                      : t("start.hostChipNone")
+                  }
                 >
                   <EntityAvatar
                     seed={machineSeed(host)}
                     kind="machine"
-                    label={selectedHost?.name ?? "Host"}
+                    label={selectedHost?.name ?? t("start.host")}
                     size={16}
                   />
-                  <span className="q-chip-label">{selectedHost?.name ?? "No online host"}</span>
+                  <span className="q-chip-label">
+                    {selectedHost?.name ?? t("start.noOnlineHost")}
+                  </span>
                   <ChevronDownIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
                 </button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="start" className="w-52">
-                <DropdownMenuLabel>Host</DropdownMenuLabel>
+                <DropdownMenuLabel>{t("start.host")}</DropdownMenuLabel>
                 {hostOptions.length === 0 ? (
-                  <DropdownMenuItem disabled>No online hosts</DropdownMenuItem>
+                  <DropdownMenuItem disabled>{t("start.noOnlineHosts")}</DropdownMenuItem>
                 ) : (
                   hostOptions.map((option) => (
                     <DropdownMenuItem
@@ -378,7 +385,7 @@ export function InboxDetailEmpty() {
                       <span className="min-w-0 flex-1 truncate">{option.label}</span>
                       {option.hint ? (
                         <span className="ml-2 shrink-0 text-[11px] text-[var(--fg-3)]">
-                          Not yet
+                          {t("start.notYet")}
                         </span>
                       ) : null}
                     </DropdownMenuItem>
@@ -392,7 +399,7 @@ export function InboxDetailEmpty() {
                 <button
                   type="button"
                   className="q-chip"
-                  aria-label={`Harness: ${harnessLabel(harness)}`}
+                  aria-label={t("start.harnessChip", { name: harnessLabel(harness) })}
                 >
                   <EntityAvatar
                     seed={harnessSeed(host, harness)}
@@ -405,7 +412,7 @@ export function InboxDetailEmpty() {
                 </button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="start" className="w-52">
-                <DropdownMenuLabel>Harness</DropdownMenuLabel>
+                <DropdownMenuLabel>{t("start.harness")}</DropdownMenuLabel>
                 {harnessChoices.map((option) => (
                   <DropdownMenuItem key={option} onSelect={() => pickHarness(option)}>
                     <EntityAvatar
@@ -422,7 +429,7 @@ export function InboxDetailEmpty() {
 
             {customFolder || folderChoices.length === 0 ? (
               <label className="q-chip q-chip-field">
-                <span className="sr-only">Workspace folder</span>
+                <span className="sr-only">{t("start.folder")}</span>
                 <input
                   value={workspace}
                   onChange={(event) => setWorkspace(event.target.value)}
@@ -452,22 +459,26 @@ export function InboxDetailEmpty() {
                 <button
                   type="button"
                   className="q-chip"
-                  aria-label={`Project: ${selectedFolder?.name ?? workspace}`}
+                  aria-label={t("start.projectChip", { name: selectedFolder?.name ?? workspace })}
                   title={workspace}
                 >
                   <FolderIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
                   <span className="q-chip-label">
                     {customFolder || folderChoices.length === 0
-                      ? "Projects"
+                      ? t("start.projects")
                       : (selectedFolder?.name ?? shortPath(workspace))}
                   </span>
                   <ChevronDownIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
                 </button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="start" className="w-64">
-                <DropdownMenuLabel>Project on {hostName}</DropdownMenuLabel>
+                <DropdownMenuLabel>
+                  {hostName
+                    ? t("start.projectOn", { host: hostName })
+                    : t("start.projectOnAnyHost")}
+                </DropdownMenuLabel>
                 {folderChoices.length === 0 ? (
-                  <DropdownMenuItem disabled>No projects on this host yet</DropdownMenuItem>
+                  <DropdownMenuItem disabled>{t("start.noProjects")}</DropdownMenuItem>
                 ) : (
                   folderChoices.map((choice) => (
                     <DropdownMenuItem
@@ -486,11 +497,11 @@ export function InboxDetailEmpty() {
                 )}
                 <DropdownMenuSeparator />
                 <DropdownMenuItem onSelect={() => setCustomFolder(true)}>
-                  Type a folder path…
+                  {t("start.typePath")}
                 </DropdownMenuItem>
                 <DropdownMenuItem onSelect={openAddProject}>
                   <FolderPlusIcon aria-hidden />
-                  Add project…
+                  {t("start.addProject")}
                 </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
@@ -498,7 +509,7 @@ export function InboxDetailEmpty() {
 
           <fieldset
             ref={composerRef}
-            aria-label="Start a thread composer"
+            aria-label={t("start.composer")}
             className="q-composer"
             style={{ margin: 0, minWidth: 0, width: "100%", position: "relative" }}
             onDragOver={(event) => {
@@ -518,8 +529,12 @@ export function InboxDetailEmpty() {
             />
             <textarea
               ref={textareaRef}
-              aria-label="Describe the task"
-              placeholder={`Describe the task for ${harnessLabel(harness)} on ${hostName}`}
+              aria-label={t("start.describe")}
+              placeholder={
+                hostName
+                  ? t("start.describeFor", { harness: harnessLabel(harness), host: hostName })
+                  : t("start.describeForAnyHost", { harness: harnessLabel(harness) })
+              }
               value={prompt}
               disabled={!writable}
               onChange={(event) => updatePrompt(event.target.value)}
@@ -546,7 +561,7 @@ export function InboxDetailEmpty() {
               type="file"
               multiple
               accept={FILE_ACCEPT}
-              aria-label="Attach files"
+              aria-label={t("composer:attach.label")}
               className="sr-only"
               tabIndex={-1}
               onChange={(event) => attachments.onInputChange(event.target.files)}
@@ -556,8 +571,8 @@ export function InboxDetailEmpty() {
                 type="button"
                 disabled={!writable}
                 onClick={attachments.openPicker}
-                aria-label="Attach files"
-                title={titleWithShortcut("Attach files", "composer.attach")}
+                aria-label={t("composer:attach.label")}
+                title={titleWithShortcut(t("composer:attach.label"), "composer.attach")}
                 className="q-ibtn"
               >
                 <PaperclipIcon className="q-icon" strokeWidth={1.5} aria-hidden />
@@ -566,8 +581,8 @@ export function InboxDetailEmpty() {
                 type="button"
                 disabled={!writable}
                 onClick={insertMention}
-                aria-label="Mention a file"
-                title="Mention a file"
+                aria-label={t("composer:mention")}
+                title={t("composer:mention")}
                 className="q-ibtn"
               >
                 <AtSignIcon className="q-icon" strokeWidth={1.5} aria-hidden />
@@ -579,7 +594,7 @@ export function InboxDetailEmpty() {
                   <button
                     type="button"
                     className="q-model"
-                    aria-label="Model"
+                    aria-label={t("composer:controls.model")}
                     title={`${harnessLabel(harness)} · ${model}`}
                   >
                     <span className="truncate" style={{ maxWidth: 210 }}>
@@ -589,7 +604,7 @@ export function InboxDetailEmpty() {
                   </button>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="end" className="w-60">
-                  <DropdownMenuLabel>Model</DropdownMenuLabel>
+                  <DropdownMenuLabel>{t("composer:controls.model")}</DropdownMenuLabel>
                   {modelChoices.map((option) => (
                     <DropdownMenuItem key={option} onSelect={() => setModel(option)}>
                       <span className="font-mono">{option}</span>
@@ -645,16 +660,16 @@ export function InboxDetailEmpty() {
                 title={
                   attachments.blockedReason ??
                   (offline
-                    ? "Reconnect to start a thread."
+                    ? t("start.blocked.offline")
                     : !host
-                      ? "No online host is available."
+                      ? t("start.blocked.noHost")
                       : !prompt.trim() && attachments.attachments.length === 0
-                        ? "Describe the task first."
+                        ? t("start.blocked.empty")
                         : starting
-                          ? "Starting…"
-                          : "Start (Enter)")
+                          ? t("start.blocked.starting")
+                          : t("start.blocked.ready"))
                 }
-                aria-label="Start thread"
+                aria-label={t("start.send")}
               >
                 <ArrowUpIcon className="q-icon" strokeWidth={2} aria-hidden />
               </button>
@@ -662,21 +677,27 @@ export function InboxDetailEmpty() {
           </fieldset>
 
           <p className="q-faint" style={{ fontSize: 12, margin: "12px 0 0" }}>
-            No host yet?{" "}
-            <button
-              type="button"
-              className="q-link"
-              onClick={() =>
-                navigate({
-                  kind: "placeholder",
-                  surface: "settings",
-                  path: "/settings/devices",
-                })
-              }
-            >
-              Pair a device
-            </button>{" "}
-            or run <span className="q-mono">h4rn host</span> on the machine.
+            <Trans
+              t={t}
+              i18nKey="start.noHostYet"
+              values={{ command: "h4rn host" }}
+              components={{
+                pair: (
+                  <button
+                    type="button"
+                    className="q-link"
+                    onClick={() =>
+                      navigate({
+                        kind: "placeholder",
+                        surface: "settings",
+                        path: "/settings/devices",
+                      })
+                    }
+                  />
+                ),
+                code: <span className="q-mono" />,
+              }}
+            />
           </p>
         </div>
       </div>
@@ -704,21 +725,19 @@ function Surface({ surface, path }: { surface: string; path: string }) {
 }
 
 function PhoneIdeNotice() {
+  const { t } = useTranslation("shell");
   return (
     <main className="q-main" aria-label="IDE">
       <div className="q-center-empty">
         <div className="q-empty" style={{ width: 340, padding: 0 }}>
-          <h3 style={{ fontSize: 17, lineHeight: "24px" }}>The IDE is a desktop view.</h3>
-          <p style={{ margin: 0 }}>
-            Open the thread on a larger screen to browse files, read diffs and edit. The thread and
-            its changes are available here.
-          </p>
+          <h3 style={{ fontSize: 17, lineHeight: "24px" }}>{t("phoneIde.title")}</h3>
+          <p style={{ margin: 0 }}>{t("phoneIde.body")}</p>
           <button
             type="button"
             className="q-btn secondary"
             onClick={() => navigate({ kind: "inbox" })}
           >
-            Back to inbox
+            {t("phoneIde.back")}
           </button>
         </div>
       </div>

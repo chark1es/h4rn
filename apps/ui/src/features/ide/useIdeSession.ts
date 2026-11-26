@@ -17,7 +17,7 @@ import type {
   ThreadId,
   TurnId,
 } from "@/gen";
-import { toProtoError } from "@/lib/client/errors";
+import { clientProto, toProtoError } from "@/lib/client/errors";
 import { retainWorkspaceWatch } from "@/lib/client/fsWatch";
 import { getClient } from "@/lib/store/appStore";
 import { conflictFromWrite, keepMineBaseEtag } from "./conflict";
@@ -628,15 +628,7 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
           diffListPath: null,
           diff: null,
           diffLoading: false,
-          diffError: {
-            code: "invalid_request",
-            message: missingTurn
-              ? "This workspace has no agent turn to compare against yet."
-              : "Choose a commit to compare against first.",
-            hint: missingTurn
-              ? "Run a turn first, then open Turn changes."
-              : "Pick a commit from the source picker.",
-          },
+          diffError: clientProto("invalid_request", missingTurn ? "noAgentTurn" : "noCommit"),
         }));
         return;
       }

@@ -27,6 +27,8 @@ import type {
   ResponseBody,
 } from "@/gen";
 import { toProtoError } from "@/lib/client/errors";
+import { i18n } from "@/lib/i18n";
+import { joinSentences } from "@/lib/i18n/sentences";
 import { getClient, getState, pushToast } from "@/lib/store/appStore";
 
 export type McpState = {
@@ -173,6 +175,7 @@ export async function loadMcpServers(options: { force?: boolean } = {}): Promise
   try {
     const response = await send({ type: "list_servers" });
     if (response.type !== "mcp_servers") {
+      // i18n-ignore-next-line: a reply of the wrong type is a bug, not a state
       throw new Error(`The daemon answered \`${response.type}\`, not the server list.`);
     }
     set({
@@ -183,7 +186,7 @@ export async function loadMcpServers(options: { force?: boolean } = {}): Promise
       checkedAt: Date.now(),
     });
   } catch (error) {
-    fail("list servers", error);
+    fail(i18n.t("shell:mcp.listServers"), error);
   }
 }
 
@@ -194,6 +197,7 @@ export async function upsertMcpServer(input: McpServerInput): Promise<McpServerV
   try {
     const response = await send({ type: "upsert", input });
     if (response.type !== "mcp_server") {
+      // i18n-ignore-next-line: a reply of the wrong type is a bug, not a state
       throw new Error(`The daemon answered \`${response.type}\`, not the saved server.`);
     }
     set({ servers: replaceServer(response.server), checkedAt: Date.now() });
@@ -201,8 +205,8 @@ export async function upsertMcpServer(input: McpServerInput): Promise<McpServerV
   } catch (error) {
     const proto = toProtoError(error);
     pushToast({
-      title: `Couldn't save ${input.name}.`,
-      description: `${proto.message} Nothing changed on this machine.${proto.hint ? ` ${proto.hint}` : ""}`,
+      title: i18n.t("shell:mcp.saveFailed", { name: input.name }),
+      description: joinSentences([proto.message, i18n.t("shell:mcp.nothingChanged"), proto.hint]),
       variant: "error",
     });
     return null;
@@ -227,8 +231,8 @@ export async function removeMcpServer(name: string): Promise<boolean> {
     const proto = toProtoError(error);
     set({ servers: before });
     pushToast({
-      title: `Couldn't remove ${name}.`,
-      description: `${proto.message} The server is still configured.${proto.hint ? ` ${proto.hint}` : ""}`,
+      title: i18n.t("shell:mcp.removeFailed", { name }),
+      description: joinSentences([proto.message, i18n.t("shell:mcp.stillConfigured"), proto.hint]),
       variant: "error",
     });
     return false;
@@ -295,6 +299,7 @@ export async function setMcpEnabled(
       enabled,
     });
     if (response.type !== "mcp_server") {
+      // i18n-ignore-next-line: a reply of the wrong type is a bug, not a state
       throw new Error(`The daemon answered \`${response.type}\`, not the updated server.`);
     }
     set({ servers: replaceServer(response.server), checkedAt: Date.now() });
@@ -303,8 +308,8 @@ export async function setMcpEnabled(
     const proto = toProtoError(error);
     set({ servers: replaceServer({ ...current, enabled: before }) });
     pushToast({
-      title: `Couldn't ${enabled ? "turn on" : "turn off"} ${name}.`,
-      description: `${proto.message} The switch is back where it was; the daemon still has the old setting.${proto.hint ? ` ${proto.hint}` : ""}`,
+      title: i18n.t(enabled ? "shell:mcp.turnOnFailed" : "shell:mcp.turnOffFailed", { name }),
+      description: joinSentences([proto.message, i18n.t("shell:mcp.switchBack"), proto.hint]),
       variant: "error",
     });
     return false;
@@ -323,14 +328,15 @@ export async function previewMcpImport(
   try {
     const response = await send({ type: "import", harness, workspace });
     if (response.type !== "mcp_import_preview") {
+      // i18n-ignore-next-line: a reply of the wrong type is a bug, not a state
       throw new Error(`The daemon answered \`${response.type}\`, not an import preview.`);
     }
     return response.preview;
   } catch (error) {
     const proto = toProtoError(error);
     pushToast({
-      title: "Couldn't read that harness config.",
-      description: `${proto.message} ${proto.hint ?? "Check the path and try again."}`,
+      title: i18n.t("shell:mcp.readConfigFailed"),
+      description: joinSentences([proto.message, proto.hint ?? i18n.t("shell:mcp.checkPath")]),
       variant: "error",
     });
     return null;
@@ -345,6 +351,7 @@ export async function applyMcpImport(
   try {
     const response = await send({ type: "apply_import", harness, workspace });
     if (response.type !== "mcp_servers") {
+      // i18n-ignore-next-line: a reply of the wrong type is a bug, not a state
       throw new Error(`The daemon answered \`${response.type}\`, not the imported servers.`);
     }
     set({ servers: sortServers(response.servers), checkedAt: Date.now() });
@@ -352,8 +359,8 @@ export async function applyMcpImport(
   } catch (error) {
     const proto = toProtoError(error);
     pushToast({
-      title: "Couldn't apply the import.",
-      description: `${proto.message} No new servers were added.${proto.hint ? ` ${proto.hint}` : ""}`,
+      title: i18n.t("shell:mcp.importFailed"),
+      description: joinSentences([proto.message, i18n.t("shell:mcp.noneAdded"), proto.hint]),
       variant: "error",
     });
     return false;
@@ -378,8 +385,8 @@ export async function resolveMcpConflict(
   } catch (error) {
     const proto = toProtoError(error);
     pushToast({
-      title: `Couldn't resolve ${name}.`,
-      description: `${proto.message} The conflict is still open.${proto.hint ? ` ${proto.hint}` : ""}`,
+      title: i18n.t("shell:mcp.resolveFailed", { name }),
+      description: joinSentences([proto.message, i18n.t("shell:mcp.conflictOpen"), proto.hint]),
       variant: "error",
     });
     return false;
@@ -395,6 +402,7 @@ export async function shareMcpServer(
   try {
     const response = await send({ type: "share", name, to_machine: toMachine, policy });
     if (response.type !== "mcp_server") {
+      // i18n-ignore-next-line: a reply of the wrong type is a bug, not a state
       throw new Error(`The daemon answered \`${response.type}\`, not the shared server.`);
     }
     set({ servers: replaceServer(response.server) });
@@ -402,8 +410,8 @@ export async function shareMcpServer(
   } catch (error) {
     const proto = toProtoError(error);
     pushToast({
-      title: `Couldn't share ${name}.`,
-      description: `${proto.message} The server is still local only.${proto.hint ? ` ${proto.hint}` : ""}`,
+      title: i18n.t("shell:mcp.shareFailed", { name }),
+      description: joinSentences([proto.message, i18n.t("shell:mcp.stillLocal"), proto.hint]),
       variant: "error",
     });
     return false;
@@ -419,8 +427,8 @@ export async function unshareMcpServer(name: string, machine: HostId): Promise<b
   } catch (error) {
     const proto = toProtoError(error);
     pushToast({
-      title: `Couldn't unshare ${name}.`,
-      description: `${proto.message} That machine can still reach the server.`,
+      title: i18n.t("shell:mcp.unshareFailed", { name }),
+      description: joinSentences([proto.message, i18n.t("shell:mcp.stillReachable")]),
       variant: "error",
     });
     return false;
@@ -434,6 +442,7 @@ export async function loadMcpTools(name: string): Promise<McpToolInfo[]> {
   try {
     const response = await send({ type: "list_tools", name });
     if (response.type !== "mcp_tools") {
+      // i18n-ignore-next-line: a reply of the wrong type is a bug, not a state
       throw new Error(`The daemon answered \`${response.type}\`, not the tool list.`);
     }
     set({ tools: { ...state.tools, [name]: response.tools }, checkedAt: Date.now() });
@@ -441,8 +450,8 @@ export async function loadMcpTools(name: string): Promise<McpToolInfo[]> {
   } catch (error) {
     const proto = toProtoError(error);
     pushToast({
-      title: `Couldn't list ${name} tools.`,
-      description: `${proto.message} The server may still be starting.${proto.hint ? ` ${proto.hint}` : ""}`,
+      title: i18n.t("shell:mcp.toolsFailed", { name }),
+      description: joinSentences([proto.message, i18n.t("shell:mcp.stillStarting"), proto.hint]),
       variant: "error",
     });
     return [];
@@ -464,6 +473,7 @@ export async function testMcpTool(
   try {
     const response = await send({ type: "test_call", name, tool, arguments: args });
     if (response.type !== "mcp_call") {
+      // i18n-ignore-next-line: a reply of the wrong type is a bug, not a state
       throw new Error(`The daemon answered \`${response.type}\`, not a call result.`);
     }
     set({ calls: { ...state.calls, [name]: response.result }, checkedAt: Date.now() });
@@ -471,8 +481,8 @@ export async function testMcpTool(
   } catch (error) {
     const proto = toProtoError(error);
     pushToast({
-      title: `Couldn't call ${name}__${tool}.`,
-      description: `${proto.message} ${proto.hint ?? "Check the server status and arguments."}`,
+      title: i18n.t("shell:mcp.callFailed", { tool: `${name}__${tool}` }),
+      description: joinSentences([proto.message, proto.hint ?? i18n.t("shell:mcp.checkServer")]),
       variant: "error",
     });
     return null;
@@ -488,6 +498,7 @@ export async function loadMcpApprovals(): Promise<void> {
   try {
     const response = await send({ type: "pending_approvals" });
     if (response.type !== "mcp_approvals") {
+      // i18n-ignore-next-line: a reply of the wrong type is a bug, not a state
       throw new Error(`The daemon answered \`${response.type}\`, not the pending approvals.`);
     }
     set({ approvals: sortApprovals(response.approvals) });
@@ -495,8 +506,8 @@ export async function loadMcpApprovals(): Promise<void> {
     // The inbox must not block on a nicety; the event stream will repair it.
     const proto = toProtoError(error);
     pushToast({
-      title: "Couldn't read shared tool approvals.",
-      description: `${proto.message}${proto.hint ? ` ${proto.hint}` : ""}`,
+      title: i18n.t("shell:mcp.approvalsFailed"),
+      description: joinSentences([proto.message, proto.hint]),
       variant: "error",
     });
   }
@@ -523,8 +534,8 @@ export async function respondMcpApproval(
     const proto = toProtoError(error);
     set({ approvals: before });
     pushToast({
-      title: "Couldn't answer that approval.",
-      description: `${proto.message} The call stays blocked.${proto.hint ? ` ${proto.hint}` : ""}`,
+      title: i18n.t("shell:mcp.answerFailed"),
+      description: joinSentences([proto.message, i18n.t("shell:mcp.callBlocked"), proto.hint]),
       variant: "error",
     });
     return false;

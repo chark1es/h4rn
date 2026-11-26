@@ -4,7 +4,12 @@ import { formatRelativeTime, i18n } from "@/lib/i18n";
 import { updateShell } from "@/lib/platform/appUpdate";
 import { useApp } from "@/lib/store/appStore";
 
-import { checkForAppUpdates, setAutoCheck, useAppUpdate } from "./appUpdateStore";
+import {
+  appUpdateErrorText,
+  checkForAppUpdates,
+  setAutoCheck,
+  useAppUpdate,
+} from "./appUpdateStore";
 
 function checkedLabel(checkedAtMs: number, now = Date.now()): string {
   if (now - checkedAtMs < 60_000) return i18n.t("settings:about.justNow");
@@ -51,7 +56,7 @@ export function AboutSettings() {
   const status = checking
     ? t("common:checking")
     : error
-      ? error
+      ? appUpdateErrorText(error)
       : available
         ? t("about.available", { version: available })
         : checkedAt

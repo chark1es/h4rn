@@ -10,6 +10,7 @@ import { useSyncExternalStore } from "react";
 
 import type { GuestLink, GuestSharing, ThreadId } from "@/gen";
 import { toProtoError } from "@/lib/client/errors";
+import { i18n } from "@/lib/i18n";
 import { getClient, pushToast } from "@/lib/store/appStore";
 
 export type GuestState = {
@@ -105,7 +106,7 @@ export async function setGuestLinksEnabled(enabled: boolean): Promise<boolean> {
     update({ settingsSaving: false, error: describe(error) });
     pushToast({
       variant: "error",
-      title: "Guest links could not be changed",
+      title: i18n.t("shell:guest.settingsFailed"),
       description: describe(error),
     });
     return false;
@@ -219,7 +220,7 @@ export async function sendGuestRequest(threadId: ThreadId, requestId: string): P
     update({ answering: { ...state.answering, [requestId]: false } });
     pushToast({
       variant: "error",
-      title: "That guest message could not be sent.",
+      title: i18n.t("shell:guest.sendFailed"),
       description: describe(error),
     });
     return false;
@@ -241,7 +242,7 @@ export async function dismissGuestRequest(threadId: ThreadId, requestId: string)
     update({ answering: { ...state.answering, [requestId]: false } });
     pushToast({
       variant: "error",
-      title: "That guest message could not be dismissed.",
+      title: i18n.t("shell:guest.dismissFailed"),
       description: describe(error),
     });
     return false;

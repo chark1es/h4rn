@@ -24,7 +24,9 @@ import type {
   SkillSummary,
   SkillSyncStatus,
 } from "@/gen";
-import { toProtoError } from "@/lib/client/errors";
+import { clientProto, toProtoError } from "@/lib/client/errors";
+import { i18n } from "@/lib/i18n";
+import { joinSentences } from "@/lib/i18n/sentences";
 import { getClient, getState, pushToast } from "@/lib/store/appStore";
 
 export type SkillsState = {
@@ -117,17 +119,28 @@ function fail(action: string, error: unknown): ProtoError {
   return proto;
 }
 
+function toggleFailedTitle(enabled: boolean, skill: string | undefined, harness: string): string {
+  if (skill) {
+    return i18n.t(enabled ? "shell:skills.enableFailed" : "shell:skills.disableFailed", {
+      skill,
+      harness,
+    });
+  }
+  return i18n.t(
+    enabled ? "shell:skills.enableFailedUnnamed" : "shell:skills.disableFailedUnnamed",
+    {
+      harness,
+    },
+  );
+}
+
 /** Loads the inventory and unresolved conflicts. */
 export async function loadSkills(options: { force?: boolean } = {}): Promise<void> {
   const host = skillsHost();
   if (!host) {
     set({
       loading: false,
-      error: {
-        code: "unsupported",
-        message: "The daemon has not reported its host yet.",
-        hint: "Wait for the status bar to say online, then try again.",
-      },
+      error: clientProto("unsupported", "noHost"),
     });
     return;
   }
@@ -146,6 +159,7 @@ export async function loadSkills(options: { force?: boolean } = {}): Promise<voi
       })),
     ]);
     if (inventory.type !== "skills") {
+      // i18n-ignore-next-line: a reply of the wrong type is a bug, not a state
       throw new Error(`The daemon answered \`${inventory.type}\`, not the skill inventory.`);
     }
     set({
@@ -157,7 +171,7 @@ export async function loadSkills(options: { force?: boolean } = {}): Promise<voi
       checkedAt: Date.now(),
     });
   } catch (error) {
-    fail("list skills", error);
+    fail(i18n.t("shell:skills.listSkills"), error);
   }
 }
 
@@ -188,6 +202,7 @@ export async function addSkill(input: {
       name: input.name ?? null,
     });
     if (response.type !== "skill_added") {
+      // i18n-ignore-next-line: a reply of the wrong type is a bug, not a state
       throw new Error(`The daemon answered \`${response.type}\`, not the added skill.`);
     }
     set({ inventory: replaceSkill(response.skill), checkedAt: Date.now() });
@@ -196,8 +211,11 @@ export async function addSkill(input: {
   } catch (error) {
     const proto = toProtoError(error);
     pushToast({
-      title: "Couldn't add that skill.",
-      description: `${proto.message} ${proto.hint ?? "Check SKILL.md exists and the path is readable."}`,
+      title: i18n.t("shell:skills.addFailed"),
+      description: joinSentences([
+        proto.message,
+        proto.hint ?? i18n.t("shell:skills.checkSkillFile"),
+      ]),
       variant: "error",
     });
     return null;
@@ -211,6 +229,7 @@ export async function updateSkill(skillId: string, source: SkillSource): Promise
   try {
     const response = await send({ type: "skills_update", host, skill_id: skillId, source });
     if (response.type !== "skill_added") {
+      // i18n-ignore-next-line: a reply of the wrong type is a bug, not a state
       throw new Error(`The daemon answered \`${response.type}\`, not the updated skill.`);
     }
     set({ inventory: replaceSkill(response.skill), checkedAt: Date.now() });
@@ -218,8 +237,8 @@ export async function updateSkill(skillId: string, source: SkillSource): Promise
   } catch (error) {
     const proto = toProtoError(error);
     pushToast({
-      title: "Couldn't update the skill.",
-      description: `${proto.message} ${proto.hint ?? "The current version is unchanged."}`,
+      title: i18n.t("shell:skills.updateFailed"),
+      description: joinSentences([proto.message, proto.hint ?? i18n.t("shell:skills.unchanged")]),
       variant: "error",
     });
     return false;
@@ -244,8 +263,8 @@ export async function removeSkill(skillId: string): Promise<boolean> {
     const proto = toProtoError(error);
     set({ inventory: before });
     pushToast({
-      title: "Couldn't remove the skill.",
-      description: `${proto.message} It is still in the registry.`,
+      title: i18n.t("shell:skills.removeFailed"),
+      description: joinSentences([proto.message, i18n.t("shell:skills.stillRegistered")]),
       variant: "error",
     });
     return false;
@@ -296,6 +315,7 @@ export async function setSkillEnabled(
       enabled,
     });
     if (response.type !== "skill_added") {
+      // i18n-ignore-next-line: a reply of the wrong type is a bug, not a state
       throw new Error(`The daemon answered \`${response.type}\`, not the updated skill.`);
     }
     set({ inventory: replaceSkill(response.skill), checkedAt: Date.now() });
@@ -305,8 +325,8 @@ export async function setSkillEnabled(
     set({ inventory: before });
     const skill = before.skills.find((entry) => entry.id === skillId);
     pushToast({
-      title: `Couldn't ${enabled ? "enable" : "disable"} ${skill?.name ?? "the skill"} for ${harnessLabel(harness)}.`,
-      description: `${proto.message} The switch is back where it was.${proto.hint ? ` ${proto.hint}` : ""}`,
+      title: toggleFailedTitle(enabled, skill?.name, harnessLabel(harness)),
+      description: joinSentences([proto.message, i18n.t("shell:skills.switchBack"), proto.hint]),
       variant: "error",
     });
     return false;
@@ -326,17 +346,14 @@ export async function previewSkillImport(
 ): Promise<SkillImportPreview | null> {
   const host = skillsHost();
   if (!host) {
-    options.onError?.({
-      code: "unsupported",
-      message: "The daemon has not reported its host yet.",
-      hint: "Wait for the status bar to say online, then try again.",
-    });
+    options.onError?.(clientProto("unsupported", "noHost"));
     return null;
   }
   set({ previewing: true });
   try {
     const response = await send({ type: "skills_import_preview", host });
     if (response.type !== "skills_import_preview") {
+      // i18n-ignore-next-line: a reply of the wrong type is a bug, not a state
       throw new Error(`The daemon answered \`${response.type}\`, not an import preview.`);
     }
     set({
@@ -350,8 +367,11 @@ export async function previewSkillImport(
     options.onError?.(proto);
     if (options.quiet) return null;
     pushToast({
-      title: "Couldn't scan the harness skill directories.",
-      description: `${proto.message} ${proto.hint ?? "Check that the harness directories are readable."}`,
+      title: i18n.t("shell:skills.scanFailed"),
+      description: joinSentences([
+        proto.message,
+        proto.hint ?? i18n.t("shell:skills.checkDirectories"),
+      ]),
       variant: "error",
     });
     return null;
@@ -382,8 +402,8 @@ export async function commitSkillImport(
   } catch (error) {
     const proto = toProtoError(error);
     pushToast({
-      title: "Couldn't import those skills.",
-      description: `${proto.message} ${proto.hint ?? "Rescan and try again."}`,
+      title: i18n.t("shell:skills.importFailed"),
+      description: joinSentences([proto.message, proto.hint ?? i18n.t("shell:skills.rescan")]),
       variant: "error",
     });
     return false;
@@ -405,8 +425,8 @@ export async function resolveSkillConflict(
   } catch (error) {
     const proto = toProtoError(error);
     pushToast({
-      title: "Couldn't resolve the conflict.",
-      description: `${proto.message} It is still open.`,
+      title: i18n.t("shell:skills.resolveFailed"),
+      description: joinSentences([proto.message, i18n.t("shell:skills.stillOpen")]),
       variant: "error",
     });
     return false;
@@ -419,6 +439,7 @@ export async function syncSkillsNow(): Promise<SkillSyncStatus | null> {
   try {
     const response = await send({ type: "skills_sync_now" });
     if (response.type !== "skill_sync_status") {
+      // i18n-ignore-next-line: a reply of the wrong type is a bug, not a state
       throw new Error(`The daemon answered \`${response.type}\`, not a sync status.`);
     }
     set({ sync: response.status, syncing: false, checkedAt: Date.now() });
@@ -428,8 +449,12 @@ export async function syncSkillsNow(): Promise<SkillSyncStatus | null> {
     const proto = toProtoError(error);
     set({ syncing: false });
     pushToast({
-      title: "Couldn't sync skills.",
-      description: `${proto.message} Local skills still work.${proto.hint ? ` ${proto.hint}` : ""}`,
+      title: i18n.t("shell:skills.syncFailed"),
+      description: joinSentences([
+        proto.message,
+        i18n.t("shell:skills.localStillWork"),
+        proto.hint,
+      ]),
       variant: "error",
     });
     return null;
@@ -453,6 +478,7 @@ export async function diffSkill(
       to_version: toVersion,
     });
     if (response.type !== "skill_diff") {
+      // i18n-ignore-next-line: a reply of the wrong type is a bug, not a state
       throw new Error(`The daemon answered \`${response.type}\`, not a diff.`);
     }
     set({ diff: response.diff });
@@ -460,8 +486,8 @@ export async function diffSkill(
   } catch (error) {
     const proto = toProtoError(error);
     pushToast({
-      title: "Couldn't compare those versions.",
-      description: `${proto.message} Pick two versions the registry still has.`,
+      title: i18n.t("shell:skills.compareFailed"),
+      description: joinSentences([proto.message, i18n.t("shell:skills.pickVersions")]),
       variant: "error",
     });
     return null;

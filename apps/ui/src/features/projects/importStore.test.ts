@@ -4,18 +4,23 @@ import type { ImportProject, ImportScan } from "@/gen";
 
 const { request } = vi.hoisted(() => ({ request: vi.fn() }));
 const { loadProjects } = vi.hoisted(() => ({ loadProjects: vi.fn() }));
+const local = vi.hoisted(() => ({ host: "host_local" as string | null }));
 
 vi.mock("@/lib/store/appStore", () => ({
   getClient: () => ({ request }),
-  getState: () => ({ localHostId: "host_local" }),
+  getState: () => ({ localHostId: local.host }),
   pushToast: vi.fn(),
 }));
 
 vi.mock("./store", () => ({ loadProjects }));
 
+import { clientProto } from "@/lib/client/errors";
+import { setLocalePreference } from "@/lib/i18n";
+
 import {
   applyImportEvent,
   getImportState,
+  importErrorText,
   loadImportScan,
   resetImportStoreForTests,
   selectAllImportProjects,
@@ -111,8 +116,27 @@ describe("import discovery", () => {
   it("shows an honest error when the scan fails", async () => {
     request.mockRejectedValueOnce(new Error("the daemon refused the scan"));
     await loadImportScan();
-    expect(getImportState().error).toContain("the daemon refused the scan");
+    expect(getImportState().error?.message).toBe("the daemon refused the scan");
+    expect(importErrorText(getImportState().error ?? clientProto("internal", "unexpected"))).toBe(
+      "the daemon refused the scan Try again. If this keeps happening, open the connection details in the status bar.",
+    );
     expect(getImportState().scan).toBeNull();
+  });
+
+  it("keeps a missing host as a kind and words it in the active language", async () => {
+    local.host = null;
+    try {
+      await loadImportScan();
+      const error = getImportState().error;
+      expect(error).toMatchObject({ code: "unsupported", client: { kind: "noHost" } });
+      await setLocalePreference("es");
+      expect(importErrorText(error ?? clientProto("internal", "unexpected"))).toBe(
+        "El daemon aún no ha informado de su host. Espera a que la barra de estado indique que está en línea y vuelve a intentarlo.",
+      );
+    } finally {
+      await setLocalePreference("system");
+      local.host = "host_local";
+    }
   });
 });
 

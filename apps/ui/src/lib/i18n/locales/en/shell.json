@@ -1,0 +1,306 @@
+{
+  "offline": {
+    "reconnecting": "Reconnecting",
+    "offline": "Offline",
+    "attempt": "attempt {{attempt}}",
+    "cached": "cached {{time}}",
+    "noCache": "no cached threads",
+    "reconnect": "Reconnect"
+  },
+  "toasts": {
+    "region": "Notifications",
+    "dismiss": "Dismiss"
+  },
+  "start": {
+    "title": "Start a thread",
+    "lead": "Pick where it runs. The agent works in a directory you choose on that host, and you can supervise it from any paired device.",
+    "host": "Host",
+    "hostChip": "Host: {{name}}",
+    "hostChipNone": "Host: no online host",
+    "noOnlineHost": "No online host",
+    "noOnlineHosts": "No online hosts",
+    "notYet": "Not yet",
+    "notYetHint": "Not yet: new threads run on this host",
+    "harness": "Harness",
+    "harnessChip": "Harness: {{name}}",
+    "folder": "Workspace folder",
+    "projectChip": "Project: {{name}}",
+    "projects": "Projects",
+    "projectOn": "Project on {{host}}",
+    "projectOnAnyHost": "Project on a host",
+    "noProjects": "No projects on this host yet",
+    "typePath": "Type a folder path…",
+    "addProject": "Add project…",
+    "composer": "Start a thread composer",
+    "describe": "Describe the task",
+    "describeFor": "Describe the task for {{harness}} on {{host}}",
+    "describeForAnyHost": "Describe the task for {{harness}} on a host",
+    "attachOffline": "Reconnect to attach files.",
+    "attachNoHost": "Pick an online host first.",
+    "send": "Start thread",
+    "blocked": {
+      "offline": "Reconnect to start a thread.",
+      "noHost": "No online host is available.",
+      "empty": "Describe the task first.",
+      "starting": "Starting…",
+      "ready": "Start (Enter)"
+    },
+    "noHostYet": "No host yet? <pair>Pair a device</pair> or run <code>{{command}}</code> on the machine.",
+    "failed": "Couldn't start the thread on {{host}}.",
+    "nothingRunning": "Nothing is running."
+  },
+  "phoneIde": {
+    "title": "The IDE is a desktop view.",
+    "body": "Open the thread on a larger screen to browse files, read diffs and edit. The thread and its changes are available here.",
+    "back": "Back to inbox"
+  },
+  "threadActions": {
+    "theHost": "the host",
+    "moveToSettled": "Settling failed on {{host}}.",
+    "moveToDone": "Moving to Done failed on {{host}}.",
+    "moveToWorking": "Moving to Working failed on {{host}}.",
+    "acknowledge": "Acknowledging failed on {{host}}.",
+    "settle": "Settling failed on {{host}}.",
+    "pin": "Pinning failed on {{host}}.",
+    "unpin": "Unpinning failed on {{host}}.",
+    "snooze": "Snoozing failed on {{host}}.",
+    "wake": "Waking failed on {{host}}.",
+    "interrupt": "Interrupting failed on {{host}}.",
+    "mode": "Changing the mode failed on {{host}}.",
+    "model": "Changing the model failed on {{host}}.",
+    "effort": "Changing the effort failed on {{host}}.",
+    "fastOn": "Turning on fast mode failed on {{host}}.",
+    "fastOff": "Turning off fast mode failed on {{host}}.",
+    "rename": "Renaming failed on {{host}}.",
+    "switchHarness": "Switching harness failed on {{host}}.",
+    "rewind": "Rewinding failed on {{host}}."
+  },
+  "approval": {
+    "approveFailed": "Couldn't send Go to {{host}}.",
+    "denyFailed": "Couldn't send Hold to {{host}}.",
+    "stillPending": "The approval is still pending."
+  },
+  "rewind": {
+    "fellBack": "The rewind fell back to a fresh session",
+    "fellBackNamed": "{{harness}} could not use the recorded rewind point. The next turn continues from a handoff of the kept conversation.",
+    "fellBackUnnamed": "The recorded rewind point could not be used. The next turn continues from a handoff of the kept conversation.",
+    "done": "Thread rewound",
+    "native": "{{harness}} dropped the removed turns from its own history.",
+    "handoff": "A fresh session will continue from the kept conversation.",
+    "leftAlone": "Ignored files left as they are: {{files}}.",
+    "more_one": "{{count, number}} more",
+    "more_other": "{{count, number}} more",
+    "failed": "Couldn't rewind {{title}}.",
+    "failedUntitled": "Couldn't rewind the thread."
+  },
+  "fork": {
+    "failed": "Couldn't fork that turn."
+  },
+  "mcp": {
+    "listServers": "list servers",
+    "saveFailed": "Couldn't save {{name}}.",
+    "nothingChanged": "Nothing changed on this machine.",
+    "removeFailed": "Couldn't remove {{name}}.",
+    "stillConfigured": "The server is still configured.",
+    "turnOnFailed": "Couldn't turn on {{name}}.",
+    "turnOffFailed": "Couldn't turn off {{name}}.",
+    "switchBack": "The switch is back where it was; the daemon still has the old setting.",
+    "readConfigFailed": "Couldn't read that harness config.",
+    "checkPath": "Check the path and try again.",
+    "importFailed": "Couldn't apply the import.",
+    "noneAdded": "No new servers were added.",
+    "resolveFailed": "Couldn't resolve {{name}}.",
+    "conflictOpen": "The conflict is still open.",
+    "shareFailed": "Couldn't share {{name}}.",
+    "stillLocal": "The server is still local only.",
+    "unshareFailed": "Couldn't unshare {{name}}.",
+    "stillReachable": "That machine can still reach the server.",
+    "toolsFailed": "Couldn't list {{name}} tools.",
+    "stillStarting": "The server may still be starting.",
+    "callFailed": "Couldn't call {{tool}}.",
+    "checkServer": "Check the server status and arguments.",
+    "approvalsFailed": "Couldn't read shared tool approvals.",
+    "answerFailed": "Couldn't answer that approval.",
+    "callBlocked": "The call stays blocked."
+  },
+  "skills": {
+    "listSkills": "list skills",
+    "addFailed": "Couldn't add that skill.",
+    "checkSkillFile": "Check SKILL.md exists and the path is readable.",
+    "updateFailed": "Couldn't update the skill.",
+    "unchanged": "The current version is unchanged.",
+    "removeFailed": "Couldn't remove the skill.",
+    "stillRegistered": "It is still in the registry.",
+    "enableFailed": "Couldn't enable {{skill}} for {{harness}}.",
+    "disableFailed": "Couldn't disable {{skill}} for {{harness}}.",
+    "enableFailedUnnamed": "Couldn't enable the skill for {{harness}}.",
+    "disableFailedUnnamed": "Couldn't disable the skill for {{harness}}.",
+    "switchBack": "The switch is back where it was.",
+    "scanFailed": "Couldn't scan the harness skill directories.",
+    "checkDirectories": "Check that the harness directories are readable.",
+    "importFailed": "Couldn't import those skills.",
+    "rescan": "Rescan and try again.",
+    "resolveFailed": "Couldn't resolve the conflict.",
+    "stillOpen": "It is still open.",
+    "syncFailed": "Couldn't sync skills.",
+    "localStillWork": "Local skills still work.",
+    "compareFailed": "Couldn't compare those versions.",
+    "pickVersions": "Pick two versions the registry still has."
+  },
+  "guest": {
+    "settingsFailed": "Guest links could not be changed",
+    "sendFailed": "That guest message could not be sent.",
+    "dismissFailed": "That guest message could not be dismissed."
+  },
+  "projectImport": {
+    "startFailed": "Couldn't start the import.",
+    "chooseFirst": "Choose a project first.",
+    "checkOne": "Check at least one project to import."
+  },
+  "update": {
+    "unreachable": "Couldn't reach the update server.",
+    "installFailed": "The update could not be installed."
+  },
+  "errors": {
+    "notConnected": {
+      "message": "The daemon is not connected.",
+      "hint": "Wait until the status bar says online, then try again."
+    },
+    "stopped": {
+      "message": "The client stopped.",
+      "hint": "Start it again to reconnect."
+    },
+    "handshakeTimeout": {
+      "message": "The daemon connection did not finish its handshake in time.",
+      "hint": "The daemon may be busy. Try again, or check the connection in the status bar."
+    },
+    "requestTimeout": {
+      "message": "The daemon did not answer `{{request}}` within {{seconds, number}} s.",
+      "hint": "The daemon may be busy. Try again, or check the connection in the status bar."
+    },
+    "sendFailed": {
+      "message": "The frame could not be sent.",
+      "hint": "Wait for the connection to recover, then try again."
+    },
+    "socketClosed": {
+      "message": "The socket is not open.",
+      "hint": "Wait for the connection to recover, then try again."
+    },
+    "transportStarting": {
+      "message": "The secure transport is still starting.",
+      "hint": "Wait for the connection to recover, then try again."
+    },
+    "transportCreate": {
+      "message": "The transport could not be created.",
+      "hint": "Check the daemon URL and try again."
+    },
+    "transportFailed": {
+      "message": "The connection failed.",
+      "hint": "Check that the daemon is running, then reconnect."
+    },
+    "urlRejected": {
+      "message": "The WebSocket URL was rejected.",
+      "hint": "Check that the daemon is running, then reconnect."
+    },
+    "noAnswer": {
+      "message": "The daemon did not answer. It may be stopped or unreachable.",
+      "hint": "Check that the daemon is running, then reconnect."
+    },
+    "unreachable": {
+      "message": "Could not reach {{endpoint}}.",
+      "hint": "Check that the daemon is running, then reconnect."
+    },
+    "secureUrlRejected": {
+      "message": "The secure URL was rejected.",
+      "hint": "Check that the daemon is running, then reconnect."
+    },
+    "relayBinary": {
+      "message": "The relay sent a binary frame; only JSON is expected.",
+      "hint": "Check that the daemon is running, then reconnect."
+    },
+    "plaintext": {
+      "message": "The daemon sent plaintext on the secure path.",
+      "hint": "Check that the daemon is running, then reconnect."
+    },
+    "relayNotJson": {
+      "message": "The relay sent a frame that was not JSON.",
+      "hint": "Check that the daemon is running, then reconnect."
+    },
+    "relayError": {
+      "message": "The relay reported an error.",
+      "hint": "Check that the daemon is running, then reconnect."
+    },
+    "relayBadPayload": {
+      "message": "The relay sent an invalid data payload.",
+      "hint": "Check that the daemon is running, then reconnect."
+    },
+    "noRoute": {
+      "message": "No route to this machine is available.",
+      "hint": "The machine's daemon may be offline. Check the hosts list, then reconnect."
+    },
+    "notPaired": {
+      "message": "This browser is not paired with a daemon.",
+      "hint": "Scan the daemon's pairing code, then reopen the app."
+    },
+    "invalidPairingCode": {
+      "message": "Invalid pairing code: {{detail}}",
+      "hint": "Scan the daemon's pairing code, then reopen the app."
+    },
+    "invalidPairingCodeBare": {
+      "message": "Invalid pairing code.",
+      "hint": "Scan the daemon's pairing code, then reopen the app."
+    },
+    "helloUnexpected": {
+      "message": "The daemon answered hello with an unexpected response.",
+      "hint": "Update h4rn on both ends."
+    },
+    "helloFailed": {
+      "message": "The hello handshake did not complete.",
+      "hint": "Check the daemon version, then reconnect."
+    },
+    "chunkOrder": {
+      "message": "The daemon's chunked frame arrived out of order.",
+      "hint": "The connection will retry."
+    },
+    "notJson": {
+      "message": "The daemon sent a frame that was not JSON.",
+      "hint": "Update h4rn on both ends; the connection will retry."
+    },
+    "closed": {
+      "message": "The daemon closed the connection.",
+      "hint": "The client reconnects automatically. Reads are retried; writes are not."
+    },
+    "unauthorized": {
+      "message": "The daemon rejected this device token.",
+      "hint": "Pair this device again."
+    },
+    "forbidden": {
+      "message": "This device is not allowed to do that.",
+      "hint": "Ask the host owner for access."
+    },
+    "offline": {
+      "message": "The daemon connection is offline.",
+      "hint": "Start the daemon or check the network, then press Reconnect."
+    },
+    "unexpected": {
+      "message": "Something went wrong.",
+      "hint": "Try again. If this keeps happening, open the connection details in the status bar."
+    },
+    "unreadable": {
+      "message": "The daemon returned something the client could not read.",
+      "hint": "Try again. If it persists, update h4rn."
+    },
+    "noHost": {
+      "message": "The daemon has not reported its host yet.",
+      "hint": "Wait for the status bar to say online, then try again."
+    },
+    "noAgentTurn": {
+      "message": "This workspace has no agent turn to compare against yet.",
+      "hint": "Run a turn first, then open Turn changes."
+    },
+    "noCommit": {
+      "message": "Choose a commit to compare against first.",
+      "hint": "Pick a commit from the source picker."
+    }
+  }
+}

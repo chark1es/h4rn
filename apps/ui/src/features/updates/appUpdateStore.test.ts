@@ -1,9 +1,11 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
+import { setLocalePreference } from "@/lib/i18n";
 import type { AppUpdateStatus } from "@/lib/platform/appUpdate";
 
 import {
   applyStatus,
+  appUpdateErrorText,
   getAppUpdateState,
   noticeVisible,
   resetAppUpdateStoreForTests,
@@ -51,7 +53,22 @@ describe("app update store", () => {
 
   it("keeps a failed check as a quiet message, not a notice", () => {
     applyStatus(status({ available: null, error: "Couldn't reach the update server." }));
-    expect(getAppUpdateState().error).toBe("Couldn't reach the update server.");
+    expect(getAppUpdateState().error).toEqual({
+      kind: "sent",
+      text: "Couldn't reach the update server.",
+    });
     expect(noticeVisible(getAppUpdateState())).toBe(false);
+  });
+
+  it("words its own failed check in the active language, the shell's text as sent", async () => {
+    await setLocalePreference("ja");
+    try {
+      expect(appUpdateErrorText({ kind: "unreachable" })).toBe(
+        "アップデートサーバーに接続できませんでした。",
+      );
+      expect(appUpdateErrorText({ kind: "sent", text: "shell said no" })).toBe("shell said no");
+    } finally {
+      await setLocalePreference("system");
+    }
   });
 });
