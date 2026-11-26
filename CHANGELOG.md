@@ -31,7 +31,14 @@ All notable changes to h4rn are recorded here. The format follows
   whole tracked worktree, so a shell command's edits are covered), warns that it
   also undoes the person's own later edits, and is refused when another thread
   or agent session shares the directory (finished subagents with nothing queued
-  or pending do not block it). Checkpoints are only captured while the switch
+  or pending do not block it). It restores exactly what git could see then:
+  ignored files and folders are never written, recreated or removed, and the
+  dialog and answer name the ignored paths the turn touched that stayed as they
+  were. Bytes go in and out raw, so a CRLF file or one under a filter attribute
+  comes back exactly as it was, and a recreated private file keeps its bits. A
+  checkpoint with more than 10,000 ignored paths, or one taken with a git older
+  than 2.40, is incomplete and refuses the restore with that reason. Checkpoints
+  are only captured while the switch
   is on, so a turn sent while it was off only rewinds its conversation. A
   rewind is refused while a turn runs, a message is
   queued or parked, a message's delivery is uncertain (resend or discard it
@@ -862,6 +869,32 @@ All notable changes to h4rn are recorded here. The format follows
   finished request's answer before an expired link's rows are cleaned up, and an
   answer is found by its request id rather than by reading the thread's whole
   event log.
+- **Rewind files restores the right bytes or refuses.** The selected message's
+  own checkpoint now decides the restore, so a later turn never overrides it;
+  the checkpoint covers untracked files as well as tracked ones, and keeps
+  renames (a staged rename included), symlinks and executable bits; it also
+  records which ignored paths were present, so a turn that empties `.gitignore`
+  or forces an ignored file into the index never makes a restore delete that
+  file, and nothing under an ignored folder is touched even when the turn
+  removes the rule — those paths are named instead; an ignored file a tool
+  captured before the turn wrote it comes back while one only captured mid-turn
+  refuses and names the path; a path the checkpoint proves absent is removed
+  even when a mid-turn capture holds it; git paths resolve from the repository
+  root and anything outside the thread's worktree is refused; a failed `git`
+  read aborts instead of deleting; a restored file is written with the exact
+  bytes it had, so a CRLF or filtered file comes back unchanged whatever
+  `.gitattributes`, `.git/info/attributes` or the global attributes file says,
+  and its own permission bits are kept (a 0600 `.env` stays private) with only
+  the executable bit toggled; a failed symlink unlink or write rolls back
+  instead of writing through the link; a rollback keeps its journal until it is
+  on disk and restores the exact mode; backups, restored files and folders are
+  flushed, new folders one level at a time; startup recovery checks the
+  journal's path is still the thread's worktree and that its root is the
+  workspace's repository root, and both it and a live rollback refuse a parent
+  that is now a symlink or leads outside that root, keeping the journal;
+  startup recovery surfaces an unreadable journal on its thread and keeps
+  booting instead of stopping the daemon; and the answer says files were
+  restored only when the restore really changed one.
 - **Rewind and fork stay honest about messages still being delivered.** An edit
   now waits for a steer's write to return instead of cutting the turn it was
   about to join, a queued steer is marked in flight before its `sending` write

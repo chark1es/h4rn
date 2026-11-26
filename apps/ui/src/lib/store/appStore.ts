@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from "react";
 import { isPlacementMove, noteManualPlacement } from "@/features/notifications/placement";
+import { leftAloneSummary } from "@/features/rewind/left-alone";
 import type {
   ApprovalDecision,
   Attachment,
@@ -1609,12 +1610,17 @@ export async function rewindThread(
     // Say what the harness really did, not what the thread row advertises: the
     // answer names the method the daemon recorded for this cut.
     const harness = current.threads[threadId]?.harness;
+    const leftAlone = leftAloneSummary(prompt.left_alone);
     pushToast({
       title: "Thread rewound",
-      description:
+      description: [
         prompt.method === "native" && harness
           ? `${harnessName(harness)} dropped the removed turns from its own history.`
           : "A fresh session will continue from the kept conversation.",
+        leftAlone ? `Ignored files left as they are: ${leftAlone}.` : null,
+      ]
+        .filter(Boolean)
+        .join(" "),
     });
     return prompt;
   } catch (error) {

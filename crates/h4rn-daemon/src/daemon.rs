@@ -501,10 +501,12 @@ impl DaemonBuilder {
             }
         }
         manager.set_snapshot_store(fs.snapshots());
-        manager
-            .recover_pending_restores()
-            .await
-            .map_err(|error| anyhow::anyhow!("recover an interrupted file restore: {error}"))?;
+        // An interrupted restore is finished or rolled back here. A journal
+        // that cannot be read is reported on its thread and kept on disk; it
+        // never stops the daemon from starting.
+        if let Err(error) = manager.recover_pending_restores().await {
+            tracing::error!(%error, "could not finish the interrupted file restores");
+        }
         let projects = Arc::new(
             crate::projects::ProjectService::open(&self.config.data_dir, hosts.local_id())
                 .map_err(|error| anyhow::anyhow!("open the project list: {error}"))?

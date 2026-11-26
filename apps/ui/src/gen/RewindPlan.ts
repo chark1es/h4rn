@@ -21,4 +21,9 @@ files_enabled: boolean,
 /**
  * Whether **Revert files too** would be accepted for this prompt.
  */
-files_available: boolean, };
+files_available: boolean, 
+/**
+ * Paths the removed turns touched that git ignored when the checkpoint
+ * was taken, so **Revert files too** leaves them exactly as they are.
+ */
+left_alone: Array<string>, };
