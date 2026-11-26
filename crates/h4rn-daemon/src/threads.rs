@@ -2858,7 +2858,8 @@ impl ThreadRecord {
             reasoning_efforts: self.advertised_efforts.clone(),
             models: self.meta.advertised_models.clone(),
             fast: self.meta.fast,
-            fast_available: self.meta.fast_available,
+            fast_models: Some(self.meta.model_fast.clone()),
+            fast_available: self.meta.fast_available(),
             tab,
             // The manual override sticks until the next turn starts, so this
             // is true exactly for the placement it caused: a lifecycle
@@ -4957,7 +4958,7 @@ impl ThreadManager {
             reasoning_effort: request.reasoning_effort,
             fast: request.fast,
             advertised_models: Vec::new(),
-            fast_available: None,
+            model_fast: Default::default(),
             worktree: request.worktree,
             created_at: now,
             usage: Usage::default(),
@@ -5151,7 +5152,7 @@ impl ThreadManager {
             reasoning_effort: None,
             fast: false,
             advertised_models: Vec::new(),
-            fast_available: None,
+            model_fast: Default::default(),
             worktree: None,
             created_at,
             usage: Usage::default(),
@@ -5475,7 +5476,7 @@ impl ThreadManager {
             // The fork starts on the source's harness and model, so the
             // catalogue the source's last session reported describes it too.
             advertised_models: meta.advertised_models.clone(),
-            fast_available: meta.fast_available,
+            model_fast: meta.model_fast.clone(),
             // A fork runs in the source's workspace. Per-fork worktrees come
             // later; the fork never invents one.
             worktree: None,
@@ -8548,7 +8549,9 @@ impl ThreadManager {
             }
             record.session_settings = None;
             record.meta.advertised_models.clear();
-            record.meta.fast_available = None;
+            // The new harness's models know nothing about the old one's
+            // service tiers, so the per-model answers go with the catalogue.
+            record.meta.model_fast.clear();
             record.advertised_efforts.clear();
             record.context_window = None;
             let domain = vec![ThreadEvent::HarnessSwitched {
@@ -8632,12 +8635,13 @@ impl ThreadManager {
         // session switched away from.
         let settings_lock = handle.lock().await.settings_lock.clone();
         let _settings = settings_lock.lock().await;
-        let (harness, mut settings, session) = {
+        let (harness, mut settings, session, fast_by_model) = {
             let record = handle.lock().await;
             (
                 record.meta.harness,
                 ThreadSettings::of(&record.meta),
                 record.session.live().cloned(),
+                record.meta.model_fast.clone(),
             )
         };
 
@@ -8670,6 +8674,17 @@ impl ThreadManager {
             settings.reasoning_effort.as_deref(),
             settings.fast,
         )?;
+
+        // The fast tier belongs to the model, so a model a session has already
+        // described as tierless refuses Fast here. This is the only check when
+        // no session is live (right after a restart, say), and it also stops a
+        // model switch from carrying the old model's Fast into a tierless one.
+        if settings.fast && fast_by_model.get(&settings.model) == Some(&false) {
+            return Err(ManagerError::Unsupported(format!(
+                "model `{}` has no fast tier; turn Fast off first",
+                settings.model
+            )));
+        }
 
         // From here the live session may change and the record has not caught
         // up. A Send must not select a session in this window, so it waits on
@@ -8743,7 +8758,10 @@ impl ThreadManager {
                         "this agent does not offer reasoning effort `{effort}`"
                     )));
                 }
-                if settings.fast && !controls.fast {
+                // A catalogue that says this model has no tier refuses Fast;
+                // one that does not describe the model leaves it unknown, so
+                // the request is not refused on a guess.
+                if settings.fast && controls.fast == Some(false) {
                     return Err(ManagerError::Unsupported(
                         "this agent has no fast mode".into(),
                     ));
@@ -8821,12 +8839,12 @@ impl ThreadManager {
                 ThreadSettingsChange::Mode(mode) => record.meta.runtime_mode = *mode,
                 ThreadSettingsChange::Model(_) => {
                     record.meta.model = settings.model.clone();
-                    // A different model can have a different context window and
-                    // fast tier; the live switch below fills the tier it really
-                    // got, and the proxy catalog fills the window again on the
-                    // next session start.
+                    // A different model can have a different context window;
+                    // the proxy catalog fills the window again on the next
+                    // session start. Its fast answer is the map's, so the
+                    // summary answers for the model chosen here even when no
+                    // session is live to describe it.
                     record.context_window = None;
-                    record.meta.fast_available = None;
                 }
                 ThreadSettingsChange::Effort(_) => {
                     record.meta.reasoning_effort = settings.reasoning_effort.clone();
@@ -8862,7 +8880,14 @@ impl ThreadManager {
                     if let Some(controls) = switched_controls {
                         record.meta.advertised_models = controls.models.clone().unwrap_or_default();
                         record.advertised_efforts = controls.efforts;
-                        record.meta.fast_available = Some(controls.fast);
+                        // The session now runs the model this request chose,
+                        // so its answer is recorded for that model, and its
+                        // catalogue's answers for the others it lists.
+                        record.meta.record_fast_answers(
+                            &settings.model,
+                            controls.fast,
+                            &controls.fast_by_model,
+                        );
                     }
                 }
             } else {
@@ -11687,19 +11712,19 @@ impl Inner {
                 if let Some(models) = controls.models.clone() {
                     record.meta.advertised_models = models;
                 }
-                // Fast belongs to the model, so the session's answer replaces
-                // the last one even when it is "no tier" — but only while the
-                // thread still runs the model this session started on. A model
-                // picked during startup is the newer choice, and the session
-                // that takes it reports its own tier when it starts.
-                record.meta.fast_available = if record.meta.model == started_settings.model {
-                    Some(controls.fast)
-                } else {
-                    // A model picked during startup: the running session's
-                    // answer describes the old one, so it is unknown until the
-                    // session that takes the new model starts.
-                    None
-                };
+                // Fast belongs to the model, so the answer is recorded per
+                // model id — under the model this session really runs, never
+                // under a model picked while the harness was booting, whose
+                // tier this session knows nothing about. The catalogue's own
+                // per-model answers are kept too, so a switch made while no
+                // session is live can still answer for them.
+                let described = controls
+                    .current_model
+                    .clone()
+                    .unwrap_or_else(|| started_settings.model.clone());
+                record
+                    .meta
+                    .record_fast_answers(&described, controls.fast, &controls.fast_by_model);
             }
             record.advertised_efforts = controls
                 .as_ref()
@@ -28828,6 +28853,89 @@ mod tests {
         assert!(matches!(error, ManagerError::Unsupported(_)), "{error:?}");
     }
 
+    /// Each model's fast answer outlives the session, and a switch made with no
+    /// session live is answered from it rather than from the harness.
+    ///
+    /// The bug: a model change cleared the tier answer, so after a restart a
+    /// switch to a tierless model looked unknown, the client fell back to
+    /// Codex's harness-wide "has Fast", and the daemon accepted a Fast the
+    /// model could not honour.
+    #[tokio::test]
+    async fn a_tierless_model_stays_refused_after_a_restart() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let journal: Arc<dyn Journal> =
+            Arc::new(SqliteJournal::in_memory().await.expect("journal"));
+        let (harness, _settings) = FakeHarness::new()
+            .with_kind(HarnessKind::Codex)
+            .with_advertised_models(["gpt-a".to_string(), "gpt-b".to_string()])
+            .with_model_fast("gpt-a", true)
+            .with_model_fast("gpt-b", false)
+            .with_session_settings();
+        let host = HostId::new("host_test");
+        let manager = open_test_manager_with_journal(harness, host.clone(), journal.clone()).await;
+        let mut request = new_thread(host.clone(), workspace.path(), "first");
+        request.harness = HarnessKind::Codex;
+        request.model = "gpt-a".into();
+        let created = manager.create_thread(request).await.expect("create");
+        wait_for_idle(&manager, &created.thread_id).await;
+        manager.shutdown().await;
+        drop(manager);
+
+        // No session is live now, so only the persisted per-model answers can
+        // say what gpt-b offers.
+        let restarted = open_test_manager_with_journal(
+            FakeHarness::new().with_kind(HarnessKind::Codex),
+            host,
+            journal,
+        )
+        .await;
+        let summary = restarted
+            .set_thread_model(&created.thread_id, "gpt-b".into())
+            .await
+            .expect("switch to the tierless model");
+        assert_eq!(summary.model, "gpt-b");
+        assert_eq!(
+            summary.fast_available,
+            Some(false),
+            "the persisted answer for gpt-b follows the switch"
+        );
+        // The whole map is published, so a new-thread dialog can answer for a
+        // model this thread no longer runs.
+        assert_eq!(
+            summary
+                .fast_models
+                .as_ref()
+                .and_then(|map| map.get("gpt-a")),
+            Some(&true),
+            "the answer for the model left behind is still there"
+        );
+        assert_eq!(
+            summary
+                .fast_models
+                .as_ref()
+                .and_then(|map| map.get("gpt-b")),
+            Some(&false)
+        );
+        let error = restarted
+            .set_thread_fast(&created.thread_id, true)
+            .await
+            .expect_err("a model with no tier refuses Fast with no session live");
+        assert!(matches!(error, ManagerError::Unsupported(_)), "{error:?}");
+
+        // And back: the model that has a tier is offered and accepted again.
+        let summary = restarted
+            .set_thread_model(&created.thread_id, "gpt-a".into())
+            .await
+            .expect("switch back to the model with Fast");
+        assert_eq!(summary.fast_available, Some(true));
+        let summary = restarted
+            .set_thread_fast(&created.thread_id, true)
+            .await
+            .expect("the model with a tier takes Fast");
+        assert!(summary.fast);
+        restarted.shutdown().await;
+    }
+
     /// The catalogue a thread's session reported outlives a daemon restart.
     ///
     /// Without it the picker and a new thread on that host fall back to the
@@ -29057,6 +29165,55 @@ mod tests {
             .find(|meta| meta.thread_id == created.thread_id)
             .expect("the thread's metadata");
         assert_eq!(stored.model, "m-1");
+    }
+
+    /// A model picked while a Codex session is starting does not inherit the
+    /// starting session's fast answer.
+    ///
+    /// The session boots on gpt-a, which has Fast, while the person picks
+    /// gpt-b. The answer the session reports describes gpt-a, so the summary
+    /// must not offer Fast for gpt-b until a session that runs it reports.
+    #[tokio::test]
+    async fn a_model_chosen_during_startup_does_not_inherit_the_old_fast_answer() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (harness, start) = FakeHarness::new().with_start_gate();
+        let (harness, _settings) = harness
+            .with_kind(HarnessKind::Codex)
+            .with_advertised_models(["gpt-a".to_string(), "gpt-b".to_string()])
+            .with_model_fast("gpt-a", true)
+            .with_session_settings();
+        let (harness, sessions) = harness.with_session_count();
+        let host = HostId::new("host_test");
+        let manager = open_test_manager(harness, host.clone()).await;
+        let mut events = manager.subscribe();
+        let mut request = new_thread(host, workspace.path(), "first");
+        request.harness = HarnessKind::Codex;
+        request.model = "gpt-a".into();
+        let created = manager.create_thread(request).await.expect("create");
+
+        // The session is booting on gpt-a; pick gpt-b before it reports.
+        assert!(wait_until(|| sessions.get() >= 1).await);
+        let summary = manager
+            .set_thread_model(&created.thread_id, "gpt-b".into())
+            .await
+            .expect("pick a model during startup");
+        assert_eq!(summary.model, "gpt-b");
+
+        start.release();
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+        wait_for_idle(&manager, &created.thread_id).await;
+
+        let summary = manager
+            .get_thread(&created.thread_id, 0)
+            .await
+            .expect("summary")
+            .summary;
+        assert_eq!(summary.model, "gpt-b");
+        assert_ne!(
+            summary.fast_available,
+            Some(true),
+            "the starting session's gpt-a answer must not describe gpt-b"
+        );
     }
 
     /// A resumed agent with no catalogue in its reply leaves the daemon unable

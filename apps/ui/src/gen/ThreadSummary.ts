@@ -118,13 +118,26 @@ models: Array<string>,
  */
 fast: boolean, 
 /**
+ * Fast answers for the models this thread's sessions described.
+ *
+ * The thread keeps every per-model answer its sessions' catalogues
+ * reported, not only the one for its current model, so a client can answer
+ * for a model the thread no longer runs (the new-thread dialog does).
+ * `fast_available` is this map's entry for `model`; a model missing from
+ * it is unknown. `None` is an older daemon that reported only the current
+ * model's answer.
+ */
+fast_models?: { [key in string]?: boolean }, 
+/**
  * Whether the thread's current model offers a fast tier.
  *
  * The fast tier belongs to the model, not the harness: Codex's catalogue
  * names it per model, and a thread switched to a model without one must
- * not be offered the row. `None` means no session has reported it yet (a
- * thread that has not run, or an older daemon), and the client falls back
- * to what the harness offers as a whole.
+ * not be offered the row. The daemon keeps the answer for every model a
+ * session has described, so a switch made with no live session still
+ * answers correctly. `None` means the tier for this model is genuinely
+ * unknown (no session has described it, or an older daemon), and the
+ * client shows no Fast row rather than falling back to the harness.
  */
 fast_available?: boolean, 
 /**

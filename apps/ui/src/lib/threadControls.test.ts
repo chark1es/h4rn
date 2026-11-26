@@ -5,6 +5,7 @@ import {
   effortLabel,
   fastSupported,
   modeLabel,
+  newThreadFastSupported,
   newThreadModel,
   nonDefaultSettings,
   runtimeModeForModeId,
@@ -114,16 +115,65 @@ describe("thread controls", () => {
     expect(fastSupported("acp")).toBe(false);
   });
 
-  it("follows the model's fast tier and falls back to the harness before a session", () => {
+  it("follows the model's fast tier and shows nothing when it is unknown", () => {
     expect(threadFastSupported(summary({ harness: "codex", fast_available: true }))).toBe(true);
     // A switch to a model without a service tier hides the row.
     expect(threadFastSupported(summary({ harness: "codex", fast_available: false }))).toBe(false);
-    // No session has answered yet (a new thread or an older daemon): the
-    // harness-wide answer stands.
-    expect(threadFastSupported(summary({ harness: "codex" }))).toBe(true);
+    // No answer for this model (a new thread, a model no session has run, or
+    // an older daemon): the harness-wide answer must not stand in, or a
+    // tierless model would be offered Fast anyway.
+    expect(threadFastSupported(summary({ harness: "codex" }))).toBe(false);
     expect(threadFastSupported(summary({ harness: "claude_code", fast_available: false }))).toBe(
       false,
     );
+  });
+
+  it("offers Fast in the new-thread dialog only for a model known to have a tier", () => {
+    const fast = summary({
+      thread_id: "th_fast",
+      harness: "codex",
+      model: "gpt-a",
+      fast_available: true,
+      fast_models: { "gpt-a": true },
+    });
+    const tierless = summary({
+      thread_id: "th_plain",
+      harness: "codex",
+      model: "gpt-b",
+      fast_available: false,
+      fast_models: { "gpt-b": false },
+    });
+    expect(newThreadFastSupported("codex", "host_1", "gpt-a", [fast, tierless])).toBe(true);
+    expect(newThreadFastSupported("codex", "host_1", "gpt-b", [fast, tierless])).toBe(false);
+    // No thread on this host has run the model, so its tier is unknown: the
+    // harness-wide answer must not offer a row the daemon would refuse.
+    expect(newThreadFastSupported("codex", "host_1", "gpt-c", [fast, tierless])).toBe(false);
+    expect(newThreadFastSupported("codex", "host_1", "gpt-a", [])).toBe(false);
+    // An answer from another host says nothing about this one.
+    expect(newThreadFastSupported("codex", "host_2", "gpt-a", [fast])).toBe(false);
+    // A thread that no longer runs the model still remembers its answer.
+    const moved = summary({
+      thread_id: "th_moved",
+      harness: "codex",
+      model: "gpt-b",
+      fast_available: false,
+      fast_models: { "gpt-a": true, "gpt-b": false },
+    });
+    expect(newThreadFastSupported("codex", "host_1", "gpt-a", [moved])).toBe(true);
+    // An older daemon reports only the current model; the thread that ran it
+    // still answers.
+    const old = summary({
+      harness: "codex",
+      model: "gpt-a",
+      fast_available: true,
+    });
+    expect(newThreadFastSupported("codex", "host_1", "gpt-a", [old])).toBe(true);
+    // A harness with no fast tier never offers it, whatever a thread says.
+    expect(
+      newThreadFastSupported("claude_code", "host_1", "claude-sonnet-5-5", [
+        summary({ harness: "claude_code", model: "claude-sonnet-5-5", fast_available: true }),
+      ]),
+    ).toBe(false);
   });
 
   it("shows only settings that differ from the defaults", () => {

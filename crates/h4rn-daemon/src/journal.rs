@@ -11,7 +11,7 @@
 //! what a client subscribed to several threads needs. `GetThread` replays by
 //! that global sequence and filters one thread.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -134,13 +134,14 @@ pub struct ThreadMeta {
     /// from what the installed CLI really offers. A new session that reports a
     /// catalogue replaces it; a harness switch clears it.
     pub advertised_models: Vec<String>,
-    /// Whether the thread's current model offered a fast tier, when known.
+    /// Whether each model the thread's sessions described offers a fast tier.
     ///
-    /// The fast tier belongs to the model, so the answer from the last session
-    /// describes the model the row names. `None` before any session advertised
-    /// one, and after a switch to a model whose tier the session could not
-    /// report. Persisted beside `advertised_models` for the same reason.
-    pub fast_available: Option<bool>,
+    /// The fast tier belongs to the model, not the harness, so the answer is
+    /// kept per model id beside `advertised_models`: a session's catalogue
+    /// can describe every model it lists, and a restart keeps those answers.
+    /// A model with no entry is unknown — never "no tier" and never the
+    /// harness's answer for someone else's model.
+    pub model_fast: BTreeMap<String, bool>,
     /// Worktree intent recorded at creation.
     pub worktree: Option<WorktreeRequest>,
     /// Creation time, used as the initial lifecycle clock.
@@ -213,6 +214,40 @@ pub struct ThreadMeta {
     /// session accepts the prompt that carried the handoff, so a failed start
     /// does not lose the history a later message needs.
     pub handoff_pending: bool,
+}
+
+impl ThreadMeta {
+    /// The fast answer for the row's current model, when a session described it.
+    ///
+    /// `None` means genuinely unknown — no session has described this model —
+    /// so the client hides the row instead of borrowing the harness's answer
+    /// for a model it never ran.
+    pub fn fast_available(&self) -> Option<bool> {
+        self.model_fast.get(&self.model).copied()
+    }
+
+    /// Records the fast answers one session's catalogue reported.
+    ///
+    /// `current` is the model the session really runs; its own answer is
+    /// recorded under that id, so a model picked while the session was
+    /// starting never inherits the answer for the model it replaced.
+    pub fn record_fast_answers(
+        &mut self,
+        current: &str,
+        fast: Option<bool>,
+        fast_by_model: &BTreeMap<String, bool>,
+    ) {
+        self.model_fast.extend(
+            fast_by_model
+                .iter()
+                .map(|(model, available)| (model.clone(), *available)),
+        );
+        if let Some(fast) = fast
+            && !current.trim().is_empty()
+        {
+            self.model_fast.insert(current.to_string(), fast);
+        }
+    }
 }
 
 /// The source of a forked thread.
@@ -1079,7 +1114,7 @@ impl SqliteJournal {
                 runtime_mode   TEXT NOT NULL DEFAULT 'approval_required',
                 reasoning_effort TEXT,
                 fast           INTEGER NOT NULL DEFAULT 0,
-                fast_available INTEGER,
+                model_fast_json TEXT NOT NULL DEFAULT '{}',
                 advertised_models_json TEXT NOT NULL DEFAULT '[]',
                 worktree_json  TEXT,
                 parent_thread_id TEXT,
@@ -1147,8 +1182,12 @@ impl SqliteJournal {
             .await?;
         self.ensure_column("daemon_threads", "fast", "INTEGER NOT NULL DEFAULT 0")
             .await?;
-        self.ensure_column("daemon_threads", "fast_available", "INTEGER")
-            .await?;
+        self.ensure_column(
+            "daemon_threads",
+            "model_fast_json",
+            "TEXT NOT NULL DEFAULT '{}'",
+        )
+        .await?;
         self.ensure_column(
             "daemon_threads",
             "advertised_models_json",
@@ -1688,9 +1727,10 @@ async fn upsert_thread_on(
     let provider_turns_json = serde_json::to_string(&meta.provider_turns)?;
     let forked_json = serde_json::to_string(&meta.forked_from)?;
     let advertised_models_json = serde_json::to_string(&meta.advertised_models)?;
+    let model_fast_json = serde_json::to_string(&meta.model_fast)?;
     sqlx::query(
         "INSERT INTO daemon_threads
-            (thread_id, host, harness, title, title_source, workspace_path, model, created_at, usage_json, resume_id, runtime_mode, reasoning_effort, fast, fast_available, advertised_models_json, worktree_json, parent_thread_id, subagent_id, agent_id, agent_fingerprint, parked_json, queued_json, claimed_json, imported_json, rewind_json, worktree_identity_json, provider_turns_json, forked_json, handoff_pending, switch_generation)
+            (thread_id, host, harness, title, title_source, workspace_path, model, created_at, usage_json, resume_id, runtime_mode, reasoning_effort, fast, model_fast_json, advertised_models_json, worktree_json, parent_thread_id, subagent_id, agent_id, agent_fingerprint, parked_json, queued_json, claimed_json, imported_json, rewind_json, worktree_identity_json, provider_turns_json, forked_json, handoff_pending, switch_generation)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(thread_id) DO UPDATE SET
             host = excluded.host,
@@ -1704,7 +1744,7 @@ async fn upsert_thread_on(
             runtime_mode = excluded.runtime_mode,
             reasoning_effort = excluded.reasoning_effort,
             fast = excluded.fast,
-            fast_available = excluded.fast_available,
+            model_fast_json = excluded.model_fast_json,
             advertised_models_json = excluded.advertised_models_json,
             worktree_json = excluded.worktree_json,
             parent_thread_id = excluded.parent_thread_id,
@@ -1735,7 +1775,7 @@ async fn upsert_thread_on(
     .bind(runtime_mode)
     .bind(meta.reasoning_effort.as_deref())
     .bind(meta.fast as i64)
-    .bind(meta.fast_available.map(|available| available as i64))
+    .bind(&model_fast_json)
     .bind(advertised_models_json)
     .bind(worktree_json)
     .bind(meta.parent_thread_id.as_ref().map(ThreadId::as_str))
@@ -1879,7 +1919,7 @@ impl Journal for SqliteJournal {
 
     async fn list_threads(&self) -> Result<Vec<ThreadMeta>, JournalError> {
         let rows = sqlx::query(
-            "SELECT thread_id, host, harness, title, title_source, workspace_path, model, created_at, usage_json, resume_id, runtime_mode, reasoning_effort, fast, fast_available, advertised_models_json, worktree_json, parent_thread_id, subagent_id, agent_id, agent_fingerprint, parked_json, queued_json, claimed_json, imported_json, rewind_json, worktree_identity_json, provider_turns_json, forked_json, handoff_pending, switch_generation
+            "SELECT thread_id, host, harness, title, title_source, workspace_path, model, created_at, usage_json, resume_id, runtime_mode, reasoning_effort, fast, model_fast_json, advertised_models_json, worktree_json, parent_thread_id, subagent_id, agent_id, agent_fingerprint, parked_json, queued_json, claimed_json, imported_json, rewind_json, worktree_identity_json, provider_turns_json, forked_json, handoff_pending, switch_generation
              FROM daemon_threads ORDER BY created_at ASC",
         )
         .fetch_all(&self.pool)
@@ -1920,9 +1960,10 @@ impl Journal for SqliteJournal {
                     .unwrap_or_default(),
                 reasoning_effort: row.try_get("reasoning_effort")?,
                 fast: row.try_get::<i64, _>("fast")? != 0,
-                fast_available: row
-                    .try_get::<Option<i64>, _>("fast_available")?
-                    .map(|available| available != 0),
+                model_fast: row
+                    .try_get::<Option<String>, _>("model_fast_json")?
+                    .and_then(|json| serde_json::from_str(&json).ok())
+                    .unwrap_or_default(),
                 advertised_models: row
                     .try_get::<Option<String>, _>("advertised_models_json")?
                     .and_then(|json| serde_json::from_str(&json).ok())
@@ -3608,7 +3649,7 @@ mod tests {
             reasoning_effort: None,
             fast: false,
             advertised_models: Vec::new(),
-            fast_available: None,
+            model_fast: Default::default(),
             worktree: None,
             created_at: Utc::now(),
             usage: Usage::default(),
@@ -3646,6 +3687,7 @@ mod tests {
             reasoning_efforts: Vec::new(),
             models: Vec::new(),
             fast: false,
+            fast_models: None,
             fast_available: None,
             tab: h4rn_protocol::ThreadTab::Working,
             placed_by_user: false,

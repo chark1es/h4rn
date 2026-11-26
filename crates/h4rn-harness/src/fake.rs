@@ -2063,11 +2063,10 @@ impl HarnessSession for FakeSession {
             current_model: self.restored_model.clone(),
             default_models: self.default_models.clone(),
             efforts,
-            fast: self
-                .model_fast
-                .get(&self.current_model)
-                .copied()
-                .unwrap_or(base.fast),
+            fast: self.model_fast.get(&self.current_model).copied(),
+            // The test configured a per-model catalogue, so the session can
+            // answer for every model it names, not only the one it runs.
+            fast_by_model: self.model_fast.clone(),
             switch_mode: self.switchable,
             switch_model: self.switchable,
             switch_effort: self.switchable,

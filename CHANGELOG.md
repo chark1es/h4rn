@@ -799,8 +799,12 @@ All notable changes to h4rn are recorded here. The format follows
   follows the thread's current model instead of its harness (Codex advertises
   service tiers per model), and the model catalogue a session reports is saved
   with the thread, so a daemon restart no longer falls back to the static list
-  or silently starts a Codex thread on another model. OpenCode's in-place mode
-  and model switches have request-shape tests.
+  or silently starts a Codex thread on another model. Each model's Fast answer
+  is saved beside that catalogue too, so a switch made while no session is live
+  still hides Fast for a model without a tier and refuses it rather than
+  guessing from the harness; a model whose tier nothing has described shows no
+  Fast row, in the composer and in the New thread dialog. OpenCode's in-place
+  mode and model switches have request-shape tests.
 - **Outside-agent access can no longer outlive or slip past a revocation.** A tool call binds the
   turn that admitted it (so a slow delegation or PR watch cannot inherit a later, wider turn), and
   every revoke — Settings, `POST /oauth/revoke` and `DELETE /mcp` — waits for admitted calls and

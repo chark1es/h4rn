@@ -2295,7 +2295,7 @@ fn idle_thread_meta(
         reasoning_effort: None,
         fast: false,
         advertised_models: Vec::new(),
-        fast_available: None,
+        model_fast: Default::default(),
         worktree: None,
         created_at: Utc::now(),
         usage: Default::default(),

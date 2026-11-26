@@ -107,7 +107,9 @@ describe("ThreadControls", () => {
 
   it("offers effort and fast only where the harness has them", () => {
     const { unmount } = render(
-      <ThreadControls summary={summary({ harness: "codex", reasoning_effort: "high" })} />,
+      <ThreadControls
+        summary={summary({ harness: "codex", reasoning_effort: "high", fast_available: true })}
+      />,
     );
     fireEvent.click(screen.getByText("claude-sonnet-5-5"));
     expect(screen.getByLabelText("Reasoning effort")).toBeTruthy();
@@ -118,6 +120,14 @@ describe("ThreadControls", () => {
     render(<ThreadControls summary={summary({ harness: "opencode" })} />);
     fireEvent.click(screen.getByText("claude-sonnet-5-5"));
     expect(screen.queryByLabelText("Reasoning effort")).toBeNull();
+    expect(screen.queryByText("Fast")).toBeNull();
+  });
+
+  it("hides the Fast row when the model's tier is unknown", () => {
+    // Nothing has described this model (an older daemon, or a model this
+    // thread never ran): the harness-wide answer must not offer the row.
+    render(<ThreadControls summary={summary({ harness: "codex", model: "gpt-c" })} />);
+    fireEvent.click(screen.getByText("gpt-c"));
     expect(screen.queryByText("Fast")).toBeNull();
   });
 

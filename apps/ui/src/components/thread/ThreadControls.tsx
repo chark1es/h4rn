@@ -60,7 +60,8 @@ function Choice({
  *
  * A harness without a real effort control or fast tier shows no row for it, an
  * ACP agent shows only the modes it advertised, and Fast follows the thread's
- * current model: a model without a service tier hides the row.
+ * current model: a model with no tier, or one nothing has described, hides the
+ * row unless Fast is already on, so it can be turned off.
  */
 export function ThreadControls({ summary }: { summary: ThreadSummary }) {
   useProxyCatalog();
@@ -233,7 +234,13 @@ export function ThreadControls({ summary }: { summary: ThreadSummary }) {
               <Choice
                 checked={summary.fast ?? false}
                 label="Fast"
-                hint={fast ? "Priority service tier, higher usage" : "This model has no fast tier"}
+                hint={
+                  fast
+                    ? "Priority service tier, higher usage"
+                    : summary.fast_available === false
+                      ? "This model has no fast tier"
+                      : "No fast tier is known for this model"
+                }
                 onSelect={() => {
                   void setThreadFast(summary.thread_id, !(summary.fast ?? false)).then((ok) => {
                     if (ok) setOpen(false);
