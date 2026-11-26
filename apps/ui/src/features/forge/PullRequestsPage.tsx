@@ -65,7 +65,7 @@ import type {
 } from "@/gen";
 import { glyphForThread } from "@/lib/agent";
 import { userSeed } from "@/lib/entities";
-import { formatAge, formatList, formatNumber } from "@/lib/i18n";
+import { formatAge, formatList, formatNumber, formatRelativeTime } from "@/lib/i18n";
 import { getClient, navigate, openThread, pushToast, useApp } from "@/lib/store/appStore";
 
 const api = () => new ForgeApi((request) => getClient().request(request));
@@ -1312,7 +1312,7 @@ function PrDetail({
               ? t("detail.openedByNow", { author: pr.summary.author })
               : t("detail.openedBy", {
                   author: pr.summary.author,
-                  age: formatAge(pr.created_at),
+                  when: formatRelativeTime(pr.created_at),
                 })}{" "}
             ·{" "}
             {t("detail.onForge", {

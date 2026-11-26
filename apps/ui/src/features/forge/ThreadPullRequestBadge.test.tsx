@@ -478,7 +478,7 @@ describe("linked items in another language", () => {
       />,
     );
     const trigger = screen.getByRole("button", { name: "关联项" });
-    expect(trigger.textContent).toContain("#7 打开");
+    expect(trigger.textContent).toContain("#7 开放");
     fireEvent.pointerDown(trigger, { button: 0, ctrlKey: false, pointerType: "mouse" });
     fireEvent.pointerUp(trigger, { button: 0, pointerType: "mouse" });
     fireEvent.click(trigger);

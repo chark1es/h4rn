@@ -1576,6 +1576,58 @@ describe("the Issues page in another language", () => {
     expect(screen.getByDisplayValue("bug, frontend")).toBeTruthy();
   });
 
+  async function openJapaneseIssueWithLabels() {
+    resetTracker({
+      detailLabels: [
+        { name: "bug", color: null },
+        { name: "frontend", color: null },
+      ],
+      detailAssignees: [
+        { login: "alice", name: null },
+        { login: "bob", name: null },
+      ],
+    });
+    await setLocalePreference("ja");
+    render(<IssuesPage />);
+    fireEvent.click(await screen.findByRole("button", { name: /Dark mode flickers/ }));
+    // The fetched detail has arrived once its assignees are listed.
+    await screen.findByText("alice、bob");
+  }
+
+  it("sends nothing when Labels and Assignees lose focus unedited in Japanese", async () => {
+    await openJapaneseIssueWithLabels();
+    // The fields hold the comma-separated text they are saved from, so an
+    // untouched field round-trips to the same list and asks for no update.
+    fireEvent.blur(screen.getByLabelText("ラベル"));
+    fireEvent.blur(screen.getByLabelText("担当者"));
+    // A title edit after the blurs proves the page had time to send anything.
+    const title = screen.getByLabelText("Issue のタイトル");
+    fireEvent.change(title, { target: { value: "Dark mode flickers on load" } });
+    fireEvent.blur(title);
+    await waitFor(() => expect(requestsOfType("forge_update_issue")).toHaveLength(1));
+    expect(requestsOfType("forge_update_issue")[0]).toMatchObject({
+      update: { title: "Dark mode flickers on load" },
+    });
+  });
+
+  it("saves edited Labels and Assignees as plain lists in Japanese", async () => {
+    await openJapaneseIssueWithLabels();
+    const labels = screen.getByLabelText("ラベル");
+    fireEvent.change(labels, { target: { value: "bug, frontend, ui" } });
+    fireEvent.blur(labels);
+    await waitFor(() => expect(requestsOfType("forge_update_issue")).toHaveLength(1));
+    expect(requestsOfType("forge_update_issue")[0]).toMatchObject({
+      update: { labels: ["bug", "frontend", "ui"] },
+    });
+    const assignees = screen.getByLabelText("担当者");
+    fireEvent.change(assignees, { target: { value: "alice, bob, carol" } });
+    fireEvent.blur(assignees);
+    await waitFor(() => expect(requestsOfType("forge_update_issue")).toHaveLength(2));
+    expect(requestsOfType("forge_update_issue")[1]).toMatchObject({
+      update: { assignees: ["alice", "bob", "carol"] },
+    });
+  });
+
   it("names an unmatched project in Spanish with its name in bold", async () => {
     resetTracker({
       accounts: [

@@ -28,7 +28,7 @@
     "review": "レビュー待ちはありません",
     "branch": "このブランチのプルリクエストはありません",
     "openBody": "このリポジトリにオープンなプルリクエストはありません。",
-    "mineBody": "このリポジトリで自分が作成したオープンなものはありません。",
+    "mineBody": "このリポジトリで自分が作成したオープンなプルリクエストはありません。",
     "reviewBody": "プルリクエストのレビューを依頼されていません。",
     "branchBody": "{{branch}} を head にしたオープンなプルリクエストはありません。",
     "thisBranchBody": "このブランチを head にしたオープンなプルリクエストはありません。"
@@ -51,7 +51,7 @@
     "pending": "チェック実行中"
   },
   "reviewChip": {
-    "changes_requested": "変更を要求",
+    "changes_requested": "変更要求あり",
     "approved": "承認済み",
     "pending": "レビュー依頼中",
     "commented": "レビューコメントあり"
@@ -88,7 +88,7 @@
     "back": "一覧に戻る",
     "breadcrumb": "パンくずリスト",
     "commits_other": "{{count, number}} 件のコミット",
-    "openedBy": "{{author}} が {{age}}前に作成",
+    "openedBy": "{{author}} が {{when}}に作成",
     "openedByNow": "{{author}} がたった今作成",
     "onForge": "{{forge}} の {{repo}}",
     "openOn": "{{forge}} で開く"
@@ -159,7 +159,7 @@
     "noReviews": "まだレビューはありません。",
     "reviewState": {
       "approved": "承認",
-      "changes_requested": "変更を要求",
+      "changes_requested": "変更要求",
       "commented": "コメント",
       "pending": "保留中",
       "dismissed": "却下"

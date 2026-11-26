@@ -8,7 +8,7 @@
     "label": "Filtros de pull requests",
     "open": "Abiertos",
     "mine": "Míos",
-    "review": "Revisión",
+    "review": "Por revisar",
     "branch": "Esta rama"
   },
   "noForge": {
@@ -92,7 +92,7 @@
     "commits_one": "{{count, number}} commit",
     "commits_many": "{{count, number}} commits",
     "commits_other": "{{count, number}} commits",
-    "openedBy": "abierto por {{author}} hace {{age}}",
+    "openedBy": "abierto por {{author}} {{when}}",
     "openedByNow": "abierto por {{author}} ahora mismo",
     "onForge": "{{repo}} en {{forge}}",
     "openOn": "Abrir en {{forge}}"
@@ -188,7 +188,7 @@
     "openThreadFirst": "Abre primero un hilo.",
     "openThreadFirstBody": "El agente necesita un espacio de trabajo, un harness y un modelo para recibir el PR.",
     "handed": "Se pasó #{{number}} a {{title}}.",
-    "handedBody": "El agente empieza con el contexto del PR y no hará push sin aprobación.",
+    "handedBody": "El agente empieza con el contexto del PR y no subirá cambios sin aprobación.",
     "handFailed": "No se pasó el PR a un agente."
   },
   "linked": {

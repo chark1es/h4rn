@@ -32,8 +32,7 @@
     "body": "Its description, comments and actions open here."
   },
   "age": {
-    "now": "just now",
-    "ago": "{{age}} ago"
+    "now": "just now"
   },
   "state": {
     "open": "Open",

@@ -23,7 +23,7 @@ import type {
   ResponseBody,
   ThreadIssue,
 } from "@/gen";
-import { formatAge, formatDateTime, i18n } from "@/lib/i18n";
+import { formatDateTime, formatRelativeTime, i18n } from "@/lib/i18n";
 
 export type IssueRequest = (request: ClientRequest) => Promise<ResponseBody>;
 
@@ -346,7 +346,8 @@ export function relativeIssueAge(iso: string | null): string {
   if (elapsed >= 30 * 86_400_000) {
     return formatDateTime(then, { year: "numeric", month: "numeric", day: "numeric" });
   }
-  return i18n.t("issues:age.ago", { age: formatAge(then, now) });
+  // Written out for a sentence ("3 hours ago", "3 時間前"), not a column's "3h".
+  return formatRelativeTime(then, now);
 }
 
 /**

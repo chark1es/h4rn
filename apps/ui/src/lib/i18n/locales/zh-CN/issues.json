@@ -7,7 +7,7 @@
   },
   "filters": {
     "label": "议题筛选",
-    "open": "打开",
+    "open": "开放",
     "closed": "已关闭",
     "all": "全部",
     "assigned": "分配给我",
@@ -32,11 +32,10 @@
     "body": "它的描述、评论和操作会在这里打开。"
   },
   "age": {
-    "now": "刚刚",
-    "ago": "{{age}}前"
+    "now": "刚刚"
   },
   "state": {
-    "open": "打开",
+    "open": "开放",
     "closed": "已关闭"
   },
   "detail": {

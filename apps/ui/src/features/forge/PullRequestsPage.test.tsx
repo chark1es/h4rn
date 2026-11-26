@@ -424,7 +424,21 @@ describe("PR detail tabs", () => {
 
 describe("the pull requests page in another language", () => {
   afterEach(async () => {
+    vi.useRealTimers();
     await setLocalePreference("en");
+  });
+
+  it("writes the detail's age out in Japanese, not as a narrow column unit", async () => {
+    // Only the clock is faked, so the page's own timers still run.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-01-01T03:00:00Z"));
+    await setLocalePreference("ja");
+    render(<PullRequestsPage />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /Fix the widget/ }));
+    await screen.findByRole("heading", { name: /Fix the widget/ });
+    expect(screen.getByText(/alice が 3 時間前に作成/)).toBeTruthy();
+    expect(screen.queryByText(/3h前/)).toBeNull();
   });
 
   it("words the list, its chips and the detail in Spanish, and keeps forge text as sent", async () => {
@@ -433,7 +447,7 @@ describe("the pull requests page in another language", () => {
 
     expect(await screen.findByRole("heading", { name: "Pull requests" })).toBeTruthy();
     expect(screen.getByRole("tab", { name: "Abiertos" })).toBeTruthy();
-    expect(screen.getByRole("tab", { name: "Revisión" })).toBeTruthy();
+    expect(screen.getByRole("tab", { name: "Por revisar" })).toBeTruthy();
     expect(await screen.findByText("Abierto")).toBeTruthy();
     expect(screen.getByText("Todas las comprobaciones superadas")).toBeTruthy();
     expect(screen.getByText("Revisión solicitada")).toBeTruthy();
@@ -443,7 +457,7 @@ describe("the pull requests page in another language", () => {
     await screen.findByRole("heading", { name: /Fix the widget/ });
     expect(screen.getByRole("tab", { name: /Conversación/ })).toBeTruthy();
     expect(screen.getByText(/1 commit ·/)).toBeTruthy();
-    expect(screen.getByText(/abierto por alice hace/)).toBeTruthy();
+    expect(screen.getByText(/abierto por alice hace \d+ (días|meses|semanas)/)).toBeTruthy();
     expect(screen.getByText("1 de 1 superadas")).toBeTruthy();
     expect(screen.getByText("Sin conflictos")).toBeTruthy();
     expect(screen.getAllByText(/· obligatoria/).length).toBeGreaterThan(0);

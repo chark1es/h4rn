@@ -7,11 +7,11 @@
   },
   "filters": {
     "label": "Filtros de issues",
-    "open": "Abiertas",
-    "closed": "Cerradas",
-    "all": "Todas",
-    "assigned": "Asignadas a mí",
-    "created": "Abiertas por mí",
+    "open": "Abiertos",
+    "closed": "Cerrados",
+    "all": "Todos",
+    "assigned": "Asignados a mí",
+    "created": "Abiertos por mí",
     "mentioning": "Me mencionan"
   },
   "projects": {
@@ -28,28 +28,27 @@
   },
   "loadMore": "Cargar más",
   "select": {
-    "title": "Selecciona una issue",
+    "title": "Selecciona un issue",
     "body": "Su descripción, comentarios y acciones se abren aquí."
   },
   "age": {
-    "now": "ahora mismo",
-    "ago": "hace {{age}}"
+    "now": "ahora mismo"
   },
   "state": {
-    "open": "Abierta",
-    "closed": "Cerrada"
+    "open": "Abierto",
+    "closed": "Cerrado"
   },
   "detail": {
     "label": "Issue",
-    "reading": "Leyendo la issue…",
+    "reading": "Leyendo el issue…",
     "openOnTracker": "Abrir en el gestor",
-    "linkNeedsThread": "Abre un hilo para vincular esta issue",
+    "linkNeedsThread": "Abre un hilo para vincular este issue",
     "unlink": "Desvincular",
     "link": "Vincular a este hilo",
     "readOnlyLinear": "Este equipo de Linear no está asociado a un proyecto, así que sus issues son de solo lectura. Elige el equipo de un proyecto en Ajustes → Control de versiones.",
-    "readOnlyForge": "Este proyecto no es dueño del repositorio, así que la issue es de solo lectura.",
-    "titleLabel": "Título de la issue",
-    "descriptionLabel": "Descripción de la issue",
+    "readOnlyForge": "Este proyecto no es dueño del repositorio, así que el issue es de solo lectura.",
+    "titleLabel": "Título del issue",
+    "descriptionLabel": "Descripción del issue",
     "noDescription": "_Sin descripción._",
     "labels": "Etiquetas",
     "labelsPlaceholder": "bug, frontend",
@@ -57,13 +56,13 @@
     "assigneesPlaceholder": "alice, bob",
     "closeReason": "Motivo de cierre",
     "reasons": {
-      "completed": "Completada",
-      "not_planned": "No planificada",
-      "duplicate": "Duplicada"
+      "completed": "Completado",
+      "not_planned": "No planificado",
+      "duplicate": "Duplicado"
     },
-    "duplicateLabel": "Número de la issue duplicada",
+    "duplicateLabel": "Número del issue duplicado",
     "duplicatePlaceholder": "Número de issue",
-    "duplicateMissing": "Indica la issue de la que esta es duplicada",
+    "duplicateMissing": "Indica el issue del que este es duplicado",
     "close": "Cerrar issue",
     "reopen": "Reabrir issue",
     "linkedPrs": "Pull requests vinculados",

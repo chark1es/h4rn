@@ -90,7 +90,7 @@
     "breadcrumb": "Breadcrumb",
     "commits_one": "{{count, number}} commit",
     "commits_other": "{{count, number}} commits",
-    "openedBy": "opened by {{author}} {{age}}",
+    "openedBy": "opened by {{author}} {{when}}",
     "openedByNow": "opened by {{author}} now",
     "onForge": "{{repo}} on {{forge}}",
     "openOn": "Open on {{forge}}"

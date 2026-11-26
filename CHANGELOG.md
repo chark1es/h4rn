@@ -31,7 +31,8 @@ All notable changes to h4rn are recorded here. The format follows
   dialog follow the Language choice; titles, bodies, labels and branch names
   stay as the forge sends them. On a phone, a pull request's chips wrap to a
   second line instead of running off the screen, and the Issues header wraps
-  instead of pushing Projects out of reach.
+  instead of pushing Projects out of reach. Ages in a sentence are written
+  out in the language ("3 時間前", "hace 3 horas") rather than "3h前".
 - **The command palette in Chinese, Spanish and Japanese.** Every row, group,
   the search field and the footer follow the Language choice, and a command
   has one name everywhere: the palette, Settings → Shortcuts and the Keyboard

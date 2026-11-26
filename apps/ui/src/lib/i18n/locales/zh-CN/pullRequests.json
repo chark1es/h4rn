@@ -6,7 +6,7 @@
   "loadMore": "加载更多",
   "filters": {
     "label": "拉取请求筛选",
-    "open": "打开",
+    "open": "开放",
     "mine": "我的",
     "review": "待评审",
     "branch": "此分支"
@@ -27,14 +27,14 @@
     "open": "没有拉取请求",
     "review": "没有等待评审的拉取请求",
     "branch": "此分支上没有拉取请求",
-    "openBody": "此仓库没有打开的拉取请求。",
-    "mineBody": "你在此仓库中没有打开的拉取请求。",
+    "openBody": "此仓库没有开放的拉取请求。",
+    "mineBody": "你在此仓库中没有开放的拉取请求。",
     "reviewBody": "没有人请你评审拉取请求。",
-    "branchBody": "没有以 {{branch}} 为源分支的打开的拉取请求。",
-    "thisBranchBody": "没有以此分支为源分支的打开的拉取请求。"
+    "branchBody": "没有以 {{branch}} 为源分支的开放的拉取请求。",
+    "thisBranchBody": "没有以此分支为源分支的开放的拉取请求。"
   },
   "state": {
-    "open": "打开",
+    "open": "开放",
     "draft": "草稿",
     "merged": "已合并",
     "closed": "已关闭"
@@ -88,7 +88,7 @@
     "back": "返回列表",
     "breadcrumb": "面包屑导航",
     "commits_other": "{{count, number}} 个提交",
-    "openedBy": "{{author}} 创建于 {{age}}前",
+    "openedBy": "{{author}} 创建于 {{when}}",
     "openedByNow": "{{author}} 刚刚创建",
     "onForge": "{{forge}} 上的 {{repo}}",
     "openOn": "在 {{forge}} 上打开"
@@ -199,14 +199,14 @@
   },
   "linkDialog": {
     "title": "关联拉取请求",
-    "pickFrom": "粘贴链接，或从 {{repo}} 中选择一个打开的拉取请求。",
+    "pickFrom": "粘贴链接，或从 {{repo}} 中选择一个开放的拉取请求。",
     "noRemote": "粘贴拉取请求链接。此工作区没有平台远程仓库，因此没有可选择的仓库。",
     "urlLabel": "拉取请求 URL",
     "link": "关联",
     "invalid": "这不是 h4rn 能识别的拉取请求链接（GitHub、GitLab、Gitea、Forgejo、Bitbucket 或 Azure DevOps）。请粘贴包含编号的页面 URL。",
     "reading": "正在读取仓库…",
-    "openList": "打开的拉取请求",
-    "noneOpen": "{{repo}} 中没有打开的拉取请求。",
+    "openList": "开放的拉取请求",
+    "noneOpen": "{{repo}} 中没有开放的拉取请求。",
     "linked": "已将 #{{number}} 关联到此对话。"
   }
 }
