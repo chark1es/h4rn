@@ -143,6 +143,31 @@ describe("plurals and formatting", () => {
     expect(formatNumber(12345.5)).toBe("12.345,5");
   });
 
+  it("reuses one number formatter per language and options", async () => {
+    const Original = Intl.NumberFormat;
+    let built = 0;
+    // Counts constructions without changing what the formatter does.
+    const Counting = function (this: unknown, ...args: ConstructorParameters<typeof Original>) {
+      built += 1;
+      return new Original(...args);
+    } as unknown as typeof Intl.NumberFormat;
+    Intl.NumberFormat = Counting;
+    try {
+      // Options no other test uses, so the first call has to build.
+      const options = { minimumFractionDigits: 4, maximumFractionDigits: 4 };
+      expect(formatNumber(1234.5, options)).toBe("1,234.5000");
+      expect(formatNumber(99, { ...options })).toBe("99.0000");
+      expect(built).toBe(1);
+
+      await setLocalePreference("es");
+      expect(formatNumber(1234.5, options)).toBe("1234,5000");
+      expect(formatNumber(12345.5, options)).toBe("12.345,5000");
+      expect(built).toBe(2);
+    } finally {
+      Intl.NumberFormat = Original;
+    }
+  });
+
   it("formats a compact age in one unit, past or ahead", async () => {
     const now = Date.parse("2026-11-25T12:00:00Z");
     expect(formatAge(now - 20_000, now)).toBe("now");

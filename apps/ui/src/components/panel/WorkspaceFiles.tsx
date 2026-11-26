@@ -9,12 +9,14 @@ import {
   SearchIcon,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { ShortcutCaps } from "@/components/common/Kbd";
 
 import { gitBadge } from "@/features/ide/useIdeSession";
 import { isHtmlPath } from "@/features/preview/htmlPreview";
 import type { FileEntry, FsListing, FsTurnChanges, HostId, ProtoError } from "@/gen";
 import { toProtoError } from "@/lib/client/errors";
+import { formatNumber } from "@/lib/i18n";
 import { getClient, openInIde, useApp } from "@/lib/store/appStore";
 import { cn } from "@/lib/utils";
 
@@ -76,6 +78,7 @@ export function WorkspaceFileRow({
   onOpenFile: (path: string) => void;
   onOpenPreview: (path: string) => void;
 }) {
+  const { t } = useTranslation("ide");
   const badge = gitBadge(entry.git_status);
   const directory = entry.kind === "directory";
   const row = (
@@ -114,8 +117,8 @@ export function WorkspaceFileRow({
       <button
         type="button"
         className="q-fopen"
-        aria-label={`Open preview of ${entry.name}`}
-        title="Open preview"
+        aria-label={t("workspace.openPreviewOf", { name: entry.name })}
+        title={t("workspace.openPreview")}
         onClick={() => onOpenPreview(entry.path)}
       >
         <EyeIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
@@ -150,6 +153,7 @@ export function WorkspaceFiles({
   /** The IDE footer names the thread and agent instead of a bare count. */
   agentChangesLabel?: string | null;
 }) {
+  const { t } = useTranslation(["ide", "common"]);
   const focusNonce = useApp((state) => state.ui.focusFilesNonce);
   const [listings, setListings] = useState<Record<string, FsListing>>({});
   const [expanded, setExpanded] = useState<Record<string, true>>({});
@@ -219,8 +223,8 @@ export function WorkspaceFiles({
             ref={setInput}
             value={query}
             onChange={(event) => setQuery(event.target.value)}
-            placeholder={`Filter ${workspaceName}`}
-            aria-label="Filter files"
+            placeholder={t("workspace.filter", { name: workspaceName })}
+            aria-label={t("workspace.filterLabel")}
             spellCheck={false}
           />
           <ShortcutCaps command="panel.files" />
@@ -228,7 +232,12 @@ export function WorkspaceFiles({
       </div>
       <div className="q-rp-body q-scroll" style={{ padding: "6px 0 8px" }}>
         {loading ? (
-          <div className="q-tree" role="status" aria-busy="true" aria-label="Loading files">
+          <div
+            className="q-tree"
+            role="status"
+            aria-busy="true"
+            aria-label={t("workspace.loading")}
+          >
             {[64, 48, 72, 56, 80].map((width, index) => (
               <div key={width} style={{ paddingLeft: index > 2 ? 16 : 0, marginBottom: 8 }}>
                 <div className="q-skel" style={{ height: 10, width: `${width}%` }} />
@@ -238,7 +247,7 @@ export function WorkspaceFiles({
         ) : error ? (
           <div className="q-sub-empty">
             <p style={{ margin: 0, fontWeight: 500, color: "var(--fg)" }}>
-              The files did not load.
+              {t("workspace.failed")}
             </p>
             <p style={{ margin: "4px 0 10px" }}>{error.message}</p>
             <button
@@ -248,15 +257,15 @@ export function WorkspaceFiles({
               onClick={() => void load("")}
             >
               <RefreshCwIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-              Retry
+              {t("common:retry")}
             </button>
           </div>
         ) : rows.length === 0 ? (
           <div className="q-sub-empty">
-            {query ? `No files match “${query}”.` : "This workspace has no files."}
+            {query ? t("workspace.noMatch", { query }) : t("workspace.empty")}
           </div>
         ) : (
-          <div role="tree" aria-label="Workspace files">
+          <div role="tree" aria-label={t("workspace.tree")}>
             <button
               type="button"
               role="treeitem"
@@ -301,17 +310,17 @@ export function WorkspaceFiles({
       {agentChanges && agentChanges.files.length > 0 ? (
         <button type="button" className="q-agentchg" onClick={onOpenAgentChanges}>
           <span className="grow">
-            <span className="t">Agent changes</span>
+            <span className="t">{t("workspace.agentChanges")}</span>
             <span className="s">
-              {agentChangesLabel ?? `${agentChanges.files.length} files in this turn`}
+              {agentChangesLabel ?? t("workspace.inThisTurn", { count: agentChanges.files.length })}
             </span>
           </span>
           <span className="q-num q-pm">
             <span className="q-add">
-              +{agentChanges.files.reduce((sum, file) => sum + file.added, 0)}
+              +{formatNumber(agentChanges.files.reduce((sum, file) => sum + file.added, 0))}
             </span>{" "}
             <span className="q-del">
-              −{agentChanges.files.reduce((sum, file) => sum + file.removed, 0)}
+              −{formatNumber(agentChanges.files.reduce((sum, file) => sum + file.removed, 0))}
             </span>
           </span>
           <ChevronRightIcon className="q-icon s14 q-faint" strokeWidth={1.5} aria-hidden />

@@ -10,6 +10,7 @@ import {
   XIcon,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { AgentGlyph } from "@/components/agent/AgentGlyph";
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
@@ -35,6 +36,7 @@ import { toProtoError } from "@/lib/client/errors";
 import { readThreadDraft, writeThreadDraft } from "@/lib/drafts";
 import { machineSeed } from "@/lib/entities";
 import { monogram } from "@/lib/grouping";
+import { formatNumber, i18n } from "@/lib/i18n";
 import { titleWithShortcut } from "@/lib/keybindings";
 import {
   ensureThread,
@@ -54,6 +56,7 @@ import { cn } from "@/lib/utils";
 import { CodeEditor, type CursorPosition } from "./CodeEditor";
 import { DiffView } from "./DiffView";
 import { computeDiff } from "./diff";
+import { languageLabel } from "./language";
 import { deleteReviewComment, type ReviewComment, sendCommentsToDraft } from "./reviewComments";
 import { SearchPanel } from "./SearchPanel";
 import {
@@ -61,11 +64,12 @@ import {
   commitLabel,
   DIFF_SOURCES,
   type DiffSource,
-  sourceDescription,
+  diffSourceHint,
+  diffSourceName,
 } from "./sources";
 import { TabStrip } from "./TabStrip";
 import type { IdeTab } from "./tabs";
-import { languageLabel, useIdeSession, type WorkspaceOption } from "./useIdeSession";
+import { useIdeSession, type WorkspaceOption } from "./useIdeSession";
 
 function workspaceName(path: string): string {
   return path.split("/").filter(Boolean).at(-1) ?? path;
@@ -83,7 +87,13 @@ function workspaceFor(thread: ThreadSummary | null, turnId: string | null): Work
   };
 }
 
+/** A cursor position in the status bar, without grouping ("Ln 1204"). */
+function position(value: number): string {
+  return formatNumber(value, { useGrouping: false });
+}
+
 export function IdePane() {
+  const { t } = useTranslation(["ide", "common"]);
   const isPhone = useIsPhone();
   const threads = useApp((state) => state.threads);
   const hosts = useApp((state) => state.hosts);
@@ -160,7 +170,7 @@ export function IdePane() {
   const toastError = useCallback((error: unknown) => {
     const proto = toProtoError(error);
     pushToast({
-      title: "The save did not complete.",
+      title: i18n.t("ide:save.failed"),
       description: proto.message,
       variant: "error",
     });
@@ -219,8 +229,8 @@ export function IdePane() {
         remove: deleteReviewComment,
       });
       pushToast({
-        title: `${comments.length} review ${comments.length === 1 ? "comment" : "comments"} added to the draft`,
-        description: "They send when you press Send in the composer.",
+        title: i18n.t("ide:comments.added", { count: comments.length }),
+        description: i18n.t("ide:comments.addedBody"),
       });
     },
     [workspace],
@@ -249,13 +259,17 @@ export function IdePane() {
 
   if (!workspace) {
     return (
-      <main className="q-main" aria-label="IDE" style={{ flex: 1 }}>
+      <main className="q-main" aria-label={t("label")} style={{ flex: 1 }}>
         <EmptyState
           className="flex-1"
           icon={Code2Icon}
-          title="No workspace to open."
-          description="The IDE reads the working tree of a thread. Start or open a thread, then return here."
-          action={<Button onClick={() => navigate({ kind: "inbox" })}>Go to inbox</Button>}
+          title={t("noWorkspace.title")}
+          description={t("noWorkspace.body")}
+          action={
+            <Button onClick={() => navigate({ kind: "inbox" })}>
+              {t("noWorkspace.goToInbox")}
+            </Button>
+          }
         />
       </main>
     );
@@ -268,16 +282,16 @@ export function IdePane() {
         <EmptyState
           className="flex-1"
           icon={FileCodeIcon}
-          title="No file is open."
-          description="Choose a file in the tree, or search the workspace. Diffs work without opening the editor first."
+          title={t("noFile.title")}
+          description={t("noFile.body")}
           action={
             <>
               <Button variant="secondary" onClick={() => setPanelTab("files")}>
-                Show files
+                {t("noFile.showFiles")}
               </Button>
               <Button variant="ghost" onClick={() => setPanel("search")}>
                 <SearchIcon aria-hidden />
-                Search
+                {t("search.run")}
               </Button>
             </>
           }
@@ -290,7 +304,7 @@ export function IdePane() {
         <div
           style={{ display: "grid", gap: 8, padding: 16 }}
           role="status"
-          aria-label="Loading file"
+          aria-label={t("file.loading")}
         >
           {[30, 43, 56, 69, 82, 45, 58, 71, 84, 37, 50, 63].map((width) => (
             <div key={width} className="q-skel" style={{ height: 11, width: `${width}%` }} />
@@ -316,7 +330,7 @@ export function IdePane() {
               style={{ color: "var(--danger)" }}
               aria-hidden
             />
-            {active.name} did not open.
+            {t("file.didNotOpen", { name: active.name })}
           </p>
           <p style={{ margin: "4px 0 0" }}>{active.error.message}</p>
           {active.error.hint ? (
@@ -328,7 +342,7 @@ export function IdePane() {
             style={{ marginTop: 12, height: 26 }}
             onClick={() => void session.reload(active.path)}
           >
-            Try again
+            {t("common:tryAgain")}
           </button>
         </div>
       );
@@ -351,11 +365,9 @@ export function IdePane() {
               style={{ color: "var(--warn)" }}
               aria-hidden
             />
-            {active.binary ? "This is a binary file." : "This file is too large for the editor."}
+            {active.binary ? t("file.binary") : t("file.tooLarge")}
           </p>
-          <p style={{ margin: "4px 0 0" }}>
-            {active.hint ?? "h4rn leaves this file to a terminal or your full IDE."}
-          </p>
+          <p style={{ margin: "4px 0 0" }}>{active.hint ?? t("file.leftToTerminal")}</p>
           <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 12 }}>
             <button
               type="button"
@@ -363,7 +375,7 @@ export function IdePane() {
               style={{ height: 26 }}
               onClick={() => openDiff(active.path, "head")}
             >
-              View diff
+              {t("file.viewDiff")}
             </button>
             <button
               type="button"
@@ -371,7 +383,7 @@ export function IdePane() {
               style={{ height: 26 }}
               onClick={() => setPanelTab("files")}
             >
-              Pick another file
+              {t("file.pickAnother")}
             </button>
           </div>
         </div>
@@ -408,7 +420,7 @@ export function IdePane() {
 
   return (
     <>
-      <main className="q-main" aria-label="IDE" style={{ flex: 1 }}>
+      <main className="q-main" aria-label={t("label")} style={{ flex: 1 }}>
         <header className="q-th-head bare">
           <SidebarReveal />
           <div className="q-th-titles">
@@ -436,12 +448,14 @@ export function IdePane() {
             <button
               type="button"
               className="q-tchip"
-              title={titleWithShortcut("Back to the thread", "view.toggle")}
+              title={titleWithShortcut(t("header.backToThread"), "view.toggle")}
               onClick={backToThread}
             >
               <AgentGlyph glyph={glyph} size={14} />
               <span className="t">{thread.title}</span>
-              {thread.needs_attention ? <span className="s">Needs approval</span> : null}
+              {thread.needs_attention ? (
+                <span className="s">{t("header.needsApproval")}</span>
+              ) : null}
             </button>
           ) : null}
           <div className="q-th-actions">
@@ -459,11 +473,7 @@ export function IdePane() {
         <TabStrip
           tabs={state.tabs.tabs}
           activePath={state.tabs.activePath}
-          note={
-            state.restoredTabs > 0
-              ? `Restored ${state.restoredTabs} ${state.restoredTabs === 1 ? "tab" : "tabs"}`
-              : null
-          }
+          note={state.restoredTabs > 0 ? t("tabs.restored", { count: state.restoredTabs }) : null}
           onActivate={session.activateTab}
           onClose={close}
           onReorder={session.moveTab}
@@ -487,14 +497,14 @@ export function IdePane() {
             {shownPath}
           </span>
           <span className="grow" />
-          <div className="q-seg inline" role="tablist" aria-label="Editor mode">
+          <div className="q-seg inline" role="tablist" aria-label={t("bar.mode")}>
             <button
               type="button"
               role="tab"
               aria-selected={!showDiff}
               onClick={() => setPanel((current) => (current === "diff" ? null : current))}
             >
-              Edit
+              {t("common:edit")}
             </button>
             <button
               type="button"
@@ -509,16 +519,16 @@ export function IdePane() {
                 void session.selectDiffSource(state.diffSource);
               }}
             >
-              Diff
+              {t("bar.diff")}
             </button>
           </div>
           <ChipSelect<DiffSource>
-            label="Diff source"
+            label={t("bar.source")}
             value={state.diffSource}
-            options={DIFF_SOURCES.map((entry) => ({
-              value: entry.value,
-              label: entry.label,
-              hint: entry.hint,
+            options={DIFF_SOURCES.map((source) => ({
+              value: source,
+              label: diffSourceName(source),
+              hint: diffSourceHint(source),
             }))}
             onChange={(value) => {
               followedTabRef.current = active?.path ?? null;
@@ -528,16 +538,16 @@ export function IdePane() {
           />
           {showDiff && state.diffSource === "branch" ? (
             <ChipSelect
-              label="Base branch"
+              label={t("bar.baseBranch")}
               value={state.diffBase ?? state.diffFiles?.base ?? ""}
               placeholder={
                 state.branchesLoading
-                  ? "Loading branches…"
+                  ? t("bar.loadingBranches")
                   : state.branchesError
-                    ? "Branches unavailable"
+                    ? t("bar.branchesUnavailable")
                     : state.diffFiles?.base
-                      ? `vs ${state.diffFiles.base}`
-                      : "Default base"
+                      ? t("bar.vsBase", { base: state.diffFiles.base })
+                      : t("bar.defaultBase")
               }
               options={baseOptions(
                 state.diffBranches?.branches ?? [],
@@ -545,21 +555,21 @@ export function IdePane() {
               ).map((option) => ({
                 value: option.value,
                 label: option.label,
-                ...(option.hint ? { hint: option.hint } : {}),
+                ...(option.current ? { hint: t("bar.currentBase") } : {}),
               }))}
               onChange={(value) => void session.setDiffBase(value)}
             />
           ) : null}
           {showDiff && state.diffSource === "commit" ? (
             <ChipSelect
-              label="Commit"
+              label={t("bar.commit")}
               value={state.diffCommit ?? ""}
               placeholder={
                 state.commitsLoading
-                  ? "Loading commits…"
+                  ? t("bar.loadingCommits")
                   : state.commitsError
-                    ? "Commits unavailable"
-                    : "Choose a commit"
+                    ? t("bar.commitsUnavailable")
+                    : t("bar.chooseCommit")
               }
               options={(state.diffCommits?.commits ?? []).map((commit) => ({
                 value: commit.sha,
@@ -576,10 +586,10 @@ export function IdePane() {
               className="q-btn ghost"
               style={{ height: 24 }}
               onClick={() => openNewThread()}
-              title="Start a thread with this file in context"
+              title={t("bar.handToAgentHint")}
             >
               <HandIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-              Hand to agent
+              {t("bar.handToAgent")}
             </button>
           ) : null}
         </div>
@@ -600,9 +610,7 @@ export function IdePane() {
           >
             <TriangleAlertIcon className="q-icon s14" aria-hidden />
             <span style={{ minWidth: 0, flex: 1 }}>
-              {external === "deleted"
-                ? "This file was deleted on disk."
-                : "This file changed on disk while you were editing."}
+              {external === "deleted" ? t("file.deletedOnDisk") : t("file.changedOnDisk")}
             </span>
             <button
               type="button"
@@ -610,7 +618,7 @@ export function IdePane() {
               className="q-btn ghost"
               style={{ height: 22 }}
             >
-              Reload
+              {t("file.reload")}
             </button>
             <button
               type="button"
@@ -622,7 +630,7 @@ export function IdePane() {
               className="q-btn ghost"
               style={{ height: 22 }}
             >
-              Keep mine
+              {t("file.keepMine")}
             </button>
           </div>
         ) : null}
@@ -646,10 +654,7 @@ export function IdePane() {
                 host={workspace.host}
                 harness={workspace.harness}
                 threadId={workspace.threadId}
-                sourceLabel={sourceDescription(
-                  state.diffSource,
-                  state.diff?.label ?? state.diffFiles?.label ?? null,
-                )}
+                scopeLabel={state.diff?.label ?? state.diffFiles?.label ?? null}
                 changeTitle={workspace.threadTitle}
                 changeAt={
                   workspace.threadId ? (threads[workspace.threadId]?.last_activity ?? null) : null
@@ -706,11 +711,11 @@ export function IdePane() {
                   flex: "none",
                 }}
               >
-                <span style={{ flex: 1, fontSize: 12, fontWeight: 600 }}>Search</span>
+                <span style={{ flex: 1, fontSize: 12, fontWeight: 600 }}>{t("search.title")}</span>
                 <button
                   type="button"
                   onClick={() => setPanel(null)}
-                  aria-label="Close search"
+                  aria-label={t("search.close")}
                   className="q-ibtn"
                 >
                   <XIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
@@ -749,25 +754,32 @@ export function IdePane() {
         ) : null}
 
         <div className="q-statusbar">
-          <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
-            <GitBranchIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
-            main
-          </span>
-          <span>{workspace.host ?? "local"}</span>
+          {thread?.branch ? (
+            <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <GitBranchIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+              {thread.branch}
+            </span>
+          ) : null}
+          <span>{workspace.host ?? t("status.local")}</span>
           <span className="grow" />
           <span>
-            Ln {cursor.line}, Col {cursor.column}
+            {t("status.position", {
+              line: position(cursor.line),
+              column: position(cursor.column),
+            })}
           </span>
-          <span className={isPhone ? "hidden" : undefined}>Spaces: 2</span>
+          <span className={isPhone ? "hidden" : undefined}>
+            {t("status.spaces", { size: formatNumber(2) })}
+          </span>
           <span>{active?.encoding === "utf-8" ? "UTF-8" : (active?.encoding ?? "UTF-8")}</span>
-          <span>{languageLabel(active?.path)}</span>
+          <span>{languageLabel(active?.path) ?? t("status.plainText")}</span>
           {offline ? (
             <span
               style={{ display: "flex", alignItems: "center", gap: 4, color: "var(--danger)" }}
-              title="Daemon offline"
+              title={t("status.daemonOffline")}
             >
               <WifiOffIcon className="q-icon s12" aria-hidden />
-              <span className={isPhone ? "hidden" : undefined}>Offline</span>
+              <span className={isPhone ? "hidden" : undefined}>{t("status.offline")}</span>
             </span>
           ) : null}
         </div>
@@ -776,15 +788,12 @@ export function IdePane() {
       <Dialog open={pendingClose !== null} onOpenChange={(open) => !open && setPendingClose(null)}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Save {pendingClose?.name} before closing?</DialogTitle>
-            <DialogDescription>
-              This tab has changes the daemon has not accepted yet. Closing it without saving
-              discards them.
-            </DialogDescription>
+            <DialogTitle>{t("save.closeTitle", { name: pendingClose?.name ?? "" })}</DialogTitle>
+            <DialogDescription>{t("save.closeBody")}</DialogDescription>
           </DialogHeader>
           <DialogFooter>
             <Button variant="ghost" onClick={() => setPendingClose(null)}>
-              Cancel
+              {t("common:cancel")}
             </Button>
             <Button
               variant="destructive"
@@ -793,11 +802,11 @@ export function IdePane() {
                 setPendingClose(null);
               }}
             >
-              Discard
+              {t("save.discard")}
             </Button>
             <Button onClick={() => void saveAndClose()} disabled={closing}>
               {closing ? <Loader2Icon className="animate-spin" aria-hidden /> : null}
-              Save and close
+              {t("save.saveAndClose")}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -810,12 +819,12 @@ export function IdePane() {
         <DialogContent className="sm:max-w-2xl">
           <DialogHeader>
             <DialogTitle>
-              {state.conflict?.path} {state.conflict?.deleted ? "was deleted" : "changed"} on disk.
+              {state.conflict?.deleted
+                ? t("conflict.deletedTitle", { path: state.conflict.path })
+                : t("conflict.changedTitle", { path: state.conflict?.path ?? "" })}
             </DialogTitle>
             <DialogDescription>
-              {state.conflict?.deleted
-                ? "This file was removed after you opened it. Recreate it with your version, leave it deleted, or cancel and keep editing."
-                : "Someone else saved this file after you opened it. Keep your version, take theirs, or cancel and keep editing."}
+              {state.conflict?.deleted ? t("conflict.deletedBody") : t("conflict.changedBody")}
             </DialogDescription>
           </DialogHeader>
           {state.conflict ? (
@@ -841,7 +850,7 @@ export function IdePane() {
           ) : null}
           <DialogFooter>
             <Button variant="ghost" onClick={() => session.patch({ conflict: null })}>
-              Cancel
+              {t("common:cancel")}
             </Button>
             <Button
               variant="secondary"
@@ -849,7 +858,7 @@ export function IdePane() {
                 session.resolveConflictTakeTheirs();
               }}
             >
-              {state.conflict?.deleted ? "Leave deleted" : "Take theirs"}
+              {state.conflict?.deleted ? t("conflict.leaveDeleted") : t("conflict.takeTheirs")}
             </Button>
             <Button
               disabled={resolving}
@@ -862,7 +871,7 @@ export function IdePane() {
               }}
             >
               {resolving ? <Loader2Icon className="animate-spin" aria-hidden /> : null}
-              {state.conflict?.deleted ? "Recreate with mine" : "Keep mine"}
+              {state.conflict?.deleted ? t("conflict.recreate") : t("conflict.keepMine")}
             </Button>
           </DialogFooter>
         </DialogContent>

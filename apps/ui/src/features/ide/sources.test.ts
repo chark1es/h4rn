@@ -157,7 +157,7 @@ describe("diff sources", () => {
     expect(baseOptions(["main", "feature"], "origin/main")[0]).toEqual({
       value: "origin/main",
       label: "origin/main",
-      hint: "current base",
+      current: true,
     });
     expect(baseOptions(["main"], "main")).toEqual([{ value: "main", label: "main" }]);
   });

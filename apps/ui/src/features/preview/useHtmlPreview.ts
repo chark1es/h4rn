@@ -4,7 +4,12 @@ import type { FsFileContent, ThreadSummary } from "@/gen";
 import { retainWorkspaceWatch } from "@/lib/client/fsWatch";
 import { getClient, onAppEvent } from "@/lib/store/appStore";
 import { isHtmlPath, type PreviewDocument } from "./htmlPreview";
-import { loadPreview, type PreviewFailure } from "./loadPreview";
+import {
+  loadPreview,
+  type PreviewFailure,
+  PreviewNoFileError,
+  previewFailureDetail,
+} from "./loadPreview";
 import { preparePreviewFrame, releasePreviewFrame } from "./previewFrame";
 
 export type { PreviewFailure } from "./loadPreview";
@@ -49,9 +54,7 @@ async function readFile(
     bytes_base64: bytes,
     ...(maxBytes === undefined ? {} : { max_bytes: maxBytes }),
   });
-  if (response.type !== "fs_file") {
-    throw new Error("The daemon returned no file.");
-  }
+  if (response.type !== "fs_file") throw new PreviewNoFileError();
   return response.file;
 }
 
@@ -125,10 +128,7 @@ export function useHtmlPreview(thread: ThreadSummary | null, path: string | null
         if (cancelled) return;
         dropFrame();
         setDocument(null);
-        setFailure({
-          title: "The preview didn’t load.",
-          detail: cause instanceof Error ? cause.message : String(cause),
-        });
+        setFailure({ kind: "loadFailed", detail: previewFailureDetail(cause) });
       } finally {
         if (!cancelled) setLoading(false);
       }

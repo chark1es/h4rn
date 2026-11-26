@@ -93,6 +93,15 @@ All notable changes to h4rn are recorded here. The format follows
   instead of keeping the words it failed in. Server, tool and skill names,
   commands, URLs and what the daemon or registry wrote are shown as sent;
   counts and times use the language's own formats.
+- **The IDE, the Files tab and the HTML preview in Chinese, Spanish and
+  Japanese.** The editor's tabs, status bar and save and conflict dialogs,
+  the diff pane with its source picker, file list and review comments, the
+  search panel, the panel's file tree and the preview's notices and failures
+  follow the Language choice. File contents, paths, diffs, search results,
+  commit subjects and the previewed page are shown as they are; counts, line
+  numbers and file sizes use the language's own numbers. A review comment
+  added to the draft keeps its English framing, since it is written for the
+  agent.
 - **Android Live Updates show a running agent.** A separate switch under
   Settings → Notifications → Phone alerts shows each running thread as an
   ongoing notification with its project and whether it is working, waiting for
@@ -924,6 +933,11 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Fixed
 
+- **The IDE's status bar names the workspace's real branch.** It showed the
+  word "main" for every workspace; it now shows the thread's branch, and
+  nothing when the workspace has none. The search panel's result count and
+  "result cap reached" note stay on one line in every language, ending in an
+  ellipsis with the whole text on hover if the panel is too narrow.
 - **Revert files too notices a line-ending change, takes its checkpoint in a fraction of a second, and works next to an uninitialised submodule.** The plan compares two trees built the same raw way instead of reading the worktree through `.git/info/attributes` or a global attributes file, a 3,000-file checkpoint dropped from about 62 s to under half a second, an empty submodule folder no longer blocks every restore, the executable bit follows git's owner-bit rule, recovery refuses a root that became a symlink, a live subagent session gets no prompt while a restore commits, and the dialog's reason reads the removed turns instead of the message's own row. A file that is there but cannot be read, or a folder git cannot open (its files would go unlisted), makes the checkpoint incomplete (the restore refuses and names it) instead of looking absent and being deleted; an error found in the worktree as it is now says so rather than blaming the checkpoint, and a path ending in a carriage return gets its own bytes back rather than those of the same name without it. It still needs the Labs switch.
 - **A burst of finishing agents after a turn start stays one phone alert.**
   When a turn start sent the collecting alert group early, that group's timer

@@ -165,6 +165,18 @@ const CONVERTED = [
   "src/features/mcp/McpApprovalCard.tsx",
   "src/features/mcp/labels.ts",
   "src/features/skills/SkillsPage.tsx",
+  "src/components/panel/WorkspaceFiles.tsx",
+  "src/features/ide/CodeEditor.tsx",
+  "src/features/ide/DiffView.tsx",
+  "src/features/ide/IdePane.tsx",
+  "src/features/ide/SearchPanel.tsx",
+  "src/features/ide/TabStrip.tsx",
+  "src/features/ide/language.ts",
+  "src/features/ide/reviewComments.ts",
+  "src/features/ide/sources.ts",
+  "src/features/preview/PreviewPanel.tsx",
+  "src/features/preview/loadPreview.ts",
+  "src/features/preview/useHtmlPreview.ts",
 ];
 
 /** Names that read the same in every language. */
@@ -216,6 +228,9 @@ function isProse(text: string): boolean {
   // Identifiers and tokens: no spaces, only code-like characters.
   if (/^[A-Z0-9_]+$/.test(value)) return false;
   if (/^[a-z0-9][a-z0-9._/:-]*$/.test(value)) return false;
+  // Encoding names (`UTF-8`) and file globs (`*.ts`) are values too.
+  if (/^[A-Z0-9]+(-[A-Z0-9]+)+$/.test(value)) return false;
+  if (/^\*[\w.*{},/-]*$/.test(value)) return false;
   return true;
 }
 
@@ -377,6 +392,8 @@ describe("hard-coded strings in converted files", () => {
       "0 9 * * *",
       "—",
       "CLIProxyAPI",
+      "UTF-8",
+      "*.ts",
     ]) {
       expect(isProse(value), value).toBe(false);
     }
