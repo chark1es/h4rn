@@ -9,7 +9,12 @@ import type {
   TransportStatus,
 } from "@/gen";
 
-import { H4rnRequestError, protoError } from "./errors";
+import {
+  type ClientErrorKind,
+  type ClientErrorSource,
+  clientProto,
+  H4rnRequestError,
+} from "./errors";
 import {
   emitHarnessFrame,
   emitImportFrame,
@@ -451,12 +456,9 @@ const DEFAULT_DEVICE: DeviceInfo = {
   app_version: "1.0.1",
 };
 
-const FATAL_CLOSE_CODES = new Map<number, { message: string; hint: string }>([
-  [4401, { message: "The daemon rejected this device token.", hint: "Pair this device again." }],
-  [
-    4403,
-    { message: "This device is not allowed to do that.", hint: "Ask the host owner for access." },
-  ],
+const FATAL_CLOSE_CODES = new Map<number, ClientErrorKind>([
+  [4401, "unauthorized"],
+  [4403, "forbidden"],
 ]);
 
 /**
@@ -595,9 +597,7 @@ export class H4rnClient {
     this.removeWakeListeners();
     this.clearReconnect();
     this.stopPing();
-    const stoppedError = new H4rnRequestError(
-      protoError("internal", "The client stopped.", "Start it again to reconnect."),
-    );
+    const stoppedError = new H4rnRequestError(clientProto("internal", "stopped"));
     this.settleHandshakeWaiters(stoppedError);
     this.rejectPending(stoppedError);
     this.transport?.close();
@@ -659,13 +659,7 @@ export class H4rnClient {
   /** Sends one binary frame, such as PTY input or a blob chunk. */
   sendBinary(data: Uint8Array | ArrayBuffer): void {
     if (!this.socketOpen || !this.transport) {
-      throw new H4rnRequestError(
-        protoError(
-          "internal",
-          "The daemon is not connected.",
-          "Wait until the status bar says online, then try again.",
-        ),
-      );
+      throw new H4rnRequestError(clientProto("internal", "notConnected"));
     }
     this.transport.send(data);
   }
@@ -729,13 +723,7 @@ export class H4rnClient {
   }
 
   private notConnected(): H4rnRequestError {
-    return new H4rnRequestError(
-      protoError(
-        "internal",
-        "The daemon is not connected.",
-        "Wait until the status bar says online, then try again.",
-      ),
-    );
+    return new H4rnRequestError(clientProto("internal", "notConnected"));
   }
 
   /** Resolves once the handshake is done; waits through connect and reconnect. */
@@ -757,15 +745,7 @@ export class H4rnClient {
           reject(error);
         },
         timer: setTimeout(() => {
-          waiter.reject(
-            new H4rnRequestError(
-              protoError(
-                "internal",
-                "The daemon connection did not finish its handshake in time.",
-                "The daemon may be busy. Try again, or check the connection in the status bar.",
-              ),
-            ),
-          );
+          waiter.reject(new H4rnRequestError(clientProto("internal", "handshakeTimeout")));
         }, timeoutMs),
       };
       this.handshakeWaiters.add(waiter);
@@ -784,13 +764,7 @@ export class H4rnClient {
     options: { timeoutMs?: number } = {},
   ): Promise<ResponseOf<T>> {
     if (!this.socketOpen || !this.transport) {
-      throw new H4rnRequestError(
-        protoError(
-          "internal",
-          "The daemon is not connected.",
-          "Wait until the status bar says online, then try again.",
-        ),
-      );
+      throw new H4rnRequestError(clientProto("internal", "notConnected"));
     }
 
     const id = ++this.frameId;
@@ -819,11 +793,9 @@ export class H4rnClient {
         this.pending.delete(id);
         reject(
           new H4rnRequestError(
-            protoError(
-              "internal",
-              `The daemon did not answer \`${body.type}\` within ${Math.round(timeoutMs / 1000)} s.`,
-              "The daemon may be busy. Try again, or check the connection in the status bar.",
-            ),
+            clientProto("internal", "requestTimeout", {
+              params: { request: body.type, seconds: Math.round(timeoutMs / 1000) },
+            }),
             id,
           ),
         );
@@ -838,11 +810,11 @@ export class H4rnClient {
       clearTimeout(pending.timer);
       this.pending.delete(id);
       throw new H4rnRequestError(
-        protoError(
-          "internal",
-          error instanceof Error ? error.message : "The frame could not be sent.",
-          "Wait for the connection to recover, then try again.",
-        ),
+        error instanceof H4rnRequestError
+          ? error.proto
+          : clientProto("internal", "sendFailed", {
+              message: error instanceof Error ? error.message : undefined,
+            }),
         id,
       );
     }
@@ -872,16 +844,10 @@ export class H4rnClient {
       },
       onMessage: (data) => this.handleMessage(data),
       onBinary: (data) => this.handleBinary(data),
-      onClose: (frame) => this.handleClose(frame.code, frame.reason),
+      onClose: (frame) => this.handleClose(frame.code, frame.reason, frame.error),
       onTransportStatus: (status) => this.handleTransportStatus(status),
-      onError: (message) => {
-        this.patchSnapshot({
-          error: protoError(
-            "internal",
-            message,
-            "Check that the daemon is running, then reconnect.",
-          ),
-        });
+      onError: (failure) => {
+        this.patchSnapshot({ error: clientProto("internal", failure.kind, failure) });
       },
     };
 
@@ -894,11 +860,9 @@ export class H4rnClient {
       this.transport.connect(handlers);
     } catch (error) {
       this.patchSnapshot({
-        error: protoError(
-          "internal",
-          error instanceof Error ? error.message : "The transport could not be created.",
-          "Check the daemon URL and try again.",
-        ),
+        error: clientProto("internal", "transportCreate", {
+          message: error instanceof Error ? error.message : undefined,
+        }),
       });
       this.scheduleReconnect();
     }
@@ -916,13 +880,7 @@ export class H4rnClient {
       );
 
       if (hello.type !== "hello") {
-        throw new H4rnRequestError(
-          protoError(
-            "internal",
-            "The daemon answered hello with an unexpected response.",
-            "Update h4rn on both ends.",
-          ),
-        );
+        throw new H4rnRequestError(clientProto("internal", "helloUnexpected"));
       }
 
       const reconnected = this.everReady;
@@ -984,13 +942,7 @@ export class H4rnClient {
         return;
       }
       this.patchSnapshot({
-        error:
-          proto ??
-          protoError(
-            "internal",
-            "The hello handshake did not complete.",
-            "Check the daemon version, then reconnect.",
-          ),
+        error: proto ?? clientProto("internal", "helloFailed"),
       });
       this.transport?.close();
     }
@@ -1040,11 +992,7 @@ export class H4rnClient {
     } else if (this.receivedChunk === null || frame.index !== this.receivedChunk.index + 1) {
       this.receivedChunk = null;
       this.patchSnapshot({
-        error: protoError(
-          "internal",
-          "The daemon's chunked frame arrived out of order.",
-          "The connection will retry.",
-        ),
+        error: clientProto("internal", "chunkOrder"),
       });
       return true;
     } else {
@@ -1068,11 +1016,7 @@ export class H4rnClient {
       frame = JSON.parse(data) as ServerFrame;
     } catch {
       this.patchSnapshot({
-        error: protoError(
-          "internal",
-          "The daemon sent a frame that was not JSON.",
-          "Update h4rn on both ends; the connection will retry.",
-        ),
+        error: clientProto("internal", "notJson"),
       });
       return;
     }
@@ -1232,7 +1176,7 @@ export class H4rnClient {
     this.flushReplay(replayThrough, firstConnect);
   }
 
-  private handleClose(code: number, reason: string): void {
+  private handleClose(code: number, reason: string, source?: ClientErrorSource): void {
     this.socketOpen = false;
     this.transport = null;
     this.stopPing();
@@ -1244,12 +1188,13 @@ export class H4rnClient {
     this.replayBuffer = [];
     this.subscribeId = null;
     this.subscribeSince = null;
+    // A transport that knows why it closed names a kind, so a request still
+    // waiting on it is worded again where it is shown; a socket's bare close
+    // reason is shown as sent.
     const dropped = new H4rnRequestError(
-      protoError(
-        "internal",
-        reason || "The daemon closed the connection.",
-        "The client reconnects automatically. Reads are retried; writes are not.",
-      ),
+      source
+        ? clientProto("internal", source.kind, source)
+        : clientProto("internal", "closed", { message: reason || undefined }),
     );
     DISCONNECTED.add(dropped);
     this.rejectPending(dropped);
@@ -1258,13 +1203,11 @@ export class H4rnClient {
     if (fatal) {
       this.fatal = true;
       this.settleHandshakeWaiters(
-        new H4rnRequestError(
-          protoError(code === 4401 ? "unauthorized" : "forbidden", fatal.message, fatal.hint),
-        ),
+        new H4rnRequestError(clientProto(code === 4401 ? "unauthorized" : "forbidden", fatal)),
       );
       this.setSnapshot({
         status: "offline",
-        error: protoError(code === 4401 ? "unauthorized" : "forbidden", fatal.message, fatal.hint),
+        error: clientProto(code === 4401 ? "unauthorized" : "forbidden", fatal),
       });
       return;
     }
@@ -1336,13 +1279,7 @@ export class H4rnClient {
       this.setSnapshot({
         status: "offline",
         attempt: this.attempt,
-        error:
-          this.snapshot.error ??
-          protoError(
-            "internal",
-            "The daemon connection is offline.",
-            "Start the daemon or check the network, then press Reconnect.",
-          ),
+        error: this.snapshot.error ?? clientProto("internal", "offline"),
       });
       return;
     }

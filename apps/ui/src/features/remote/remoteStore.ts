@@ -33,7 +33,6 @@ import {
 import {
   base64UrlToHex,
   ConnectClient,
-  type ConnectError,
   clearCredentials,
   completeLogin,
   deviceRegistration,
@@ -48,6 +47,7 @@ import {
 } from "./connect";
 import { mockOffer, offerFromCreate, type PairingOffer } from "./pairingOffer";
 import { DEFAULT_PAIR_SCOPES, isPairScope, orderedScopes } from "./pairingScopes";
+import { type RemoteError, RemoteFailure, remoteErrorText, toRemoteError } from "./remoteError";
 import {
   currentConnectClient,
   loadConnectClient,
@@ -110,7 +110,8 @@ export type RemoteState = {
   /** A typed-code pairing awaiting the person's check of the code on the host. */
   sasConfirm: SasConfirm | null;
   busy: RemoteBusy | null;
-  error: string | null;
+  /** A kind, worded by the component that shows it (`remoteErrorText`). */
+  error: RemoteError | null;
   lastSyncAt: number | null;
 };
 
@@ -152,7 +153,7 @@ function tauriInvoke<T>(command: string, args?: Record<string, unknown>): Promis
       };
     }
   ).__TAURI_INTERNALS__;
-  if (!internals) throw new Error(i18n.t("settings:connect.errors.noSignInWindow"));
+  if (!internals) throw new RemoteFailure({ kind: "noSignInWindow" });
   return internals.invoke<T>(command, args);
 }
 
@@ -223,9 +224,8 @@ function patch(next: Partial<RemoteState>): void {
   remoteStore.setState({ ...remoteStore.getState(), ...next });
 }
 
-function describe(error: unknown): string {
-  const connect = error as ConnectError;
-  return connect?.hint ?? connect?.message ?? String(error);
+function describe(error: unknown): RemoteError {
+  return toRemoteError(error);
 }
 
 function defaultDeviceName(): string {
@@ -473,7 +473,10 @@ async function consumePendingDeepLinks(): Promise<void> {
 async function finishCallback(params: URLSearchParams): Promise<string | null> {
   const error = params.get("error");
   if (error) {
-    patch({ phase: "error", error: params.get("error_description") ?? error });
+    patch({
+      phase: "error",
+      error: { kind: "sent", text: params.get("error_description") ?? error },
+    });
     clearPendingLogin();
     return null;
   }
@@ -481,7 +484,7 @@ async function finishCallback(params: URLSearchParams): Promise<string | null> {
   const state = params.get("state");
   const pending = readPendingLogin();
   if (!code || !state || !pending || pending.state !== state) {
-    patch({ phase: "error", error: i18n.t("settings:connect.errors.callbackState") });
+    patch({ phase: "error", error: { kind: "callbackState" } });
     return null;
   }
   patch({ phase: "signing_in", busy: { kind: "completingSignIn" } });
@@ -714,7 +717,7 @@ async function pollLogin(login: DeviceCodeLogin, intervalSecs: number): Promise<
           phase: "signed_out",
           login: null,
           busy: null,
-          error: i18n.t("settings:connect.errors.denied"),
+          error: { kind: "signInDenied" },
         });
         return;
       case "expired":
@@ -722,7 +725,7 @@ async function pollLogin(login: DeviceCodeLogin, intervalSecs: number): Promise<
           phase: "signed_out",
           login: null,
           busy: null,
-          error: i18n.t("settings:connect.errors.expired"),
+          error: { kind: "signInExpired" },
         });
         return;
       case "slow_down":
@@ -736,7 +739,7 @@ async function pollLogin(login: DeviceCodeLogin, intervalSecs: number): Promise<
     phase: "signed_out",
     login: null,
     busy: null,
-    error: i18n.t("settings:connect.errors.expired"),
+    error: { kind: "signInExpired" },
   });
 }
 
@@ -794,9 +797,7 @@ function daemonKeyFor(machine: MachineSummary, devices: ConnectDevice[]): string
   );
   const key = daemon?.noise_static_public_key;
   if (!key) {
-    throw new Error(
-      i18n.t("sidebar:hosts.errors.noNoiseKey", { name: machine.name, command: "h4rnd login" }),
-    );
+    throw new RemoteFailure({ kind: "noNoiseKey", params: { name: machine.name } });
   }
   return base64UrlToHex(key);
 }
@@ -843,7 +844,7 @@ export async function activateMachine(machineId: string): Promise<boolean> {
     pushToast({
       variant: "error",
       title: i18n.t("sidebar:hosts.toasts.selectFailed"),
-      description: describe(error),
+      description: remoteErrorText(describe(error)),
     });
     return false;
   }
@@ -914,11 +915,11 @@ export async function pairMachine(raw: string): Promise<boolean> {
   pendingPairingRaw = raw;
   const payload = parseConnectPairing(raw);
   if (!payload) {
-    patch({ error: i18n.t("pairing:errors.notPairingLink") });
+    patch({ error: { kind: "notPairingLink" } });
     return false;
   }
   if (payload.expiresAt > 0 && payload.expiresAt < Date.now()) {
-    patch({ error: i18n.t("pairing:errors.expired") });
+    patch({ error: { kind: "pairingExpired" } });
     return false;
   }
   if (mockFixtures) {
@@ -948,13 +949,13 @@ export async function pairMachine(raw: string): Promise<boolean> {
     patch({
       connectUrl: payload.connectUrl,
       phase: "signed_out",
-      error: i18n.t("pairing:errors.signInToScan"),
+      error: { kind: "signInToScan" },
     });
     return false;
   }
   if (payload.connectUrl.replace(/\/+$/, "") !== state.connectUrl.replace(/\/+$/, "")) {
     patch({
-      error: i18n.t("pairing:errors.otherConnect", { url: payload.connectUrl }),
+      error: { kind: "otherConnect", params: { url: payload.connectUrl } },
     });
     return false;
   }
@@ -990,7 +991,7 @@ export async function pairMachine(raw: string): Promise<boolean> {
     pushToast({
       variant: "error",
       title: i18n.t("pairing:errors.claimFailed"),
-      description: describe(error),
+      description: remoteErrorText(describe(error)),
     });
     return false;
   }
@@ -1025,7 +1026,7 @@ export async function createPairing(
     pushToast({
       variant: "error",
       title: i18n.t("settings:devices.toasts.pairingFailed"),
-      description: describe(error),
+      description: remoteErrorText(describe(error)),
     });
   }
 }
@@ -1067,7 +1068,7 @@ export async function pairByCode(code: string): Promise<boolean> {
   }
   const client = await loadConnectClient();
   if (!client) {
-    patch({ error: i18n.t("pairing:errors.signInToType") });
+    patch({ error: { kind: "signInToType" } });
     return false;
   }
   patch({ busy: { kind: "claimingPairing" }, error: null });
@@ -1132,7 +1133,7 @@ export async function confirmPairingSas(): Promise<boolean> {
   if (!approved) {
     patch({
       sasConfirm: { ...pending, waiting: false },
-      error: i18n.t("pairing:errors.notApproved", { name: pending.machineName }),
+      error: { kind: "notApproved", params: { name: pending.machineName } },
     });
     return false;
   }
@@ -1180,7 +1181,7 @@ export async function rejectPairingSas(): Promise<void> {
   }
   await signOut();
   patch({
-    error: i18n.t("pairing:errors.codesDiffer"),
+    error: { kind: "codesDiffer" },
   });
 }
 
@@ -1234,7 +1235,7 @@ export async function renameDevice(id: string, name: string): Promise<boolean> {
     pushToast({
       variant: "error",
       title: i18n.t("settings:devices.toasts.renameFailed"),
-      description: describe(error),
+      description: remoteErrorText(describe(error)),
     });
     return false;
   }
@@ -1263,7 +1264,7 @@ export async function revokeDevice(id: string): Promise<boolean> {
     pushToast({
       variant: "error",
       title: i18n.t("settings:devices.toasts.revokeFailed"),
-      description: describe(error),
+      description: remoteErrorText(describe(error)),
     });
     return false;
   }

@@ -7,6 +7,7 @@ import type {
   ServerFrame,
   TransportStatus,
 } from "@/gen";
+import type { ClientErrorSource } from "./errors";
 
 /**
  * Connection state shown by the status bar and the offline banner.
@@ -79,8 +80,19 @@ export type TransportHandlers = {
   onMessage: (data: string) => void;
   /** One binary WebSocket message; the header is decoded by the feature using it. */
   onBinary?: (data: ArrayBuffer) => void;
-  onClose: (frame: { code: number; reason: string; wasClean: boolean }) => void;
-  onError: (message: string) => void;
+  /**
+   * The transport closed. `error` is set when the transport knows why in
+   * words the client owns (`shell:errors.*`), so requests that were waiting
+   * on it fail with that kind rather than the raw `reason`.
+   */
+  onClose: (frame: {
+    code: number;
+    reason: string;
+    wasClean: boolean;
+    error?: ClientErrorSource;
+  }) => void;
+  /** A transport failure, as a kind the client words (`shell:errors.*`). */
+  onError: (failure: ClientErrorSource) => void;
   /**
    * Multipath state from the secure transport. Optional so the plain
    * WebSocket and mock transports stay unchanged.

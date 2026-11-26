@@ -37,9 +37,9 @@
     },
     "warning": "Esto también deshace los cambios que hiciste tú después de este mensaje. No se toca nada fuera del worktree.",
     "ignored": "Los archivos ignorados se quedan como están: {{paths}}. Una restauración nunca los rebobina.",
-    "ignoredMore_one": "{{paths}} y {{count, number}} más",
-    "ignoredMore_many": "{{paths}} y {{count, number}} más",
-    "ignoredMore_other": "{{paths}} y {{count, number}} más",
+    "ignoredMore_one": "{{count, number}} más",
+    "ignoredMore_many": "{{count, number}} más",
+    "ignoredMore_other": "{{count, number}} más",
     "method": {
       "handoff": "Este mensaje no se puede descartar de forma nativa, así que h4rn inicia una sesión nueva con un traspaso.",
       "native": "{{harness}} descarta este mensaje y todos los turnos posteriores de su propio historial.",

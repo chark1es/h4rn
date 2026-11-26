@@ -739,7 +739,6 @@
     "empty": "Aún no hay worktrees. Aquí aparecen los subagentes que se ejecutan con aislamiento de worktree y los hilos que trabajan en un worktree.",
     "nothingSettled": "No hay nada resuelto.",
     "removeLabel": "Quitar {{name}}",
-    "sentenceSeparator": " ",
     "origin": {
       "subagent": "Worktree de subagente",
       "thread": "Espacio de trabajo de hilo",

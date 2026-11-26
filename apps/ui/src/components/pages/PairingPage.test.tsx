@@ -91,13 +91,45 @@ describe("Pairing page", () => {
     expect(screen.getAllByText("Incluido")).toHaveLength(2);
     expect(screen.getByText("relay.test · vía relay")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Vincular este teléfono" })).toBeTruthy();
-    // The store's error is written in the language that was active.
     expect(
       screen.getByText(
         "Inicia sesión en h4rn-connect primero y vuelve a escanear el código de vinculación.",
       ),
     ).toBeTruthy();
     expect(screen.queryByText("View threads")).toBeNull();
+  });
+
+  it("relabels a pairing error already on screen when the language changes", async () => {
+    const expires = Math.floor((Date.now() + 10 * 60_000) / 1_000);
+    // Signed out, so the claim stops at once with an error for the page.
+    await act(async () => {
+      await pairMachine(
+        `h4rn://pair?c=https://relay.test&m=atlas&k=bW9jay1ub2lzZQ&p=view&e=${expires}`,
+      );
+    });
+    // The store keeps the kind, not the words of the language that was active.
+    expect(remoteStore.getState().error).toEqual({ kind: "signInToScan" });
+    render(<PairingPage />);
+    expect(
+      screen.getByText("Sign in to h4rn-connect first, then scan the pairing code again."),
+    ).toBeTruthy();
+
+    await act(() => setLocalePreference("es"));
+    expect(
+      screen.getByText(
+        "Inicia sesión en h4rn-connect primero y vuelve a escanear el código de vinculación.",
+      ),
+    ).toBeTruthy();
+    await act(() => setLocalePreference("ja"));
+    expect(screen.getByText(i18n.t("pairing:errors.signInToScan"))).toBeTruthy();
+    expect(screen.queryByText(/Sign in to h4rn-connect first/)).toBeNull();
+  });
+
+  it("keeps a relay's own error text as sent in every language", async () => {
+    remoteStore.setState({ ...initial, error: { kind: "sent", text: "relay said no" } });
+    render(<PairingPage />);
+    await act(() => setLocalePreference("zh-CN"));
+    expect(screen.getByText("relay said no")).toBeTruthy();
   });
 
   it("asks to compare the code in the active language", async () => {

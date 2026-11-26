@@ -37,8 +37,8 @@
     },
     "warning": "This also undoes edits you made yourself after this message. Nothing outside the worktree is touched.",
     "ignored": "Ignored files stay as they are: {{paths}}. A restore never rewinds them.",
-    "ignoredMore_one": "{{paths}} and {{count, number}} more",
-    "ignoredMore_other": "{{paths}} and {{count, number}} more",
+    "ignoredMore_one": "{{count, number}} more",
+    "ignoredMore_other": "{{count, number}} more",
     "method": {
       "handoff": "This message can't be dropped natively, so h4rn starts a new session with a handoff.",
       "native": "{{harness}} drops this message and every later turn from its own history.",

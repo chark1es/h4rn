@@ -13,6 +13,7 @@ import { onImportFrame } from "@/lib/client/frames";
 import { cn } from "@/lib/utils";
 import {
   applyImportEvent,
+  importErrorText,
   loadImportScan,
   selectAllImportProjects,
   selectNoImportProjects,
@@ -87,7 +88,7 @@ export function ImportPanel() {
       <div className="q-imp-list" aria-busy={loading}>
         {error ? (
           <div className="q-fb-msg err" role="alert">
-            {error}
+            {importErrorText(error)}
           </div>
         ) : loading && !scan ? (
           <div className="q-fb-msg">{t("import.readingSaved")}</div>

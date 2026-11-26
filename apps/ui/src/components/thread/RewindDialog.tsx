@@ -10,9 +10,9 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { leftAloneList } from "@/features/rewind/left-alone";
 import type { QueuedMessage, RewindPlan, ThreadSummary } from "@/gen";
 import { harnessLabel } from "@/lib/entities";
-import { formatList, i18n } from "@/lib/i18n";
 import {
   filesRewindAvailable,
   planRewind,
@@ -23,14 +23,6 @@ import type { ThreadLog } from "@/lib/store/projection";
 import { cn } from "@/lib/utils";
 
 type Choice = "keep" | "files";
-
-/** The ignored paths a restore leaves alone: the first four, then a count. */
-function leftAloneText(paths: string[] | undefined): string | null {
-  if (!paths || paths.length === 0) return null;
-  const shown = formatList(paths.slice(0, 4), "conjunction", "narrow");
-  const rest = paths.length - 4;
-  return rest > 0 ? i18n.t("dialogs:rewind.ignoredMore", { paths: shown, count: rest }) : shown;
-}
 
 /** A plan error with no message of its own; worded when the dialog renders. */
 const PLAN_FAILED = "\u0000rewind.planError";
@@ -69,7 +61,7 @@ export function RewindDialog({
   const checkpointReady = filesRewindAvailable(log, itemId);
   const filesOffered = plan?.files_enabled === true;
   const canRestoreFiles = filesOffered && plan.files_available === true;
-  const leftAlone = leftAloneText(plan?.left_alone);
+  const leftAlone = leftAloneList(plan?.left_alone);
 
   useEffect(() => {
     if (!open) {

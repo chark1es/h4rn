@@ -8,15 +8,18 @@
  */
 import { useSyncExternalStore } from "react";
 
-import type { ClientRequest, ImportProgress, ImportScan, ResponseBody } from "@/gen";
-import { toProtoError } from "@/lib/client/errors";
+import type { ClientRequest, ImportProgress, ImportScan, ProtoError, ResponseBody } from "@/gen";
+import { clientProto, errorWords, toProtoError } from "@/lib/client/errors";
+import { i18n } from "@/lib/i18n";
+import { joinSentences } from "@/lib/i18n/sentences";
 import { getClient, getState, pushToast } from "@/lib/store/appStore";
 import { loadProjects } from "./store";
 
 export type ImportState = {
   scan: ImportScan | null;
   loading: boolean;
-  error: string | null;
+  /** Why the scan failed; `importErrorText` words it in the active language. */
+  error: ProtoError | null;
   /** Keys the person checked. */
   selected: string[];
   /** Whether every found project is listed, not only the recommended ones. */
@@ -81,11 +84,17 @@ export function visibleProjects(scan: ImportScan | null, reviewAll: boolean) {
   return reviewAll ? scan.projects : scan.projects.filter((project) => project.recommended);
 }
 
+/** A scan or import failure in the active language: what happened, then what to do. */
+export function importErrorText(error: ProtoError): string {
+  const words = errorWords(error);
+  return joinSentences([words.message, words.hint]);
+}
+
 /** Loads the scan and checks the projects the daemon recommends. */
 export async function loadImportScan(): Promise<void> {
   const host = getState().localHostId;
   if (!host) {
-    set({ error: "The daemon has not reported its host yet." });
+    set({ error: clientProto("unsupported", "noHost") });
     return;
   }
   set({ loading: true, error: null });
@@ -95,6 +104,7 @@ export async function loadImportScan(): Promise<void> {
       host,
     } as ClientRequest)) as ResponseBody;
     if (response.type !== "session_imports") {
+      // i18n-ignore-next-line: a reply of the wrong type is a bug, not a state
       throw new Error(`Unexpected answer \`${response.type}\`.`);
     }
     const recommended = response.scan.projects
@@ -117,7 +127,7 @@ export async function loadImportScan(): Promise<void> {
     const proto = toProtoError(error);
     set({
       loading: false,
-      error: proto.hint ? `${proto.message}. ${proto.hint}` : proto.message,
+      error: proto,
     });
   }
 }
@@ -172,16 +182,16 @@ export async function startImport(): Promise<void> {
   const host = getState().localHostId;
   if (!host) {
     pushToast({
-      title: "Couldn't start the import.",
-      description: "The daemon has not reported its host yet.",
+      title: i18n.t("shell:projectImport.startFailed"),
+      description: i18n.t("shell:errors.noHost.message"),
       variant: "error",
     });
     return;
   }
   if (state.selected.length === 0) {
     pushToast({
-      title: "Choose a project first.",
-      description: "Check at least one project to import.",
+      title: i18n.t("shell:projectImport.chooseFirst"),
+      description: i18n.t("shell:projectImport.checkOne"),
       variant: "info",
     });
     return;
@@ -194,6 +204,7 @@ export async function startImport(): Promise<void> {
       projects: state.selected,
     } as ClientRequest)) as ResponseBody;
     if (response.type !== "session_import_status" || !response.progress) {
+      // i18n-ignore-next-line: a reply of the wrong type is a bug, not a state
       throw new Error(`Unexpected answer \`${response.type}\`.`);
     }
     set({ progress: response.progress, starting: false });
@@ -201,8 +212,8 @@ export async function startImport(): Promise<void> {
     const proto = toProtoError(error);
     set({ starting: false });
     pushToast({
-      title: "Couldn't start the import.",
-      description: proto.hint ? `${proto.message}. ${proto.hint}` : proto.message,
+      title: i18n.t("shell:projectImport.startFailed"),
+      description: importErrorText(proto),
       variant: "error",
     });
   }

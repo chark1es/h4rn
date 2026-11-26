@@ -10,7 +10,9 @@ import type {
   ThreadFilter,
 } from "@/gen";
 
+import { setLocalePreference } from "@/lib/i18n";
 import { chunkText, H4rnClient } from "./client";
+import { errorWords, H4rnRequestError } from "./errors";
 import type { EventEnvelope, ReadyInfo, Transport, TransportHandlers } from "./types";
 import { isProtocolToken } from "./ws";
 
@@ -264,6 +266,45 @@ describe("H4rnClient", () => {
     await expect(first).resolves.toMatchObject({ type: "threads" });
     await expect(second).resolves.toMatchObject({ type: "ack" });
     expect(transports[0]?.sent.length).toBeGreaterThanOrEqual(4);
+  });
+
+  it("fails a waiting request with the transport's own kind, worded again in Japanese", async () => {
+    // The daemon never answers the send, so it is still waiting when the
+    // transport closes.
+    const transport = new FakeTransport((frame) => frame.body.type === "send_message");
+    const { client } = harness(() => transport);
+    try {
+      client.start();
+      await settle();
+
+      const pending = client.request({
+        type: "send_message",
+        thread_id: "t1",
+        text: "hi",
+        attachments: [],
+        steer: false,
+      });
+      const failure = pending.then(
+        () => null,
+        (error: unknown) => error,
+      );
+      await settle();
+      transport.handlers?.onClose({
+        code: 1011,
+        reason: "Every secure path closed.",
+        wasClean: false,
+        error: { kind: "allPathsClosed" },
+      });
+
+      const error = await failure;
+      if (!(error instanceof H4rnRequestError)) throw new Error("expected a request error");
+      expect(errorWords(error.proto).message).toBe("Every secure path to the daemon closed.");
+      await setLocalePreference("ja");
+      expect(errorWords(error.proto).message).toBe("デーモンへの安全な経路がすべて閉じました。");
+    } finally {
+      await setLocalePreference("system");
+      client.stop();
+    }
   });
 
   it("rejects a request that outlives its timeout", async () => {

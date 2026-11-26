@@ -10,6 +10,7 @@ import {
   loadSkills,
   removeSkill,
   resetSkillsStore,
+  resolveSkillConflict,
   setSkillEnabled,
   setSkillsRequesterForTests,
 } from "./store";
@@ -215,6 +216,21 @@ describe("Skills store", () => {
     expect(removed).toBe(false);
     expect(getSkillsState().inventory?.skills.map((entry) => entry.name)).toEqual(["review"]);
     expect(getState().toasts.at(-1)?.description).toContain("still in the registry");
+  });
+
+  it("names the skill whose conflict could not be resolved", async () => {
+    setSkillsRequesterForTests((request) =>
+      request.type === "skills_list"
+        ? ok({ type: "skills", inventory: inventory() })
+        : ok({ type: "skill_conflicts", conflicts: [conflict] }),
+    );
+    await loadSkills();
+    setSkillsRequesterForTests(() =>
+      Promise.reject(new H4rnRequestError(protoError("conflict", "Changed again.", null))),
+    );
+
+    expect(await resolveSkillConflict("cnf_1", "keep_local")).toBe(false);
+    expect(getState().toasts.at(-1)?.title).toBe("Couldn't resolve the conflict for review.");
   });
 
   it("records a sync status event as-is", () => {

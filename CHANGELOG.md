@@ -68,6 +68,16 @@ All notable changes to h4rn are recorded here. The format follows
   with no published key or a shell that cannot open a sign-in window are
   translated. Japanese and Chinese no longer put a space after 。 between
   two sentences in Settings → Worktrees.
+- **The connection banner, toasts and client errors in Chinese, Spanish and
+  Japanese.** The offline and reconnecting banner, the toast list, the
+  inbox's Start a thread box, the phone's IDE notice, the thread action
+  failures ("Settling failed on atlas."), the MCP, skills, guest, import and
+  update failure toasts, and the errors the client writes itself (not
+  connected, timed out, the connection closed) follow the Language choice.
+  An error already on screen, such as a pairing, sign-in or guest-link error
+  or the banner's reason, switches language with the rest of the page, and
+  the list of files a rewind left alone reads the same in its dialog and its
+  toast. The daemon's and the relay's own error text is shown as sent.
 - **Dialogs and confirmations in Chinese, Spanish and Japanese.** New thread,
   rename, edit from here (rewind), the branch and pull request dialogs, Share
   with guest, Delegate a subagent, Add project and its import pane, and the

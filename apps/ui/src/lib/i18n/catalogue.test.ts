@@ -94,11 +94,9 @@ describe("translation catalogues", () => {
 
         it("has no empty values", () => {
           for (const [key, value] of flat) {
-            // A deliberately empty second line, or the separator between
-            // sentences in a language that does not use one, is allowed
-            // only where English is empty too or the key says so.
-            const allowedEmpty =
-              english.get(key) === "" || key.endsWith("sentenceSeparator") || key === "";
+            // A deliberately empty second line is allowed only where English
+            // is empty too.
+            const allowedEmpty = english.get(key) === "" || key === "";
             if (!allowedEmpty) expect(value.trim(), `${locale} ${key}`).not.toBe("");
           }
         });

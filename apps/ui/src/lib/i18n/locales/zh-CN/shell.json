@@ -1,0 +1,312 @@
+{
+  "offline": {
+    "reconnecting": "正在重新连接",
+    "offline": "离线",
+    "attempt": "第 {{attempt}} 次尝试",
+    "cached": "缓存于 {{time}}",
+    "noCache": "没有缓存的对话",
+    "reconnect": "重新连接"
+  },
+  "toasts": {
+    "region": "通知",
+    "dismiss": "关闭"
+  },
+  "start": {
+    "title": "开始对话",
+    "lead": "选择在哪里运行。智能体在你于该主机上选择的目录中工作，你可以在任何已配对的设备上监督它。",
+    "host": "主机",
+    "hostChip": "主机：{{name}}",
+    "hostChipNone": "主机：没有在线主机",
+    "noOnlineHost": "没有在线主机",
+    "noOnlineHosts": "没有在线主机",
+    "notYet": "暂不可用",
+    "notYetHint": "暂不可用：新对话会在本主机上运行",
+    "harness": "Harness",
+    "harnessChip": "Harness：{{name}}",
+    "folder": "工作区文件夹",
+    "projectChip": "项目：{{name}}",
+    "projects": "项目",
+    "projectOn": "{{host}} 上的项目",
+    "projectOnAnyHost": "主机上的项目",
+    "noProjects": "此主机上还没有项目",
+    "typePath": "输入文件夹路径…",
+    "addProject": "添加项目…",
+    "composer": "开始对话的输入框",
+    "describe": "描述任务",
+    "describeFor": "为 {{host}} 上的 {{harness}} 描述任务",
+    "describeForAnyHost": "为主机上的 {{harness}} 描述任务",
+    "attachOffline": "重新连接后才能添加附件。",
+    "attachNoHost": "请先选择一台在线主机。",
+    "send": "开始对话",
+    "blocked": {
+      "offline": "重新连接后才能开始对话。",
+      "noHost": "没有可用的在线主机。",
+      "empty": "请先描述任务。",
+      "starting": "正在开始…",
+      "ready": "开始（Enter）"
+    },
+    "noHostYet": "还没有主机？<pair>配对设备</pair>，或在那台机器上运行 <code>{{command}}</code>。",
+    "failed": "无法在 {{host}} 上开始对话。",
+    "nothingRunning": "没有任何任务在运行。"
+  },
+  "phoneIde": {
+    "title": "IDE 是桌面视图。",
+    "body": "在更大的屏幕上打开此对话，即可浏览文件、阅读差异并编辑。对话及其变更在这里也能查看。",
+    "back": "返回收件箱"
+  },
+  "threadActions": {
+    "theHost": "主机",
+    "moveToSettled": "在 {{host}} 上了结失败。",
+    "moveToDone": "在 {{host}} 上移到“已完成”失败。",
+    "moveToWorking": "在 {{host}} 上移到“进行中”失败。",
+    "acknowledge": "在 {{host}} 上确认失败。",
+    "settle": "在 {{host}} 上了结失败。",
+    "pin": "在 {{host}} 上置顶失败。",
+    "unpin": "在 {{host}} 上取消置顶失败。",
+    "snooze": "在 {{host}} 上稍后提醒失败。",
+    "wake": "在 {{host}} 上取消稍后提醒失败。",
+    "interrupt": "在 {{host}} 上中断失败。",
+    "mode": "在 {{host}} 上更改模式失败。",
+    "model": "在 {{host}} 上更改模型失败。",
+    "effort": "在 {{host}} 上更改推理强度失败。",
+    "fastOn": "在 {{host}} 上开启快速模式失败。",
+    "fastOff": "在 {{host}} 上关闭快速模式失败。",
+    "rename": "在 {{host}} 上重命名失败。",
+    "switchHarness": "在 {{host}} 上切换 harness 失败。",
+    "rewind": "在 {{host}} 上回退失败。"
+  },
+  "approval": {
+    "approveFailed": "无法向 {{host}} 发送批准。",
+    "denyFailed": "无法向 {{host}} 发送拒绝。",
+    "stillPending": "审批仍在等待中。"
+  },
+  "rewind": {
+    "fellBack": "回退改用了新的会话",
+    "fellBackNamed": "{{harness}} 无法使用记录的回退点。下一个回合将从保留对话的交接继续。",
+    "fellBackUnnamed": "无法使用记录的回退点。下一个回合将从保留对话的交接继续。",
+    "done": "对话已回退",
+    "native": "{{harness}} 已从自己的历史中删除被移除的回合。",
+    "handoff": "新的会话将从保留的对话继续。",
+    "leftAlone": "被忽略的文件保持原样：{{files}}。",
+    "failed": "无法回退 {{title}}。",
+    "failedUntitled": "无法回退此对话。"
+  },
+  "fork": {
+    "failed": "无法从这个回合分叉。"
+  },
+  "mcp": {
+    "listServers": "列出服务器",
+    "saveFailed": "无法保存 {{name}}。",
+    "nothingChanged": "这台机器上没有任何更改。",
+    "removeFailed": "无法移除 {{name}}。",
+    "stillConfigured": "该服务器仍处于配置状态。",
+    "turnOnFailed": "无法开启 {{name}}。",
+    "turnOffFailed": "无法关闭 {{name}}。",
+    "switchBack": "开关已恢复原状；守护进程仍保留旧设置。",
+    "readConfigFailed": "无法读取该 harness 配置。",
+    "checkPath": "请检查路径后重试。",
+    "importFailed": "无法应用导入。",
+    "noneAdded": "没有添加新的服务器。",
+    "resolveFailed": "无法解决 {{name}} 的冲突。",
+    "conflictOpen": "冲突仍未解决。",
+    "shareFailed": "无法共享 {{name}}。",
+    "stillLocal": "该服务器仍仅限本地使用。",
+    "unshareFailed": "无法取消共享 {{name}}。",
+    "stillReachable": "那台机器仍可访问该服务器。",
+    "toolsFailed": "无法列出 {{name}} 的工具。",
+    "stillStarting": "服务器可能仍在启动。",
+    "callFailed": "无法调用 {{tool}}。",
+    "checkServer": "请检查服务器状态和参数。",
+    "approvalsFailed": "无法读取共享工具的审批。",
+    "answerFailed": "无法答复该审批。",
+    "callBlocked": "该调用仍被阻止。"
+  },
+  "skills": {
+    "listSkills": "列出技能",
+    "addFailed": "无法添加该技能。",
+    "checkSkillFile": "请确认 SKILL.md 存在且路径可读。",
+    "updateFailed": "无法更新该技能。",
+    "unchanged": "当前版本未改变。",
+    "removeFailed": "无法移除该技能。",
+    "stillRegistered": "它仍在注册表中。",
+    "enableFailed": "无法为 {{harness}} 启用 {{skill}}。",
+    "disableFailed": "无法为 {{harness}} 停用 {{skill}}。",
+    "enableFailedUnnamed": "无法为 {{harness}} 启用该技能。",
+    "disableFailedUnnamed": "无法为 {{harness}} 停用该技能。",
+    "switchBack": "开关已恢复原状。",
+    "scanFailed": "无法扫描 harness 的技能目录。",
+    "checkDirectories": "请确认 harness 目录可读。",
+    "importFailed": "无法导入这些技能。",
+    "rescan": "请重新扫描后重试。",
+    "resolveFailed": "无法解决 {{name}} 的冲突。",
+    "stillOpen": "冲突仍未解决。",
+    "syncFailed": "无法同步技能。",
+    "localStillWork": "本地技能仍可使用。",
+    "compareFailed": "无法比较这些版本。",
+    "pickVersions": "请选择注册表中仍有的两个版本。"
+  },
+  "guest": {
+    "settingsFailed": "无法更改访客链接",
+    "sendFailed": "无法发送该访客消息。",
+    "dismissFailed": "无法忽略该访客消息。"
+  },
+  "projectImport": {
+    "startFailed": "无法开始导入。",
+    "chooseFirst": "请先选择一个项目。",
+    "checkOne": "请至少勾选一个要导入的项目。"
+  },
+  "update": {
+    "unreachable": "无法连接更新服务器。",
+    "installFailed": "无法安装更新。"
+  },
+  "errors": {
+    "notConnected": {
+      "message": "守护进程未连接。",
+      "hint": "等状态栏显示在线后再试。"
+    },
+    "stopped": {
+      "message": "客户端已停止。",
+      "hint": "重新启动它即可重新连接。"
+    },
+    "handshakeTimeout": {
+      "message": "与守护进程的连接未能及时完成握手。",
+      "hint": "守护进程可能正忙。请重试，或在状态栏中检查连接。"
+    },
+    "requestTimeout": {
+      "message": "守护进程未在 {{seconds, number}} 秒内答复 `{{request}}`。",
+      "hint": "守护进程可能正忙。请重试，或在状态栏中检查连接。"
+    },
+    "sendFailed": {
+      "message": "无法发送该帧。",
+      "hint": "等连接恢复后再试。"
+    },
+    "socketClosed": {
+      "message": "套接字未打开。",
+      "hint": "等连接恢复后再试。"
+    },
+    "transportStarting": {
+      "message": "安全传输仍在启动。",
+      "hint": "等连接恢复后再试。"
+    },
+    "transportCreate": {
+      "message": "无法创建传输。",
+      "hint": "请检查守护进程的 URL 后重试。"
+    },
+    "transportFailed": {
+      "message": "连接失败。",
+      "hint": "请确认守护进程正在运行，然后重新连接。"
+    },
+    "urlRejected": {
+      "message": "WebSocket URL 被拒绝。",
+      "hint": "请确认守护进程正在运行，然后重新连接。"
+    },
+    "noAnswer": {
+      "message": "守护进程没有应答。它可能已停止或无法访问。",
+      "hint": "请确认守护进程正在运行，然后重新连接。"
+    },
+    "unreachable": {
+      "message": "无法访问 {{endpoint}}。",
+      "hint": "请确认守护进程正在运行，然后重新连接。"
+    },
+    "secureUrlRejected": {
+      "message": "安全 URL 被拒绝。",
+      "hint": "请确认守护进程正在运行，然后重新连接。"
+    },
+    "relayBinary": {
+      "message": "中继发送了二进制帧；这里只接受 JSON。",
+      "hint": "请确认守护进程正在运行，然后重新连接。"
+    },
+    "plaintext": {
+      "message": "守护进程在安全路径上发送了明文。",
+      "hint": "请确认守护进程正在运行，然后重新连接。"
+    },
+    "relayNotJson": {
+      "message": "中继发送的帧不是 JSON。",
+      "hint": "请确认守护进程正在运行，然后重新连接。"
+    },
+    "relayError": {
+      "message": "中继报告了一个错误。",
+      "hint": "请确认守护进程正在运行，然后重新连接。"
+    },
+    "relayBadPayload": {
+      "message": "中继发送的数据负载无效。",
+      "hint": "请确认守护进程正在运行，然后重新连接。"
+    },
+    "noRoute": {
+      "message": "无法连接到这台机器。",
+      "hint": "这台机器的守护进程可能已离线。请检查主机列表，然后重新连接。"
+    },
+    "allPathsClosed": {
+      "message": "通往守护进程的所有安全路径都已关闭。",
+      "hint": "客户端会自动重新连接。如果反复出现，请检查这台机器的网络。"
+    },
+    "noSecurePath": {
+      "message": "没有可通往守护进程的安全路径。",
+      "hint": "客户端会自动重新连接。如果反复出现，请检查这台机器的网络。"
+    },
+    "notPaired": {
+      "message": "此浏览器尚未与守护进程配对。",
+      "hint": "扫描守护进程的配对码，然后重新打开应用。"
+    },
+    "invalidPairingCode": {
+      "message": "配对码无效：{{detail}}",
+      "hint": "请扫描守护进程上新的配对码。"
+    },
+    "invalidPairingCodeBare": {
+      "message": "配对码无效。",
+      "hint": "请扫描守护进程上新的配对码。"
+    },
+    "helloUnexpected": {
+      "message": "守护进程对 hello 的应答不符合预期。",
+      "hint": "请将两端的 h4rn 都更新。"
+    },
+    "helloFailed": {
+      "message": "hello 握手未完成。",
+      "hint": "请检查守护进程的版本，然后重新连接。"
+    },
+    "chunkOrder": {
+      "message": "守护进程的分块帧顺序错乱。",
+      "hint": "连接会自动重试。"
+    },
+    "notJson": {
+      "message": "守护进程发送的帧不是 JSON。",
+      "hint": "请将两端的 h4rn 都更新；连接会自动重试。"
+    },
+    "closed": {
+      "message": "守护进程关闭了连接。",
+      "hint": "客户端会自动重新连接。读取会重试，写入不会。"
+    },
+    "unauthorized": {
+      "message": "守护进程拒绝了此设备的令牌。",
+      "hint": "请重新配对此设备。"
+    },
+    "forbidden": {
+      "message": "此设备无权执行该操作。",
+      "hint": "请向主机所有者申请访问权限。"
+    },
+    "offline": {
+      "message": "已与守护进程断开连接。",
+      "hint": "启动守护进程或检查网络，然后点击“重新连接”。"
+    },
+    "unexpected": {
+      "message": "出现了问题。",
+      "hint": "请重试。如果问题持续出现，请在状态栏中打开连接详情。"
+    },
+    "unreadable": {
+      "message": "守护进程返回了客户端无法读取的内容。",
+      "hint": "请重试。如果问题仍然存在，请更新 h4rn。"
+    },
+    "noHost": {
+      "message": "守护进程尚未报告它的主机。",
+      "hint": "等状态栏显示在线后再试。"
+    },
+    "noAgentTurn": {
+      "message": "此工作区还没有可供比较的智能体回合。",
+      "hint": "先运行一个回合，再选择“Turn”作为差异来源。"
+    },
+    "noCommit": {
+      "message": "请先选择一个要比较的提交。",
+      "hint": "从来源选择器中选择一个提交。"
+    }
+  }
+}

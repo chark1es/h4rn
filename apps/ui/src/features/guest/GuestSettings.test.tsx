@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const { request } = vi.hoisted(() => ({ request: vi.fn() }));
@@ -11,6 +11,8 @@ vi.mock("@/lib/store/appStore", () => ({
   useApp: (selector: (state: unknown) => unknown) => selector({ connection: { status: "online" } }),
 }));
 
+import { clientProto, H4rnRequestError } from "@/lib/client/errors";
+import { setLocalePreference } from "@/lib/i18n";
 import { resetAccessStore } from "../access/store";
 import { resetRewindSettingsForTests } from "../rewind/settings";
 import { GuestSettingsForm } from "./GuestSettings";
@@ -48,8 +50,9 @@ beforeEach(() => {
   );
 });
 
-afterEach(() => {
+afterEach(async () => {
   cleanup();
+  await setLocalePreference("system");
   resetGuestStoreForTests();
   resetAccessStore();
   resetRewindSettingsForTests();
@@ -121,5 +124,27 @@ describe("Settings → Labs", () => {
     expect(await screen.findByText(/daemon unavailable/)).toBeTruthy();
     const group = screen.getByRole("heading", { name: "Outside agents" }).closest(".q-group");
     expect(group?.querySelector('[role="alert"]')?.textContent).toContain("daemon unavailable");
+  });
+
+  it("words a guest-link error the client wrote again when the language changes", async () => {
+    const fallback = request.getMockImplementation();
+    request.mockImplementation((body: { type: string }) => {
+      if (body.type === "get_guest_settings") {
+        return Promise.reject(new H4rnRequestError(clientProto("internal", "notConnected")));
+      }
+      return fallback?.(body);
+    });
+    render(<GuestSettingsForm />);
+    const group = (await screen.findByRole("heading", { name: "Sharing" })).closest(".q-group");
+    await waitFor(() =>
+      expect(group?.querySelector('[role="alert"]')?.textContent).toBe(
+        "The daemon is not connected.",
+      ),
+    );
+
+    await act(() => setLocalePreference("es"));
+    expect(group?.querySelector('[role="alert"]')?.textContent).toBe(
+      "El daemon no está conectado.",
+    );
   });
 });

@@ -1,16 +1,18 @@
 import { CircleAlertIcon, InfoIcon, XIcon } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 import { dismissToast, useApp } from "@/lib/store/appStore";
 import { cn } from "@/lib/utils";
 
 export function Toasts() {
   const toasts = useApp((state) => state.toasts);
+  const { t } = useTranslation("shell");
   if (toasts.length === 0) return null;
 
   return (
     <section
       aria-live="polite"
-      aria-label="Notifications"
+      aria-label={t("toasts.region")}
       className="pointer-events-none fixed right-3 bottom-10 z-50 flex w-[min(380px,calc(100vw-1.5rem))] flex-col gap-2"
     >
       {toasts.slice(-3).map((toast) => (
@@ -53,7 +55,7 @@ export function Toasts() {
           </div>
           <button
             type="button"
-            aria-label="Dismiss"
+            aria-label={t("toasts.dismiss")}
             className="q-ibtn"
             style={{ width: 22, height: 22 }}
             onClick={() => dismissToast(toast.id)}

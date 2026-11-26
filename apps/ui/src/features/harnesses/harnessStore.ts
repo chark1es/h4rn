@@ -221,7 +221,10 @@ export async function removeAcpAgent(id: string): Promise<string | null> {
  */
 export async function loadAcpAgentSpec(id: string): Promise<AcpAgentSpec> {
   const response = await getClient().request({ type: "get_acp_agent", id });
-  if (response.type !== "acp_agent_spec") throw new Error("the daemon returned no configuration");
+  if (response.type !== "acp_agent_spec") {
+    // i18n-ignore-next-line: a reply of the wrong type is a bug, not a state
+    throw new Error("the daemon returned no configuration");
+  }
   return response.agent;
 }
 

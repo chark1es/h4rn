@@ -1,5 +1,7 @@
 import { useSyncExternalStore } from "react";
 
+import { i18n } from "@/lib/i18n";
+
 import {
   type AppUpdateBridge,
   type AppUpdateProgress,
@@ -20,8 +22,17 @@ export type AppUpdateState = {
   /** "Later" was pressed; stays true until the next check reports back. */
   snoozed: boolean;
   progress: AppUpdateProgress | null;
-  error: string | null;
+  /** Why the last check failed; `appUpdateErrorText` words it. */
+  error: AppUpdateError | null;
 };
+
+/** The shell's own sentence, shown as sent, or the client's kind. */
+export type AppUpdateError = { kind: "sent"; text: string } | { kind: "unreachable" };
+
+/** The check failure in the active language; the shell's text is shown as sent. */
+export function appUpdateErrorText(error: AppUpdateError): string {
+  return error.kind === "sent" ? error.text : i18n.t("shell:update.unreachable");
+}
 
 const initialState: AppUpdateState = {
   supported: false,
@@ -74,7 +85,7 @@ export function applyStatus(status: AppUpdateStatus): void {
     availableVersion: status.available?.version ?? null,
     checkedAtMs: status.checked_at_ms,
     autoCheck: status.auto_check,
-    error: status.error,
+    error: status.error ? { kind: "sent", text: status.error } : null,
     checking: false,
     snoozed: false,
   });
@@ -116,7 +127,7 @@ export async function checkForAppUpdates(): Promise<void> {
   try {
     applyStatus(await bridge.check());
   } catch {
-    patch({ checking: false, error: "Couldn't reach the update server." });
+    patch({ checking: false, error: { kind: "unreachable" } });
   }
 }
 
@@ -148,7 +159,9 @@ export async function installAppUpdate(): Promise<void> {
     // The shell also emits a `failed` progress with the sentence to show.
     if (state.progress?.phase !== "failed") {
       patch({
-        progress: { phase: "failed", message: "The update could not be installed." },
+        // The shell writes its own sentence in the same field; this one is
+        // worded when it is raised, like the shell's.
+        progress: { phase: "failed", message: i18n.t("shell:update.installFailed") },
       });
     }
   }

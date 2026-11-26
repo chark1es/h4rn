@@ -37,7 +37,7 @@
     },
     "warning": "このメッセージ以降にあなた自身が行った編集も元に戻ります。worktree の外には何も影響しません。",
     "ignored": "無視されたファイルはそのまま残ります：{{paths}}。復元で巻き戻されることはありません。",
-    "ignoredMore_other": "{{paths}} ほか {{count, number}} 件",
+    "ignoredMore_other": "ほか {{count, number}} 件",
     "method": {
       "handoff": "このメッセージはネイティブに削除できないため、h4rn は引き継ぎ付きの新しいセッションを開始します。",
       "native": "{{harness}} は自身の履歴からこのメッセージと以降のすべてのターンを削除します。",

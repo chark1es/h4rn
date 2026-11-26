@@ -14,7 +14,7 @@ const harness = vi.hoisted(() => ({
     creating: {} as Record<string, boolean>,
     stopping: {} as Record<string, boolean>,
     answering: {} as Record<string, boolean>,
-    error: null as string | null,
+    error: null as { code: string; message: string; hint: string | null } | null,
   },
   send: vi.fn(),
   dismiss: vi.fn(),
@@ -36,6 +36,7 @@ vi.mock("@/features/guest/guestStore", () => ({
   loadGuestSharing: vi.fn(),
   loadGuestSettings: vi.fn(),
   closeGuestShare: harness.close,
+  guestErrorText: (error: { message: string }) => error.message,
 }));
 
 vi.mock("@/lib/store/appStore", () => ({
@@ -153,7 +154,11 @@ describe("GuestShareDialog", () => {
   });
 
   it("shows the error the store holds in an alert", () => {
-    harness.state.error = "Sharing is unavailable right now.";
+    harness.state.error = {
+      code: "internal",
+      message: "Sharing is unavailable right now.",
+      hint: null,
+    };
     render(<GuestShareDialog />);
     expect(screen.getByRole("alert").textContent).toContain("Sharing is unavailable right now.");
   });

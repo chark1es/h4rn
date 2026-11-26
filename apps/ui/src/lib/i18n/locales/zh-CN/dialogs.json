@@ -37,7 +37,7 @@
     },
     "warning": "这也会撤消你在这条消息之后亲自做的修改。worktree 之外的内容不受影响。",
     "ignored": "被忽略的文件保持原样：{{paths}}。恢复操作从不回退它们。",
-    "ignoredMore_other": "{{paths}} 及另外 {{count, number}} 个",
+    "ignoredMore_other": "另外 {{count, number}} 个",
     "method": {
       "handoff": "这条消息无法在原会话中删除，所以 h4rn 会通过交接开始一个新会话。",
       "native": "{{harness}} 会从自己的历史中删除这条消息及之后的每个回合。",

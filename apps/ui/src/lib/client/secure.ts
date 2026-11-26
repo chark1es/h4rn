@@ -7,6 +7,7 @@ import {
 } from "@/gen/transport-wasm/h4rn_transport_wasm";
 import { forgetSecret, getSecret, peekSecret, setSecret } from "@/lib/platform/secrets";
 
+import { type ClientErrorSource, clientProto, clientSource, H4rnRequestError } from "./errors";
 import type { Transport, TransportContext, TransportFactory, TransportHandlers } from "./types";
 import { loadTransportWasm } from "./wasm";
 
@@ -147,7 +148,7 @@ export class SecureTransport implements Transport {
   }
 
   send(data: string | ArrayBuffer | Uint8Array): void {
-    if (!this.wasm) throw new Error("The secure transport is still starting.");
+    if (!this.wasm) throw new H4rnRequestError(clientProto("internal", "transportStarting"));
     if (typeof data === "string") {
       this.wasm.send(new TextEncoder().encode(data), false, nowMs());
       return;
@@ -191,19 +192,13 @@ export class SecureTransport implements Transport {
       if (this.closedByUs) return;
       if (!resolved) {
         if (this.options.remote) {
-          this.finishClose(
-            1011,
-            "No route to this machine is available.",
-            false,
-            "The machine's daemon may be offline. Check the hosts list, then reconnect.",
-          );
+          this.finishClose(1011, "No route to this machine is available.", false, {
+            kind: "noRoute",
+          });
         } else {
-          this.finishClose(
-            4401,
-            "This browser is not paired with a daemon.",
-            true,
-            "Scan the daemon's pairing code, then reopen the app.",
-          );
+          this.finishClose(4401, "This browser is not paired with a daemon.", true, {
+            kind: "notPaired",
+          });
         }
         return;
       }
@@ -295,10 +290,10 @@ export class SecureTransport implements Transport {
         };
         psk = fresh.psk;
       } catch (error) {
-        throw new Error(
+        throw new H4rnRequestError(
           error instanceof Error
-            ? `Invalid pairing code: ${error.message}`
-            : "Invalid pairing code.",
+            ? clientProto("internal", "invalidPairingCode", { params: { detail: error.message } })
+            : clientProto("internal", "invalidPairingCodeBare"),
         );
       }
     } else if (pending) {
@@ -391,8 +386,8 @@ export class SecureTransport implements Transport {
       } catch (error) {
         this.handlers?.onError(
           error instanceof Error
-            ? `Could not reach ${path.endpoint}.`
-            : "The secure URL was rejected.",
+            ? { kind: "unreachable", params: { endpoint: path.endpoint } }
+            : { kind: "secureUrlRejected" },
         );
         this.socketClosed();
         return;
@@ -425,14 +420,14 @@ export class SecureTransport implements Transport {
         if (this.closedByUs) return;
         if (this.isRelay(index)) {
           if (typeof message.data !== "string") {
-            this.handlers?.onError("The relay sent a binary frame; only JSON is expected.");
+            this.handlers?.onError({ kind: "relayBinary" });
             return;
           }
           this.handleRelayEvent(index, socket, message.data);
           return;
         }
         if (typeof message.data === "string") {
-          this.handlers?.onError("The daemon sent plaintext on the secure path.");
+          this.handlers?.onError({ kind: "plaintext" });
           return;
         }
         const buffer =
@@ -460,7 +455,9 @@ export class SecureTransport implements Transport {
           // The engine may already be closed.
         }
         if (this.closedSockets >= this.paths.length && !this.notifiedClose) {
-          this.finishClose(1011, "Every secure path closed.", false);
+          this.finishClose(1011, "Every secure path closed.", false, {
+            kind: "allPathsClosed",
+          });
         }
       };
     });
@@ -521,13 +518,14 @@ export class SecureTransport implements Transport {
     try {
       event = JSON.parse(text) as RelayEvent;
     } catch {
-      this.handlers?.onError("The relay sent a frame that was not JSON.");
+      this.handlers?.onError({ kind: "relayNotJson" });
       return;
     }
     if (event.type === "error") {
-      this.handlers?.onError(
-        event.error?.hint ?? event.error?.message ?? "The relay reported an error.",
-      );
+      this.handlers?.onError({
+        kind: "relayError",
+        message: event.error?.hint ?? event.error?.message ?? undefined,
+      });
       return;
     }
     if (event.type !== "frame" || !event.frame) return;
@@ -536,7 +534,7 @@ export class SecureTransport implements Transport {
       case "data": {
         const bytes = decodeBase64Url(event.frame.payload ?? "");
         if (!bytes) {
-          this.handlers?.onError("The relay sent an invalid data payload.");
+          this.handlers?.onError({ kind: "relayBadPayload" });
           return;
         }
         const buffer = bytes.buffer.slice(
@@ -621,7 +619,8 @@ export class SecureTransport implements Transport {
     });
     if (lost && !this.notifiedClose) {
       queueMicrotask(() => {
-        this.finishClose(1011, status.detail ?? "No secure path is available.", false);
+        const { reason, error } = noSecurePathClose(status.detail);
+        this.finishClose(1011, reason, false, error);
       });
     }
   }
@@ -659,7 +658,12 @@ export class SecureTransport implements Transport {
   // Teardown
   // ---------------------------------------------------------------------
 
-  private finishClose(code: number, reason: string, wasClean: boolean, error?: string): void {
+  private finishClose(
+    code: number,
+    reason: string,
+    wasClean: boolean,
+    error?: ClientErrorSource,
+  ): void {
     if (this.notifiedClose || this.closedByUs) return;
     this.notifiedClose = true;
     this.stopTimer();
@@ -681,12 +685,13 @@ export class SecureTransport implements Transport {
     this.wasm = null;
 
     if (error) this.handlers?.onError(error);
-    this.handlers?.onClose({ code, reason, wasClean });
+    this.handlers?.onClose(error ? { code, reason, wasClean, error } : { code, reason, wasClean });
   }
 
   private reportFailure(error: unknown): void {
     const message = error instanceof Error ? error.message : String(error);
-    this.handlers?.onError(message);
+    const client = error instanceof H4rnRequestError ? clientSource(error.proto) : null;
+    this.handlers?.onError(client ?? { kind: "transportFailed", message });
     this.finishClose(1011, message, false);
   }
 
@@ -709,6 +714,21 @@ export class SecureTransport implements Transport {
  * stale one-time PSK must not immediately become fatal while a fresh session
  * can still be attempted.
  */
+/**
+ * The close for a session whose every path was lost. `detail` is the engine's
+ * own text, shown as sent; without one the client words the failure itself
+ * from the kind, so it follows the language.
+ */
+export function noSecurePathClose(detail: string | null | undefined): {
+  reason: string;
+  error: { kind: "noSecurePath"; message: string | undefined };
+} {
+  return {
+    reason: detail ?? "No secure path is available.",
+    error: { kind: "noSecurePath", message: detail ?? undefined },
+  };
+}
+
 function closeCodeFor(
   reason: string,
   established: boolean,

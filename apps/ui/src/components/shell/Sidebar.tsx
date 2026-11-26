@@ -55,6 +55,7 @@ import {
 import { loadSkills, useSkills } from "@/features/skills/store";
 import type { ThreadSummary, ThreadTab } from "@/gen";
 import { useNow } from "@/hooks/use-now";
+import { errorWords } from "@/lib/client/errors";
 import { harnessLabel, machineSeed } from "@/lib/entities";
 import { absoluteTime } from "@/lib/format";
 import { formatAge, formatDateTime, formatList, formatNumber } from "@/lib/i18n";
@@ -729,7 +730,8 @@ function ThreadsSidebar() {
             <CircleAlertIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
           </span>
           <span className="grow">
-            <b>{unreachableHostLine(hosts, t)}</b> {error.hint ?? t("unreachable.cached")}
+            <b>{unreachableHostLine(hosts, t)}</b>{" "}
+            {errorWords(error).hint ?? t("unreachable.cached")}
           </span>
           {connection.status === "offline" && stored ? (
             <UseThisMachineButton compact />

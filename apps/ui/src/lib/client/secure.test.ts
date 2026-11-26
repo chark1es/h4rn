@@ -4,7 +4,12 @@ import { fileURLToPath } from "node:url";
 
 import { describe, expect, it, vi } from "vitest";
 
-import { createSecureTransportFactory, kindForEndpoint, normalizeSecureUrl } from "./secure";
+import {
+  createSecureTransportFactory,
+  kindForEndpoint,
+  normalizeSecureUrl,
+  noSecurePathClose,
+} from "./secure";
 
 const secrets = vi.hoisted(() => {
   const store = new Map<string, string>();
@@ -116,6 +121,7 @@ class FakeSocket {
   static readonly CLOSING = 2;
   static readonly CLOSED = 3;
   static readonly opened: string[] = [];
+  static readonly instances: FakeSocket[] = [];
 
   readyState = FakeSocket.CONNECTING;
   binaryType = "blob";
@@ -126,6 +132,7 @@ class FakeSocket {
 
   constructor(readonly url: string) {
     FakeSocket.opened.push(url);
+    FakeSocket.instances.push(this);
   }
 
   send(): void {}
@@ -201,5 +208,60 @@ describe("secure transport cancellation", () => {
         writable: true,
       });
     }
+  });
+});
+
+describe("secure transport close", () => {
+  it("names the kind when every path closed, so a waiting request is worded by the client", async () => {
+    FakeSocket.instances.length = 0;
+    const previous = globalThis.WebSocket;
+    Object.defineProperty(globalThis, "WebSocket", {
+      value: FakeSocket,
+      configurable: true,
+      writable: true,
+    });
+    try {
+      const factory = createSecureTransportFactory({
+        remote: {
+          daemonPublic: "aa".repeat(32),
+          paths: [{ kind: "relay", endpoint: "wss://relay.invalid/relay" }],
+          machineId: "machine",
+          sessionKey: "test.session.close",
+        },
+        mintRelayUrl: async () => "wss://relay.invalid/minted",
+      });
+      const frames: Array<{ code: number; reason: string; error?: { kind: string } }> = [];
+      const transport = factory({ url: "ws://daemon.test:47800/secure", token: null, attempt: 0 });
+      transport.connect({
+        onOpen: () => undefined,
+        onMessage: () => undefined,
+        onClose: (frame) => frames.push(frame),
+        onError: () => undefined,
+      });
+      await waitFor(() => FakeSocket.instances.length === 1);
+
+      FakeSocket.instances[0]?.onclose?.({ reason: "" });
+
+      expect(frames).toHaveLength(1);
+      expect(frames[0]?.code).toBe(1011);
+      expect(frames[0]?.error).toEqual({ kind: "allPathsClosed" });
+    } finally {
+      Object.defineProperty(globalThis, "WebSocket", {
+        value: previous,
+        configurable: true,
+        writable: true,
+      });
+    }
+  });
+
+  it("names the kind when no secure path is left, and keeps the engine's own detail as sent", () => {
+    expect(noSecurePathClose(undefined).error).toEqual({
+      kind: "noSecurePath",
+      message: undefined,
+    });
+    expect(noSecurePathClose("relay refused the ticket").error).toEqual({
+      kind: "noSecurePath",
+      message: "relay refused the ticket",
+    });
   });
 });

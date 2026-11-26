@@ -1,0 +1,312 @@
+{
+  "offline": {
+    "reconnecting": "Reconectando",
+    "offline": "Sin conexión",
+    "attempt": "intento {{attempt}}",
+    "cached": "caché: {{time}}",
+    "noCache": "no hay hilos en caché",
+    "reconnect": "Reconectar"
+  },
+  "toasts": {
+    "region": "Notificaciones",
+    "dismiss": "Descartar"
+  },
+  "start": {
+    "title": "Iniciar un hilo",
+    "lead": "Elige dónde se ejecuta. El agente trabaja en un directorio que eliges en ese host, y puedes supervisarlo desde cualquier dispositivo vinculado.",
+    "host": "Host",
+    "hostChip": "Host: {{name}}",
+    "hostChipNone": "Host: ningún host en línea",
+    "noOnlineHost": "Ningún host en línea",
+    "noOnlineHosts": "No hay hosts en línea",
+    "notYet": "Aún no",
+    "notYetHint": "Aún no: los hilos nuevos se ejecutan en este host",
+    "harness": "Harness",
+    "harnessChip": "Harness: {{name}}",
+    "folder": "Carpeta del espacio de trabajo",
+    "projectChip": "Proyecto: {{name}}",
+    "projects": "Proyectos",
+    "projectOn": "Proyecto en {{host}}",
+    "projectOnAnyHost": "Proyecto en un host",
+    "noProjects": "Aún no hay proyectos en este host",
+    "typePath": "Escribe la ruta de una carpeta…",
+    "addProject": "Añadir proyecto…",
+    "composer": "Compositor para iniciar un hilo",
+    "describe": "Describe la tarea",
+    "describeFor": "Describe la tarea para {{harness}} en {{host}}",
+    "describeForAnyHost": "Describe la tarea para {{harness}} en un host",
+    "attachOffline": "Reconecta para adjuntar archivos.",
+    "attachNoHost": "Elige primero un host en línea.",
+    "send": "Iniciar hilo",
+    "blocked": {
+      "offline": "Reconecta para iniciar un hilo.",
+      "noHost": "No hay ningún host en línea disponible.",
+      "empty": "Describe primero la tarea.",
+      "starting": "Iniciando…",
+      "ready": "Iniciar (Enter)"
+    },
+    "noHostYet": "¿Aún no tienes un host? <pair>Vincula un dispositivo</pair> o ejecuta <code>{{command}}</code> en la máquina.",
+    "failed": "No se pudo iniciar el hilo en {{host}}.",
+    "nothingRunning": "No hay nada en ejecución."
+  },
+  "phoneIde": {
+    "title": "El IDE es una vista de escritorio.",
+    "body": "Abre el hilo en una pantalla más grande para explorar archivos, leer diffs y editar. El hilo y sus cambios están disponibles aquí.",
+    "back": "Volver a la bandeja"
+  },
+  "threadActions": {
+    "theHost": "el host",
+    "moveToSettled": "No se pudo resolver el hilo en {{host}}.",
+    "moveToDone": "No se pudo mover el hilo a «Terminado» en {{host}}.",
+    "moveToWorking": "No se pudo mover el hilo a «En curso» en {{host}}.",
+    "acknowledge": "No se pudo confirmar el hilo en {{host}}.",
+    "settle": "No se pudo resolver el hilo en {{host}}.",
+    "pin": "No se pudo fijar el hilo en {{host}}.",
+    "unpin": "No se pudo desfijar el hilo en {{host}}.",
+    "snooze": "No se pudo posponer el hilo en {{host}}.",
+    "wake": "No se pudo reactivar el hilo en {{host}}.",
+    "interrupt": "No se pudo interrumpir el hilo en {{host}}.",
+    "mode": "No se pudo cambiar el modo en {{host}}.",
+    "model": "No se pudo cambiar el modelo en {{host}}.",
+    "effort": "No se pudo cambiar el esfuerzo en {{host}}.",
+    "fastOn": "No se pudo activar el modo rápido en {{host}}.",
+    "fastOff": "No se pudo desactivar el modo rápido en {{host}}.",
+    "rename": "No se pudo cambiar el nombre del hilo en {{host}}.",
+    "switchHarness": "No se pudo cambiar de harness en {{host}}.",
+    "rewind": "No se pudo rebobinar el hilo en {{host}}."
+  },
+  "approval": {
+    "approveFailed": "No se pudo enviar la aprobación a {{host}}.",
+    "denyFailed": "No se pudo enviar la denegación a {{host}}.",
+    "stillPending": "La aprobación sigue pendiente."
+  },
+  "rewind": {
+    "fellBack": "El rebobinado pasó a una sesión nueva",
+    "fellBackNamed": "{{harness}} no pudo usar el punto de rebobinado registrado. El siguiente turno continúa con un traspaso de la conversación conservada.",
+    "fellBackUnnamed": "No se pudo usar el punto de rebobinado registrado. El siguiente turno continúa con un traspaso de la conversación conservada.",
+    "done": "Hilo rebobinado",
+    "native": "{{harness}} eliminó los turnos quitados de su propio historial.",
+    "handoff": "Una sesión nueva continuará desde la conversación conservada.",
+    "leftAlone": "Los archivos ignorados se quedan como están: {{files}}.",
+    "failed": "No se pudo rebobinar {{title}}.",
+    "failedUntitled": "No se pudo rebobinar el hilo."
+  },
+  "fork": {
+    "failed": "No se pudo bifurcar ese turno."
+  },
+  "mcp": {
+    "listServers": "listar servidores",
+    "saveFailed": "No se pudo guardar {{name}}.",
+    "nothingChanged": "No cambió nada en esta máquina.",
+    "removeFailed": "No se pudo quitar {{name}}.",
+    "stillConfigured": "El servidor sigue configurado.",
+    "turnOnFailed": "No se pudo activar {{name}}.",
+    "turnOffFailed": "No se pudo desactivar {{name}}.",
+    "switchBack": "El interruptor volvió a su posición; el daemon conserva la configuración anterior.",
+    "readConfigFailed": "No se pudo leer esa configuración del harness.",
+    "checkPath": "Revisa la ruta y vuelve a intentarlo.",
+    "importFailed": "No se pudo aplicar la importación.",
+    "noneAdded": "No se añadió ningún servidor nuevo.",
+    "resolveFailed": "No se pudo resolver el conflicto de {{name}}.",
+    "conflictOpen": "El conflicto sigue abierto.",
+    "shareFailed": "No se pudo compartir {{name}}.",
+    "stillLocal": "El servidor sigue siendo solo local.",
+    "unshareFailed": "No se pudo dejar de compartir {{name}}.",
+    "stillReachable": "Esa máquina todavía puede acceder al servidor.",
+    "toolsFailed": "No se pudieron listar las herramientas de {{name}}.",
+    "stillStarting": "Es posible que el servidor aún se esté iniciando.",
+    "callFailed": "No se pudo llamar a {{tool}}.",
+    "checkServer": "Revisa el estado del servidor y los argumentos.",
+    "approvalsFailed": "No se pudieron leer las aprobaciones de herramientas compartidas.",
+    "answerFailed": "No se pudo responder a esa aprobación.",
+    "callBlocked": "La llamada sigue bloqueada."
+  },
+  "skills": {
+    "listSkills": "listar skills",
+    "addFailed": "No se pudo añadir esa skill.",
+    "checkSkillFile": "Comprueba que SKILL.md existe y que la ruta se puede leer.",
+    "updateFailed": "No se pudo actualizar la skill.",
+    "unchanged": "La versión actual no cambió.",
+    "removeFailed": "No se pudo quitar la skill.",
+    "stillRegistered": "Sigue en el registro.",
+    "enableFailed": "No se pudo activar {{skill}} para {{harness}}.",
+    "disableFailed": "No se pudo desactivar {{skill}} para {{harness}}.",
+    "enableFailedUnnamed": "No se pudo activar la skill para {{harness}}.",
+    "disableFailedUnnamed": "No se pudo desactivar la skill para {{harness}}.",
+    "switchBack": "El interruptor volvió a su posición.",
+    "scanFailed": "No se pudieron explorar los directorios de skills de los harness.",
+    "checkDirectories": "Comprueba que los directorios de los harness se pueden leer.",
+    "importFailed": "No se pudieron importar esas skills.",
+    "rescan": "Vuelve a explorar e inténtalo de nuevo.",
+    "resolveFailed": "No se pudo resolver el conflicto de {{name}}.",
+    "stillOpen": "El conflicto sigue abierto.",
+    "syncFailed": "No se pudieron sincronizar las skills.",
+    "localStillWork": "Las skills locales siguen funcionando.",
+    "compareFailed": "No se pudieron comparar esas versiones.",
+    "pickVersions": "Elige dos versiones que el registro aún tenga."
+  },
+  "guest": {
+    "settingsFailed": "No se pudieron cambiar los enlaces de invitado",
+    "sendFailed": "No se pudo enviar ese mensaje de invitado.",
+    "dismissFailed": "No se pudo descartar ese mensaje de invitado."
+  },
+  "projectImport": {
+    "startFailed": "No se pudo iniciar la importación.",
+    "chooseFirst": "Elige primero un proyecto.",
+    "checkOne": "Marca al menos un proyecto para importar."
+  },
+  "update": {
+    "unreachable": "No se pudo contactar con el servidor de actualizaciones.",
+    "installFailed": "No se pudo instalar la actualización."
+  },
+  "errors": {
+    "notConnected": {
+      "message": "El daemon no está conectado.",
+      "hint": "Espera a que la barra de estado indique que está en línea y vuelve a intentarlo."
+    },
+    "stopped": {
+      "message": "El cliente se detuvo.",
+      "hint": "Vuelve a iniciarlo para reconectar."
+    },
+    "handshakeTimeout": {
+      "message": "La conexión con el daemon no terminó el handshake a tiempo.",
+      "hint": "Puede que el daemon esté ocupado. Vuelve a intentarlo o revisa la conexión en la barra de estado."
+    },
+    "requestTimeout": {
+      "message": "El daemon no respondió a `{{request}}` en {{seconds, number}} s.",
+      "hint": "Puede que el daemon esté ocupado. Vuelve a intentarlo o revisa la conexión en la barra de estado."
+    },
+    "sendFailed": {
+      "message": "No se pudo enviar el frame.",
+      "hint": "Espera a que la conexión se recupere y vuelve a intentarlo."
+    },
+    "socketClosed": {
+      "message": "El socket no está abierto.",
+      "hint": "Espera a que la conexión se recupere y vuelve a intentarlo."
+    },
+    "transportStarting": {
+      "message": "El transporte seguro aún se está iniciando.",
+      "hint": "Espera a que la conexión se recupere y vuelve a intentarlo."
+    },
+    "transportCreate": {
+      "message": "No se pudo crear el transporte.",
+      "hint": "Revisa la URL del daemon y vuelve a intentarlo."
+    },
+    "transportFailed": {
+      "message": "La conexión falló.",
+      "hint": "Comprueba que el daemon está en ejecución y vuelve a conectar."
+    },
+    "urlRejected": {
+      "message": "Se rechazó la URL del WebSocket.",
+      "hint": "Comprueba que el daemon está en ejecución y vuelve a conectar."
+    },
+    "noAnswer": {
+      "message": "El daemon no respondió. Puede que esté detenido o no sea accesible.",
+      "hint": "Comprueba que el daemon está en ejecución y vuelve a conectar."
+    },
+    "unreachable": {
+      "message": "No se pudo acceder a {{endpoint}}.",
+      "hint": "Comprueba que el daemon está en ejecución y vuelve a conectar."
+    },
+    "secureUrlRejected": {
+      "message": "Se rechazó la URL segura.",
+      "hint": "Comprueba que el daemon está en ejecución y vuelve a conectar."
+    },
+    "relayBinary": {
+      "message": "El relay envió un frame binario; solo se espera JSON.",
+      "hint": "Comprueba que el daemon está en ejecución y vuelve a conectar."
+    },
+    "plaintext": {
+      "message": "El daemon envió texto sin cifrar por la ruta segura.",
+      "hint": "Comprueba que el daemon está en ejecución y vuelve a conectar."
+    },
+    "relayNotJson": {
+      "message": "El relay envió un frame que no era JSON.",
+      "hint": "Comprueba que el daemon está en ejecución y vuelve a conectar."
+    },
+    "relayError": {
+      "message": "El relay informó de un error.",
+      "hint": "Comprueba que el daemon está en ejecución y vuelve a conectar."
+    },
+    "relayBadPayload": {
+      "message": "El relay envió una carga de datos no válida.",
+      "hint": "Comprueba que el daemon está en ejecución y vuelve a conectar."
+    },
+    "noRoute": {
+      "message": "No hay ninguna ruta disponible hacia esta máquina.",
+      "hint": "Puede que el daemon de la máquina esté sin conexión. Revisa la lista de hosts y vuelve a conectar."
+    },
+    "allPathsClosed": {
+      "message": "Se cerraron todas las rutas seguras hacia el daemon.",
+      "hint": "El cliente se reconecta automáticamente. Si sigue ocurriendo, revisa la red de la máquina."
+    },
+    "noSecurePath": {
+      "message": "No hay ninguna ruta segura disponible hacia el daemon.",
+      "hint": "El cliente se reconecta automáticamente. Si sigue ocurriendo, revisa la red de la máquina."
+    },
+    "notPaired": {
+      "message": "Este navegador no está vinculado con ningún daemon.",
+      "hint": "Escanea el código de vinculación del daemon y vuelve a abrir la app."
+    },
+    "invalidPairingCode": {
+      "message": "Código de vinculación no válido: {{detail}}",
+      "hint": "Escanea un código de vinculación nuevo del daemon."
+    },
+    "invalidPairingCodeBare": {
+      "message": "Código de vinculación no válido.",
+      "hint": "Escanea un código de vinculación nuevo del daemon."
+    },
+    "helloUnexpected": {
+      "message": "El daemon respondió al hello con una respuesta inesperada.",
+      "hint": "Actualiza h4rn en ambos extremos."
+    },
+    "helloFailed": {
+      "message": "El handshake de hello no se completó.",
+      "hint": "Revisa la versión del daemon y vuelve a conectar."
+    },
+    "chunkOrder": {
+      "message": "El frame fragmentado del daemon llegó desordenado.",
+      "hint": "La conexión se reintentará."
+    },
+    "notJson": {
+      "message": "El daemon envió un frame que no era JSON.",
+      "hint": "Actualiza h4rn en ambos extremos; la conexión se reintentará."
+    },
+    "closed": {
+      "message": "El daemon cerró la conexión.",
+      "hint": "El cliente se reconecta automáticamente. Las lecturas se reintentan; las escrituras, no."
+    },
+    "unauthorized": {
+      "message": "El daemon rechazó el token de este dispositivo.",
+      "hint": "Vuelve a vincular este dispositivo."
+    },
+    "forbidden": {
+      "message": "Este dispositivo no tiene permiso para hacer eso.",
+      "hint": "Pide acceso al propietario del host."
+    },
+    "offline": {
+      "message": "No hay conexión con el daemon.",
+      "hint": "Inicia el daemon o revisa la red y pulsa «Reconectar»."
+    },
+    "unexpected": {
+      "message": "Algo salió mal.",
+      "hint": "Vuelve a intentarlo. Si sigue ocurriendo, abre los detalles de la conexión en la barra de estado."
+    },
+    "unreadable": {
+      "message": "El daemon devolvió algo que el cliente no pudo leer.",
+      "hint": "Vuelve a intentarlo. Si persiste, actualiza h4rn."
+    },
+    "noHost": {
+      "message": "El daemon aún no ha informado de su host.",
+      "hint": "Espera a que la barra de estado indique que está en línea y vuelve a intentarlo."
+    },
+    "noAgentTurn": {
+      "message": "Este espacio de trabajo aún no tiene ningún turno del agente con el que comparar.",
+      "hint": "Ejecuta primero un turno y luego elige «Turn» como origen del diff."
+    },
+    "noCommit": {
+      "message": "Elige primero un commit con el que comparar.",
+      "hint": "Elige un commit en el selector de origen."
+    }
+  }
+}

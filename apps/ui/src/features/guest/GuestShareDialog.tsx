@@ -17,6 +17,7 @@ import { cn } from "@/lib/utils";
 import {
   closeGuestShare,
   copyGuestLink,
+  guestErrorText,
   loadGuestSharing,
   setGuestLinksEnabled,
   shareThreadWithGuest,
@@ -267,7 +268,7 @@ export function GuestShareDialog() {
 
             {error ? (
               <p className="q-danger" role="alert" style={{ margin: 0, fontSize: 12 }}>
-                {error}
+                {guestErrorText(error)}
               </p>
             ) : null}
           </div>

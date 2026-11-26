@@ -10,6 +10,7 @@ import enIssues from "./locales/en/issues.json";
 import enPairing from "./locales/en/pairing.json";
 import enPullRequests from "./locales/en/pullRequests.json";
 import enSettings from "./locales/en/settings.json";
+import enShell from "./locales/en/shell.json";
 import enSidebar from "./locales/en/sidebar.json";
 import enThread from "./locales/en/thread.json";
 import enUsage from "./locales/en/usage.json";
@@ -39,6 +40,7 @@ export const NAMESPACES = [
   "pairing",
   "pullRequests",
   "settings",
+  "shell",
   "sidebar",
   "thread",
   "usage",
@@ -64,6 +66,7 @@ export const englishResources = {
   pairing: enPairing,
   pullRequests: enPullRequests,
   settings: enSettings,
+  shell: enShell,
   sidebar: enSidebar,
   thread: enThread,
   usage: enUsage,

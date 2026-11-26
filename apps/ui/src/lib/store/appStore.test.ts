@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { HostSummary, ThreadSummary } from "@/gen";
 
 const fake = vi.hoisted(() => {
@@ -16,6 +16,7 @@ import { onManualPlacement } from "@/features/notifications/placement";
 import { H4rnRequestError, protoError } from "@/lib/client/errors";
 import type { EventEnvelope } from "@/lib/client/types";
 import { drafts, flushDrafts, readThreadDraft } from "@/lib/drafts";
+import { setLocalePreference } from "@/lib/i18n";
 import {
   applyEvent,
   createThread,
@@ -32,9 +33,11 @@ import {
   sendMessage,
   sendQueuedNow,
   setThreadTab,
+  settleThread,
   steerOldestQueued,
   store,
   syncQueueWithSummary,
+  togglePin,
 } from "./appStore";
 
 function hostSummary(hostId: string): HostSummary {
@@ -422,6 +425,60 @@ describe("manual placements", () => {
   });
 });
 
+describe("thread action failures", () => {
+  afterEach(() => setLocalePreference("system"));
+
+  it("say which action failed on which host, in the active language", async () => {
+    const state = getState();
+    store.setState({
+      ...state,
+      threads: {
+        ...state.threads,
+        thread_tab: threadSummary({ threadId: "thread_tab", host: "atlas" }),
+      },
+    });
+    fake.response.current = null;
+
+    fake.request.mockRejectedValueOnce(new Error("the host is unreachable"));
+    await setThreadTab("thread_tab", "done");
+    expect(getState().toasts.at(-1)?.title).toBe("Moving to Done failed on atlas.");
+
+    await setLocalePreference("es");
+    fake.request.mockRejectedValueOnce(new Error("the host is unreachable"));
+    const pending = setThreadTab("thread_tab", "settled");
+    // What is in flight is a kind; nothing stores English words.
+    expect(getState().pendingActions.thread_tab).toBe("moveToSettled");
+    await pending;
+    const toast = getState().toasts.at(-1);
+    expect(toast?.title).toBe("No se pudo resolver el hilo en atlas.");
+    expect(toast?.description).toBe(
+      "Vuelve a intentarlo. Si sigue ocurriendo, abre los detalles de la conexión en la barra de estado.",
+    );
+    expect(getState().pendingActions.thread_tab).toBeUndefined();
+  });
+
+  it("name the thread in Spanish, so settling does not read as solving", async () => {
+    const state = getState();
+    store.setState({
+      ...state,
+      threads: {
+        ...state.threads,
+        thread_settle: threadSummary({ threadId: "thread_settle", host: "atlas" }),
+      },
+    });
+    fake.response.current = null;
+    await setLocalePreference("es");
+
+    fake.request.mockRejectedValueOnce(new Error("the host is unreachable"));
+    await settleThread("thread_settle");
+    expect(getState().toasts.at(-1)?.title).toBe("No se pudo resolver el hilo en atlas.");
+
+    fake.request.mockRejectedValueOnce(new Error("the host is unreachable"));
+    await togglePin("thread_settle");
+    expect(getState().toasts.at(-1)?.title).toBe("No se pudo fijar el hilo en atlas.");
+  });
+});
+
 describe("planRewind", () => {
   beforeEach(() => {
     fake.response.current = null;
@@ -467,6 +524,25 @@ describe("rewindThread", () => {
     const prompt = await rewindThread("th_rewind", "item_user_1", false);
     expect(prompt?.method).toBe("handoff");
     expect(getState().toasts.at(-1)?.description).toContain("fresh session");
+  });
+
+  it("lists the files it left alone the way the dialog did", async () => {
+    fake.response.current = {
+      type: "rewound",
+      prompt: {
+        thread_id: "th_rewind",
+        before_item_id: "item_user_1",
+        prompt: "try again",
+        attachments: [],
+        files_restored: true,
+        left_alone: [".env", "a.log", "b.log", "c.log", "d.log"],
+        method: "handoff",
+      },
+    };
+    await rewindThread("th_rewind", "item_user_1", true);
+    expect(getState().toasts.at(-1)?.description).toContain(
+      "Ignored files left as they are: .env, a.log, b.log, c.log, and 1 more.",
+    );
   });
 });
 

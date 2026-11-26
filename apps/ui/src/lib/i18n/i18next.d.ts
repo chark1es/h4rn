@@ -8,6 +8,7 @@ import type enIssues from "./locales/en/issues.json";
 import type enPairing from "./locales/en/pairing.json";
 import type enPullRequests from "./locales/en/pullRequests.json";
 import type enSettings from "./locales/en/settings.json";
+import type enShell from "./locales/en/shell.json";
 import type enSidebar from "./locales/en/sidebar.json";
 import type enThread from "./locales/en/thread.json";
 import type enUsage from "./locales/en/usage.json";
@@ -26,6 +27,7 @@ declare module "i18next" {
       pairing: typeof enPairing;
       pullRequests: typeof enPullRequests;
       settings: typeof enSettings;
+      shell: typeof enShell;
       sidebar: typeof enSidebar;
       thread: typeof enThread;
       usage: typeof enUsage;

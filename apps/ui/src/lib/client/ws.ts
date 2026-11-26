@@ -1,3 +1,4 @@
+import { clientProto, H4rnRequestError } from "./errors";
 import type { Transport, TransportHandlers } from "./types";
 
 /**
@@ -37,10 +38,13 @@ export class WebSocketTransport implements Transport {
     try {
       socket = new WebSocket(url, protocols);
     } catch (error) {
-      handlers.onError(error instanceof Error ? error.message : "The WebSocket URL was rejected.");
+      handlers.onError({
+        kind: "urlRejected",
+        message: error instanceof Error ? error.message : undefined,
+      });
       handlers.onClose({
         code: 1006,
-        reason: "The WebSocket could not be created.",
+        reason: "",
         wasClean: false,
       });
       return;
@@ -62,13 +66,13 @@ export class WebSocketTransport implements Transport {
       }
     };
     socket.onerror = () => {
-      handlers.onError("The daemon did not answer. It may be stopped or unreachable.");
+      handlers.onError({ kind: "noAnswer" });
     };
     socket.onclose = (event) => {
       if (this.closedByUs) return;
       handlers.onClose({
         code: event.code,
-        reason: event.reason || "The connection closed.",
+        reason: event.reason,
         wasClean: event.wasClean,
       });
     };
@@ -76,7 +80,7 @@ export class WebSocketTransport implements Transport {
 
   send(data: string | ArrayBuffer | Uint8Array): void {
     if (this.socket?.readyState !== WebSocket.OPEN) {
-      throw new Error("The socket is not open.");
+      throw new H4rnRequestError(clientProto("internal", "socketClosed"));
     }
     this.socket.send(data);
   }
