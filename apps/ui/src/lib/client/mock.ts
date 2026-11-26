@@ -2251,7 +2251,7 @@ class MockDaemon {
         this.ok(frame.id, {
           type: "hello",
           protocol_version: 1,
-          server_version: "1.0.1-mock",
+          server_version: "1.1.0-mock",
           device_id: "mock-device",
           daemon_machine_id: null,
           local_host: "atlas",

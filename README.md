@@ -7,7 +7,7 @@ local ACP command ([docs/acp.md](docs/acp.md)) and whatever comes next, on this 
 one. The desktop, mobile and browser clients are
 pure views over a single Rust daemon and one typed WebSocket protocol.
 
-> **Status: v1.0.1.** The daemon, the typed protocol, the Noise transport,
+> **Status: v1.1.0.** The daemon, the typed protocol, the Noise transport,
 > the relay, MCP sharing, skills, metering, forges and packaging are implemented and tested; the
 > desktop, mobile and browser clients are pure views over the daemon. Two paths are deliberately
 > not implemented yet — see [Known limits](#known-limits). The detailed history is in

@@ -2,7 +2,7 @@
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "h4rn",
   "mainBinaryName": "h4rn",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "identifier": "dev.h4rn.desktop",
   "build": {
     "beforeDevCommand": "bun run --cwd ../ui dev",

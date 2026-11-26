@@ -2,7 +2,7 @@
 
 [package]
 name = "h4rn-desktop"
-version = "1.0.1"
+version = "1.1.0"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT"
