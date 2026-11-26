@@ -28,7 +28,7 @@ use tokio_util::sync::CancellationToken;
 use crate::hub::{HubError, McpHub};
 use crate::jsonrpc::{self, RpcErrorObject};
 use crate::names;
-use crate::provider::ToolCallContext;
+use crate::provider::{ToolAdmission, ToolAdmissionSource, ToolCallContext};
 use crate::session::AuthorizedSession;
 
 /// How long a single `tools/call` may take before the hub returns an error.
@@ -48,6 +48,8 @@ pub struct McpServerState {
     /// serves OAuth. The supplier reads the switch and the bound address when
     /// the request is answered, so it follows both.
     resource_metadata: Arc<RwLock<Option<ResourceMetadata>>>,
+    /// Supplies the calling turn and grant for each admitted request.
+    tool_admission: Arc<RwLock<Option<Arc<dyn ToolAdmissionSource>>>>,
 }
 
 impl McpServerState {
@@ -57,6 +59,30 @@ impl McpServerState {
             hub,
             inflight: Arc::new(Mutex::new(HashMap::new())),
             resource_metadata: Arc::new(RwLock::new(None)),
+            tool_admission: Arc::new(RwLock::new(None)),
+        }
+    }
+
+    /// Installs the supplier that binds each request to its calling turn.
+    ///
+    /// Called once by the daemon, after the thread manager exists.
+    pub fn set_tool_admission(&self, source: Arc<dyn ToolAdmissionSource>) {
+        *self
+            .tool_admission
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(source);
+    }
+
+    /// The admission for one request, captured before its body is parsed.
+    async fn admission(&self, scope: &crate::session::McpScope) -> ToolAdmission {
+        let source = self
+            .tool_admission
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        match source {
+            Some(source) => source.admission(scope).await,
+            None => ToolAdmission::default(),
         }
     }
 
@@ -188,6 +214,10 @@ async fn mcp_post(
         Ok(session) => session,
         Err(response) => return *response,
     };
+    // The calling turn is bound here, before the body is read and before any
+    // tool setup awaits: work this call asks for belongs to this turn's grant,
+    // even if another turn starts while the tool is still running.
+    let admission = state.admission(&session.scope).await;
     let value: Value = match serde_json::from_slice(&body) {
         Ok(value) => value,
         Err(error) => {
@@ -211,7 +241,7 @@ async fn mcp_post(
             ),
         );
     }
-    match dispatch(&state, &session, value).await {
+    match dispatch(&state, &session, value, admission).await {
         Some(response) => {
             let mut http_response = json_response(response.body);
             if let Some(session_id) = response.session_id
@@ -250,6 +280,7 @@ async fn dispatch(
     state: &McpServerState,
     session: &AuthorizedSession,
     message: Value,
+    admission: ToolAdmission,
 ) -> Option<Dispatch> {
     let incoming = match jsonrpc::parse_message(message) {
         Ok(incoming) => incoming,
@@ -270,7 +301,7 @@ async fn dispatch(
         }
         jsonrpc::Incoming::Response { .. } => None,
         jsonrpc::Incoming::Request { id, method, params } => {
-            let outcome = handle_request(state, session, &id, &method, params).await;
+            let outcome = handle_request(state, session, &id, &method, params, admission).await;
             Some(Dispatch {
                 body: match outcome {
                     Ok(result) => jsonrpc::success(id, result),
@@ -298,6 +329,7 @@ async fn handle_request(
     id: &Value,
     method: &str,
     params: Value,
+    admission: ToolAdmission,
 ) -> Result<Value, RpcErrorObject> {
     let scope = session.scope.clone();
     match method {
@@ -334,7 +366,7 @@ async fn handle_request(
                 }).collect::<Vec<_>>()
             }))
         }
-        "tools/call" => call_tool(state, session, id, params).await,
+        "tools/call" => call_tool(state, session, id, params, admission).await,
         "resources/list" => {
             let resources = state.hub.list_resources(&scope).await.map_err(hub_error)?;
             Ok(json!({ "resources": resources }))
@@ -387,6 +419,7 @@ async fn call_tool(
     session: &AuthorizedSession,
     id: &Value,
     params: Value,
+    admission: ToolAdmission,
 ) -> Result<Value, RpcErrorObject> {
     let name = params
         .get("name")
@@ -405,7 +438,9 @@ async fn call_tool(
         .lock()
         .await
         .insert(key.clone(), cancel.clone());
-    let mut context = ToolCallContext::new(scope.clone(), server, TOOL_TIMEOUT).with_cancel(cancel);
+    let mut context = ToolCallContext::new(scope.clone(), server, TOOL_TIMEOUT)
+        .with_cancel(cancel)
+        .with_admission(admission);
     if let Some(token) = params
         .get("_meta")
         .and_then(|meta| meta.get("progressToken"))

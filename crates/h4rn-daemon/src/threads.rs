@@ -80,6 +80,15 @@ pub trait McpSessionProvider: Send + Sync {
     /// Returns the injection for one harness session, or `None` before the
     /// endpoint is bound.
     fn prepare(&self, harness: HarnessKind, thread_id: &ThreadId) -> Option<McpSession>;
+
+    /// Revokes every tool token belonging to a thread.
+    ///
+    /// Returns how many tokens it ended. The default does nothing, for tests
+    /// and embedders without a hub.
+    fn revoke_thread(&self, thread_id: &ThreadId) -> usize {
+        let _ = thread_id;
+        0
+    }
 }
 
 /// Resolves what one configured ACP agent really offers.
@@ -176,6 +185,37 @@ pub trait SettleHook: Send + Sync {
 pub trait GrantAuthority: Send + Sync {
     /// Whether `family` still has a live, unrevoked token.
     fn family_is_live(&self, family: &str) -> bool;
+
+    /// Registers one prompt write under `family`, or refuses it when the
+    /// family was revoked.
+    ///
+    /// A revoke marks the family revoked and then waits for every write it
+    /// registered. The returned guard is held across the adapter write; with no
+    /// override (a test authority) liveness alone decides and nothing is
+    /// tracked.
+    fn begin_delivery(&self, family: &str) -> Option<GrantWrite> {
+        self.family_is_live(family)
+            .then_some(GrantWrite::untracked())
+    }
+}
+
+/// One registered prompt write, released when it is dropped.
+pub struct GrantWrite {
+    _token: Option<Box<dyn Send>>,
+}
+
+impl GrantWrite {
+    /// A write no revoker waits for (used when there is nothing to track).
+    pub fn untracked() -> Self {
+        Self { _token: None }
+    }
+
+    /// Wraps a store ticket.
+    pub fn tracked(token: Box<dyn Send>) -> Self {
+        Self {
+            _token: Some(token),
+        }
+    }
 }
 
 /// A request to create a thread (the protocol fields without the wire id).
@@ -1376,6 +1416,14 @@ impl SessionSlot {
                 ..
             } if *current == generation => grant.clone(),
             Self::None | Self::Starting(_) | Self::Live { .. } => None,
+        }
+    }
+
+    /// The grant the live session last delivered, whoever issued it.
+    fn current_grant(&self) -> Option<&WorkGrant> {
+        match self {
+            Self::Live { grant, .. } => grant.as_ref(),
+            Self::None | Self::Starting(_) => None,
         }
     }
 
@@ -2740,6 +2788,21 @@ impl Inner {
                 .grant_authority
                 .get()
                 .is_some_and(|authority| authority.family_is_live(&grant.family)),
+        }
+    }
+
+    /// Registers a prompt write under the grant, or refuses it when revoked.
+    ///
+    /// This is the same gate as [`Self::grant_allows`], plus a ticket the
+    /// revoker waits for, so a revoke that returns cannot race the write.
+    fn grant_admit(&self, grant: Option<&WorkGrant>) -> Option<Option<GrantWrite>> {
+        match grant {
+            None => Some(None),
+            Some(grant) => self
+                .grant_authority
+                .get()
+                .and_then(|authority| authority.begin_delivery(&grant.family))
+                .map(Some),
         }
     }
 
@@ -4312,10 +4375,64 @@ impl ThreadManager {
     /// A tool called inside the turn uses this to bind any work that outlives
     /// the turn (a PR watch) to the grant and its limit.
     pub async fn active_turn_grant(&self, thread_id: &ThreadId) -> Option<WorkGrant> {
+        self.active_turn_admission(thread_id)
+            .await
+            .and_then(|(_, grant)| grant)
+    }
+
+    /// The running turn and its outside grant, read under one lock.
+    ///
+    /// An MCP request binds to this at admission: the turn can end and another
+    /// start while the tool's own setup runs, and work that call asks for must
+    /// still belong to the turn the client was talking to.
+    pub async fn active_turn_admission(
+        &self,
+        thread_id: &ThreadId,
+    ) -> Option<(TurnId, Option<WorkGrant>)> {
         let handle = self.inner.handle(thread_id).await.ok()?;
         let record = handle.lock().await;
         let dispatch = &record.active.as_ref()?.dispatch;
-        dispatch.grant().cloned()
+        Some((dispatch.turn_id.clone(), dispatch.grant().cloned()))
+    }
+
+    /// Drops the tool token of every session working under one of `families`.
+    ///
+    /// A revoke ends the grant's future work; this closes the live half too: a
+    /// turn already running may finish, but its agent can no longer call h4rn's
+    /// tools with the token it was handed.
+    pub async fn revoke_tool_tokens_for_families(&self, families: &[String]) -> usize {
+        if families.is_empty() {
+            return 0;
+        }
+        let handles: Vec<ThreadHandle> = {
+            let threads = self.inner.threads.lock().await;
+            threads.values().cloned().collect()
+        };
+        let mut revoked = 0;
+        for handle in handles {
+            let (thread_id, holds_grant) = {
+                let record = handle.lock().await;
+                let active = record
+                    .active
+                    .as_ref()
+                    .and_then(|active| active.dispatch.grant())
+                    .map(|grant| families.contains(&grant.family));
+                let delivered = record
+                    .session
+                    .current_grant()
+                    .map(|grant| families.contains(&grant.family));
+                (
+                    record.meta.thread_id.clone(),
+                    active.unwrap_or(false) || delivered.unwrap_or(false),
+                )
+            };
+            if holds_grant {
+                if let Some(provider) = self.inner.mcp.get() {
+                    revoked += provider.revoke_thread(&thread_id);
+                }
+            }
+        }
+        revoked
     }
 
     /// Whether a turn is in flight for this thread.
@@ -6539,13 +6656,24 @@ impl ThreadManager {
                     }
                     #[cfg(test)]
                     self.inner.pause_direct_steer().await;
-                    let steered = guard
-                        .steer(UserInput {
-                            text: text.clone(),
-                            attachments: harness_attachments.clone(),
-                        })
-                        .await
-                        .map_err(steer_failure);
+                    // The last check under the session lock, with the write
+                    // registered so a revoke cannot return while it lands.
+                    let steered = match self.inner.grant_admit(grant.as_ref()) {
+                        Some(write_ticket) => {
+                            let steered = guard
+                                .steer(UserInput {
+                                    text: text.clone(),
+                                    attachments: harness_attachments.clone(),
+                                })
+                                .await
+                                .map_err(steer_failure);
+                            drop(write_ticket);
+                            steered
+                        }
+                        None => Err(SteerFailure::Rejected(ManagerError::Conflict(
+                            REVOKED_GRANT_MESSAGE.into(),
+                        ))),
+                    };
                     drop(guard);
                     match steered {
                         Ok(()) => {}
@@ -7298,30 +7426,34 @@ impl ThreadManager {
                 // immediately before the adapter write. The first check runs
                 // before the `sending` append, so a family revoked in between
                 // would otherwise still deliver its work.
-                let (still_active, granted) = {
+                let still_active = {
                     let record = handle.lock().await;
-                    (
-                        record
-                            .active
-                            .as_ref()
-                            .is_some_and(|active| active.turn_id == active_turn_id)
-                            && record.session.is_live(&session),
-                        self.inner.grant_allows(grant.as_ref()),
-                    )
+                    record
+                        .active
+                        .as_ref()
+                        .is_some_and(|active| active.turn_id == active_turn_id)
+                        && record.session.is_live(&session)
                 };
                 if !still_active {
                     Err(SteerFailure::Rejected(ManagerError::Conflict(
                         "that turn ended before the message could be steered; try again".into(),
                     )))
-                } else if !granted {
-                    Err(SteerFailure::Rejected(ManagerError::Conflict(
-                        REVOKED_GRANT_MESSAGE.into(),
-                    )))
                 } else {
-                    guard
-                        .steer(queued_input(&message.message))
-                        .await
-                        .map_err(steer_failure)
+                    match self.inner.grant_admit(grant.as_ref()) {
+                        // The write is registered across the adapter call so a
+                        // revoke returning cannot race this steer.
+                        Some(write_ticket) => {
+                            let steered = guard
+                                .steer(queued_input(&message.message))
+                                .await
+                                .map_err(steer_failure);
+                            drop(write_ticket);
+                            steered
+                        }
+                        None => Err(SteerFailure::Rejected(ManagerError::Conflict(
+                            REVOKED_GRANT_MESSAGE.into(),
+                        ))),
+                    }
                 }
             };
             match steered {
@@ -11147,7 +11279,10 @@ impl Inner {
                 }
             }
         }
-        match self.retry_with_handoff(handle, turn, generation).await {
+        match self
+            .retry_with_handoff(handle, turn, generation, false)
+            .await
+        {
             HandoffRetry::Started => {}
             HandoffRetry::Declined | HandoffRetry::Stopped => {
                 // The turn is not the retry's to run again. Finish it the way the
@@ -11324,6 +11459,7 @@ impl Inner {
                     Some(generation),
                     turn,
                     format!("no {harness_kind:?} adapter is available in this daemon build"),
+                    None,
                 )
                 .await;
                 return;
@@ -11467,11 +11603,21 @@ impl Inner {
             Err(StartFailure::Failed(error)) => {
                 // An imported conversation prefers its harness-native resume.
                 // A resume the harness cannot honour falls back to a bounded
-                // handoff on this same turn instead of failing it.
-                if self.fall_back_to_handoff(&handle, &turn, generation).await {
+                // handoff on this same turn instead of failing it. The same
+                // applies to a resume whose reply could not confirm its mode:
+                // a fresh session applies and checks that mode itself, so the
+                // grant still fails closed.
+                let resume_unconfirmed =
+                    matches!(error, h4rn_harness::HarnessError::ResumeUnconfirmed { .. });
+                if self
+                    .fall_back_to_handoff(&handle, &turn, generation, resume_unconfirmed)
+                    .await
+                {
                     return;
                 }
-                self.fail_session(handle, Some(generation), turn, error.to_string())
+                let hint = resume_unconfirmed
+                    .then(|| "Send the message again to start a fresh session".into());
+                self.fail_session(handle, Some(generation), turn, error.to_string(), hint)
                     .await;
                 return;
             }
@@ -11483,7 +11629,10 @@ impl Inner {
                     %thread_id,
                     "a native fork did not finish copying in time; handing off instead"
                 );
-                if self.fall_back_to_handoff(&handle, &turn, generation).await {
+                if self
+                    .fall_back_to_handoff(&handle, &turn, generation, false)
+                    .await
+                {
                     return;
                 }
                 self.fail_session(
@@ -11492,6 +11641,7 @@ impl Inner {
                     turn,
                     "the native fork did not finish copying this thread's conversation in time"
                         .into(),
+                    None,
                 )
                 .await;
                 return;
@@ -11786,16 +11936,19 @@ impl Inner {
     ///
     /// The resume id is dropped for good, the turn's prompt becomes a bounded
     /// handoff of the saved messages, and a fresh session is started for the
-    /// same turn. [`HandoffRetry::Declined`] when this turn was not an imported
-    /// native resume, or no longer owns the startup slot: the ordinary failure
-    /// path then runs. [`HandoffRetry::Stopped`] when a Stop took the turn
-    /// inside the recovery window; it must end interrupted, so the caller must
-    /// not start anything for it.
+    /// same turn. A resume whose reply could not confirm its mode is the same
+    /// shape of refusal: `resume_unconfirmed` lets it fall back too.
+    /// [`HandoffRetry::Declined`] when this turn was not an imported native
+    /// resume, or no longer owns the startup slot: the ordinary failure path
+    /// then runs. [`HandoffRetry::Stopped`] when a Stop took the turn inside
+    /// the recovery window; it must end interrupted, so the caller must not
+    /// start anything for it.
     async fn fall_back_to_handoff(
         self: &Arc<Self>,
         handle: &ThreadHandle,
         turn: &Arc<TurnDispatch>,
         generation: u64,
+        resume_unconfirmed: bool,
     ) -> bool {
         {
             let record = handle.lock().await;
@@ -11806,18 +11959,21 @@ impl Inner {
             }
             // An imported or forked thread still holding its one native
             // attempt falls back, and so does a pending native rewind the
-            // adapter refused; every other startup failure keeps the ordinary
-            // path.
-            let applies = matches!(
-                record.meta.pending_rewind,
-                Some(h4rn_protocol::PendingRewind::Native { .. })
-            ) || record.native_origin_pending();
+            // adapter refused or a resume whose mode could not be confirmed;
+            // every other startup failure keeps the ordinary path.
+            let applies = resume_unconfirmed
+                || matches!(
+                    record.meta.pending_rewind,
+                    Some(h4rn_protocol::PendingRewind::Native { .. })
+                )
+                || record.native_origin_pending();
             if !applies {
                 return false;
             }
         }
         matches!(
-            self.retry_with_handoff(handle, turn, generation).await,
+            self.retry_with_handoff(handle, turn, generation, resume_unconfirmed)
+                .await,
             HandoffRetry::Started
         )
     }
@@ -11837,6 +11993,7 @@ impl Inner {
         generation: Option<u64>,
         turn: Arc<TurnDispatch>,
         message: String,
+        hint: Option<String>,
     ) {
         // This startup is over without a session, so a fork's copy window has
         // closed: let the source dispatch again. Only the generation that owned
@@ -11883,7 +12040,9 @@ impl Inner {
                         &turn_id,
                         TurnEnd::failed(
                             message,
-                            Some("Install the harness or pick a different one, then retry".into()),
+                            Some(hint.unwrap_or_else(|| {
+                                "Install the harness or pick a different one, then retry".into()
+                            })),
                             false,
                         ),
                     )
@@ -12659,11 +12818,14 @@ impl Inner {
         // `sending` write, immediately before the adapter call. A family
         // revoked between the delivery claim and this write must not receive
         // the prompt; nothing has been written yet, so the refusal is definite.
-        if !self.grant_allows(dispatch.grant()) {
+        // The ticket is held across the write, so a revoke that starts now
+        // waits for this prompt and nothing under the grant reaches the agent
+        // after it returns.
+        let Some(write_ticket) = self.grant_admit(dispatch.grant()) else {
             drop(guard);
             self.refuse_revoked_delivery(handle, &dispatch).await;
             return;
-        }
+        };
         // From here on the adapter may emit this turn's own events, including
         // while the write is still running; before this, the pump treats them
         // as the finished turn's late output. A promoted turn's pump holds them
@@ -12675,6 +12837,7 @@ impl Inner {
         // record no prompt id ignore the tag.
         let prompt_tag = turn_suffix(&turn_id).to_owned();
         let sent = guard.send_tagged(dispatch.input(), Some(&prompt_tag)).await;
+        drop(write_ticket);
         drop(guard);
         match sent {
             Ok(()) => {
@@ -13597,7 +13760,7 @@ impl Inner {
                     record.take_transport_report(&dispatch.turn_id);
                     drop(record);
                     match self
-                        .retry_with_handoff(&handle, &dispatch, generation)
+                        .retry_with_handoff(&handle, &dispatch, generation, false)
                         .await
                     {
                         HandoffRetry::Started => {
@@ -14535,7 +14698,10 @@ impl Inner {
         if let Some(retry) = retry {
             // The retry arms a fresh session for the same turn; `spawn_session`
             // delivers the handoff-built prompt.
-            match self.retry_with_handoff(&handle, &retry, generation).await {
+            match self
+                .retry_with_handoff(&handle, &retry, generation, false)
+                .await
+            {
                 HandoffRetry::Started => {}
                 HandoffRetry::Declined => self.spawn_advance(handle),
                 HandoffRetry::Stopped => {
@@ -14652,11 +14818,18 @@ impl Inner {
     /// when a Stop took the turn before it could be requeued: it must end
     /// interrupted instead. The cleared id is persisted before the retry, so a
     /// daemon restart cannot try the dead session again.
+    ///
+    /// `resume_unconfirmed` also falls back when the resume itself answered but
+    /// its reply named no mode catalogue. Starting fresh from the handoff is
+    /// what makes that a recoverable refusal rather than a thread that fails
+    /// every later send on the same resume; the new session applies and checks
+    /// the requested mode, so the grant still fails closed.
     async fn retry_with_handoff(
         self: &Arc<Self>,
         handle: &ThreadHandle,
         turn: &Arc<TurnDispatch>,
         generation: u64,
+        resume_unconfirmed: bool,
     ) -> HandoffRetry {
         let mut fell_back = false;
         let (thread_id, switch_generation) = {
@@ -14674,7 +14847,7 @@ impl Inner {
                 record.meta.pending_rewind,
                 Some(h4rn_protocol::PendingRewind::Native { .. })
             );
-            let applies = rewinding || record.native_origin_pending();
+            let applies = resume_unconfirmed || rewinding || record.native_origin_pending();
             if !applies {
                 return HandoffRetry::Declined;
             }
@@ -16155,6 +16328,7 @@ fn steer_failure(error: h4rn_harness::HarnessError) -> SteerFailure {
         | HarnessError::Spawn { .. }
         | HarnessError::Protocol { .. }
         | HarnessError::Unsupported { .. }
+        | HarnessError::ResumeUnconfirmed { .. }
         | HarnessError::Deferred { .. }
         | HarnessError::NotSent { .. } => SteerFailure::Rejected(steer_error(error)),
         HarnessError::Transport { .. } | HarnessError::RateLimited { .. } => {
@@ -19227,6 +19401,7 @@ mod tests {
                         Some(generation),
                         a,
                         "the harness could not start".into(),
+                        None,
                     )
                     .await;
             }
@@ -19331,6 +19506,7 @@ mod tests {
                 Some(generation),
                 turn,
                 "the harness could not start".into(),
+                None,
             )
             .await;
 

@@ -17,7 +17,7 @@
 //! The parent agent reaches the same operations through the `h4rn__…` MCP tools
 //! in [`provider`], scoped by the session token to its own thread.
 
-mod provider;
+pub mod provider;
 mod store;
 pub mod worktree;
 
@@ -346,11 +346,34 @@ impl SubagentManager {
     }
 
     /// Spawns a child thread and starts its first turn.
+    ///
+    /// The inherited authority is the turn that is running now. An MCP tool
+    /// call instead uses [`Self::spawn_admitted`] with the turn captured when
+    /// the request arrived.
     pub async fn spawn(
         &self,
         request: h4rn_protocol::SpawnSubagentRequest,
     ) -> Result<SubagentView, SubagentError> {
-        self.inner.spawn(request).await
+        let admission = self
+            .inner
+            .threads
+            .active_turn_admission(&request.parent_thread)
+            .await
+            .map(|(turn_id, grant)| h4rn_mcp::provider::ToolAdmission {
+                turn_id: Some(turn_id),
+                grant,
+            })
+            .unwrap_or_default();
+        self.spawn_admitted(request, admission).await
+    }
+
+    /// Spawns a child under the authority captured at the tool call's admission.
+    pub async fn spawn_admitted(
+        &self,
+        request: h4rn_protocol::SpawnSubagentRequest,
+        admission: h4rn_mcp::provider::ToolAdmission,
+    ) -> Result<SubagentView, SubagentError> {
+        self.inner.spawn(request, admission).await
     }
 
     /// Lists subagents, optionally scoped to one parent.
@@ -599,6 +622,7 @@ impl Inner {
     async fn spawn(
         self: &Arc<Self>,
         request: h4rn_protocol::SpawnSubagentRequest,
+        admission: h4rn_mcp::provider::ToolAdmission,
     ) -> Result<SubagentView, SubagentError> {
         let task = request.task.trim().to_owned();
         if task.is_empty() {
@@ -758,11 +782,12 @@ impl Inner {
         }
         self.persist_id(subagent_id.as_str()).await;
 
-        let grant = self.threads.active_turn_grant(&request.parent_thread).await;
+        let grant = admission.grant.clone();
         // A child inherits the calling turn's authority: the same ceiling and
-        // the same token family. A delegated turn is not a way out from under a
-        // supervised grant, and the child's first dispatch re-checks the family
-        // like any other work that starts later.
+        // the same token family. The calling turn is the one the MCP request
+        // was admitted under, even if another turn has started since; this is
+        // not a way out from under a supervised grant, and the child's first
+        // dispatch re-checks the family like any other work that starts later.
         let ceiling = grant.as_ref().and_then(|grant| grant.ceiling);
         let runtime_mode = ceiling.map_or(parent.runtime_mode, |ceiling| {
             parent.runtime_mode.clamped_to(ceiling)
@@ -827,10 +852,11 @@ impl Inner {
 
         // The child thread exists now; deliver the delegation row to the parent
         // and finish the durable half of the spawn.
-        let parent_turn = self
-            .threads
-            .thread_turn_id(&request.parent_thread)
-            .await
+        // The delegation row belongs to the turn that called the tool, even if
+        // another turn started while the worktree was being prepared.
+        let parent_turn = admission
+            .turn_id
+            .clone()
             .unwrap_or_else(TurnId::new_uuid_v7);
         let item = Item::Delegated {
             item_id: format!("item_delegated_{}", short_id(subagent_id.as_str())),
