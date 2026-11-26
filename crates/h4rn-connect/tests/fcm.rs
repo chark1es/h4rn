@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use h4rn_connect::config::Config;
-use h4rn_connect::push::{FcmClient, PushMessage, SendError};
+use h4rn_connect::push::{FcmClient, PushMessage, PushPlatform, SendError};
 use rsa::RsaPrivateKey;
 use rsa::pkcs8::{EncodePrivateKey, LineEnding};
 use wiremock::matchers::{method, path};
@@ -77,6 +77,7 @@ async fn a_correct_message_shape_is_sent_with_a_cached_token() {
     assert!(client.configured());
     let message = PushMessage {
         token: "device-token-one",
+        platform: PushPlatform::Android,
         package_name: Some("dev.h4rn.app"),
         data: data(),
     };
@@ -132,6 +133,7 @@ async fn unregistered_tokens_are_reported_for_deletion() {
     let error = client
         .send(&PushMessage {
             token: "gone",
+            platform: PushPlatform::Android,
             package_name: None,
             data: data(),
         })
@@ -169,6 +171,7 @@ async fn a_429_is_retried_with_backoff() {
     client
         .send(&PushMessage {
             token: "device-token",
+            platform: PushPlatform::Android,
             package_name: None,
             data: data(),
         })
@@ -192,6 +195,7 @@ async fn without_a_service_account_nothing_is_requested() {
     let error = client
         .send(&PushMessage {
             token: "device-token",
+            platform: PushPlatform::Android,
             package_name: None,
             data: data(),
         })
@@ -231,6 +235,7 @@ async fn an_expired_token_is_refreshed() {
     let client = client(&server, Some(String::new()), "demo");
     let message = PushMessage {
         token: "device-token",
+        platform: PushPlatform::Android,
         package_name: None,
         data: data(),
     };

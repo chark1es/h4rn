@@ -77,8 +77,11 @@ pub struct AppState {
     pub replay: Arc<ReplayCache>,
     /// Outbound HTTP client for provider revocation.
     pub http: reqwest::Client,
-    /// Firebase Cloud Messaging sender; unconfigured means push is off.
+    /// Firebase Cloud Messaging sender; unconfigured means Android push is off.
     pub push: Arc<crate::push::FcmClient>,
+    /// Apple Push Notification service sender; unconfigured means iOS push is
+    /// off.
+    pub apns: Arc<crate::apns::ApnsClient>,
     /// Activity transitions waiting to alert, and their delivery baseline.
     pub alerts: Arc<crate::alerts::AlertService>,
     /// Process start, for `/readyz`.
@@ -105,9 +108,11 @@ pub async fn build_state(config: Config) -> Result<AppState> {
         .build()
         .map_err(|error| AppError::internal(format!("http client: {error}")))?;
     let push = Arc::new(crate::push::FcmClient::new(&config, http.clone()));
+    let apns = Arc::new(crate::apns::ApnsClient::new(&config, http.clone()));
     let alerts = Arc::new(crate::alerts::AlertService::new(
         store.clone(),
         Arc::clone(&push),
+        Arc::clone(&apns),
         Duration::from_millis(config.push_group_window_ms.max(1)),
         Duration::from_secs(config.push_completion_max_age_secs.max(1) as u64),
     ));
@@ -122,6 +127,7 @@ pub async fn build_state(config: Config) -> Result<AppState> {
         replay: Arc::new(ReplayCache::default()),
         http,
         push,
+        apns,
         alerts,
         started: Instant::now(),
     })
@@ -1234,7 +1240,7 @@ async fn revoke_device(
 // Push devices
 // ---------------------------------------------------------------------------
 
-/// Registers or rotates this install's FCM token.
+/// Registers or rotates this install's push token.
 ///
 /// A caller may only register its own connect device. The user id always comes
 /// from the authenticated token, never from the body, so a device can never be
@@ -1271,12 +1277,34 @@ async fn register_push_device(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(|value| value.chars().take(100).collect::<String>());
+    let platform = match request.platform.as_deref().map(str::trim) {
+        // Clients that predate iOS registered Android installs and send nothing.
+        None | Some("") => "android",
+        Some(value) if value.eq_ignore_ascii_case("android") => "android",
+        Some(value) if value.eq_ignore_ascii_case("ios") => "ios",
+        Some(_) => {
+            return Err(AppError::bad_request(
+                "push_platform_invalid",
+                "platform must be `android` or `ios`",
+            ));
+        }
+    };
+    // An APNs device token is hex. Storing an FCM token or a truncated value
+    // under `ios` would make every send fail and the row would never be
+    // deleted, so the shape is refused at registration.
+    if platform == "ios" && !crate::apns::is_valid_device_token(token) {
+        return Err(AppError::bad_request(
+            "push_token_invalid",
+            "an iOS token must be 64-200 hexadecimal characters",
+        ));
+    }
     state
         .store
         .register_push_device(
             authed.user.id,
             &authed.device.id.to_string(),
             token,
+            platform,
             package.as_deref(),
             version.as_deref(),
         )
@@ -1289,7 +1317,7 @@ async fn register_push_device(
             "push.registered",
             Some("device"),
             Some(&authed.device.id.to_string()),
-            serde_json::json!({ "package": package }),
+            serde_json::json!({ "package": package, "platform": platform }),
         )
         .await
         .ok();
@@ -1324,15 +1352,29 @@ async fn push_status(
     authed: Authed,
 ) -> Result<Json<ConnectPushStatus>> {
     let devices = state.store.push_devices(authed.user.id).await?;
-    let registered = state
+    let own = state
         .store
         .push_device(authed.user.id, &authed.device.id.to_string())
-        .await?
-        .is_some();
+        .await?;
+    // The registration row is the platform this phone actually registered as.
+    // Before the first registration, its device row is the only label there is.
+    let platform = crate::push::PushPlatform::parse(
+        own.as_ref()
+            .map(|row| row.platform.as_str())
+            .or(authed.device.platform.as_deref()),
+    );
+    let platform_configured = match platform {
+        crate::push::PushPlatform::Android => state.push.configured(),
+        crate::push::PushPlatform::Ios => state.apns.configured(),
+    };
     Ok(Json(ConnectPushStatus {
+        // Clients from before `platform_configured` are all Android and read
+        // this flag as "my sender exists", so it stays the FCM answer; an
+        // APNs-only relay must not tell an older Android client alerts work.
         configured: state.push.configured(),
         devices: devices.len(),
-        registered,
+        registered: own.is_some(),
+        platform_configured: Some(platform_configured),
     }))
 }
 

@@ -10,7 +10,7 @@
 use std::path::{Path, PathBuf};
 
 fn main() {
-    link_ios_secret_store();
+    link_ios_native();
     tauri_build::build()
 }
 
@@ -19,7 +19,9 @@ fn main() {
 /// The build script runs on the host. `tauri_utils::build::link_apple_library`
 /// only exists on macOS, so the whole function is compiled out elsewhere; the
 /// `CARGO_CFG_TARGET_OS` check keeps a macOS desktop build from linking it too.
-fn link_ios_secret_store() {
+/// Each product is a separate static library, so each is linked by its own
+/// product name.
+fn link_ios_native() {
     println!("cargo:rerun-if-changed=native/ios");
     println!("cargo:rerun-if-changed=native/ios/Package.swift");
 
@@ -55,6 +57,7 @@ fn link_ios_secret_store() {
         }
 
         tauri_utils::build::link_apple_library("h4rn-secret-store", &source);
+        tauri_utils::build::link_apple_library("h4rn-push", &source);
     }
 }
 

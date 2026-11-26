@@ -2396,3 +2396,63 @@ configured a Firebase service account has push off; Connect reports that state
 and never pretends to send. The Android build compiles and runs without
 `google-services.json`; the feature is then unavailable and Settings says so.
 
+## ADR-052: iOS gets the same alert record, sent to APNs with the operator's own key
+
+**Status:** Accepted
+
+ADR-051's record, gating, grouping, dedupe and phone-side rules apply to iOS
+unchanged: the daemon publishes the same six fields, Connect still decides, and
+a phone's registration belongs to the account and device that created it. The
+device row now records the platform, and Connect builds the transport shape for
+that phone only — the Android FCM data message, or an iOS APNs alert carrying
+the same title and body in `aps.alert` and, as custom keys, only `h4rn_alert`,
+`state`, `thread_id` and `count`. There is still no field for a prompt, a
+reply, tool output, a diff, a file path or a credential.
+
+iOS is sent to APNs directly rather than through FCM. FCM for iOS requires the
+Firebase Messaging SDK, and the mobile shell links its Swift code as a local
+Swift Package through `swift-rs`, which links the package's own static archive
+and cannot link a SwiftPM dependency's archives. Adding Firebase would mean an
+Xcode project target this repository does not generate, and it would also make
+every iOS build depend on a `GoogleService-Info.plist`. The APNs auth key
+therefore lives on the relay beside the FCM service account: the operator sets
+`H4RN_CONNECT_APNS_KEY`, `H4RN_CONNECT_APNS_KEY_ID` and
+`H4RN_CONNECT_APNS_TEAM_ID`, and the relay signs an ES256 provider token,
+caches it for 50 minutes, and posts HTTP/2 alerts. A missing or partial key
+leaves iOS push off, reported honestly, and does not stop the relay from
+starting. `H4RN_CONNECT_APNS_URL` exists for tests and for the sandbox host a
+development build needs.
+
+iOS cannot execute app code for a plain data message while the app is
+suspended, so the alert is a visible APNs notification with
+`mutable-content: 1`. Without a Notification Service Extension, which needs its
+own Xcode target that the generated project cannot gain here, the local
+"signed in and switched on" flag cannot suppress a suspended app's alert. The
+guarantee stays the one ADR-051 already chose for a failed removal: taking the
+switch off removes the registration from Connect, and the phone clears what is
+already in Notification Centre. That is not a lock-screen promise: a signed-out
+or switched-off iPhone that cannot reach Connect may still show alerts while it
+is suspended, until the pending removal succeeds at the next sign-in. Android's
+local flag gives it the stronger guarantee; iOS documents the weaker one rather
+than claiming it. While the app is running, its notification delegate enforces
+the same rule as Android — quiet only for the exact thread on screen, never for
+a group — and a tap follows the existing `h4rn://thread/<id>` route, or opens
+h4rn for a grouped alert. A missing extension is documented as a limit rather
+than replaced by a weaker claim.
+
+The phone asks APNs for a fresh token on every launch when permission is
+granted, and waits for that callback; the cached token is only a fallback after
+a short timeout. A phone restored from a backup can otherwise keep offering a
+token Apple already retired: Connect would delete the row on a 410 and the phone
+would register the same dead value again forever. The UI re-registers on launch
+and when the app returns to the foreground, so a changed token replaces the old
+row. A tap that launches the app is buffered by the delegate and exposed as a
+one-shot command the UI reads during boot, because there is no page listener
+yet to receive the warm `h4rn-deep-link` event.
+
+`BadDeviceToken` and a bare 403 do not delete a registration. Apple answers
+`BadDeviceToken` when a development build talks to the production host (or the
+reverse) for a token that is still valid on the other host, and deleting every
+row on that would silence a phone because of an operator misconfiguration. Only
+`410` and an explicit `Unregistered` reason remove the row, the same caution
+ADR-051 applies to FCM's 404.
