@@ -217,9 +217,10 @@ and ends the watch) and starts at most at the ceiling. The wake turn itself carr
 so a watch it re-creates keeps the grant rather than clearing it. A watch is durable: its PR, thread
 and triple are stored with the journal, so a restart restores the watch and never recreates it
 without the grant. Those journal writes are serialized, so a snapshot taken before a watch ended
-cannot land after the newer one and bring that watch back on restart. A live mode switch, a prompt dispatch and a resume's session selection share one
-per-thread gate, so a switch that has already applied full access to the session cannot be read as
-the old setting by an incoming supervised message or an auto-resume.
+cannot land after the newer one and bring that watch back on restart. A live mode switch, a prompt
+dispatch and a resume's session selection share one per-thread gate, so a switch that has already
+applied full access to the session cannot be read as the old setting by an incoming supervised
+message or an auto-resume.
 
 Revoking an agent is ordered against everything already admitted under its grant. An MCP request
 holds a shared admission gate for its whole answer, and a prompt write (from a queued message, a
