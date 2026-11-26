@@ -4,7 +4,12 @@ import { fileURLToPath } from "node:url";
 
 import { describe, expect, it, vi } from "vitest";
 
-import { createSecureTransportFactory, kindForEndpoint, normalizeSecureUrl } from "./secure";
+import {
+  createSecureTransportFactory,
+  kindForEndpoint,
+  normalizeSecureUrl,
+  noSecurePathClose,
+} from "./secure";
 
 const secrets = vi.hoisted(() => {
   const store = new Map<string, string>();
@@ -247,5 +252,16 @@ describe("secure transport close", () => {
         writable: true,
       });
     }
+  });
+
+  it("names the kind when no secure path is left, and keeps the engine's own detail as sent", () => {
+    expect(noSecurePathClose(undefined).error).toEqual({
+      kind: "noSecurePath",
+      message: undefined,
+    });
+    expect(noSecurePathClose("relay refused the ticket").error).toEqual({
+      kind: "noSecurePath",
+      message: "relay refused the ticket",
+    });
   });
 });

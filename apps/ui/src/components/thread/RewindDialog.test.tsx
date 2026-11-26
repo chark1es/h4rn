@@ -134,7 +134,7 @@ describe("RewindDialog", () => {
     fireEvent.click(screen.getByLabelText(/Revert files too/));
     expect(
       screen.getByText(
-        /Ignored files stay as they are: \.env, a\.log, b\.log, c\.log and 1 more\./,
+        /Ignored files stay as they are: \.env, a\.log, b\.log, c\.log, and 1 more\./,
       ),
     ).toBeTruthy();
   });

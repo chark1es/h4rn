@@ -77,8 +77,7 @@ All notable changes to h4rn are recorded here. The format follows
   An error already on screen, such as a pairing, sign-in or guest-link error
   or the banner's reason, switches language with the rest of the page, and
   the list of files a rewind left alone reads the same in its dialog and its
-  toast. The daemon's
-  and the relay's own error text is shown as sent.
+  toast. The daemon's and the relay's own error text is shown as sent.
 - **Dialogs and confirmations in Chinese, Spanish and Japanese.** New thread,
   rename, edit from here (rewind), the branch and pull request dialogs, Share
   with guest, Delegate a subagent, Add project and its import pane, and the

@@ -619,12 +619,8 @@ export class SecureTransport implements Transport {
     });
     if (lost && !this.notifiedClose) {
       queueMicrotask(() => {
-        // `detail` is the engine's own text, shown as sent; without one the
-        // client words the failure itself.
-        this.finishClose(1011, status.detail ?? "No secure path is available.", false, {
-          kind: "noSecurePath",
-          message: status.detail ?? undefined,
-        });
+        const { reason, error } = noSecurePathClose(status.detail);
+        this.finishClose(1011, reason, false, error);
       });
     }
   }
@@ -718,6 +714,21 @@ export class SecureTransport implements Transport {
  * stale one-time PSK must not immediately become fatal while a fresh session
  * can still be attempted.
  */
+/**
+ * The close for a session whose every path was lost. `detail` is the engine's
+ * own text, shown as sent; without one the client words the failure itself
+ * from the kind, so it follows the language.
+ */
+export function noSecurePathClose(detail: string | null | undefined): {
+  reason: string;
+  error: { kind: "noSecurePath"; message: string | undefined };
+} {
+  return {
+    reason: detail ?? "No secure path is available.",
+    error: { kind: "noSecurePath", message: detail ?? undefined },
+  };
+}
+
 function closeCodeFor(
   reason: string,
   established: boolean,

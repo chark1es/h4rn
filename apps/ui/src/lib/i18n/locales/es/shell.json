@@ -139,7 +139,7 @@
     "importFailed": "No se pudieron importar esas skills.",
     "rescan": "Vuelve a explorar e inténtalo de nuevo.",
     "resolveFailed": "No se pudo resolver el conflicto de {{name}}.",
-    "stillOpen": "Sigue abierto.",
+    "stillOpen": "El conflicto sigue abierto.",
     "syncFailed": "No se pudieron sincronizar las skills.",
     "localStillWork": "Las skills locales siguen funcionando.",
     "compareFailed": "No se pudieron comparar esas versiones.",

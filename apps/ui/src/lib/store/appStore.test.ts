@@ -541,7 +541,7 @@ describe("rewindThread", () => {
     };
     await rewindThread("th_rewind", "item_user_1", true);
     expect(getState().toasts.at(-1)?.description).toContain(
-      "Ignored files left as they are: .env, a.log, b.log, c.log and 1 more.",
+      "Ignored files left as they are: .env, a.log, b.log, c.log, and 1 more.",
     );
   });
 });
