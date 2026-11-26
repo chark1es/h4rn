@@ -302,7 +302,7 @@
     },
     "noAgentTurn": {
       "message": "Este espacio de trabajo aún no tiene ningún turno del agente con el que comparar.",
-      "hint": "Ejecuta primero un turno y luego elige «Turn» como origen del diff."
+      "hint": "Ejecuta primero un turno y luego elige «Turno» como origen del diff."
     },
     "noCommit": {
       "message": "Elige primero un commit con el que comparar.",

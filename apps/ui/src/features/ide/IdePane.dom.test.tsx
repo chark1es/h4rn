@@ -171,6 +171,7 @@ vi.mock("./CodeEditor", () => ({ CodeEditor: () => null }));
 
 import { IdePane } from "./IdePane";
 import { listReviewComments, resetReviewComments } from "./reviewComments";
+import { sourceDescription } from "./sources";
 
 const thread = "th_1" as ThreadId;
 const turn = "turn_1" as TurnId;
@@ -908,7 +909,8 @@ describe("the diff pane stays on the file the person picked", () => {
     fireEvent.click(screen.getByRole("button", { name: "Add comment" }));
 
     await waitFor(() => expect(listReviewComments(thread)).toHaveLength(1));
-    expect(listReviewComments(thread)[0]?.source).toBe("turn 1");
+    const [written] = listReviewComments(thread);
+    expect(written && sourceDescription(written.source, written.sourceLabel)).toBe("turn 1");
     expect(screen.getByText(/line 1 · turn 1/)).toBeTruthy();
   });
 });
@@ -995,7 +997,8 @@ describe("a slower reply never overrides a later choice", () => {
     fireEvent.click(screen.getByRole("button", { name: "Add comment" }));
     await waitFor(() => expect(listReviewComments(thread)).toHaveLength(1));
     expect(listReviewComments(thread)[0]?.path).toBe("b.ts");
-    expect(listReviewComments(thread)[0]?.source).toBe("turn 1");
+    const [written] = listReviewComments(thread);
+    expect(written && sourceDescription(written.source, written.sourceLabel)).toBe("turn 1");
   });
 });
 
@@ -1023,7 +1026,8 @@ describe("comments are keyed on the turn, not its label", () => {
     fireEvent.click(screen.getByRole("button", { name: "Add comment" }));
     await waitFor(() => expect(listReviewComments(thread)).toHaveLength(1));
     expect(listReviewComments(thread)[0]?.scope).toBe(`turn:${thread}:${first}`);
-    expect(listReviewComments(thread)[0]?.source).toBe("turn 0192f0c1");
+    const [written] = listReviewComments(thread);
+    expect(written && sourceDescription(written.source, written.sourceLabel)).toBe("turn 0192f0c1");
 
     // The thread starts its next turn; the label has not ticked over.
     act(() => {

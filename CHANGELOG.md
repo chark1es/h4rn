@@ -86,6 +86,15 @@ All notable changes to h4rn are recorded here. The format follows
   branches, paths, commit messages, server and skill names and the daemon's
   own errors are shown as they are; a guest link's expiry, sizes and dates use
   the language's own formats.
+- **The IDE, the Files tab and the HTML preview in Chinese, Spanish and
+  Japanese.** The editor's tabs, status bar and save and conflict dialogs,
+  the diff pane with its source picker, file list and review comments, the
+  search panel, the panel's file tree and the preview's notices and failures
+  follow the Language choice. File contents, paths, diffs, search results,
+  commit subjects and the previewed page are shown as they are; counts, line
+  numbers and file sizes use the language's own numbers. A review comment
+  added to the draft keeps its English framing, since it is written for the
+  agent.
 - **Android Live Updates show a running agent.** A separate switch under
   Settings → Notifications → Phone alerts shows each running thread as an
   ongoing notification with its project and whether it is working, waiting for

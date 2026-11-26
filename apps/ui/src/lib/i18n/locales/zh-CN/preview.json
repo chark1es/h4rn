@@ -1,0 +1,44 @@
+{
+  "preview": "预览",
+  "reload": "重新加载",
+  "reloadPreview": "重新加载预览",
+  "openFullWidth": "全宽打开",
+  "openFullWidthLabel": "全宽打开预览",
+  "close": "关闭预览",
+  "backToThread": "返回对话",
+  "returnToPanel": "放回面板",
+  "returnToPanelLabel": "将预览放回面板",
+  "loading": "正在加载预览",
+  "frameTitle": "{{name}} 的预览",
+  "empty": {
+    "title": "没有打开的预览",
+    "body": "在“文件”中选择一个 HTML 文件并打开它的预览。页面在沙盒中运行，无法访问 h4rn、它的 Cookie 或存储。",
+    "showFiles": "显示文件"
+  },
+  "missing_other": "{{count, number}} 个文件未加载：它们不存在、位于工作区之外，或超出了大小限制。",
+  "link": {
+    "ask": "在浏览器中打开 <host>{{host}}</host>？",
+    "open": "打开"
+  },
+  "scripts": {
+    "deviceTitle": "此设备无法在预览中运行脚本。",
+    "deviceBody": "它的 WebView 会阻止沙盒页面自身的脚本，因此预览已关闭，而不是显示缺少脚本的页面。请更新 Android System WebView，然后重新加载。",
+    "blockedTitle": "预览脚本没有启动。",
+    "unknownBody": "应用无法读取此 WebView 的能力报告，因此无法确认页面的脚本能否运行。请重新加载以再次检查。",
+    "blockedBody": "页面已加载，但保护其链接安全的脚本没有运行。请重新加载预览；未闭合的注释或阻止脚本的策略都可能导致这种情况。"
+  },
+  "failure": {
+    "goneTitle": "此文件已不在工作区中。",
+    "documentTooLargeTitle": "此文件太大，无法预览。",
+    "documentTooLarge": "预览最多读取 {{limit}} 的文本，以便一次响应能放进一个传输帧。此文件为 {{size}}，或者其文本为传输转义后会超过该大小。请在终端中打开它，或拆分报告。",
+    "pageTooLargeTitle": "此页面太大，无法预览。",
+    "pageTooLarge": "准备好的页面为 {{size}}；预览最多从工作区嵌入 {{limit}}。",
+    "notTextTitle": "此文件不是 UTF-8 文本。",
+    "binary": "只能预览文本格式的 HTML 文件。",
+    "undecodable": "守护进程无法将其解码为文本。",
+    "loadFailedTitle": "预览未能加载。",
+    "noFile": "守护进程没有返回文件。",
+    "kib": "{{size}} KiB",
+    "mib": "{{size}} MiB"
+  }
+}
