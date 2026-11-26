@@ -2539,9 +2539,7 @@ first sends the group that was collecting when the frame arrived, if it holds a
 transition for the same thread. A queued message starts the next turn the
 moment the previous one finishes, so without that the previous finish, still
 waiting out the group window, would arrive second and replace the new turn's
-ongoing entry. Each group window's timer carries that window's number and only
-sends a group that still has it, so the timer of a group a `working` frame
-already took cannot send the account's next group early and split it. That order is kept by one delivery worker per account: a queue
+ongoing entry. That order is kept by one delivery worker per account: a queue
 drained in arrival order by its own task, which receives both the group flushes
 and the `working` frames. Each queued job carries the transitions it sends,
 taken when it is queued, and never looks at what is collecting when it runs: a
@@ -2552,6 +2550,10 @@ logged, and the worker carries on with the rest of the queue. The relay's
 socket read loop only records the transition and enqueues it, so a slow FCM or
 APNs response never stops Connect reading a machine's socket. A worker exits,
 and its entry is removed, as soon as its queue is empty.
+
+Each group window's timer carries that window's number and only sends a group
+that still has it, so the timer of a group a `working` frame already took cannot
+send the account's next group early and split it.
 
 The Android app shows a running turn, a waiting approval or a question as an
 ongoing notification: `setOngoing(true)`, the project and state words, and

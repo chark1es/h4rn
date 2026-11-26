@@ -2736,9 +2736,12 @@ async fn a_queued_flush_never_carries_a_finish_seen_after_a_turn_start() {
             alert_activity(&busy, AgentAlertState::Completed, Utc::now(), "b-done"),
         )
         .await;
-    service.flush(user).await;
+    // Both queued flushes finish before B's finish is drained, so a flush job
+    // that also took what was collecting when it ran would send B's finish
+    // ahead of `B:working`.
     first_flush.await.expect("the first flush");
     second_flush.await.expect("the second flush");
+    service.flush(user).await;
 
     assert_eq!(
         fcm_sends(&server, &[(&first, "A"), (&second, "C"), (&busy, "B")]).await,
