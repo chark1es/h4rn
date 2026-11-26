@@ -864,11 +864,45 @@ describe("notification wording", () => {
     expect(approvalBody("question", "Which branch?")).toBe("Which branch?");
     expect(finishedBody(null)).toBe("已完成：本回合已结束。");
     expect(finishedBody({ status: "failed", error: "exit 1" })).toBe("失败：exit 1");
-    expect(threadTitle({}, "t-missing" as ThreadId)).toBe("一个对话");
-
-    await setLocalePreference("es");
+    expect(threadTitle({}, "t-missing" as ThreadId)).toBe("对话");
     expect(finishedBody({ status: "token_limit", error: null })).toBe(
-      "Detenido: el agente alcanzó su límite de tokens.",
+      "已停止：智能体达到了 token 上限。",
     );
+  });
+
+  it("words every body kind in Spanish", async () => {
+    await setLocalePreference("es");
+    expect(threadTitle({}, "t-missing" as ThreadId)).toBe("Un hilo");
+    expect(approvalBody("question", "")).toBe("Hay una pregunta esperando.");
+    expect(approvalBody("command", "")).toBe("Quiere ejecutar un comando.");
+    expect(approvalBody("command", "cargo test")).toBe("Quiere ejecutar: cargo test");
+    expect(approvalBody("file_change", "")).toBe("Quiere cambiar archivos.");
+    expect(approvalBody("file_change", "src/main.rs")).toBe("Quiere cambiar: src/main.rs");
+    expect(approvalBody("permission", "")).toBe("Necesita una aprobación.");
+    expect(finishedBody(null)).toBe("Terminado: el turno ha acabado.");
+    expect(finishedBody({ status: "completed", error: null })).toBe(
+      "Terminado: el turno ha acabado.",
+    );
+    expect(finishedBody({ status: "failed", error: "exit 1" })).toBe("Falló: exit 1");
+    expect(finishedBody({ status: "failed", error: null })).toBe(
+      "Falló: el turno terminó con un error.",
+    );
+    expect(finishedBody({ status: "interrupted", error: null })).toBe(
+      "Detenido: el turno se interrumpió.",
+    );
+    expect(finishedBody({ status: "token_limit", error: null })).toBe(
+      "Detenido: el agente llegó a su límite de tokens.",
+    );
+    expect(finishedBody({ status: "turn_limit", error: null })).toBe(
+      "Detenido: el agente alcanzó su límite de turnos.",
+    );
+    const offline = offlineTransitions(
+      { host_atlas: { name: "atlas", online: true } },
+      { host_atlas: { name: "atlas", online: false } },
+      focus(),
+    );
+    expect(offline.map((draft) => draft.body)).toEqual([
+      "Host sin conexión: h4rn ya no puede contactar con él.",
+    ]);
   });
 });

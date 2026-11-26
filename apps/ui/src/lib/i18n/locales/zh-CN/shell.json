@@ -86,6 +86,7 @@
     "fellBackUnnamed": "无法使用记录的回退点。下一个回合将从保留对话的交接继续。",
     "done": "对话已回退",
     "native": "{{harness}} 已从自己的历史中删除被移除的回合。",
+    "nativeUnnamed": "该智能体已从自己的历史中删除被移除的回合。",
     "handoff": "新的会话将从保留的对话继续。",
     "leftAlone": "被忽略的文件保持原样：{{files}}。",
     "failed": "无法回退 {{title}}。",
@@ -313,7 +314,7 @@
     }
   },
   "notifications": {
-    "untitledThread": "一个对话",
+    "untitledThread": "对话",
     "question": "有一个问题在等待回答。",
     "wantsToRun": "想要运行：{{command}}",
     "wantsToRunCommand": "想要运行一条命令。",
@@ -324,7 +325,7 @@
     "failed": "失败：{{error}}",
     "failedUnknown": "失败：本回合因错误而结束。",
     "interrupted": "已停止：本回合被中断。",
-    "tokenLimit": "已停止：智能体达到了 token 限额。",
+    "tokenLimit": "已停止：智能体达到了 token 上限。",
     "turnLimit": "已停止：智能体达到了回合限额。",
     "hostOffline": "主机离线：h4rn 已无法连接到它。"
   },

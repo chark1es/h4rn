@@ -315,7 +315,8 @@ function el<K extends keyof HTMLElementTagNameMap>(
   return node;
 }
 
-function renderConnect(initialMessage?: string): void {
+/** Draws the first-launch connect form; exported so a test can word-check it. */
+export function renderConnect(initialMessage?: string): void {
   if (document.getElementById("h4rn-connect")) return;
 
   const overlay = el(

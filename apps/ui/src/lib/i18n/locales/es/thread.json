@@ -120,6 +120,7 @@
   "rewind": {
     "notLoaded": "El hilo aún no se ha cargado.",
     "unsupported": "{{harness}} no puede quitar turnos de su propio historial.",
+    "unsupportedUnnamed": "Este agente no puede quitar turnos de su propio historial.",
     "approval": "Responde primero a la aprobación pendiente.",
     "delivery": "Puede que un mensaje haya llegado al agente. Reenvíalo o descártalo primero.",
     "queued": "Hay un mensaje esperando para ejecutarse. Deja que termine primero.",

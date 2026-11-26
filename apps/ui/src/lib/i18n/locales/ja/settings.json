@@ -147,7 +147,7 @@
       "senderUnknown": "この Connect サーバーが通知を送信できるか確認できませんでした。"
     },
     "agentAlertsFailed": "エージェントの通知を変更できませんでした",
-    "phoneAppOnly": "デバイスへの通知は h4rn のスマートフォンアプリでのみ使えます。"
+    "phoneAppOnly": "スマートフォンへの通知は h4rn のスマートフォンアプリでのみ使えます。"
   },
   "chat": {
     "title": "チャット",

@@ -42,7 +42,7 @@ describe("parsePairingUrl", () => {
 
   it("still refuses a link that has neither shape", () => {
     expect(() => parsePairingUrl("h4rn://pair?e=host%3A47810")).toThrow(
-      "The pairing link is missing daemon or token.",
+      "This pairing link has no daemon address or token. Copy the whole link from the host again.",
     );
   });
 

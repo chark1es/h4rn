@@ -149,7 +149,7 @@
       "senderUnknown": "Could not check whether this Connect server can send alerts."
     },
     "agentAlertsFailed": "Agent alerts could not be changed",
-    "phoneAppOnly": "Device alerts are only available in the h4rn phone app."
+    "phoneAppOnly": "Phone alerts are only available in the h4rn phone app."
   },
   "chat": {
     "title": "Chat",

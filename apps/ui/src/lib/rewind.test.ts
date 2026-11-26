@@ -1,8 +1,9 @@
 // @vitest-environment jsdom
 
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
 import type { QueuedMessage, ThreadSummary } from "@/gen";
+import { setLocalePreference } from "@/lib/i18n";
 import { filesRewindAvailable, rewindRefusal } from "./store/appStore";
 import { createThreadLog, foldEvent, type ThreadLog } from "./store/projection";
 
@@ -73,6 +74,26 @@ describe("rewindRefusal", () => {
     expect(rewindRefusal(summary({ rewind: "unsupported" }), undefined)).toContain(
       "cannot drop turns",
     );
+  });
+
+  describe("in Chinese and Japanese", () => {
+    afterEach(() => setLocalePreference("en"));
+
+    it("puts a space only after a Latin harness name", async () => {
+      const acp = summary({ harness: "acp", rewind: "unsupported" });
+      const claude = summary({ rewind: "unsupported" });
+      await setLocalePreference("zh-CN");
+      expect(rewindRefusal(acp, undefined)).toBe("该智能体无法从自己的历史中删除回合。");
+      expect(rewindRefusal(claude, undefined)).toBe("Claude Code 无法从自己的历史中删除回合。");
+      await setLocalePreference("ja");
+      expect(rewindRefusal(acp, undefined)).toBe(
+        "このエージェントは自身の履歴からターンを削除できません。",
+      );
+      await setLocalePreference("en");
+      expect(rewindRefusal(acp, undefined)).toBe(
+        "This agent cannot drop turns from its own history.",
+      );
+    });
   });
 
   it("names an uncertain delivery as something to resend or discard", () => {

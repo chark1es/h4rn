@@ -5,6 +5,7 @@
   "show": "サイドバーを表示",
   "showNeedsYou_other": "サイドバーを表示。{{count, number}} 件のスレッドが対応待ちです",
   "newThread": "新しいスレッド",
+  "untitledThread": "新しいスレッド",
   "search": "検索または実行",
   "resize": "サイドバーの幅を変更",
   "stateTabs": "スレッドの状態",

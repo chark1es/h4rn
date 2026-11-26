@@ -147,7 +147,7 @@
       "senderUnknown": "无法检查此 Connect 服务器能否发送提醒。"
     },
     "agentAlertsFailed": "无法更改智能体提醒",
-    "phoneAppOnly": "设备提醒仅在 h4rn 手机应用中可用。"
+    "phoneAppOnly": "手机提醒仅在 h4rn 手机应用中可用。"
   },
   "chat": {
     "title": "聊天",

@@ -60,7 +60,7 @@
     "claimFailed": "No se pudo completar la vinculación.",
     "notApproved": "{{name}} aún no ha aprobado este dispositivo. Abre Ajustes → Dispositivos en {{name}}, confirma el mismo código y vuelve a intentarlo.",
     "codesDiffer": "Los códigos no coincidían, así que se revocó este dispositivo. Vuelve a vincularlo desde una red de confianza.",
-    "missingDaemonOrToken": "Al enlace de vinculación le falta daemon o token."
+    "missingDaemonOrToken": "A este enlace de vinculación le falta la dirección del daemon o el token. Vuelve a copiar el enlace completo desde el host."
   },
   "toasts": {
     "paired": "Vinculado con {{name}}."

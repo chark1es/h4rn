@@ -86,6 +86,7 @@
     "fellBackUnnamed": "記録された巻き戻しポイントを使えませんでした。次のターンは、残した会話の引き継ぎから続きます。",
     "done": "スレッドを巻き戻しました",
     "native": "{{harness}} は削除したターンを自身の履歴から取り除きました。",
+    "nativeUnnamed": "このエージェントは削除したターンを自身の履歴から取り除きました。",
     "handoff": "新しいセッションが、残した会話から続けます。",
     "leftAlone": "無視されたファイルはそのままです: {{files}}。",
     "failed": "{{title}} を巻き戻せませんでした。",
@@ -159,7 +160,7 @@
     "available": "<b>h4rn {{version}}</b> が利用可能です",
     "downloading": "h4rn {{version}} をダウンロード中",
     "installing": "<b>h4rn {{version}} をインストール中</b> · 再起動します",
-    "restart": "再起動して更新",
+    "restart": "再起動してアップデート",
     "later": "後で"
   },
   "errors": {
@@ -324,9 +325,9 @@
     "failed": "失敗：{{error}}",
     "failedUnknown": "失敗：ターンがエラーで終了しました。",
     "interrupted": "停止：ターンが中断されました。",
-    "tokenLimit": "停止：エージェントがトークンの上限に達しました。",
+    "tokenLimit": "停止しました：エージェントがトークン上限に達しました。",
     "turnLimit": "停止：エージェントがターンの上限に達しました。",
-    "hostOffline": "ホストがオフラインです：h4rn から接続できなくなりました。"
+    "hostOffline": "オフライン：h4rn からホストに接続できなくなりました。"
   },
   "secureStorage": {
     "requestFailed": "IndexedDB の要求に失敗しました。",

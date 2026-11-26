@@ -859,11 +859,12 @@ function enqueueEvent(envelope: EventEnvelope): void {
 export function noticeRewindFallback(envelope: EventEnvelope): void {
   if (envelope.replayed || envelope.event.type !== "rewind_fell_back") return;
   const harness = getState().threads[envelope.event.thread_id]?.harness;
+  const name = harness ? harnessName(harness) : null;
   pushToast({
     variant: "info",
     title: i18n.t("shell:rewind.fellBack"),
-    description: harness
-      ? i18n.t("shell:rewind.fellBackNamed", { harness: harnessName(harness) })
+    description: name
+      ? i18n.t("shell:rewind.fellBackNamed", { harness: name })
       : i18n.t("shell:rewind.fellBackUnnamed"),
   });
 }
@@ -1652,7 +1653,7 @@ export async function rewindThread(
       title: i18n.t("shell:rewind.done"),
       description: joinSentences([
         prompt.method === "native" && harness
-          ? i18n.t("shell:rewind.native", { harness: harnessName(harness) })
+          ? nativeRewindSentence(harness)
           : i18n.t("shell:rewind.handoff"),
         leftAlone ? i18n.t("shell:rewind.leftAlone", { files: leftAlone }) : null,
       ]),
@@ -1690,7 +1691,12 @@ export function rewindRefusal(
 ): string | null {
   if (!summary) return i18n.t("thread:rewind.notLoaded");
   if (summary.rewind === "unsupported") {
-    return i18n.t("thread:rewind.unsupported", { harness: harnessName(summary.harness) });
+    // A generic agent gets its own sentence, not a name slotted into the
+    // named one: "该智能体 无法" would carry the space a Latin name needs.
+    const name = harnessName(summary.harness);
+    return name
+      ? i18n.t("thread:rewind.unsupported", { harness: name })
+      : i18n.t("thread:rewind.unsupportedUnnamed");
   }
   if (summary.agent_state === "awaiting_approval" || pendingApprovalIn(log)) {
     return i18n.t("thread:rewind.approval");
@@ -1749,7 +1755,15 @@ export function filesRewindAvailable(
   return removed.length > 0 && removed.every((turn) => turn.changes?.complete === true);
 }
 
-function harnessName(harness: ThreadSummary["harness"]): string {
+function nativeRewindSentence(harness: ThreadSummary["harness"]): string {
+  const name = harnessName(harness);
+  return name
+    ? i18n.t("shell:rewind.native", { harness: name })
+    : i18n.t("shell:rewind.nativeUnnamed");
+}
+
+/** The product name a sentence can start with; a generic ACP agent has none. */
+function harnessName(harness: ThreadSummary["harness"]): string | null {
   switch (harness) {
     case "claude_code":
       return "Claude Code";
@@ -1760,7 +1774,7 @@ function harnessName(harness: ThreadSummary["harness"]): string {
     case "antigravity":
       return "Antigravity";
     case "acp":
-      return i18n.t("common:thisAgent");
+      return null;
   }
 }
 export type SendOptions = {
@@ -2209,7 +2223,7 @@ export async function createThread(input: CreateThreadInput): Promise<boolean> {
   const state = getState();
   const tempId = `local-thread-${++localCounter}`;
   // Shown until the daemon names the thread; the prompt's own words win.
-  const title = input.prompt.split("\n")[0]?.slice(0, 56) || i18n.t("sidebar:newThread");
+  const title = input.prompt.split("\n")[0]?.slice(0, 56) || i18n.t("sidebar:untitledThread");
   const now = new Date().toISOString();
   const optimistic: ThreadSummary = {
     thread_id: tempId,

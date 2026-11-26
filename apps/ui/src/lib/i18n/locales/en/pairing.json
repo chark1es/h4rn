@@ -59,7 +59,7 @@
     "claimFailed": "Could not complete that pairing.",
     "notApproved": "{{name}} has not approved this device yet. Open Settings → Devices on {{name}}, confirm the same code, then try again.",
     "codesDiffer": "The codes did not match, so this device was revoked. Pair again from a network you trust.",
-    "missingDaemonOrToken": "The pairing link is missing daemon or token."
+    "missingDaemonOrToken": "This pairing link has no daemon address or token. Copy the whole link from the host again."
   },
   "toasts": {
     "paired": "Paired with {{name}}."

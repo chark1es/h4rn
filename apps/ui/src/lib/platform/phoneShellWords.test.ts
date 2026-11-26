@@ -1,14 +1,17 @@
 // @vitest-environment jsdom
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { HARNESS_LABELS, threadHarnessLabel } from "@/lib/entities";
 import { setLocalePreference } from "@/lib/i18n";
 
-import { normaliseDaemon } from "./mobile";
+import { normaliseDaemon, renderConnect } from "./mobile";
 import { parsePairingUrl } from "./pairingUrl";
 
-afterEach(() => setLocalePreference("en"));
+afterEach(async () => {
+  document.getElementById("h4rn-connect")?.remove();
+  await setLocalePreference("en");
+});
 
 describe("the phone shell's own words", () => {
   it("checks a daemon URL in the active language", async () => {
@@ -24,7 +27,35 @@ describe("the phone shell's own words", () => {
   it("refuses a half pairing link in the active language", async () => {
     await setLocalePreference("ja");
     expect(() => parsePairingUrl("h4rn://connect?daemon=ws%3A%2F%2Fx")).toThrow(
-      "ペアリングリンクに daemon または token がありません。",
+      "このペアリングリンクにはデーモンのアドレスまたはトークンがありません。ホストからリンク全体をもう一度コピーしてください。",
+    );
+  });
+
+  it("words the first-launch connect form and its errors in the active language", async () => {
+    await setLocalePreference("ja");
+    renderConnect();
+    const overlay = document.getElementById("h4rn-connect");
+    if (!overlay) throw new Error("the connect form was not drawn");
+    expect(overlay.querySelector("h1")?.textContent).toBe("このスマートフォンを接続");
+    expect([...overlay.querySelectorAll("label")].map((label) => label.textContent)).toEqual([
+      "デーモンの URL",
+      "アクセストークン",
+    ]);
+    expect(overlay.querySelector("input[type=password]")?.getAttribute("placeholder")).toBe(
+      "64 文字の 16 進トークン",
+    );
+    const buttons = [...overlay.querySelectorAll("button")].map((button) => button.textContent);
+    expect(buttons).toEqual(["接続", "QR をスキャン"]);
+
+    // A half pairing link pasted into the URL field says what to do next.
+    const daemon = overlay.querySelector<HTMLInputElement>("input[type=text]");
+    if (!daemon) throw new Error("the daemon field was not drawn");
+    daemon.value = "h4rn://connect?daemon=ws%3A%2F%2Fx";
+    overlay.querySelector("form")?.dispatchEvent(new Event("submit", { cancelable: true }));
+    await vi.waitFor(() =>
+      expect(overlay.querySelector("form p")?.textContent).toBe(
+        "このペアリングリンクにはデーモンのアドレスまたはトークンがありません。ホストからリンク全体をもう一度コピーしてください。",
+      ),
     );
   });
 });

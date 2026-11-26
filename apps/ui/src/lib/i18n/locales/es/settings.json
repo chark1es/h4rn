@@ -151,7 +151,7 @@
       "senderUnknown": "No se pudo comprobar si este servidor de Connect puede enviar avisos."
     },
     "agentAlertsFailed": "No se pudieron cambiar los avisos de agentes",
-    "phoneAppOnly": "Los avisos del dispositivo solo están disponibles en la app de h4rn para teléfono."
+    "phoneAppOnly": "Los avisos en el teléfono solo están disponibles en la app de h4rn para teléfono."
   },
   "chat": {
     "title": "Chat",

@@ -108,7 +108,9 @@ All notable changes to h4rn are recorded here. The format follows
   attachment download errors, the Labs rewind switch, the ACP harness name and
   the "or press" hint under empty states. A check now reads every UI file, not
   an opt-in list, so new English text fails the tests unless it is demo data
-  or code (see `docs/i18n.md`).
+  or code (see `docs/i18n.md`). A half pairing link pasted on the phone now
+  says to copy the whole link from the host again. The Android app's own live
+  update words and alert channel name are still English.
 - **Android Live Updates show a running agent.** A separate switch under
   Settings → Notifications → Phone alerts shows each running thread as an
   ongoing notification with its project and whether it is working, waiting for

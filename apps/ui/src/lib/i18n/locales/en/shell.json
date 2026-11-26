@@ -86,6 +86,7 @@
     "fellBackUnnamed": "The recorded rewind point could not be used. The next turn continues from a handoff of the kept conversation.",
     "done": "Thread rewound",
     "native": "{{harness}} dropped the removed turns from its own history.",
+    "nativeUnnamed": "This agent dropped the removed turns from its own history.",
     "handoff": "A fresh session will continue from the kept conversation.",
     "leftAlone": "Ignored files left as they are: {{files}}.",
     "failed": "Couldn't rewind {{title}}.",

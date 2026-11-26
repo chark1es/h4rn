@@ -86,6 +86,7 @@
     "fellBackUnnamed": "No se pudo usar el punto de rebobinado registrado. El siguiente turno continúa con un traspaso de la conversación conservada.",
     "done": "Hilo rebobinado",
     "native": "{{harness}} eliminó los turnos quitados de su propio historial.",
+    "nativeUnnamed": "Este agente eliminó los turnos quitados de su propio historial.",
     "handoff": "Una sesión nueva continuará desde la conversación conservada.",
     "leftAlone": "Los archivos ignorados se quedan como están: {{files}}.",
     "failed": "No se pudo rebobinar {{title}}.",
@@ -324,9 +325,9 @@
     "failed": "Falló: {{error}}",
     "failedUnknown": "Falló: el turno terminó con un error.",
     "interrupted": "Detenido: el turno se interrumpió.",
-    "tokenLimit": "Detenido: el agente alcanzó su límite de tokens.",
+    "tokenLimit": "Detenido: el agente llegó a su límite de tokens.",
     "turnLimit": "Detenido: el agente alcanzó su límite de turnos.",
-    "hostOffline": "Host sin conexión: h4rn ya no puede alcanzarlo."
+    "hostOffline": "Host sin conexión: h4rn ya no puede contactar con él."
   },
   "secureStorage": {
     "requestFailed": "La solicitud a IndexedDB falló.",
