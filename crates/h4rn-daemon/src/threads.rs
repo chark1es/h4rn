@@ -733,6 +733,12 @@ struct Inner {
     /// between marking a turn active and writing its events. It is not read by
     /// the production path unless a test installs one.
     append_pause: std::sync::Mutex<Option<Arc<AppendPause>>>,
+    /// Pauses the next file-restoring rewind between reserving its workspace
+    /// and scanning for other threads in it.
+    ///
+    /// Used by an integration test that starts a turn in exactly that window.
+    /// It is not read by the production path unless a test installs one.
+    rewind_scan_pause: std::sync::Mutex<Option<Arc<RewindScanPause>>>,
     /// Per-source gates held while a native fork copies the source's session.
     ///
     /// A `LatestOnly` provider reads the source's whole saved conversation
@@ -849,6 +855,29 @@ struct Inner {
     /// must never mirror.
     #[cfg(test)]
     stop_pause: std::sync::Mutex<Option<Arc<StopPause>>>,
+}
+
+/// A test's hold on one rewind, between its workspace reservation and its
+/// overlap scan.
+///
+/// [`ThreadManager::pause_next_rewind_scan`] installs it. It is public so an
+/// integration test can start a turn in that exact window instead of timing it.
+#[doc(hidden)]
+pub struct RewindScanPause {
+    arrived: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+impl RewindScanPause {
+    /// Waits until a rewind reaches the gate.
+    pub async fn arrived(&self) {
+        self.arrived.notified().await;
+    }
+
+    /// Lets the paused rewind continue.
+    pub fn release(&self) {
+        self.release.notify_one();
+    }
 }
 
 /// A test's hold on one journal append.
@@ -4238,6 +4267,7 @@ impl ThreadManager {
             resync_retry: std::sync::Mutex::new(ResyncRetry::default()),
             clock,
             append_pause: std::sync::Mutex::new(None),
+            rewind_scan_pause: std::sync::Mutex::new(None),
             fork_copies: Mutex::new(HashMap::new()),
             fork_copies_open: AtomicUsize::new(0),
             in_flight_claims: std::sync::Mutex::new(HashSet::new()),
@@ -4436,6 +4466,25 @@ impl ThreadManager {
         *self
             .inner
             .append_pause
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Arc::clone(&gate));
+        gate
+    }
+
+    /// Pauses the next file-restoring rewind after it reserved its workspace
+    /// and before it scans for other threads there.
+    ///
+    /// Used by an integration test that starts a turn in that window. It is not
+    /// read by the production path unless a test installs one.
+    #[doc(hidden)]
+    pub fn pause_next_rewind_scan(&self) -> Arc<RewindScanPause> {
+        let gate = Arc::new(RewindScanPause {
+            arrived: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        });
+        *self
+            .inner
+            .rewind_scan_pause
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Arc::clone(&gate));
         gate
@@ -6191,7 +6240,21 @@ impl ThreadManager {
             // already active when the scan reads its record, and the rewind
             // refuses instead. Reserving only after the scan left a window in
             // which neither side saw the other.
+            //
+            // A known trade-off: a turn on an overlapping checkout that starts
+            // in the short window before the scan is refused even when the
+            // scan then refuses this rewind too.
             reservation = Some(self.inner.reserve_restore(&workspace));
+            let pause = self
+                .inner
+                .rewind_scan_pause
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .take();
+            if let Some(pause) = pause {
+                pause.arrived.notify_one();
+                pause.release.notified().await;
+            }
             let facts = self.inner.thread_facts(thread_id).await;
             let descendants = descendants_of(thread_id, &facts);
             for fact in &facts {

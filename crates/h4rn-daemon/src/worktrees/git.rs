@@ -1182,8 +1182,9 @@ pub const MAX_CHECKPOINT_IGNORED: usize = 10_000;
 /// No attribute source can convert the stored bytes: not `.gitattributes`, not
 /// `.git/info/attributes`, and not the global `core.attributesFile`. A clean
 /// filter and `core.autocrlf` never run either. `Err` names why a checkpoint
-/// cannot be complete — more ignored paths than [`MAX_CHECKPOINT_IGNORED`] —
-/// and the caller records that reason so a restore refuses with it.
+/// cannot be complete — more ignored paths than [`MAX_CHECKPOINT_IGNORED`], a
+/// file that is there but cannot be read, or a worktree git cannot list — and
+/// the caller records that reason so a restore refuses with it.
 ///
 /// Ignored files are outside the tree by design (they are build output, not
 /// work), so the checkpoint records which ignored paths were present (see
@@ -1199,7 +1200,9 @@ pub fn checkpoint_commit(workspace: &Path) -> Result<Option<Checkpoint>, String>
     let Some(repo) = toplevel(workspace) else {
         return Ok(None);
     };
-    let Ok(Some(tree)) = worktree_tree(&repo) else {
+    // A file that is there but cannot be read makes the checkpoint
+    // incomplete: recording it as absent would let a restore delete it.
+    let Some(tree) = worktree_tree(&repo)? else {
         return Ok(None);
     };
     let ignored = ignored_paths(workspace)
@@ -1219,7 +1222,9 @@ pub fn checkpoint_commit(workspace: &Path) -> Result<Option<Checkpoint>, String>
 /// Regular files are hashed in one `--stdin-paths` process; a path that
 /// protocol cannot carry (one with a newline, or starting with a quote) and
 /// every symlink target get their own. `Ok(None)` when the tree could not be
-/// written; `Err` only when git could not even list the worktree.
+/// written. `Err` when git could not list the worktree, or when a file that is
+/// still there could not be read: leaving it out would record it as absent,
+/// and a restore would then delete it.
 fn worktree_tree(repo: &Path) -> Result<Option<String>, String> {
     let listed = run_bytes_with_timeout(
         repo,
@@ -1280,7 +1285,7 @@ fn worktree_tree(repo: &Path) -> Result<Option<String>, String> {
             }
         }
     }
-    for ((path, mode), object) in files.iter().copied().zip(hash_files(repo, &files)) {
+    for ((path, mode), object) in files.iter().copied().zip(hash_files(repo, &files)?) {
         if let Some(object) = object {
             entries.push((path, mode, object));
         }
@@ -1347,12 +1352,15 @@ fn gitlink_object(
 /// One blob id per file, in order, each hashed with no conversion or filter.
 ///
 /// One `hash-object --stdin-paths` process hashes every path it can read by
-/// line. A path with a newline, or starting with a quote (which the line
-/// protocol would unquote), is hashed by itself. If the batch fails — a file
-/// disappeared halfway, say — every path falls back to its own process, and a
-/// path that still fails is left out, as one that vanished would be.
-fn hash_files(repo: &Path, files: &[(&str, u32)]) -> Vec<Option<String>> {
-    let by_line = |path: &str| !path.contains('\n') && !path.starts_with('"');
+/// line. A path the line protocol would change is hashed by itself: one with a
+/// newline, one starting with a quote (which it would unquote), and one with a
+/// carriage return (git's line reader drops a trailing `\r`, so `a.txt\r`
+/// would be hashed as `a.txt`). If the batch fails, every path falls back to
+/// its own process. A path that is gone by then is left out, as `git add -A`
+/// would record it removed; one that is still there but cannot be read is an
+/// `Err` naming it, so the checkpoint is incomplete instead of wrong.
+fn hash_files(repo: &Path, files: &[(&str, u32)]) -> Result<Vec<Option<String>>, String> {
+    let by_line = |path: &str| !path.contains(['\n', '\r']) && !path.starts_with('"');
     let mut input = Vec::new();
     for (path, _) in files {
         if by_line(path) {
@@ -1375,24 +1383,56 @@ fn hash_files(repo: &Path, files: &[(&str, u32)]) -> Vec<Option<String>> {
     let mut batch = batch
         .filter(|objects| objects.len() == expected && objects.iter().all(|id| is_object_id(id)))
         .map(Vec::into_iter);
+    if batch.is_none() {
+        // An unreadable file is the usual reason the batch failed. Opening
+        // every file first names it without one `hash-object` per file.
+        for (path, _) in files {
+            still_readable(repo, path)?;
+        }
+    }
     files
         .iter()
         .map(|(path, _)| match batch.as_mut() {
-            Some(objects) if by_line(path) => objects.next(),
+            Some(objects) if by_line(path) => Ok(objects.next()),
             _ => hash_one_file(repo, path),
         })
         .collect()
 }
 
-/// One file's blob id, hashed by its own `hash-object` process.
-fn hash_one_file(repo: &Path, path: &str) -> Option<String> {
-    run_with_timeout(
+/// One file's blob id, hashed by its own `hash-object` process: `Ok(None)` when
+/// the file is gone, `Err` when it is there but could not be hashed.
+fn hash_one_file(repo: &Path, path: &str) -> Result<Option<String>, String> {
+    if !still_readable(repo, path)? {
+        return Ok(None);
+    }
+    let error = match run_with_timeout(
         repo,
         ["hash-object", "-w", "--no-filters", "--", path],
         OBSERVATION_GIT_TIMEOUT,
-    )
-    .ok()
-    .filter(|object| is_object_id(object))
+    ) {
+        Ok(object) if is_object_id(&object) => return Ok(Some(object)),
+        Ok(object) => format!("git printed {object:?} instead of an object id"),
+        Err(error) => error,
+    };
+    if still_readable(repo, path)? {
+        Err(format!(
+            "{path} could not be read for the checkpoint: {error}"
+        ))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Whether a file the checkpoint lists can still be opened: `Ok(false)` when it
+/// is gone, `Err` naming it when it is there but cannot be read.
+fn still_readable(repo: &Path, path: &str) -> Result<bool, String> {
+    match std::fs::File::open(repo.join(path)) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(format!(
+            "{path} could not be read for the checkpoint: {error}"
+        )),
+    }
 }
 
 /// A blob written from `bytes` with no conversion or filter.

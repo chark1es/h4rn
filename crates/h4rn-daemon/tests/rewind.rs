@@ -2053,6 +2053,75 @@ async fn a_live_subagent_session_gets_no_prompt_while_a_restore_commits() {
     assert!(!worktree.join("from-parent.txt").exists());
 }
 
+/// The workspace is reserved before the overlap scan runs. A turn that starts
+/// on an overlapping checkout between the two — here an idle subagent's, whose
+/// session is already live — is refused, so the scan's "idle" reading of it
+/// stays true for the whole restore.
+#[tokio::test]
+async fn a_turn_claimed_between_the_reservation_and_the_scan_is_refused() {
+    let (_base, _repo, worktree) = git_worktree();
+    let fixture = make_fixture(FakeHarness::new().with_native_rewind()).await;
+    let mut events = fixture.manager.subscribe();
+    let parent = fixture
+        .manager
+        .create_thread(thread_request(
+            &fixture.host,
+            &worktree,
+            "parent [[write:from-parent.txt]]from the parent",
+        ))
+        .await
+        .expect("create parent");
+    let mut first = events.resubscribe();
+    wait_turn(&mut first).await;
+    drain(&mut events);
+
+    let mut child_request = thread_request(&fixture.host, &worktree, "child");
+    child_request.parent_thread_id = Some(parent.thread_id.clone());
+    let child = fixture
+        .manager
+        .create_thread(child_request)
+        .await
+        .expect("create child");
+    let (_, _) = next_user_item(&mut events).await;
+    wait_turn(&mut events).await;
+    drain(&mut events);
+
+    let gate = fixture.manager.pause_next_rewind_scan();
+    let manager = Arc::clone(&fixture.manager);
+    let thread_id = parent.thread_id.clone();
+    let item = format!(
+        "item_user_{}",
+        parent.turn_id.as_str().trim_start_matches("turn_")
+    );
+    let rewind = tokio::spawn(async move { manager.rewind_thread(&thread_id, &item, true).await });
+    gate.arrived().await;
+
+    // The rewind has reserved the tree and not yet read the child's record.
+    fixture
+        .manager
+        .send_message(
+            &child.thread_id,
+            "between [[write:between.txt]]from the child".into(),
+            Vec::new(),
+        )
+        .await
+        .expect("the send is accepted");
+    let status = wait_turn(&mut events).await;
+    assert_eq!(status, TurnStatus::Failed, "the child's turn is refused");
+    assert!(
+        !worktree.join("between.txt").exists(),
+        "the child's prompt never reached its session once the tree was reserved"
+    );
+
+    gate.release();
+    let prompt = rewind
+        .await
+        .expect("the rewind task finished")
+        .expect("the rewind committed");
+    assert!(prompt.files_restored);
+    assert!(!worktree.join("from-parent.txt").exists());
+}
+
 #[tokio::test]
 async fn a_finished_subagent_with_a_background_task_blocks_the_restore() {
     let (_base, _repo, worktree) = git_worktree();

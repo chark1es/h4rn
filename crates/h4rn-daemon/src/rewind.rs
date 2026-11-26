@@ -2927,6 +2927,99 @@ mod tests {
     }
 
     #[test]
+    fn a_path_ending_in_a_carriage_return_gets_its_own_bytes_back() {
+        // Git's line reader drops a trailing `\r`, so in a `--stdin-paths`
+        // batch `a.txt\r` would be hashed as `a.txt`.
+        let fixture = Fixture::new(&[("a.txt", "plain before"), ("a.txt\r", "cr before")]);
+        fixture.checkpoint("turn_1");
+        write(&fixture.repo, "a.txt", "plain after");
+        write(&fixture.repo, "a.txt\r", "cr after");
+
+        let prepared = fixture.prepare(&["turn_1"]).expect("prepare");
+        let outcome = run_restore(&prepared);
+        assert_eq!(read(&fixture.repo, "a.txt"), "plain before");
+        assert_eq!(
+            read(&fixture.repo, "a.txt\r"),
+            "cr before",
+            "the path with a carriage return gets its own bytes, not a.txt's"
+        );
+        assert_eq!(outcome.files, 2);
+    }
+
+    #[test]
+    fn a_change_to_only_the_carriage_return_path_is_undone() {
+        let fixture = Fixture::new(&[("a.txt", "plain before"), ("a.txt\r", "cr before")]);
+        fixture.checkpoint("turn_1");
+        write(&fixture.repo, "a.txt\r", "cr after");
+
+        let prepared = fixture.prepare(&["turn_1"]).expect("prepare");
+        let outcome = run_restore(&prepared);
+        assert_eq!(
+            read(&fixture.repo, "a.txt\r"),
+            "cr before",
+            "a change to the carriage-return path alone is seen and undone"
+        );
+        assert_eq!(read(&fixture.repo, "a.txt"), "plain before");
+        assert_eq!(outcome.files, 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_file_makes_the_checkpoint_incomplete_and_is_never_deleted() {
+        use std::os::unix::fs::PermissionsExt;
+        let fixture = Fixture::new(&[("README.md", "hi\n")]);
+        let key = fixture.repo.join("private.key");
+        fs::write(&key, "secret\n").unwrap();
+        fs::set_permissions(&key, fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::File::open(&key).is_ok() {
+            fs::set_permissions(&key, fs::Permissions::from_mode(0o644)).unwrap();
+            eprintln!(
+                "skipped: this user can read a mode-000 file (running as root?), \
+                 so an unreadable file cannot be set up"
+            );
+            return;
+        }
+
+        // What a turn's start does with the capture (see threads.rs).
+        let turn = TurnId::new("turn_1");
+        match crate::worktrees::git::checkpoint_commit(&fixture.repo) {
+            Ok(Some(checkpoint)) => fixture
+                .store
+                .record_checkpoint(
+                    &fixture.repo,
+                    &fixture.thread,
+                    &turn,
+                    &checkpoint.tree,
+                    &checkpoint.ignored,
+                )
+                .unwrap(),
+            Ok(None) => {}
+            Err(reason) => {
+                assert!(reason.contains("private.key"), "{reason}");
+                fixture
+                    .store
+                    .record_checkpoint_incomplete(&fixture.repo, &fixture.thread, &turn, &reason)
+                    .unwrap();
+            }
+        }
+        // The turn makes the key readable and changes nothing else.
+        fs::set_permissions(&key, fs::Permissions::from_mode(0o644)).unwrap();
+
+        let prepared = fixture.prepare(&["turn_1"]);
+        if let Ok(prepared) = &prepared {
+            run_restore(prepared);
+        }
+        assert_eq!(
+            read(&fixture.repo, "private.key"),
+            "secret\n",
+            "a file the checkpoint could not read is never deleted"
+        );
+        let refused = prepared.err().expect("the restore refuses");
+        assert!(refused.contains("no complete file checkpoint"), "{refused}");
+        assert!(refused.contains("private.key"), "{refused}");
+    }
+
+    #[test]
     fn an_untracked_nested_repository_is_left_out_of_the_plan() {
         let fixture = Fixture::new(&[("README.md", "hi\n")]);
         // The nested repository is part of the checkpoint, so only the
