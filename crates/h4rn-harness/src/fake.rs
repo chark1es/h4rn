@@ -1291,8 +1291,8 @@ impl FakeHarness {
     /// Says whether one model offers a fast tier, the way Codex's catalogue
     /// answers per model.
     ///
-    /// A model the map does not name falls back to what the harness offers as
-    /// a whole, so a test only names the models that differ.
+    /// A model the map does not name has an unknown tier (`None`), exactly as
+    /// the real Codex adapter reports a model its catalogue does not list.
     pub fn with_model_fast(mut self, model: impl Into<String>, fast: bool) -> Self {
         self.model_fast.insert(model.into(), fast);
         self

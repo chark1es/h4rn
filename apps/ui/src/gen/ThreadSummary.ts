@@ -103,9 +103,11 @@ reasoning_effort?: string,
  */
 reasoning_efforts: Array<string>, 
 /**
- * Model ids the live session advertised.
+ * Model ids the last session advertised.
  *
- * Empty until a session names a catalogue. Codex publishes its
+ * Kept with the thread, including across a daemon restart, so a thread
+ * with no live session still offers its last catalogue. Empty until a
+ * session names one. Codex publishes its
  * `model/list` at session start, and the picker offers exactly those ids
  * (plus the current one) instead of the adapter's static guess. An older
  * daemon's thread has none, so the picker falls back to the static list.
