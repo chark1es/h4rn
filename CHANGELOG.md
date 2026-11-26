@@ -48,6 +48,18 @@ All notable changes to h4rn are recorded here. The format follows
   follow the Language choice; agent output, tool output, file names and diffs
   stay as written. Token counts, costs and durations use the language's own
   formats, and palette rows that open a dialog now end in "…".
+- **Phone pairing and the phone tab bar in Chinese, Spanish and Japanese.**
+  The pairing screen, its code check, the scopes it shows, pairing errors and
+  the "Paired with" toast follow the Language choice, and the tab bar uses the
+  sidebar's name for each place. Pairing codes, host names and URLs stay as
+  they are. Settings → Devices no longer shows a raw key such as
+  `devices.scopes.approve.sub` under a scope that has no second line. The
+  hosts pane says when an offline host was last seen as a whole phrase in
+  each language ("last seen 3 hours ago", "最終確認：3 時間前"), the code check
+  says plainly what a match and a mismatch mean, and the errors for a host
+  with no published key or a shell that cannot open a sign-in window are
+  translated. Japanese and Chinese no longer put a space after 。 between
+  two sentences in Settings → Worktrees.
 - **Android Live Updates show a running agent.** A separate switch under
   Settings → Notifications → Phone alerts shows each running thread as an
   ongoing notification with its project and whether it is working, waiting for

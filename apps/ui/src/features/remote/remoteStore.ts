@@ -152,7 +152,7 @@ function tauriInvoke<T>(command: string, args?: Record<string, unknown>): Promis
       };
     }
   ).__TAURI_INTERNALS__;
-  if (!internals) throw new Error("This shell cannot open a sign-in window.");
+  if (!internals) throw new Error(i18n.t("settings:connect.errors.noSignInWindow"));
   return internals.invoke<T>(command, args);
 }
 
@@ -794,7 +794,9 @@ function daemonKeyFor(machine: MachineSummary, devices: ConnectDevice[]): string
   );
   const key = daemon?.noise_static_public_key;
   if (!key) {
-    throw new Error(`${machine.name} has not published a Noise key yet. Re-run h4rnd login.`);
+    throw new Error(
+      i18n.t("sidebar:hosts.errors.noNoiseKey", { name: machine.name, command: "h4rnd login" }),
+    );
   }
   return base64UrlToHex(key);
 }
@@ -912,11 +914,11 @@ export async function pairMachine(raw: string): Promise<boolean> {
   pendingPairingRaw = raw;
   const payload = parseConnectPairing(raw);
   if (!payload) {
-    patch({ error: "That QR code is not an h4rn pairing link." });
+    patch({ error: i18n.t("pairing:errors.notPairingLink") });
     return false;
   }
   if (payload.expiresAt > 0 && payload.expiresAt < Date.now()) {
-    patch({ error: "That pairing code has expired. Generate a new one on the host." });
+    patch({ error: i18n.t("pairing:errors.expired") });
     return false;
   }
   if (mockFixtures) {
@@ -946,13 +948,13 @@ export async function pairMachine(raw: string): Promise<boolean> {
     patch({
       connectUrl: payload.connectUrl,
       phase: "signed_out",
-      error: "Sign in to h4rn-connect first, then scan the pairing code again.",
+      error: i18n.t("pairing:errors.signInToScan"),
     });
     return false;
   }
   if (payload.connectUrl.replace(/\/+$/, "") !== state.connectUrl.replace(/\/+$/, "")) {
     patch({
-      error: `This code belongs to ${payload.connectUrl}. Sign out and sign in there first.`,
+      error: i18n.t("pairing:errors.otherConnect", { url: payload.connectUrl }),
     });
     return false;
   }
@@ -987,7 +989,7 @@ export async function pairMachine(raw: string): Promise<boolean> {
     patch({ busy: null, error: describe(error) });
     pushToast({
       variant: "error",
-      title: "Could not claim that pairing.",
+      title: i18n.t("pairing:errors.claimFailed"),
       description: describe(error),
     });
     return false;
@@ -1065,7 +1067,7 @@ export async function pairByCode(code: string): Promise<boolean> {
   }
   const client = await loadConnectClient();
   if (!client) {
-    patch({ error: "Sign in to h4rn-connect first, then enter the code again." });
+    patch({ error: i18n.t("pairing:errors.signInToType") });
     return false;
   }
   patch({ busy: { kind: "claimingPairing" }, error: null });
@@ -1112,7 +1114,10 @@ export async function confirmPairingSas(): Promise<boolean> {
       activeMachineId: pending.active.machineId,
       sasConfirm: null,
     });
-    pushToast({ variant: "success", title: `Paired with ${pending.machineName}.` });
+    pushToast({
+      variant: "success",
+      title: i18n.t("pairing:toasts.paired", { name: pending.machineName }),
+    });
     return true;
   }
   writeActiveRemote(pending.active);
@@ -1127,13 +1132,16 @@ export async function confirmPairingSas(): Promise<boolean> {
   if (!approved) {
     patch({
       sasConfirm: { ...pending, waiting: false },
-      error: `${pending.machineName} has not approved this device yet. Open Settings → Devices on ${pending.machineName}, confirm the same code, then try again.`,
+      error: i18n.t("pairing:errors.notApproved", { name: pending.machineName }),
     });
     return false;
   }
   patch({ sasConfirm: null });
   await refresh();
-  pushToast({ variant: "success", title: `Paired with ${pending.machineName}.` });
+  pushToast({
+    variant: "success",
+    title: i18n.t("pairing:toasts.paired", { name: pending.machineName }),
+  });
   return true;
 }
 
@@ -1172,8 +1180,7 @@ export async function rejectPairingSas(): Promise<void> {
   }
   await signOut();
   patch({
-    error:
-      "The codes did not match, so this device was revoked. Pair again from a network you trust.",
+    error: i18n.t("pairing:errors.codesDiffer"),
   });
 }
 

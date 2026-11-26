@@ -566,7 +566,7 @@
       "generate": "Generar un código de vinculación"
     },
     "toasts": {
-      "pairingFailed": "No se pudo crear el emparejamiento.",
+      "pairingFailed": "No se pudo crear la vinculación.",
       "renameFailed": "No se pudo cambiar el nombre del dispositivo.",
       "revoked": "Dispositivo revocado. Su próxima solicitud fallará.",
       "revokeFailed": "No se pudo revocar el dispositivo."
@@ -622,7 +622,8 @@
     "errors": {
       "callbackState": "A la respuesta del inicio de sesión le falta su parámetro state.",
       "denied": "Se denegó el inicio de sesión.",
-      "expired": "Ese código ha caducado."
+      "expired": "Ese código ha caducado.",
+      "noSignInWindow": "Esta aplicación no puede abrir una ventana de inicio de sesión."
     }
   },
   "localMachine": {

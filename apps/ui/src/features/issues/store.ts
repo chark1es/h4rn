@@ -68,6 +68,7 @@ export class IssueApi {
   ): Promise<Extract<ResponseBody, { type: K }>> {
     const response = await this.request(request);
     if (response.type !== type) {
+      // i18n-ignore-next-line: a reply of the wrong type is a daemon bug, not a state to word
       throw new Error(`expected ${type}, got ${response.type}`);
     }
     return response as Extract<ResponseBody, { type: K }>;

@@ -96,6 +96,9 @@
     "toasts": {
       "machineGone": "Esa máquina ya no está disponible.",
       "selectFailed": "No se pudo seleccionar esa máquina."
+    },
+    "errors": {
+      "noNoiseKey": "{{name}} aún no ha publicado su clave de conexión. Vuelve a ejecutar {{command}} en esa máquina."
     }
   },
   "snoozed": {
@@ -180,5 +183,9 @@
       "reading": "Leyendo",
       "editing": "Editando"
     }
+  },
+  "phoneNav": {
+    "label": "Principal",
+    "pulls": "PRs"
   }
 }

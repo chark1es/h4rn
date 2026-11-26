@@ -1,0 +1,75 @@
+{
+  "title": "Pair a host",
+  "pairWith": "Pair with {{name}}",
+  "viaRelay": "{{address}} · via relay",
+  "signedInAs": "Signed in to h4rn-connect as {{account}}",
+  "signInFirst": "Sign in to h4rn-connect before pairing",
+  "thisPhoneCan": "This phone can",
+  "scopes": {
+    "terminalOn": "Type into shells on {{host}}",
+    "included": "Included",
+    "notIncluded": "Not included",
+    "setOn": "Set on {{host}}."
+  },
+  "alsoIncluded": "Also included",
+  "everyHost": "Every host on {{host}}",
+  "wslIncluded": "WSL distros included",
+  "empty": {
+    "title": "Scan a pairing code",
+    "body": "Open the code on the host from Settings → Devices, then scan it with this device. The link brings you back here to confirm.",
+    "typeCode": "Or type the code under the QR",
+    "codeLabel": "Pairing code"
+  },
+  "credentials": "Credentials stay on {{host}}. You can revoke this phone from any other device.",
+  "credentialsUnnamed": "Credentials stay on the host. You can revoke this phone from any other device.",
+  "foot": {
+    "linkExpired": "Link expired",
+    "expiresIn": "Link expires in {{time}}",
+    "codesOnce_one": "Codes work once and expire in {{count, number}} minute",
+    "codesOnce_other": "Codes work once and expire in {{count, number}} minutes"
+  },
+  "actions": {
+    "openThreads": "Open threads",
+    "pairing": "Pairing…",
+    "pairPhone": "Pair this phone",
+    "pairCode": "Pair with code"
+  },
+  "sas": {
+    "waitingLabel": "Waiting for {{name}} to approve this phone",
+    "checkLabel": "Check the code for {{name}}",
+    "waitingTitle": "Waiting for approval",
+    "checkTitle": "Check the code",
+    "mustApprove": "{{name}} must approve this phone before it can connect.",
+    "scanned": "Scanned code. Compare it before you trust the host.",
+    "typed": "Paired through a typed code. Compare it before you trust the host.",
+    "waitingNote": "On {{name}}, open Settings → Devices and confirm the same code. This screen updates when {{name}} approves this phone.",
+    "compareNote": "{{name}} shows this code under Settings → Devices. If it reads the same, no third party can read this connection. If it is different, someone between you and the host has replaced the key.",
+    "waitingFor": "Waiting for {{name}}",
+    "approvalRequired": "Host approval is required: after you confirm here, approve the same code on {{name}}.",
+    "differ": "They differ",
+    "match": "They match",
+    "waitingHost": "Waiting for host…"
+  },
+  "errors": {
+    "notPairingLink": "That QR code is not an h4rn pairing link.",
+    "expired": "That pairing code has expired. Generate a new one on the host.",
+    "signInToScan": "Sign in to h4rn-connect first, then scan the pairing code again.",
+    "signInToType": "Sign in to h4rn-connect first, then enter the code again.",
+    "otherConnect": "This code belongs to {{url}}. Sign out and sign in there first.",
+    "claimFailed": "Could not complete that pairing.",
+    "notApproved": "{{name}} has not approved this device yet. Open Settings → Devices on {{name}}, confirm the same code, then try again.",
+    "codesDiffer": "The codes did not match, so this device was revoked. Pair again from a network you trust."
+  },
+  "toasts": {
+    "paired": "Paired with {{name}}."
+  },
+  "hostsPane": {
+    "pairDevice": "Pair a device",
+    "pairingLater": "Pairing arrives in Phase 2",
+    "loading": "Loading hosts",
+    "emptyTitle": "No hosts yet.",
+    "emptyBody": "A host is a machine running the h4rn daemon. Pair this device or add a host on your tailnet to give agents somewhere to run.",
+    "lastSeen": "last seen {{when}}",
+    "note": "Presence is a dot plus a word. A WSL distribution is its own host, so pairing the Windows host does not grant the distribution."
+  }
+}

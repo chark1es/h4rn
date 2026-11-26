@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { TrackedWorktree } from "@/gen";
 import type { H4rnClient } from "@/lib/client/client";
@@ -20,6 +20,8 @@ vi.mock("@/lib/store/appStore", () => ({
   useApp: () => undefined,
 }));
 
+import { setLocalePreference } from "@/lib/i18n";
+
 import {
   captureClear,
   clearAllDescription,
@@ -30,6 +32,7 @@ import {
   forceRemoveDescription,
   getWorktreeState,
   inUseWorktrees,
+  joinSentences,
   loadWorktreeSettings,
   loadWorktrees,
   removeDescription,
@@ -515,6 +518,25 @@ describe("forceRemoveDescription", () => {
     );
     expect(text).toContain("This can't be undone.");
     expect(forceRemoveDescription(" Note.").endsWith("undone. Note.")).toBe(true);
+  });
+});
+
+describe("joinSentences", () => {
+  afterEach(() => setLocalePreference("system"));
+
+  it("puts a space between Latin sentences only", async () => {
+    expect(joinSentences(["One.", "Two."])).toBe("One. Two.");
+    await setLocalePreference("es");
+    expect(joinSentences(["Uno.", "Dos."])).toBe("Uno. Dos.");
+    for (const locale of ["ja", "zh-CN"] as const) {
+      await setLocalePreference(locale);
+      expect(joinSentences(["一つ。", "二つ。"]), locale).toBe("一つ。二つ。");
+    }
+  });
+
+  it("joins a Japanese forced-removal note with no space after 。", async () => {
+    await setLocalePreference("ja");
+    expect(forceRemoveDescription("メモ。")).not.toMatch(/。 /);
   });
 });
 

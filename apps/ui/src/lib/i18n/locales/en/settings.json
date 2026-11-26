@@ -617,7 +617,8 @@
     "errors": {
       "callbackState": "The sign-in callback is missing its state.",
       "denied": "Sign-in was denied.",
-      "expired": "That code expired."
+      "expired": "That code expired.",
+      "noSignInWindow": "This app cannot open a sign-in window."
     }
   },
   "localMachine": {
