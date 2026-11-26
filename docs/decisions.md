@@ -2562,6 +2562,10 @@ socket read loop only records the transition and enqueues it, so a slow FCM or
 APNs response never stops Connect reading a machine's socket. A worker exits,
 and its entry is removed, as soon as its queue is empty.
 
+Each group window's timer carries that window's number and only sends a group
+that still has it, so the timer of a group a `working` frame already took cannot
+send the account's next group early and split it.
+
 The Android app shows a running turn, a waiting approval or a question as an
 ongoing notification: `setOngoing(true)`, the project and state words, and
 Android 16's promoted ongoing notification with an indeterminate

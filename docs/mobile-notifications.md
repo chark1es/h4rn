@@ -93,7 +93,10 @@ completion that is more than two minutes old. Transitions that arrive together
 are grouped: two or more agents waiting for a person become one **N agents need
 attention** alert, and two or more finishing become one **N agents finished**
 alert. The count is of threads, not raw transitions, so one agent that raises the
-same hand twice inside the group window is still one agent.
+same hand twice inside the group window is still one agent. When a turn start
+sends a collecting group early (see below), the next group gets its own full
+window: the earlier group's timer never sends it early, so a burst of finishes
+that follows is not split into one alert per thread.
 
 ## While an agent is running (Android Live Updates)
 
