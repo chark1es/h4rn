@@ -2680,12 +2680,10 @@ async fn a_finish_after_a_turn_start_never_overtakes_it_behind_a_slow_provider()
 async fn a_queued_flush_never_carries_a_finish_seen_after_a_turn_start() {
     use h4rn_protocol::{AgentAlertState, ThreadId};
 
-    let (server, _state, user, service) = slow_android_alerts(
-        Duration::from_millis(1500),
-        Duration::from_millis(50),
-        false,
-    )
-    .await;
+    // Every window is closed by hand, so nothing but the explicit flushes
+    // below can queue a group.
+    let (server, _state, user, service) =
+        slow_android_alerts(Duration::from_millis(1500), Duration::from_secs(60), true).await;
     let first = ThreadId::new_uuid_v7();
     let second = ThreadId::new_uuid_v7();
     let busy = ThreadId::new_uuid_v7();
@@ -2697,18 +2695,31 @@ async fn a_queued_flush_never_carries_a_finish_seen_after_a_turn_start() {
             alert_activity(&first, AgentAlertState::Completed, Utc::now(), "a-done"),
         )
         .await;
+    let first_flush = tokio::spawn({
+        let service = Arc::clone(&service);
+        async move { service.flush(user).await }
+    });
     tokio::time::sleep(Duration::from_millis(300)).await;
-    // Another finish waits out its window and queues behind that send.
+    assert!(
+        service.delivery_in_flight(user),
+        "the first finish should still be on its way to FCM"
+    );
+
+    // Another finish is queued behind that send.
     service
         .ingest(
             user,
             alert_activity(&second, AgentAlertState::Completed, Utc::now(), "c-done"),
         )
         .await;
+    let second_flush = tokio::spawn({
+        let service = Arc::clone(&service);
+        async move { service.flush(user).await }
+    });
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(
-        service.delivery_in_flight(user),
-        "the first finish should still be on its way to FCM"
+        !second_flush.is_finished(),
+        "the second flush should still be queued behind the first send"
     );
 
     // A third thread starts a turn and finishes it while both are queued. The
@@ -2726,6 +2737,8 @@ async fn a_queued_flush_never_carries_a_finish_seen_after_a_turn_start() {
         )
         .await;
     service.flush(user).await;
+    first_flush.await.expect("the first flush");
+    second_flush.await.expect("the second flush");
 
     assert_eq!(
         fcm_sends(&server, &[(&first, "A"), (&second, "C"), (&busy, "B")]).await,
@@ -2736,6 +2749,67 @@ async fn a_queued_flush_never_carries_a_finish_seen_after_a_turn_start() {
             "B:completed".to_string(),
         ],
         "a finish Connect saw after its turn start was sent ahead of it"
+    );
+}
+
+/// A turn start takes its thread's collecting group, but that group's window
+/// timer keeps running. It must not send the account's next group early: that
+/// would split one burst of finishes into one alert per thread.
+#[tokio::test]
+#[ignore = "requires H4RN_TEST_DATABASE_URL (use ./scripts/test-connect.sh)"]
+async fn a_taken_groups_timer_never_splits_the_next_group() {
+    use h4rn_protocol::{AgentAlertState, ThreadId};
+
+    let (server, _state, user, service) =
+        slow_android_alerts(Duration::ZERO, Duration::from_secs(1), false).await;
+    let busy = ThreadId::new_uuid_v7();
+    let third = ThreadId::new_uuid_v7();
+    let fourth = ThreadId::new_uuid_v7();
+    let start = tokio::time::Instant::now();
+
+    // B finishes, starting a 1 s window, then starts its next turn, which
+    // takes that group out early.
+    service
+        .ingest(
+            user,
+            alert_activity(&busy, AgentAlertState::Completed, Utc::now(), "b-done"),
+        )
+        .await;
+    tokio::time::sleep_until(start + Duration::from_millis(200)).await;
+    service
+        .ingest(
+            user,
+            alert_activity(&busy, AgentAlertState::Working, Utc::now(), "b-start"),
+        )
+        .await;
+    // C and D finish half a second apart, inside one window that starts with
+    // C; B's old timer fires between them.
+    tokio::time::sleep_until(start + Duration::from_millis(600)).await;
+    service
+        .ingest(
+            user,
+            alert_activity(&third, AgentAlertState::Completed, Utc::now(), "c-done"),
+        )
+        .await;
+    tokio::time::sleep_until(start + Duration::from_millis(1100)).await;
+    service
+        .ingest(
+            user,
+            alert_activity(&fourth, AgentAlertState::Completed, Utc::now(), "d-done"),
+        )
+        .await;
+    // Past every window either version could have started, then drain.
+    tokio::time::sleep_until(start + Duration::from_millis(2600)).await;
+    service.flush(user).await;
+
+    assert_eq!(
+        fcm_sends(&server, &[(&busy, "B"), (&third, "C"), (&fourth, "D")]).await,
+        vec![
+            "B:completed".to_string(),
+            "B:working".to_string(),
+            "group:completed".to_string(),
+        ],
+        "a taken group's timer split the next burst"
     );
 }
 
