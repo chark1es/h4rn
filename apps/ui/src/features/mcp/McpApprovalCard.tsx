@@ -9,8 +9,10 @@
 
 import { ShieldCheckIcon } from "lucide-react";
 import { useState } from "react";
+import { Trans, useTranslation } from "react-i18next";
 
 import { pendingMcpApprovals, respondMcpApproval, useMcp } from "@/features/mcp/store";
+import { formatRelativeTime } from "@/lib/i18n";
 import { useApp } from "@/lib/store/appStore";
 
 export function McpApprovalCard() {
@@ -18,6 +20,7 @@ export function McpApprovalCard() {
   const hosts = useApp((state) => state.hosts);
   const connection = useApp((state) => state.connection.status);
   const [sending, setSending] = useState(false);
+  const { t } = useTranslation(["library", "common"]);
 
   const pending = pendingMcpApprovals(approvals);
   const first = pending[0];
@@ -26,7 +29,9 @@ export function McpApprovalCard() {
   const machineName = hosts[first.machine]?.name ?? first.machine;
   const more = pending.length - 1;
   const blocked = connection !== "online" || sending;
-  const expiresIn = Math.max(0, Math.ceil((Date.parse(first.expires_at) - Date.now()) / 60_000));
+  const now = Date.now();
+  const expiresAt = Date.parse(first.expires_at);
+  const expiring = !(expiresAt - now > 0);
 
   const answer = (decision: "approve" | "deny") => {
     if (blocked) return;
@@ -35,29 +40,33 @@ export function McpApprovalCard() {
   };
 
   return (
-    <section className="q-ask" aria-label="Shared tool approval">
+    <section className="q-ask" aria-label={t("mcp.approval.label")}>
       <div className="q-ask-h">
         <ShieldCheckIcon className="q-icon" strokeWidth={1.5} aria-hidden />
         <span className="t">
-          {machineName} wants to run{" "}
-          <span className="q-mono">
-            {first.server}__{first.tool}
-          </span>
+          <Trans
+            t={t}
+            i18nKey="mcp.approval.wantsToRun"
+            values={{ machine: machineName, tool: `${first.server}__${first.tool}` }}
+            components={{ tool: <span className="q-mono" /> }}
+          />
         </span>
         <span className="q-faint" style={{ fontSize: 12 }}>
-          {more > 0 ? `+${more} more` : "Needs you"}
+          {more > 0 ? t("mcp.approval.more", { count: more }) : t("mcp.approval.needsYou")}
         </span>
       </div>
       <div className="q-ask-sub">
         <span>
-          Shared MCP server · {expiresIn > 0 ? `expires in ${expiresIn} min` : "expiring now"}
+          {expiring
+            ? t("mcp.approval.expiring")
+            : t("mcp.approval.expires", { when: formatRelativeTime(expiresAt, now) })}
         </span>
       </div>
-      <div className="q-cmd">{first.arguments_preview.trim() || "No arguments"}</div>
+      <div className="q-cmd">{first.arguments_preview.trim() || t("mcp.approval.noArgs")}</div>
       <div className="q-ask-f">
         {blocked ? (
           <span className="q-faint" style={{ fontSize: 12 }}>
-            Reconnect to answer. Nothing runs until you approve.
+            {t("mcp.approval.reconnect")}
           </span>
         ) : null}
         <span className="grow" />
@@ -67,7 +76,7 @@ export function McpApprovalCard() {
           disabled={blocked}
           onClick={() => answer("deny")}
         >
-          Deny
+          {t("mcp.approval.deny")}
         </button>
         <button
           type="button"
@@ -76,7 +85,7 @@ export function McpApprovalCard() {
           disabled={blocked}
           onClick={() => answer("approve")}
         >
-          {sending ? "Answering…" : "Approve once"}
+          {sending ? t("mcp.approval.answering") : t("mcp.approval.approveOnce")}
         </button>
       </div>
     </section>

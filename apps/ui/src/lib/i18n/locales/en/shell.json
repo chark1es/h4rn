@@ -95,7 +95,6 @@
     "failed": "Couldn't fork that turn."
   },
   "mcp": {
-    "listServers": "list servers",
     "saveFailed": "Couldn't save {{name}}.",
     "nothingChanged": "Nothing changed on this machine.",
     "removeFailed": "Couldn't remove {{name}}.",
@@ -122,7 +121,6 @@
     "callBlocked": "The call stays blocked."
   },
   "skills": {
-    "listSkills": "list skills",
     "addFailed": "Couldn't add that skill.",
     "checkSkillFile": "Check SKILL.md exists and the path is readable.",
     "updateFailed": "Couldn't update the skill.",

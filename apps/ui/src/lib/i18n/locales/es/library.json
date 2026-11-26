@@ -1,0 +1,231 @@
+{
+  "errors": {
+    "withAction": "{{message}} ({{action}})",
+    "noAnswer": "El daemon no respondió.",
+    "actions": {
+      "listServers": "listar servidores",
+      "listSkills": "listar skills"
+    }
+  },
+  "mcp": {
+    "summary_one": "{{count, number}} servidor · entregado por harness y máquina",
+    "summary_many": "{{count, number}} servidores · entregados por harness y máquina",
+    "summary_other": "{{count, number}} servidores · entregados por harness y máquina",
+    "import": "Importar",
+    "empty": {
+      "title": "Aún no hay servidores MCP",
+      "body": "Añade un servidor una vez y h4rn lo entrega a los harnesses y máquinas que elijas. Los secretos se quedan en la máquina que lo ejecuta."
+    },
+    "detail": "Detalle del servidor MCP",
+    "loading": "Cargando servidor",
+    "allServers": "Todos los servidores",
+    "tools_one": "{{count, number}} herramienta",
+    "tools_many": "{{count, number}} herramientas",
+    "tools_other": "{{count, number}} herramientas",
+    "checked": {
+      "never": "aún sin comprobar",
+      "justNow": "comprobado ahora mismo",
+      "ago": "comprobado {{when}}"
+    },
+    "test": "Probar",
+    "actions": "Acciones del servidor",
+    "menu": {
+      "tools": "Listar herramientas y probar",
+      "edit": "Editar configuración",
+      "share": "Compartir…",
+      "remove": "Quitar servidor…"
+    },
+    "credential": {
+      "title": "Credencial",
+      "hint": "Nunca sale del host",
+      "storedOn": "Guardada en {{host}}",
+      "thisHost": "este host",
+      "env_one": "{{count, number}} variable de entorno · los valores son de solo escritura",
+      "env_many": "{{count, number}} variables de entorno · los valores son de solo escritura",
+      "env_other": "{{count, number}} variables de entorno · los valores son de solo escritura",
+      "headers_one": "{{count, number}} cabecera · los valores son de solo escritura",
+      "headers_many": "{{count, number}} cabeceras · los valores son de solo escritura",
+      "headers_other": "{{count, number}} cabeceras · los valores son de solo escritura",
+      "noEnv": "Este servidor no tiene variables de entorno guardadas.",
+      "noHeaders": "Este servidor no tiene cabeceras guardadas.",
+      "sharedWith": "Compartido con {{hosts}}"
+    },
+    "where": {
+      "title": "Dónde se ejecuta",
+      "aside": "Cada destino recibe el servidor a su manera",
+      "host": "Host",
+      "harness": "Harness",
+      "deliveredAs": "Entregado como",
+      "status": "Estado",
+      "ready": "Listo",
+      "nameConflict": "Conflicto de nombre",
+      "canCall": "Puede llamar al servidor de esta máquina",
+      "turnOn": "Activar {{name}} para {{harness}} en {{host}}",
+      "turnOff": "Desactivar {{name}} para {{harness}} en {{host}}"
+    },
+    "delivery": {
+      "claude_code": "Archivo de configuración del host",
+      "codex": "Solicitud de sesión",
+      "opencode": "API del harness",
+      "antigravity": "Puente ACP o stdio",
+      "acp": "ACP",
+      "proxied": "Entrada del hub con proxy"
+    },
+    "status": {
+      "unreachable": "Inaccesible",
+      "sharedFrom": "Compartido desde {{host}}",
+      "needsCredential": "Revisar credencial",
+      "ready": "Correcto",
+      "starting": "Iniciando",
+      "error": "Error",
+      "disabled": "Desactivado",
+      "remote": "Remoto",
+      "stopped": "Detenido"
+    },
+    "caller": {
+      "harnessThread": "{{harness}} · {{thread}}",
+      "device": "Este dispositivo",
+      "remote": "Remoto",
+      "remoteFrom": "Remoto · {{machine}}"
+    },
+    "conflict": {
+      "body": "Elige qué configuración debe ver el harness. No se sobrescribe nada hasta que lo resuelvas.",
+      "label": "Resolver el conflicto de {{name}}",
+      "trigger": "Resolver…"
+    },
+    "resolve": {
+      "title": "Resolver {{name}}",
+      "choose": "Elige qué configuración debe ver {{harness}}.",
+      "otherCopy": "La otra copia viene de la configuración propia de {{harness}}.",
+      "harness": "Harness",
+      "resolution": "Resolución",
+      "hints": {
+        "keep_mine": "El servidor de h4rn se queda; se ignora la copia del harness",
+        "use_theirs": "La configuración del harness sustituye a la mía",
+        "rename": "Importa el servidor del harness con otro nombre",
+        "skip": "Decide más tarde; no cambia nada"
+      },
+      "newName": "Nombre nuevo",
+      "resolving": "Resolviendo…",
+      "resolve": "Resolver"
+    },
+    "sharedWithYou": {
+      "title": "Compartidos contigo",
+      "aside": "Definidos en otro host",
+      "from": "desde {{host}}",
+      "runsOn": "se ejecuta en {{host}}",
+      "use": "Usar {{name}} en esta máquina"
+    },
+    "sharedFromHere": {
+      "title": "Compartido desde esta máquina",
+      "aside": "Esta máquina ejecuta el servidor y aplica la política",
+      "proxies": "Hace de proxy de este servidor por el relay o Tailscale.",
+      "unshare": "Dejar de compartir"
+    },
+    "activity": {
+      "title": "Llamadas recientes a herramientas",
+      "aside": "En directo desde el daemon"
+    },
+    "config": {
+      "title": "Configuración",
+      "importedFrom": "Importado desde {{source}}",
+      "managed": "Gestionado por h4rn",
+      "transport": "Transporte",
+      "transportHint": "Cómo lo inicia o lo alcanza el hub",
+      "cwd": "cwd {{path}}"
+    },
+    "approval": {
+      "label": "Aprobación de herramienta compartida",
+      "wantsToRun": "{{machine}} quiere ejecutar <tool>{{tool}}</tool>",
+      "more_one": "+{{count, number}} más",
+      "more_many": "+{{count, number}} más",
+      "more_other": "+{{count, number}} más",
+      "needsYou": "Te necesita",
+      "expires": "Servidor MCP compartido · la solicitud caduca {{when}}",
+      "expiring": "Servidor MCP compartido · la solicitud caduca ahora",
+      "noArgs": "Sin argumentos",
+      "reconnect": "Vuelve a conectarte para responder. No se ejecuta nada hasta que lo apruebes.",
+      "deny": "Denegar",
+      "answering": "Respondiendo…",
+      "approveOnce": "Aprobar una vez"
+    }
+  },
+  "skills": {
+    "loadingRegistry": "Leyendo el registro de skills…",
+    "summaryShort_one": "instaladas: {{installed, number}} · {{count, number}} harness",
+    "summaryShort_many": "instaladas: {{installed, number}} · {{count, number}} harnesses",
+    "summaryShort_other": "instaladas: {{installed, number}} · {{count, number}} harnesses",
+    "summary_one": "instaladas: {{installed, number}} · {{count, number}} harness detectado · disponibles donde elijas",
+    "summary_many": "instaladas: {{installed, number}} · {{count, number}} harnesses detectados · disponibles donde elijas",
+    "summary_other": "instaladas: {{installed, number}} · {{count, number}} harnesses detectados · disponibles donde elijas",
+    "findExisting": "Buscar existentes",
+    "import": "Importar",
+    "loading": "Cargando skills",
+    "sync": {
+      "syncing": "Sincronizando…",
+      "offline": "Sin conexión",
+      "notSynced": "Aún sin sincronizar",
+      "synced": "Sincronizado",
+      "blocked": "Requiere atención",
+      "idle": "Inactivo",
+      "lastSync": "última sincronización {{when}}",
+      "noSync": "ninguna sincronización completada",
+      "pushed": "enviadas: {{pushed, number}}",
+      "pulled": "recibidas: {{pulled, number}}",
+      "offlineDetail": "Las skills locales siguen funcionando; la sincronización se reanuda cuando el daemon esté en línea.",
+      "idleDetail": "Ejecuta un ciclo para publicar los cambios locales y traer el registro compartido.",
+      "conflicts_one": "{{count, number}} conflicto por resolver.",
+      "conflicts_many": "{{count, number}} conflictos por resolver.",
+      "conflicts_other": "{{count, number}} conflictos por resolver.",
+      "syncNow": "Sincronizar ahora"
+    },
+    "found": {
+      "one": "{{name}} está en una carpeta de harness, pero h4rn no la gestiona.",
+      "many_one": "{{count, number}} skill está en tus carpetas de harness, pero h4rn no la gestiona.",
+      "many_many": "{{count, number}} skills están en tus carpetas de harness, pero h4rn no las gestiona.",
+      "many_other": "{{count, number}} skills están en tus carpetas de harness, pero h4rn no las gestiona.",
+      "bringOne": "Tráela para sincronizarla entre tus máquinas.",
+      "bringMany": "Tráelas para sincronizarlas entre tus máquinas.",
+      "notNow": "Ahora no",
+      "review": "Revisar"
+    },
+    "conflicts": {
+      "resolutionFor": "Resolución para {{name}}",
+      "title": "Conflictos",
+      "aside": "Resuélvelos antes de la próxima sincronización",
+      "versions": "{{reason}} · local <v>{{local}}</v> → remota <v>{{remote}}</v>",
+      "none": "ninguna",
+      "keepLocal": "Conservar local",
+      "keepRemote": "Conservar remota",
+      "keepBoth": "Conservar ambas",
+      "settling": "Resolviendo…",
+      "resolve": "Resolver"
+    },
+    "installed": {
+      "title": "Skills instaladas",
+      "aside": "Cada harness recibe una copia gestionada; las versiones pueden diferir hasta la próxima sincronización",
+      "emptyTitle": "Aún no hay skills",
+      "emptyBody": "Añade una carpeta con un SKILL.md, clona una desde git o importa lo que tus harnesses ya instalaron."
+    },
+    "row": {
+      "conflicts_one": "{{count, number}} conflicto",
+      "conflicts_many": "{{count, number}} conflictos",
+      "conflicts_other": "{{count, number}} conflictos",
+      "installs_one": "{{installed, number}} de {{count, number}} harness · {{source}}",
+      "installs_many": "{{installed, number}} de {{count, number}} harnesses · {{source}}",
+      "installs_other": "{{installed, number}} de {{count, number}} harnesses · {{source}}",
+      "toggle": "{{skill}} para {{harness}}",
+      "noDirectory": "{{harness}} no tiene directorio de skills en este host",
+      "version": "{{harness}} · {{version}}",
+      "notInstalled": "no instalada",
+      "missingCopy": "Activada en el registro, pero no se encontró ninguna copia gestionada"
+    },
+    "directories": {
+      "title": "Directorios de los harnesses",
+      "aside": "Dónde instala h4rn las copias gestionadas en esta máquina",
+      "noUserRoot": "Sin directorio de skills del usuario",
+      "detected": "Detectado",
+      "notInstalled": "No instalado"
+    }
+  }
+}

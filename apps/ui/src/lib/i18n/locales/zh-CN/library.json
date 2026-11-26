@@ -1,0 +1,209 @@
+{
+  "errors": {
+    "withAction": "{{message}}（{{action}}）",
+    "noAnswer": "守护进程没有响应。",
+    "actions": {
+      "listServers": "列出服务器",
+      "listSkills": "列出技能"
+    }
+  },
+  "mcp": {
+    "summary_other": "{{count, number}} 个服务器 · 按 harness 和机器分发",
+    "import": "导入",
+    "empty": {
+      "title": "还没有 MCP 服务器",
+      "body": "添加一次服务器，h4rn 就会把它分发到你选择的 harness 和机器。密钥保留在运行它的机器上。"
+    },
+    "detail": "MCP 服务器详情",
+    "loading": "正在加载服务器",
+    "allServers": "所有服务器",
+    "tools_other": "{{count, number}} 个工具",
+    "checked": {
+      "never": "尚未检查",
+      "justNow": "刚刚检查",
+      "ago": "{{when}}检查"
+    },
+    "test": "测试",
+    "actions": "服务器操作",
+    "menu": {
+      "tools": "列出工具并测试",
+      "edit": "编辑配置",
+      "share": "共享…",
+      "remove": "移除服务器…"
+    },
+    "credential": {
+      "title": "凭据",
+      "hint": "不会离开这台主机",
+      "storedOn": "存储在 {{host}} 上",
+      "thisHost": "这台主机",
+      "env_other": "{{count, number}} 个环境变量 · 值只能写入",
+      "headers_other": "{{count, number}} 个请求头 · 值只能写入",
+      "noEnv": "这个服务器没有存储环境变量。",
+      "noHeaders": "这个服务器没有存储请求头。",
+      "sharedWith": "已与 {{hosts}} 共享"
+    },
+    "where": {
+      "title": "运行位置",
+      "aside": "每个目标以自己的方式接收服务器",
+      "host": "主机",
+      "harness": "Harness",
+      "deliveredAs": "分发方式",
+      "status": "状态",
+      "ready": "就绪",
+      "nameConflict": "名称冲突",
+      "canCall": "可以调用这台机器的服务器",
+      "turnOn": "在 {{host}} 上为 {{harness}} 开启 {{name}}",
+      "turnOff": "在 {{host}} 上为 {{harness}} 关闭 {{name}}"
+    },
+    "delivery": {
+      "claude_code": "主机配置文件",
+      "codex": "会话请求",
+      "opencode": "Harness API",
+      "antigravity": "ACP 或 stdio 桥接",
+      "acp": "ACP",
+      "proxied": "代理的 hub 条目"
+    },
+    "status": {
+      "unreachable": "无法访问",
+      "sharedFrom": "由 {{host}} 共享",
+      "needsCredential": "需要凭据",
+      "ready": "正常",
+      "starting": "正在启动",
+      "error": "出错",
+      "disabled": "已关闭",
+      "remote": "远程",
+      "stopped": "已停止"
+    },
+    "caller": {
+      "harnessThread": "{{harness}} · {{thread}}",
+      "device": "此设备",
+      "remote": "远程",
+      "remoteFrom": "远程 · {{machine}}"
+    },
+    "conflict": {
+      "body": "选择 harness 应使用哪份配置。在你处理之前不会覆盖任何内容。",
+      "label": "解决 {{name}} 的冲突",
+      "trigger": "解决…"
+    },
+    "resolve": {
+      "title": "解决 {{name}}",
+      "choose": "选择 {{harness}} 应使用哪份配置。",
+      "otherCopy": "另一份来自 {{harness}} 自己的配置。",
+      "harness": "Harness",
+      "resolution": "处理方式",
+      "hints": {
+        "keep_mine": "保留 h4rn 的服务器；忽略 harness 中的副本",
+        "use_theirs": "用 harness 的配置替换我的",
+        "rename": "以新名称导入 harness 的服务器",
+        "skip": "以后再决定；不做任何更改"
+      },
+      "newName": "新名称",
+      "resolving": "正在解决…",
+      "resolve": "解决"
+    },
+    "sharedWithYou": {
+      "title": "共享给你的",
+      "aside": "在另一台主机上定义",
+      "from": "来自 {{host}}",
+      "runsOn": "运行在 {{host}} 上",
+      "use": "在这台机器上使用 {{name}}"
+    },
+    "sharedFromHere": {
+      "title": "从这台机器共享",
+      "aside": "这台机器运行服务器并执行策略",
+      "proxies": "通过中继或 Tailscale 代理这个服务器。",
+      "unshare": "取消共享"
+    },
+    "activity": {
+      "title": "最近的工具调用",
+      "aside": "来自守护进程的实时数据"
+    },
+    "config": {
+      "title": "配置",
+      "importedFrom": "从 {{source}} 导入",
+      "managed": "由 h4rn 管理",
+      "transport": "传输方式",
+      "transportHint": "hub 如何启动或连接它",
+      "cwd": "cwd {{path}}"
+    },
+    "approval": {
+      "label": "共享工具审批",
+      "wantsToRun": "{{machine}} 想要运行 <tool>{{tool}}</tool>",
+      "more_other": "另有 {{count, number}} 个",
+      "needsYou": "需要你处理",
+      "expires": "共享的 MCP 服务器 · 请求{{when}}过期",
+      "expiring": "共享的 MCP 服务器 · 请求即将过期",
+      "noArgs": "无参数",
+      "reconnect": "重新连接后才能回复。在你批准之前不会运行任何内容。",
+      "deny": "拒绝",
+      "answering": "正在回复…",
+      "approveOnce": "仅批准这一次"
+    }
+  },
+  "skills": {
+    "loadingRegistry": "正在读取技能注册表…",
+    "summaryShort_other": "已安装 {{installed, number}} 个 · {{count, number}} 个 harness",
+    "summary_other": "已安装 {{installed, number}} 个 · 检测到 {{count, number}} 个 harness · 可在你选择的任何地方使用",
+    "findExisting": "查找已有技能",
+    "import": "导入",
+    "loading": "正在加载技能",
+    "sync": {
+      "syncing": "正在同步…",
+      "offline": "离线",
+      "notSynced": "尚未同步",
+      "synced": "已同步",
+      "blocked": "需要处理",
+      "idle": "空闲",
+      "lastSync": "上次同步：{{when}}",
+      "noSync": "没有已完成的同步",
+      "pushed": "已推送 {{pushed, number}} 个",
+      "pulled": "已拉取 {{pulled, number}} 个",
+      "offlineDetail": "本地技能仍可使用；守护进程上线后会恢复同步。",
+      "idleDetail": "运行一次同步，发布本地更改并拉取共享注册表。",
+      "conflicts_other": "有 {{count, number}} 个冲突需要处理。",
+      "syncNow": "立即同步"
+    },
+    "found": {
+      "one": "{{name}} 在 harness 文件夹中，但不由 h4rn 管理。",
+      "many_other": "{{count, number}} 个技能在你的 harness 文件夹中，但不由 h4rn 管理。",
+      "bringOne": "导入后即可在你的各台机器间同步。",
+      "bringMany": "导入后即可在你的各台机器间同步。",
+      "notNow": "以后再说",
+      "review": "查看"
+    },
+    "conflicts": {
+      "resolutionFor": "{{name}} 的处理方式",
+      "title": "冲突",
+      "aside": "请在下次同步前处理",
+      "versions": "{{reason}} · 本地 <v>{{local}}</v> → 远程 <v>{{remote}}</v>",
+      "none": "无",
+      "keepLocal": "保留本地",
+      "keepRemote": "保留远程",
+      "keepBoth": "两者都保留",
+      "settling": "正在处理…",
+      "resolve": "解决"
+    },
+    "installed": {
+      "title": "已安装的技能",
+      "aside": "每个 harness 都有一份托管副本；下次同步前版本可能不同",
+      "emptyTitle": "还没有技能",
+      "emptyBody": "添加一个含有 SKILL.md 的文件夹，从 git 克隆一个，或导入你的 harness 已经安装的技能。"
+    },
+    "row": {
+      "conflicts_other": "{{count, number}} 个冲突",
+      "installs_other": "已用于 {{installed, number}}/{{count, number}} 个 harness · {{source}}",
+      "toggle": "{{harness}} 的 {{skill}}",
+      "noDirectory": "{{harness}} 在这台主机上没有技能目录",
+      "version": "{{harness}} · {{version}}",
+      "notInstalled": "未安装",
+      "missingCopy": "已在注册表中启用，但未找到托管副本"
+    },
+    "directories": {
+      "title": "Harness 目录",
+      "aside": "h4rn 在这台机器上安装托管副本的位置",
+      "noUserRoot": "没有用户技能目录",
+      "detected": "已检测到",
+      "notInstalled": "未安装"
+    }
+  }
+}

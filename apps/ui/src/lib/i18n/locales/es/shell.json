@@ -95,7 +95,6 @@
     "failed": "No se pudo bifurcar ese turno."
   },
   "mcp": {
-    "listServers": "listar servidores",
     "saveFailed": "No se pudo guardar {{name}}.",
     "nothingChanged": "No cambió nada en esta máquina.",
     "removeFailed": "No se pudo quitar {{name}}.",
@@ -122,7 +121,6 @@
     "callBlocked": "La llamada sigue bloqueada."
   },
   "skills": {
-    "listSkills": "listar skills",
     "addFailed": "No se pudo añadir esa skill.",
     "checkSkillFile": "Comprueba que SKILL.md existe y que la ruta se puede leer.",
     "updateFailed": "No se pudo actualizar la skill.",
