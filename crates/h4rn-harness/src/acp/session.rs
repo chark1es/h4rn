@@ -308,12 +308,22 @@ impl AcpSession {
                 }
             }
         } else if resumed && session.modes.is_empty() {
-            // The reply carried no modes: the agent kept the mode the session
-            // was already in, which is the thread's saved selection.
+            // The reply carried no modes: the agent kept whatever native mode
+            // the session was already in. h4rn cannot confirm that mode is
+            // compatible with what this turn asked for, and it may be wider
+            // than the outside grant that caused the turn. Fail closed rather
+            // than run a resumed agent at an unknown permission level. Full
+            // access is the one request no native mode can exceed.
+            if spec.runtime_mode != RuntimeMode::FullAccess {
+                return Err(HarnessError::ResumeUnconfirmed {
+                    harness: policy.harness,
+                    mode: wanted_mode,
+                });
+            }
             tracing::debug!(
                 target: "h4rn_harness::acp",
                 harness = ?policy.harness,
-                "the resumed session advertised no modes; keeping its current mode"
+                "the resumed session advertised no modes; full access cannot be exceeded"
             );
         } else if !session.modes.is_empty()
             || spec.runtime_mode != RuntimeMode::ApprovalRequired
@@ -2282,7 +2292,17 @@ mod tests {
             assert_eq!(resume["params"]["sessionId"], "s-old");
             send_frame(
                 &mut writer,
-                json!({"jsonrpc": "2.0", "id": resume["id"], "result": {"sessionId": "s-old"}}),
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": resume["id"],
+                    "result": {
+                        "sessionId": "s-old",
+                        "modes": {
+                            "currentModeId": "default",
+                            "availableModes": [{"id": "default", "name": "Default"}]
+                        }
+                    }
+                }),
             )
             .await;
         });
@@ -2344,6 +2364,10 @@ mod tests {
                                 {"modelId": "m-restored", "name": "Restored"}
                             ],
                             "currentModelId": "m-restored"
+                        },
+                        "modes": {
+                            "currentModeId": "default",
+                            "availableModes": [{"id": "default", "name": "Default"}]
                         }
                     }
                 }),
@@ -2719,6 +2743,111 @@ mod tests {
             }
             other => panic!("expected Unsupported, got {other:?}"),
         }
+    }
+
+    /// A resumed session that names no modes cannot prove its permission level.
+    ///
+    /// The agent kept whatever native mode the old session had, which may be
+    /// wider than the outside grant that caused this turn. h4rn refuses instead
+    /// of running it at an unknown level.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_resumed_session_without_modes_is_refused_below_full_access() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (client, mut reader, mut writer) = acp_pair(workspace.path());
+
+        let agent = tokio::spawn(async move {
+            let initialize = next_frame(&mut reader).await;
+            send_frame(
+                &mut writer,
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": initialize["id"],
+                    "result": {
+                        "protocolVersion": 1,
+                        "agentCapabilities": {"loadSession": true}
+                    }
+                }),
+            )
+            .await;
+            let load = next_frame(&mut reader).await;
+            assert_eq!(load["method"], "session/load");
+            send_frame(
+                &mut writer,
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": load["id"],
+                    "result": {"sessionId": "s-old"}
+                }),
+            )
+            .await;
+        });
+
+        let mut spec = acp_spec(workspace.path());
+        spec.resume_id = Some("s-old".into());
+        let error = AcpSession::start(&client, &spec, policy(), workspace.path())
+            .await
+            .err()
+            .expect("an unconfirmed resumed mode is refused");
+        agent.await.expect("agent");
+        match error {
+            // The daemon turns this typed refusal into a fresh session for the
+            // same turn rather than failing it.
+            HarnessError::ResumeUnconfirmed { mode, .. } => {
+                assert_eq!(mode, "default", "the refusal names the requested mode")
+            }
+            other => panic!("expected ResumeUnconfirmed, got {other:?}"),
+        }
+    }
+
+    /// Full access is the one mode no native mode can exceed, so a resumed
+    /// session with no catalogue may still serve a full-access thread.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_resumed_session_without_modes_is_allowed_at_full_access() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (client, mut reader, mut writer) = acp_pair(workspace.path());
+
+        let agent = tokio::spawn(async move {
+            let initialize = next_frame(&mut reader).await;
+            send_frame(
+                &mut writer,
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": initialize["id"],
+                    "result": {
+                        "protocolVersion": 1,
+                        "agentCapabilities": {"loadSession": true}
+                    }
+                }),
+            )
+            .await;
+            let load = next_frame(&mut reader).await;
+            assert_eq!(load["method"], "session/load");
+            send_frame(
+                &mut writer,
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": load["id"],
+                    "result": {"sessionId": "s-old"}
+                }),
+            )
+            .await;
+        });
+
+        let mut spec = acp_spec(workspace.path());
+        spec.resume_id = Some("s-old".into());
+        spec.runtime_mode = RuntimeMode::FullAccess;
+        let mut session = AcpSession::start(&client, &spec, policy(), workspace.path())
+            .await
+            .expect("full access cannot be exceeded by the native mode")
+            .into_session();
+        let mut events = session.events();
+        match events.next().await.expect("session started") {
+            HarnessEvent::SessionStarted { session_id } => assert_eq!(session_id, "s-old"),
+            other => panic!("unexpected first event {other:?}"),
+        }
+        drop(events);
+        agent.await.expect("agent");
+        session.shutdown().await.expect("shutdown");
     }
 
     #[tokio::test(flavor = "current_thread")]

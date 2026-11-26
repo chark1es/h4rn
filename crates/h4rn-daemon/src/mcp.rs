@@ -364,7 +364,7 @@ impl McpService {
                         "this daemon does not offer outside-agent access",
                     )
                 })?;
-                let enabled = outside.set_enabled(enabled).map_err(|error| {
+                let enabled = outside.set_enabled(enabled).await.map_err(|error| {
                     ProtoError::plain(
                         h4rn_protocol::ProtoErrorCode::Internal,
                         format!("could not save the outside-agent switch: {error}"),
@@ -394,8 +394,8 @@ impl McpService {
                     )
                 })?;
                 outside
-                    .store()
                     .revoke_client(&client_id)
+                    .await
                     .map_err(revoke_error)?;
                 Ok(ResponseBody::Ack)
             }
@@ -951,6 +951,10 @@ impl McpSessionProvider for McpService {
             endpoint,
             token: issued.token,
         })
+    }
+
+    fn revoke_thread(&self, thread_id: &ThreadId) -> usize {
+        self.hub.revoke_thread(thread_id)
     }
 }
 

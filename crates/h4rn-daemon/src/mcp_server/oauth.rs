@@ -22,9 +22,9 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 #[cfg(test)]
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use ::url::Url;
@@ -48,6 +48,13 @@ pub const CODE_TTL: TimeDelta = TimeDelta::minutes(10);
 pub const PENDING_TTL: TimeDelta = TimeDelta::minutes(10);
 /// How long an unused registration is kept.
 pub const UNUSED_CLIENT_TTL: TimeDelta = TimeDelta::hours(24);
+/// The longest a Full-access grant may live, from approval to the last token.
+///
+/// Full access is the one level that can run unattended, so it needs a ceiling
+/// of its own: the person re-approves it daily instead of a forgotten grant
+/// renewing for the refresh token's thirty days. Supervised and read-only
+/// grants keep the ordinary refresh lifetime.
+pub const FULL_ACCESS_TTL: TimeDelta = TimeDelta::hours(24);
 
 const FILE: &str = "outside_agents.json";
 const MAX_REDIRECT_URIS: usize = 8;
@@ -97,6 +104,21 @@ struct TokenRecord {
     revoked_at: Option<DateTime<Utc>>,
     #[serde(default)]
     last_used_at: Option<DateTime<Utc>>,
+}
+
+/// One sign-in's grant, shared by every token in its family.
+///
+/// The level lives here, not on each token: admission reads it again on every
+/// request, so a level change applies to tokens already issued instead of
+/// waiting for the next refresh. `created_at` is the ceiling's anchor — a
+/// Full-access family may not outlive [`FULL_ACCESS_TTL`] from it, however
+/// often its refresh token rotates.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct FamilyRecord {
+    family: String,
+    client_id: String,
+    level: OutsideAgentLevel,
+    created_at: DateTime<Utc>,
 }
 
 impl TokenRecord {
@@ -167,6 +189,10 @@ struct StoreFile {
     enabled: Option<bool>,
     #[serde(default)]
     clients: Vec<ClientRecord>,
+    /// One row per sign-in's grant. A file written before this existed has
+    /// none; its tokens keep the level they were issued with.
+    #[serde(default)]
+    families: Vec<FamilyRecord>,
     #[serde(default)]
     tokens: Vec<TokenRecord>,
     #[serde(default)]
@@ -254,6 +280,22 @@ pub struct Grant {
     pub resource: Option<String>,
 }
 
+/// One prompt write's registration under a token family.
+///
+/// A revoke marks the family revoked and then waits until every ticket for it
+/// is dropped. Holding it across the adapter write is what makes "Revoke
+/// returned" mean nothing under that grant can still reach the agent.
+pub struct OAuthGrantTicket {
+    store: Arc<OAuthStore>,
+    family: String,
+}
+
+impl Drop for OAuthGrantTicket {
+    fn drop(&mut self) {
+        self.store.end_delivery(&self.family);
+    }
+}
+
 /// One client registration.
 #[derive(Clone, Debug)]
 pub struct RegisteredClient {
@@ -333,6 +375,9 @@ struct TestHooks {
     fail_persist: AtomicUsize,
     last_use_gate: Mutex<Option<std::sync::Arc<PersistGate>>>,
     in_last_use: AtomicBool,
+    /// Directory syncs a durable write performed, so a test can prove the
+    /// rename is followed by one.
+    dir_syncs: AtomicUsize,
 }
 
 /// Durable OAuth state.
@@ -349,6 +394,14 @@ pub struct OAuthStore {
     /// Memory only: the location holds the one-time code. Lock order is always
     /// `state` then `resolutions`, never the reverse.
     resolutions: Mutex<HashMap<String, PendingResolution>>,
+    /// Prompt writes in flight under a token family.
+    ///
+    /// A revoke marks the family revoked, then waits here for the writes that
+    /// already passed their check. After it returns no prompt under that grant
+    /// can still reach an agent.
+    in_flight: Mutex<HashMap<String, usize>>,
+    /// Signalled whenever a delivery under a family ends.
+    drained: Condvar,
 }
 
 struct StoreState {
@@ -408,6 +461,8 @@ impl OAuthStore {
             #[cfg(test)]
             hooks: TestHooks::default(),
             resolutions: Mutex::new(HashMap::new()),
+            in_flight: Mutex::new(HashMap::new()),
+            drained: Condvar::new(),
         };
         // A file written before the Labs switch existed has no answer for it.
         // Treat that as off and end every grant in memory, then try to commit
@@ -517,7 +572,35 @@ impl OAuthStore {
                 .sync_all()
                 .map_err(|error| OAuthError::Storage(error.to_string()))?;
         }
-        std::fs::rename(&temp, &self.path).map_err(|error| OAuthError::Storage(error.to_string()))
+        std::fs::rename(&temp, &self.path)
+            .map_err(|error| OAuthError::Storage(error.to_string()))?;
+        // The rename itself is only in the directory's cache until the
+        // directory is synced. Without this a crash can leave the old file in
+        // place even though the revocation reported success.
+        if let Some(parent) = self.path.parent() {
+            self.sync_directory(parent)?;
+        }
+        Ok(())
+    }
+
+    /// Flushes a directory entry so a completed rename survives a crash.
+    ///
+    /// The counter lives in this function, not beside its call, so a test that
+    /// removes the sync cannot still see a sync it never performed.
+    fn sync_directory(&self, path: &Path) -> Result<(), OAuthError> {
+        #[cfg(unix)]
+        {
+            std::fs::File::open(path)
+                .and_then(|directory| directory.sync_all())
+                .map_err(|error| OAuthError::Storage(error.to_string()))?;
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = path;
+        }
+        #[cfg(test)]
+        self.hooks.dir_syncs.fetch_add(1, Ordering::SeqCst);
+        Ok(())
     }
 
     /// Registers a client (dynamic client registration) and returns its id.
@@ -982,6 +1065,27 @@ impl OAuthStore {
                 "this grant is bound to a different resource".into(),
             ));
         }
+        // A Full-access grant has a lifetime ceiling: once it is reached the
+        // family is revoked and the person approves a new sign-in. The check is
+        // here as well as on expiry because a clock can sit between the two.
+        if let Some(family) = guard
+            .file
+            .families
+            .iter()
+            .find(|family| family.family == record.family)
+        {
+            if family.level == OutsideAgentLevel::FullAccess
+                && now >= family.created_at + FULL_ACCESS_TTL
+            {
+                let mut next = guard.file.clone();
+                revoke_family(&mut next, &record.family, now);
+                self.persist_locked(&next)?;
+                guard.file = next;
+                return Err(OAuthError::InvalidGrant(
+                    "this full-access grant reached its 24-hour limit; sign in again".into(),
+                ));
+            }
+        }
         guard.file.tokens[index].revoked_at = Some(now);
         let pair = issue_pair(
             &mut guard.file,
@@ -1029,6 +1133,16 @@ impl OAuthStore {
         let name = Self::client_locked(&guard.file, &record.client_id)
             .map(|client| client.name.clone())
             .unwrap_or_else(|| "An MCP client".into());
+        // The grant's level is read from the family on every admission, not
+        // copied from the token that was issued under it. A level the person
+        // changes then applies to the very next request.
+        let level = guard
+            .file
+            .families
+            .iter()
+            .find(|family| family.family == record.family)
+            .map(|family| family.level)
+            .unwrap_or(record.level);
         guard.file.tokens[index].last_used_at = Some(now);
         // Last-used is a convenience, so it is written lazily -- but always
         // from the state under this lock, never from a snapshot taken earlier.
@@ -1049,7 +1163,7 @@ impl OAuthStore {
         Some(Grant {
             client_id: record.client_id,
             client_name: name,
-            level: record.level,
+            level,
             family: record.family,
             resource: record.resource,
         })
@@ -1059,6 +1173,16 @@ impl OAuthStore {
     ///
     /// Returns only after the revocation is on disk.
     pub fn revoke_token(&self, token: &str) -> Result<(), OAuthError> {
+        self.revoke_token_families(token).map(|_| ())
+    }
+
+    /// [`Self::revoke_token`], returning the token family it ended.
+    ///
+    /// The caller takes the admission gate and waits for that family's in-flight
+    /// prompt writes after this returns, so a client-facing revoke means the
+    /// same thing as one from Settings. An unknown token ends no family and is
+    /// still not an error (RFC 7009).
+    pub fn revoke_token_families(&self, token: &str) -> Result<Vec<String>, OAuthError> {
         let now = Utc::now();
         let hash = digest(token);
         let mut guard = self.lock();
@@ -1070,13 +1194,13 @@ impl OAuthStore {
             .map(|entry| entry.family.clone())
         else {
             // RFC 7009: an unknown token is not an error.
-            return Ok(());
+            return Ok(Vec::new());
         };
         let mut next = guard.file.clone();
         revoke_family(&mut next, &family, now);
         self.persist_locked(&next)?;
         guard.file = next;
-        Ok(())
+        Ok(vec![family])
     }
 
     /// Turns outside-agent access on or off.
@@ -1087,16 +1211,33 @@ impl OAuthStore {
     /// crash can never leave the switch off with a grant the other half never
     /// saw -- and turning it back on does not revive anything.
     pub fn set_enabled(&self, enabled: bool) -> Result<bool, OAuthError> {
+        self.set_enabled_families(enabled).map(|_| enabled)
+    }
+
+    /// [`Self::set_enabled`], returning the families the switch ended.
+    ///
+    /// The caller waits for those families' in-flight prompt writes, so a
+    /// switch turned off cannot report success while a write is still landing.
+    pub fn set_enabled_families(&self, enabled: bool) -> Result<Vec<String>, OAuthError> {
         let now = Utc::now();
         let mut guard = self.lock();
         let mut next = guard.file.clone();
+        let mut families = Vec::new();
         if !enabled {
+            families = next
+                .tokens
+                .iter()
+                .filter(|token| token.revoked_at.is_none() && token.expires_at > now)
+                .map(|token| token.family.clone())
+                .collect();
+            families.sort();
+            families.dedup();
             revoke_all(&mut next, now);
         }
         next.enabled = Some(enabled);
         self.persist_locked(&next)?;
         guard.file = next;
-        Ok(enabled)
+        Ok(families)
     }
 
     /// Revokes every token for a client, and its codes and approvals.
@@ -1104,6 +1245,15 @@ impl OAuthStore {
     /// Returns only after the revocation is on disk, so "Revoke" in Settings
     /// never reports success for a grant a restart would resurrect.
     pub fn revoke_client(&self, client_id: &str) -> Result<(), OAuthError> {
+        self.revoke_client_families(client_id).map(|_| ())
+    }
+
+    /// [`Self::revoke_client`], returning the token families it ended.
+    ///
+    /// The caller waits for those families' in-flight prompt writes before
+    /// answering, so "Revoke" returning means none of that grant's work can
+    /// still reach an agent.
+    pub fn revoke_client_families(&self, client_id: &str) -> Result<Vec<String>, OAuthError> {
         let now = Utc::now();
         let mut guard = self.lock();
         let Some(client) = Self::client_locked(&guard.file, client_id).cloned() else {
@@ -1117,6 +1267,14 @@ impl OAuthStore {
         // old order removed it from memory first, and the retry then answered
         // "no such client" while the disk still had the live grant.
         let mut next = guard.file.clone();
+        let mut families: Vec<String> = next
+            .tokens
+            .iter()
+            .filter(|entry| entry.client_id == client.client_id)
+            .map(|entry| entry.family.clone())
+            .collect();
+        families.sort();
+        families.dedup();
         for entry in next
             .tokens
             .iter_mut()
@@ -1128,6 +1286,8 @@ impl OAuthStore {
             .retain(|entry| entry.client_id != client.client_id);
         next.pending
             .retain(|entry| entry.client_id != client.client_id);
+        next.families
+            .retain(|entry| entry.client_id != client.client_id);
         // Revoking frees the registration slot too. The cap counts registered
         // clients, and "revoke one in h4rn" has to make room for the next
         // agent; keeping a dead record would make that advice false.
@@ -1135,7 +1295,137 @@ impl OAuthStore {
             .retain(|entry| entry.client_id != client.client_id);
         self.persist_locked(&next)?;
         guard.file = next;
+        Ok(families)
+    }
+
+    /// Registers a prompt write under `family`, or refuses it when the family
+    /// was revoked.
+    ///
+    /// The check and the registration happen while the state lock is held, so a
+    /// revoke either sees this write and waits for it, or marks the family
+    /// first and this call refuses. Dropping the ticket is what a revoke waits
+    /// for; a running turn that already wrote its prompt holds none and is
+    /// allowed to finish, as documented.
+    pub fn begin_delivery(self: &Arc<Self>, family: &str) -> Option<OAuthGrantTicket> {
+        let now = Utc::now();
+        let guard = self.lock();
+        if !guard.file.enabled.unwrap_or(false) {
+            return None;
+        }
+        let live = guard
+            .file
+            .tokens
+            .iter()
+            .any(|entry| entry.family == family && entry.live(now));
+        if !live {
+            return None;
+        }
+        let mut ids = self
+            .in_flight
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *ids.entry(family.to_owned()).or_default() += 1;
+        drop(ids);
+        drop(guard);
+        Some(OAuthGrantTicket {
+            store: Arc::clone(self),
+            family: family.to_owned(),
+        })
+    }
+
+    /// Ends one prompt write's registration.
+    fn end_delivery(&self, family: &str) {
+        let mut ids = self
+            .in_flight
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(count) = ids.get_mut(family) else {
+            return;
+        };
+        *count = count.saturating_sub(1);
+        if *count == 0 {
+            ids.remove(family);
+        }
+        self.drained.notify_all();
+    }
+
+    /// Waits until no prompt write is in flight for any of `families`.
+    ///
+    /// Blocking: the caller runs it where blocking a thread is acceptable (the
+    /// revoke path does so off the async runtime).
+    pub fn wait_for_drain(&self, families: &[String]) {
+        let mut ids = self
+            .in_flight
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        while families
+            .iter()
+            .any(|family| ids.get(family).copied().unwrap_or(0) > 0)
+        {
+            ids = self
+                .drained
+                .wait(ids)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
+    }
+
+    /// Makes a family's level something else, so a test can prove admission
+    /// reads the family rather than the token issued under it.
+    #[doc(hidden)]
+    pub fn set_family_level_for_test(
+        &self,
+        family: &str,
+        level: OutsideAgentLevel,
+    ) -> Result<(), OAuthError> {
+        let mut guard = self.lock();
+        let mut next = guard.file.clone();
+        let Some(record) = next
+            .families
+            .iter_mut()
+            .find(|record| record.family == family)
+        else {
+            return Err(OAuthError::NotFound("no such family".into()));
+        };
+        record.level = level;
+        self.persist_locked(&next)?;
+        guard.file = next;
         Ok(())
+    }
+
+    /// Moves a Full-access family's approval far enough back that its ceiling
+    /// has passed, so a test need not wait a day.
+    #[doc(hidden)]
+    pub fn age_full_access_family_for_test(&self, family: &str) -> Result<(), OAuthError> {
+        let mut guard = self.lock();
+        let mut next = guard.file.clone();
+        let Some(record) = next
+            .families
+            .iter_mut()
+            .find(|record| record.family == family)
+        else {
+            return Err(OAuthError::NotFound("no such family".into()));
+        };
+        record.created_at = Utc::now() - FULL_ACCESS_TTL - TimeDelta::seconds(1);
+        self.persist_locked(&next)?;
+        guard.file = next;
+        Ok(())
+    }
+
+    /// Ages every rotated refresh record past the ordinary retention window,
+    /// while its family stays live through a newer token.
+    ///
+    /// Test-only: proves a replay record is kept for the family's lifetime
+    /// rather than pruned by the record's own age.
+    #[doc(hidden)]
+    pub fn age_rotated_refresh_records_for_test(&self) -> Result<(), OAuthError> {
+        let now = Utc::now();
+        let mut guard = self.lock();
+        for entry in guard.file.tokens.iter_mut().filter(|entry| {
+            entry.kind == TokenKind::Refresh && entry.revoked_at.is_some() && entry.expires_at > now
+        }) {
+            entry.expires_at = now - TimeDelta::days(61);
+        }
+        self.persist_locked(&guard.file)
     }
 
     /// Whether `family` names a grant that is still live.
@@ -1198,11 +1488,17 @@ impl OAuthStore {
             let Some(client) = Self::client_locked(file, &token.client_id) else {
                 continue;
             };
+            let level = file
+                .families
+                .iter()
+                .find(|family| family.family == token.family)
+                .map(|family| family.level)
+                .unwrap_or(token.level);
             agents
                 .entry(token.client_id.clone())
                 .and_modify(|view| {
-                    if level_rank(token.level) > level_rank(view.level) {
-                        view.level = token.level;
+                    if level_rank(level) > level_rank(view.level) {
+                        view.level = level;
                     }
                     if token.issued_at < view.connected_at {
                         view.connected_at = token.issued_at;
@@ -1219,7 +1515,7 @@ impl OAuthStore {
                 .or_insert(OutsideAgentView {
                     client_id: client.client_id.clone(),
                     name: client.name.clone(),
-                    level: token.level,
+                    level,
                     connected_at: token.issued_at,
                     last_used_at: token.last_used_at,
                     expires_at: token.expires_at,
@@ -1351,17 +1647,45 @@ fn issue_pair(
     resource: Option<String>,
 ) -> TokenPair {
     let family = family.unwrap_or_else(random_hex);
+    // The level is the family's, re-read on every admission. A new sign-in
+    // starts from the level the person approved; a refresh keeps whatever the
+    // family holds now, not what its oldest token was issued with.
+    let family_level = match file
+        .families
+        .iter()
+        .find(|record| record.family == family)
+        .map(|record| record.level)
+    {
+        Some(existing) => existing,
+        None => {
+            let created_at = file
+                .tokens
+                .iter()
+                .find(|token| token.family == family)
+                .map(|token| token.issued_at)
+                .unwrap_or(now);
+            file.families.push(FamilyRecord {
+                family: family.clone(),
+                client_id: client_id.to_owned(),
+                level,
+                created_at,
+            });
+            level
+        }
+    };
     let access_token = format!("h4rn_at_{}", random_hex());
     let refresh_token = format!("h4rn_rt_{}", random_hex());
+    let access_expires = family_deadline(file, &family, family_level, now, ACCESS_TTL);
+    let refresh_expires = family_deadline(file, &family, family_level, now, REFRESH_TTL);
     file.tokens.push(TokenRecord {
         hash: digest(&access_token),
         kind: TokenKind::Access,
         client_id: client_id.to_owned(),
-        level,
+        level: family_level,
         family: family.clone(),
         resource: resource.clone(),
         issued_at: now,
-        expires_at: now + ACCESS_TTL,
+        expires_at: access_expires,
         revoked_at: None,
         last_used_at: None,
     });
@@ -1369,19 +1693,40 @@ fn issue_pair(
         hash: digest(&refresh_token),
         kind: TokenKind::Refresh,
         client_id: client_id.to_owned(),
-        level,
+        level: family_level,
         family,
         resource: resource.clone(),
         issued_at: now,
-        expires_at: now + REFRESH_TTL,
+        expires_at: refresh_expires,
         revoked_at: None,
         last_used_at: None,
     });
     // Keep the file bounded: an expired token older than sixty days says
     // nothing a person still needs. Revoked tokens stay long enough for an
     // in-flight call to see the revocation rather than a "unknown token".
-    file.tokens
-        .retain(|token| token.expires_at > now - TimeDelta::days(60));
+    //
+    // A rotated refresh token is the only record that a replay is a replay. It
+    // stays as long as its family has any live token, even after its own
+    // expiry: otherwise a family kept alive by rotation would forget the old
+    // token, and a replay after sixty days would look merely unknown instead
+    // of revoking the family.
+    let live_families: Vec<String> = file
+        .tokens
+        .iter()
+        .filter(|token| token.live(now))
+        .map(|token| token.family.clone())
+        .collect();
+    file.tokens.retain(|token| {
+        token.expires_at > now - TimeDelta::days(60) || live_families.contains(&token.family)
+    });
+    // A family record with no token left describes nothing.
+    let known_families: Vec<String> = file
+        .tokens
+        .iter()
+        .map(|token| token.family.clone())
+        .collect();
+    file.families
+        .retain(|record| known_families.contains(&record.family));
     // A spent code is the only record that its family was issued from it. A
     // replay is an attack, and the replay must revoke that family; forgetting
     // the code at code expiry would turn a replay after ten minutes into an
@@ -1394,9 +1739,33 @@ fn issue_pair(
         access_token,
         refresh_token,
         expires_in: ACCESS_TTL.num_seconds() as u64,
-        level,
+        level: family_level,
         resource,
     }
+}
+
+/// The expiry one token of `family` may have: its ordinary lifetime, or the
+/// family's Full-access ceiling when that is sooner.
+fn family_deadline(
+    file: &StoreFile,
+    family: &str,
+    level: OutsideAgentLevel,
+    now: DateTime<Utc>,
+    lifetime: TimeDelta,
+) -> DateTime<Utc> {
+    let normal = now + lifetime;
+    if level != OutsideAgentLevel::FullAccess {
+        return normal;
+    }
+    let Some(created_at) = file
+        .families
+        .iter()
+        .find(|record| record.family == family)
+        .map(|record| record.created_at)
+    else {
+        return normal;
+    };
+    normal.min(created_at + FULL_ACCESS_TTL)
 }
 
 fn redirect_with(
@@ -2621,5 +2990,116 @@ mod tests {
             );
         }
         assert_eq!(reopened.client_count(), 0, "a revoked client came back");
+    }
+
+    /// A durable write must flush the directory entry after the rename.
+    ///
+    /// Without it the file can come back as the old version after a crash, so a
+    /// revocation that reported success would be undone.
+    #[test]
+    fn a_durable_write_syncs_the_directory_after_the_rename() {
+        let (_dir, store) = store();
+        let before = store.hooks.dir_syncs.load(Ordering::SeqCst);
+        store
+            .register_client(Some("Claude Code"), &["http://localhost:1455/cb".into()])
+            .expect("register");
+        assert!(
+            store.hooks.dir_syncs.load(Ordering::SeqCst) > before,
+            "the write renamed the file without syncing its directory"
+        );
+    }
+
+    /// Full access has a ceiling, and a refresh cannot extend past it.
+    #[test]
+    fn a_full_access_grant_stops_at_its_ceiling() {
+        let (_dir, store) = store();
+        let client = store
+            .register_client(None, &["http://localhost:1455/cb".into()])
+            .expect("register");
+        let pair = pair(&store, &client.client_id, OutsideAgentLevel::FullAccess);
+        let grant = store
+            .verify_access(&pair.access_token, None)
+            .expect("the pair is live");
+        assert_eq!(grant.level, OutsideAgentLevel::FullAccess);
+
+        store
+            .age_full_access_family_for_test(&grant.family)
+            .expect("age the family");
+        let refused = store
+            .refresh(&pair.refresh_token, &client.client_id, None)
+            .expect_err("a full-access grant past its ceiling must not refresh");
+        assert!(
+            refused.to_string().contains("24-hour"),
+            "the refusal names the ceiling: {refused}"
+        );
+        assert!(
+            store.verify_access(&pair.access_token, None).is_none(),
+            "the ceiling passed but the family stayed live"
+        );
+    }
+
+    /// Admission reads the family's level, not the token issued under it.
+    #[test]
+    fn a_grant_level_change_applies_without_a_new_token() {
+        let (_dir, store) = store();
+        let client = store
+            .register_client(None, &["http://localhost:1455/cb".into()])
+            .expect("register");
+        let pair = pair(&store, &client.client_id, OutsideAgentLevel::FullAccess);
+        let grant = store
+            .verify_access(&pair.access_token, None)
+            .expect("the pair is live");
+        store
+            .set_family_level_for_test(&grant.family, OutsideAgentLevel::Supervised)
+            .expect("lower the level");
+
+        let admitted = store
+            .verify_access(&pair.access_token, None)
+            .expect("the access token is still live");
+        assert_eq!(
+            admitted.level,
+            OutsideAgentLevel::Supervised,
+            "admission used the level frozen into the access token"
+        );
+        let rotated = store
+            .refresh(&pair.refresh_token, &client.client_id, None)
+            .expect("refresh");
+        assert_eq!(
+            rotated.level,
+            OutsideAgentLevel::Supervised,
+            "the refreshed pair kept the old level"
+        );
+    }
+
+    /// A rotated refresh record is kept while its family is live, even after
+    /// the record's own retention window, so its replay still revokes the
+    /// family.
+    #[test]
+    fn a_rotated_refresh_record_survives_while_its_family_is_live() {
+        let (_dir, store) = store();
+        let client = store
+            .register_client(None, &["http://localhost:1455/cb".into()])
+            .expect("register");
+        let first = pair(&store, &client.client_id, OutsideAgentLevel::Supervised);
+        let rotated = store
+            .refresh(&first.refresh_token, &client.client_id, None)
+            .expect("rotate");
+        store
+            .age_rotated_refresh_records_for_test()
+            .expect("age the rotated record");
+        // Any later issuance prunes the token list under the same rule.
+        let _second = pair(&store, &client.client_id, OutsideAgentLevel::Supervised);
+
+        let replay = store
+            .refresh(&first.refresh_token, &client.client_id, None)
+            .expect_err("the replayed refresh token must be refused");
+        assert!(
+            replay.to_string().contains("already used"),
+            "the replay was treated as unknown instead of as a replay: {replay}"
+        );
+        assert!(
+            store.verify_access(&rotated.access_token, None).is_none(),
+            "the replay did not revoke the family it belonged to"
+        );
     }
 }

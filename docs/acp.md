@@ -100,10 +100,16 @@ same socket keep answering while an agent finishes its handshake.
 
 A `session/resume` or `session/load` reply may name the session without repeating its catalogue. The
 agent already knows the thread's model and mode from the session it is continuing, so h4rn keeps the
-saved selection and sends the prompt rather than rejecting it against an empty list. When the resumed
-session reports the model it actually restored, the thread keeps that model: the summary, the stored
-thread and the next session all name it, instead of the `default` alias or an id the agent is no
-longer running. Typing `default` afterwards returns the thread to the agent's own choice. A load also
+saved model and sends the prompt rather than rejecting it against an empty list. The mode is the
+exception: a resumed reply with no mode catalogue cannot prove which native permission level the
+agent restored, and it may be wider than the turn's ceiling (for example a supervised outside
+agent's). h4rn therefore refuses such a resumed session unless the turn asked for full access, which
+no native mode can exceed. The refusal does not fail the turn: the stored session id is dropped and
+the same turn starts a fresh session with the usual bounded handoff, and that session applies and
+checks the requested mode itself, so the grant still fails closed. When the resumed session
+reports the model it actually restored, the thread keeps that model: the summary, the stored thread
+and the next session all name it, instead of the `default` alias or an id the agent is no longer
+running. Typing `default` afterwards returns the thread to the agent's own choice. A load also
 replays the old conversation as session updates; h4rn consumes that history before the new turn, so
 it is neither shown twice nor able to fill the event queue and stall a long conversation. A slow
 consumer cannot grow the reader's memory either: every session update, unknown notification and

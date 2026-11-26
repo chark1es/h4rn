@@ -643,8 +643,10 @@ async fn revoke(
 ) -> Response {
     // RFC 7009: an unknown token still gets 200. A store that could not write
     // the revocation is a different thing: reporting success would tell the
-    // client its token is dead while a restart would bring it back.
-    match service.store().revoke_token(&form.token) {
+    // client its token is dead while a restart would bring it back. The revoke
+    // is ordered exactly like Settings' one: it waits for admitted calls and
+    // in-flight prompt writes under the token's family before it answers.
+    match service.revoke_token(&form.token).await {
         Ok(()) => (
             StatusCode::OK,
             [(header::CONTENT_TYPE, "application/json")],
@@ -715,7 +717,7 @@ pub async fn outside_delete(service: &OutsideAgents, headers: HeaderMap) -> Resp
         return super::outside::outside_disabled();
     }
     if let Some(token) = super::outside::bearer_token(&headers)
-        && let Err(error) = service.store().revoke_token(token)
+        && let Err(error) = service.revoke_token(token).await
     {
         // The revocation did not reach disk. Saying 204 would tell the client
         // it is disconnected while a restart would reconnect it.
