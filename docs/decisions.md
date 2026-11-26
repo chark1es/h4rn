@@ -2306,9 +2306,9 @@ pre-turn byte — `cp -p`, `rsync -t`, `tar x` and `mv` keep old mtimes, clocks
 skew, and a file deleted before a tool named it looks absent — so the ignored
 listing only recognises a path ignored then and visible now (the turn emptied
 `.gitignore` or force-added it), which is left exactly as it is and named in the
-dialog and the answer. A path covered only by a collapsed folder entry is
-checked with `git check-ignore`, so a file the turn created in a folder whose
-files merely all matched a rule is still restored. It is refused when another live
+dialog and the answer. A path covered only by a removed folder entry is
+checked with `git check-ignore`, so a file the turn created there after
+removing the rule is visible now and is restored like any other. It is refused when another live
 thread or agent session shares the directory (finished, fully idle subagents of
 the same thread excepted), and requires the same worktree registration the
 thread was created with. The selected message's own checkpoint decides the

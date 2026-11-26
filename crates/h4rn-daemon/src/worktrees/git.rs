@@ -1342,8 +1342,8 @@ fn ignored_paths(workspace: &Path) -> Result<Vec<String>, String> {
 /// `--no-index` asks the rules themselves, not whether the path happens to be
 /// tracked: a file the turn force-added is still covered by the rule that
 /// ignored it at checkpoint time. Only paths inside a recorded ignored folder
-/// need this, because `--directory` collapses a folder whose entries all
-/// matched an ignore rule — a file later created in it may match none.
+/// need this: the turn may remove the rule that ignored the folder, and a
+/// folder entry alone cannot say its new files were ignored then.
 pub fn ignored_paths_now(workspace: &Path, paths: &[String]) -> Result<HashSet<String>, String> {
     if paths.is_empty() {
         return Ok(HashSet::new());

@@ -475,9 +475,9 @@ pub(crate) fn prepare_restore(
         }
     }
     // A path covered only by a recorded ignored folder is left alone only
-    // while the ignore rules still ignore it: `--directory` collapses a folder
-    // whose entries merely all matched a rule, and a file the turn created
-    // there afterwards matches none. Ask git once for all of them.
+    // while the ignore rules still ignore it: the turn may remove the rule
+    // that ignored the folder, and a file it created there is then visible
+    // and was not at the checkpoint. Ask git once for all of them.
     let mut candidates: Vec<String> = Vec::new();
     for change in &changes {
         if !index.covers_exactly(&change.path) && !index.folders_covering(&change.path).is_empty() {

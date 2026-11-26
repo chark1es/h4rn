@@ -149,11 +149,12 @@ The checkpoint still records which ignored paths (or ignored folders) were
 present when it was taken. That listing is how the restore recognises a path
 that was ignored then and is visible now — the turn emptied `.gitignore` or ran
 `git add -f` — and leaves it exactly as the turn left it. A recorded folder
-entry is checked with `git check-ignore`: `--directory` can collapse a folder
-whose files merely all matched an ignore rule, so a file the turn created there
-afterwards may not be ignored at all; such a path is restored like any other.
-Ignoring more than 10,000 paths makes the listing incomplete, so the checkpoint
-is incomplete and **Revert files too** refuses with that reason.
+entry is checked with `git check-ignore`: the turn may remove the rule that
+ignored the folder and create its own file inside it, and a folder entry alone
+cannot say that new path was ignored then. Such a path is visible now and was
+not there at the checkpoint, so it is restored like any other. Ignoring more
+than 10,000 paths makes the listing incomplete, so the checkpoint is
+incomplete and **Revert files too** refuses with that reason.
 
 The dialog and the answer name the ignored paths the turn touched (from the
 tool calls and captures that named them, and from recorded ignored files that
