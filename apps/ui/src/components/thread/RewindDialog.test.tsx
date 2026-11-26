@@ -1,9 +1,10 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { RewindMethod, ThreadSummary } from "@/gen";
+import { setLocalePreference } from "@/lib/i18n";
 import { RewindDialog } from "./RewindDialog";
 
 const mock = vi.hoisted(() => ({
@@ -15,6 +16,7 @@ const mock = vi.hoisted(() => ({
     method: "handoff" as RewindMethod,
     filesEnabled: true,
     error: null as string | null,
+    thrown: undefined as unknown,
     leftAlone: [] as string[],
   },
 }));
@@ -74,12 +76,19 @@ afterEach(() => {
   vi.clearAllMocks();
   mock.refusal = null;
   mock.filesAvailable = true;
-  mock.plan = { method: "handoff", filesEnabled: true, error: null, leftAlone: [] };
+  mock.plan = {
+    method: "handoff",
+    filesEnabled: true,
+    error: null,
+    thrown: undefined,
+    leftAlone: [],
+  };
 });
 
 function open(overrides: Partial<ThreadSummary> = {}) {
   mock.planRewind.mockImplementation(async () => {
     if (mock.plan.error) throw new Error(mock.plan.error);
+    if (mock.plan.thrown !== undefined) throw mock.plan.thrown;
     return {
       method: mock.plan.method,
       files_enabled: mock.plan.filesEnabled,
@@ -180,6 +189,18 @@ describe("RewindDialog", () => {
     expect(
       (screen.getByRole("button", { name: "Rewind thread" }) as HTMLButtonElement).disabled,
     ).toBe(true);
+  });
+
+  it("words a plan error with no message of its own in the current language", async () => {
+    try {
+      mock.plan.thrown = { code: 7 };
+      open();
+      expect(await screen.findByText("The rewind plan could not be read.")).toBeTruthy();
+      await act(() => setLocalePreference("ja"));
+      expect(screen.getByText("巻き戻しの計画を読み取れませんでした。")).toBeTruthy();
+    } finally {
+      await act(() => setLocalePreference("en"));
+    }
   });
 
   it("explains a missing complete checkpoint", async () => {

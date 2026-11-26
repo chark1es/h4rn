@@ -22,9 +22,15 @@ import {
 import { ForgeApi, forgeLabel } from "@/features/forge/store";
 import { gitActionsApi, type PullRequestText } from "@/features/git-actions/store";
 import type { ForgeRepoRef, GitThreadStatus, ThreadSummary } from "@/gen";
-import { i18n } from "@/lib/i18n";
 import { getClient, pushToast } from "@/lib/store/appStore";
 import { cn } from "@/lib/utils";
+
+/**
+ * Stands in for an error that carried no text of its own. The dialog words it
+ * when it renders (`shownError`), so it follows a language switch; the NUL
+ * keeps it from ever matching a message the daemon sent.
+ */
+const NO_MESSAGE = "\u0000git.failed";
 
 function describeError(cause: unknown): string {
   if (cause instanceof Error) return cause.message;
@@ -32,7 +38,12 @@ function describeError(cause: unknown): string {
   if (typeof cause === "object" && cause !== null && "message" in cause) {
     return String((cause as { message: unknown }).message);
   }
-  return i18n.t("dialogs:git.failed");
+  return NO_MESSAGE;
+}
+
+/** The error as shown: the daemon's own text, or the dialog's fallback in the active language. */
+function shownError(error: string, t: (key: "git.failed") => string): string {
+  return error === NO_MESSAGE ? t("git.failed") : error;
 }
 
 const forgeApi = () => new ForgeApi((request, options) => getClient().request(request, options));
@@ -349,7 +360,7 @@ export function GitActionsDialog({
           ) : null}
           {error ? (
             <div className="q-banner err wrap" role="alert">
-              {error}
+              {shownError(error, t)}
             </div>
           ) : null}
 
@@ -544,7 +555,8 @@ export function CreatePullRequestDialog({
                   repo: `${repo.owner}/${repo.repo}`,
                   forge: forgeLabel(repo.forge),
                 })
-              : (repoError ?? (noRemote ? t("pullRequest.noRemote") : t("pullRequest.looking")))}
+              : ((repoError && shownError(repoError, t)) ??
+                (noRemote ? t("pullRequest.noRemote") : t("pullRequest.looking")))}
           </DialogDescription>
         </DialogHeader>
 
@@ -617,7 +629,7 @@ export function CreatePullRequestDialog({
         ) : null}
         {error ? (
           <div className="q-banner err wrap" role="alert">
-            {error}
+            {shownError(error, t)}
           </div>
         ) : null}
 

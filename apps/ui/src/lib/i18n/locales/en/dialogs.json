@@ -20,7 +20,7 @@
   },
   "rewind": {
     "title": "Edit from here",
-    "description": "This message and everything after it leave {{title}}. The prompt comes back to the composer so you can edit and resend it.",
+    "description": "This message and everything after it are removed from “{{title}}”. The prompt comes back to the composer so you can edit and resend it.",
     "choices": "What a rewind does",
     "keep": {
       "title": "Revert and keep changes",

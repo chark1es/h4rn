@@ -40,6 +40,9 @@ function leftAloneText(paths: string[] | undefined): string | null {
  * switch is on and the daemon would accept it. The warning says plainly that
  * the file choice also undoes the person's own later edits.
  */
+/** A plan error with no message of its own; worded when the dialog renders. */
+const PLAN_FAILED = "\u0000rewind.planError";
+
 export function RewindDialog({
   thread,
   log,
@@ -95,7 +98,8 @@ export function RewindDialog({
       })
       .catch((error: unknown) => {
         if (!live) return;
-        setPlanError(error instanceof Error ? error.message : i18n.t("dialogs:rewind.planError"));
+        // Without a message of its own, the dialog words the error when it renders.
+        setPlanError(error instanceof Error ? error.message : PLAN_FAILED);
         setChecking(false);
       });
     return () => {
@@ -189,7 +193,7 @@ export function RewindDialog({
 
         {planError ? (
           <p className="q-rewind-note q-warn" role="status">
-            {planError}
+            {planError === PLAN_FAILED ? t("rewind.planError") : planError}
           </p>
         ) : null}
 

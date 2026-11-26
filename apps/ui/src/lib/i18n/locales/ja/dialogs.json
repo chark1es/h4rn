@@ -20,7 +20,7 @@
   },
   "rewind": {
     "title": "ここから編集",
-    "description": "このメッセージ以降のすべてが {{title}} から外れます。プロンプトはコンポーザーに戻るので、編集して再送信できます。",
+    "description": "このメッセージ以降のすべてが「{{title}}」から削除されます。プロンプトはコンポーザーに戻るので、編集して再送信できます。",
     "choices": "巻き戻しで行うこと",
     "keep": {
       "title": "元に戻して変更を残す",
@@ -121,8 +121,8 @@
     "noUpstream": "このブランチにはまだ upstream がありません。プッシュするとリモートに作成されます。",
     "reading": "ブランチを読み取っています…",
     "operation": "{{operation}} が進行中です",
-    "ahead_other": "{{count, number}} 件先行",
-    "behind_other": "{{count, number}} 件遅れ",
+    "ahead_other": "{{count, number}} コミット先行",
+    "behind_other": "{{count, number}} コミット遅れ",
     "refresh": "git の状態を更新",
     "staged": "ステージ済み",
     "unstaged": "未ステージ",

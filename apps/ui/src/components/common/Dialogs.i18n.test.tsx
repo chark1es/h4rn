@@ -62,7 +62,7 @@ describe("dialogs in other languages", () => {
     renderConfirm();
     expect(screen.getByRole("button", { name: "Cancelar" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Cerrar" })).toBeTruthy();
-    // An area not converted yet still passes its English title.
+    // The title is the caller's own text, shown as passed.
     expect(screen.getByText("Remove the worktree?")).toBeTruthy();
   });
 
