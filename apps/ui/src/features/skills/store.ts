@@ -417,6 +417,8 @@ export async function resolveSkillConflict(
 ): Promise<boolean> {
   const host = skillsHost();
   if (!host) return false;
+  // The conflict leaves the list once settled; name it before that.
+  const name = state.conflicts.find((conflict) => conflict.id === conflictId)?.name ?? conflictId;
   try {
     await send({ type: "skills_resolve_conflict", host, conflict_id: conflictId, resolution });
     set({ conflicts: state.conflicts.filter((conflict) => conflict.id !== conflictId) });
@@ -425,7 +427,7 @@ export async function resolveSkillConflict(
   } catch (error) {
     const proto = toProtoError(error);
     pushToast({
-      title: i18n.t("shell:skills.resolveFailed"),
+      title: i18n.t("shell:skills.resolveFailed", { name }),
       description: joinSentences([proto.message, i18n.t("shell:skills.stillOpen")]),
       variant: "error",
     });

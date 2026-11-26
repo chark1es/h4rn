@@ -33,9 +33,11 @@ import {
   sendMessage,
   sendQueuedNow,
   setThreadTab,
+  settleThread,
   steerOldestQueued,
   store,
   syncQueueWithSummary,
+  togglePin,
 } from "./appStore";
 
 function hostSummary(hostId: string): HostSummary {
@@ -448,11 +450,32 @@ describe("thread action failures", () => {
     expect(getState().pendingActions.thread_tab).toBe("moveToSettled");
     await pending;
     const toast = getState().toasts.at(-1);
-    expect(toast?.title).toBe("No se pudo resolver en atlas.");
+    expect(toast?.title).toBe("No se pudo resolver el hilo en atlas.");
     expect(toast?.description).toBe(
       "Vuelve a intentarlo. Si sigue ocurriendo, abre los detalles de la conexión en la barra de estado.",
     );
     expect(getState().pendingActions.thread_tab).toBeUndefined();
+  });
+
+  it("name the thread in Spanish, so settling does not read as solving", async () => {
+    const state = getState();
+    store.setState({
+      ...state,
+      threads: {
+        ...state.threads,
+        thread_settle: threadSummary({ threadId: "thread_settle", host: "atlas" }),
+      },
+    });
+    fake.response.current = null;
+    await setLocalePreference("es");
+
+    fake.request.mockRejectedValueOnce(new Error("the host is unreachable"));
+    await settleThread("thread_settle");
+    expect(getState().toasts.at(-1)?.title).toBe("No se pudo resolver el hilo en atlas.");
+
+    fake.request.mockRejectedValueOnce(new Error("the host is unreachable"));
+    await togglePin("thread_settle");
+    expect(getState().toasts.at(-1)?.title).toBe("No se pudo fijar el hilo en atlas.");
   });
 });
 
@@ -501,6 +524,25 @@ describe("rewindThread", () => {
     const prompt = await rewindThread("th_rewind", "item_user_1", false);
     expect(prompt?.method).toBe("handoff");
     expect(getState().toasts.at(-1)?.description).toContain("fresh session");
+  });
+
+  it("lists the files it left alone the way the dialog did", async () => {
+    fake.response.current = {
+      type: "rewound",
+      prompt: {
+        thread_id: "th_rewind",
+        before_item_id: "item_user_1",
+        prompt: "try again",
+        attachments: [],
+        files_restored: true,
+        left_alone: [".env", "a.log", "b.log", "c.log", "d.log"],
+        method: "handoff",
+      },
+    };
+    await rewindThread("th_rewind", "item_user_1", true);
+    expect(getState().toasts.at(-1)?.description).toContain(
+      "Ignored files left as they are: .env, a.log, b.log, c.log and 1 more.",
+    );
   });
 });
 

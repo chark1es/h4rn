@@ -9,7 +9,12 @@ import type {
   TransportStatus,
 } from "@/gen";
 
-import { type ClientErrorKind, clientProto, H4rnRequestError } from "./errors";
+import {
+  type ClientErrorKind,
+  type ClientErrorSource,
+  clientProto,
+  H4rnRequestError,
+} from "./errors";
 import {
   emitHarnessFrame,
   emitImportFrame,
@@ -839,7 +844,7 @@ export class H4rnClient {
       },
       onMessage: (data) => this.handleMessage(data),
       onBinary: (data) => this.handleBinary(data),
-      onClose: (frame) => this.handleClose(frame.code, frame.reason),
+      onClose: (frame) => this.handleClose(frame.code, frame.reason, frame.error),
       onTransportStatus: (status) => this.handleTransportStatus(status),
       onError: (failure) => {
         this.patchSnapshot({ error: clientProto("internal", failure.kind, failure) });
@@ -1171,7 +1176,7 @@ export class H4rnClient {
     this.flushReplay(replayThrough, firstConnect);
   }
 
-  private handleClose(code: number, reason: string): void {
+  private handleClose(code: number, reason: string, source?: ClientErrorSource): void {
     this.socketOpen = false;
     this.transport = null;
     this.stopPing();
@@ -1183,8 +1188,13 @@ export class H4rnClient {
     this.replayBuffer = [];
     this.subscribeId = null;
     this.subscribeSince = null;
+    // A transport that knows why it closed names a kind, so a request still
+    // waiting on it is worded again where it is shown; a socket's bare close
+    // reason is shown as sent.
     const dropped = new H4rnRequestError(
-      clientProto("internal", "closed", { message: reason || undefined }),
+      source
+        ? clientProto("internal", source.kind, source)
+        : clientProto("internal", "closed", { message: reason || undefined }),
     );
     DISCONNECTED.add(dropped);
     this.rejectPending(dropped);

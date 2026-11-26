@@ -725,7 +725,6 @@
     "empty": "worktree はまだありません。worktree 分離で実行されるサブエージェントや、worktree で作業するスレッドがここに表示されます。",
     "nothingSettled": "整理済みのものはありません。",
     "removeLabel": "{{name}} を削除",
-    "sentenceSeparator": "",
     "origin": {
       "subagent": "サブエージェントの worktree",
       "thread": "スレッドのワークスペース",

@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from "react";
 import { isPlacementMove, noteManualPlacement } from "@/features/notifications/placement";
+import { leftAloneList } from "@/features/rewind/left-alone";
 import type {
   ApprovalDecision,
   Attachment,
@@ -28,7 +29,7 @@ import { createClientFromEnv, readBootConfig } from "@/lib/client/config";
 import { toProtoError } from "@/lib/client/errors";
 import type { ConnectionSnapshot, EventEnvelope } from "@/lib/client/types";
 import { drafts, moveLocalThreadDraft } from "@/lib/drafts";
-import { formatList, i18n } from "@/lib/i18n";
+import { i18n } from "@/lib/i18n";
 import { joinSentences } from "@/lib/i18n/sentences";
 import { pushRoute, type Route, readRoute, replaceRoute, routePath } from "@/lib/router";
 import { applyTerminalTheme } from "@/lib/terminalTheme";
@@ -1597,15 +1598,6 @@ export async function planRewind(threadId: ThreadId, beforeItemId: string): Prom
     throw new Error("The daemon answered a rewind plan with the wrong shape.");
   }
   return response.plan;
-}
-
-/** The ignored paths a rewind left alone, at most four by name. */
-function leftAloneList(paths: string[] | undefined): string | null {
-  if (!paths || paths.length === 0) return null;
-  const shown = paths.slice(0, 4);
-  const rest = paths.length - shown.length;
-  if (rest === 0) return formatList(shown);
-  return formatList([...shown, i18n.t("shell:rewind.more", { count: rest })]);
 }
 
 function rewindFailedTitle(title: string | undefined): string {

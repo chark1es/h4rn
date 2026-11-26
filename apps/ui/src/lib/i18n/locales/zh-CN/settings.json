@@ -725,7 +725,6 @@
     "empty": "还没有 worktree。使用 worktree 隔离运行的子智能体，以及在 worktree 中工作的对话，都会显示在这里。",
     "nothingSettled": "没有已了结的项目。",
     "removeLabel": "移除 {{name}}",
-    "sentenceSeparator": "",
     "origin": {
       "subagent": "子智能体 worktree",
       "thread": "对话工作区",

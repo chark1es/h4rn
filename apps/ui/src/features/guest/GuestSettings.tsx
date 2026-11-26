@@ -3,7 +3,7 @@ import { useEffect } from "react";
 import { useTranslation } from "react-i18next";
 import { loadOutsideAgentSettings, setOutsideAgentEnabled, useAccess } from "../access/store";
 import { loadRewindSettings, setRewindFilesEnabled, useRewindSettings } from "../rewind/settings";
-import { loadGuestSettings, setGuestLinksEnabled, useGuest } from "./guestStore";
+import { guestErrorText, loadGuestSettings, setGuestLinksEnabled, useGuest } from "./guestStore";
 
 /**
  * Settings → Labs → Guest links.
@@ -93,7 +93,7 @@ export function GuestSettingsForm() {
         </div>
         {error ? (
           <p className="q-danger" role="alert" style={{ margin: "8px 0 0", fontSize: 12 }}>
-            {error}
+            {guestErrorText(error)}
           </p>
         ) : null}
         <p className="q-muted" style={{ fontSize: 12.5 }}>

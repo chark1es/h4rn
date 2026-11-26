@@ -88,8 +88,6 @@
     "native": "{{harness}} dropped the removed turns from its own history.",
     "handoff": "A fresh session will continue from the kept conversation.",
     "leftAlone": "Ignored files left as they are: {{files}}.",
-    "more_one": "{{count, number}} more",
-    "more_other": "{{count, number}} more",
     "failed": "Couldn't rewind {{title}}.",
     "failedUntitled": "Couldn't rewind the thread."
   },
@@ -109,7 +107,7 @@
     "checkPath": "Check the path and try again.",
     "importFailed": "Couldn't apply the import.",
     "noneAdded": "No new servers were added.",
-    "resolveFailed": "Couldn't resolve {{name}}.",
+    "resolveFailed": "Couldn't resolve the conflict for {{name}}.",
     "conflictOpen": "The conflict is still open.",
     "shareFailed": "Couldn't share {{name}}.",
     "stillLocal": "The server is still local only.",
@@ -140,7 +138,7 @@
     "checkDirectories": "Check that the harness directories are readable.",
     "importFailed": "Couldn't import those skills.",
     "rescan": "Rescan and try again.",
-    "resolveFailed": "Couldn't resolve the conflict.",
+    "resolveFailed": "Couldn't resolve the conflict for {{name}}.",
     "stillOpen": "It is still open.",
     "syncFailed": "Couldn't sync skills.",
     "localStillWork": "Local skills still work.",
@@ -238,17 +236,25 @@
       "message": "No route to this machine is available.",
       "hint": "The machine's daemon may be offline. Check the hosts list, then reconnect."
     },
+    "allPathsClosed": {
+      "message": "Every secure path to the daemon closed.",
+      "hint": "The client reconnects automatically. If it keeps happening, check the machine's network."
+    },
+    "noSecurePath": {
+      "message": "No secure path to the daemon is available.",
+      "hint": "The client reconnects automatically. If it keeps happening, check the machine's network."
+    },
     "notPaired": {
       "message": "This browser is not paired with a daemon.",
       "hint": "Scan the daemon's pairing code, then reopen the app."
     },
     "invalidPairingCode": {
       "message": "Invalid pairing code: {{detail}}",
-      "hint": "Scan the daemon's pairing code, then reopen the app."
+      "hint": "Scan a fresh pairing code from the daemon."
     },
     "invalidPairingCodeBare": {
       "message": "Invalid pairing code.",
-      "hint": "Scan the daemon's pairing code, then reopen the app."
+      "hint": "Scan a fresh pairing code from the daemon."
     },
     "helloUnexpected": {
       "message": "The daemon answered hello with an unexpected response.",
@@ -296,7 +302,7 @@
     },
     "noAgentTurn": {
       "message": "This workspace has no agent turn to compare against yet.",
-      "hint": "Run a turn first, then open Turn changes."
+      "hint": "Run a turn first, then choose Turn as the diff source."
     },
     "noCommit": {
       "message": "Choose a commit to compare against first.",

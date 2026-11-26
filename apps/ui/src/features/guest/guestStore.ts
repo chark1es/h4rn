@@ -8,8 +8,8 @@
 
 import { useSyncExternalStore } from "react";
 
-import type { GuestLink, GuestSharing, ThreadId } from "@/gen";
-import { toProtoError } from "@/lib/client/errors";
+import type { GuestLink, GuestSharing, ProtoError, ThreadId } from "@/gen";
+import { errorWords, toProtoError } from "@/lib/client/errors";
 import { i18n } from "@/lib/i18n";
 import { getClient, pushToast } from "@/lib/store/appStore";
 
@@ -27,7 +27,12 @@ export type GuestState = {
   stopping: Record<string, boolean>;
   /** Request ids whose Send or Dismiss is in flight. */
   answering: Record<string, boolean>;
-  error: string | null;
+  /**
+   * The last failure, kept as the error itself so a client-written kind
+   * (not connected, timed out) is worded again on a language switch; show it
+   * with {@link guestErrorText}.
+   */
+  error: ProtoError | null;
 };
 
 const initialState: GuestState = {
@@ -51,8 +56,14 @@ function update(patch: Partial<GuestState>): void {
   for (const listener of listeners) listener();
 }
 
+/** The words for a toast, fixed when it is raised. */
 function describe(error: unknown): string {
-  return toProtoError(error).message;
+  return errorWords(toProtoError(error)).message;
+}
+
+/** The words for the error the store holds, in the active language. */
+export function guestErrorText(error: ProtoError): string {
+  return errorWords(error).message;
 }
 
 export function getGuestState(): GuestState {
@@ -87,7 +98,7 @@ export async function loadGuestSettings(): Promise<void> {
       update({ settingsLoading: false });
     }
   } catch (error) {
-    update({ settingsLoading: false, error: describe(error) });
+    update({ settingsLoading: false, error: toProtoError(error) });
   }
 }
 
@@ -103,7 +114,7 @@ export async function setGuestLinksEnabled(enabled: boolean): Promise<boolean> {
     update({ settingsSaving: false });
     return false;
   } catch (error) {
-    update({ settingsSaving: false, error: describe(error) });
+    update({ settingsSaving: false, error: toProtoError(error) });
     pushToast({
       variant: "error",
       title: i18n.t("shell:guest.settingsFailed"),
@@ -133,7 +144,7 @@ export async function loadGuestSharing(threadId: ThreadId): Promise<void> {
   } catch (error) {
     update({
       sharingLoading: { ...state.sharingLoading, [threadId]: false },
-      error: describe(error),
+      error: toProtoError(error),
     });
   }
 }
@@ -173,7 +184,7 @@ export async function shareThreadWithGuest(threadId: ThreadId): Promise<GuestLin
   } catch (error) {
     update({
       creating: { ...state.creating, [threadId]: false },
-      error: describe(error),
+      error: toProtoError(error),
     });
     return null;
   }
@@ -199,7 +210,7 @@ export async function stopGuestSharing(threadId: ThreadId): Promise<boolean> {
   } catch (error) {
     update({
       stopping: { ...state.stopping, [threadId]: false },
-      error: describe(error),
+      error: toProtoError(error),
     });
     return false;
   }

@@ -455,7 +455,9 @@ export class SecureTransport implements Transport {
           // The engine may already be closed.
         }
         if (this.closedSockets >= this.paths.length && !this.notifiedClose) {
-          this.finishClose(1011, "Every secure path closed.", false);
+          this.finishClose(1011, "Every secure path closed.", false, {
+            kind: "allPathsClosed",
+          });
         }
       };
     });
@@ -617,7 +619,12 @@ export class SecureTransport implements Transport {
     });
     if (lost && !this.notifiedClose) {
       queueMicrotask(() => {
-        this.finishClose(1011, status.detail ?? "No secure path is available.", false);
+        // `detail` is the engine's own text, shown as sent; without one the
+        // client words the failure itself.
+        this.finishClose(1011, status.detail ?? "No secure path is available.", false, {
+          kind: "noSecurePath",
+          message: status.detail ?? undefined,
+        });
       });
     }
   }
@@ -682,7 +689,7 @@ export class SecureTransport implements Transport {
     this.wasm = null;
 
     if (error) this.handlers?.onError(error);
-    this.handlers?.onClose({ code, reason, wasClean });
+    this.handlers?.onClose(error ? { code, reason, wasClean, error } : { code, reason, wasClean });
   }
 
   private reportFailure(error: unknown): void {

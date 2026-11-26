@@ -32,7 +32,6 @@ import {
   forceRemoveDescription,
   getWorktreeState,
   inUseWorktrees,
-  joinSentences,
   loadWorktreeSettings,
   loadWorktrees,
   removeDescription,
@@ -521,16 +520,16 @@ describe("forceRemoveDescription", () => {
   });
 });
 
-describe("joinSentences", () => {
+describe("sentences in the worktree confirmations", () => {
   afterEach(() => setLocalePreference("system"));
 
   it("puts a space between Latin sentences only", async () => {
-    expect(joinSentences(["One.", "Two."])).toBe("One. Two.");
     await setLocalePreference("es");
-    expect(joinSentences(["Uno.", "Dos."])).toBe("Uno. Dos.");
+    expect(forceRemoveDescription("Nota.")).toMatch(/\. Nota\.$/);
     for (const locale of ["ja", "zh-CN"] as const) {
       await setLocalePreference(locale);
-      expect(joinSentences(["一つ。", "二つ。"]), locale).toBe("一つ。二つ。");
+      expect(forceRemoveDescription("メモ。"), locale).toMatch(/。メモ。$/);
+      expect(clearAllDescription(2), locale).not.toMatch(/。 /);
     }
   });
 

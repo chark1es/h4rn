@@ -10,6 +10,7 @@ import type {
 import type { H4rnClient } from "@/lib/client/client";
 import { toProtoError } from "@/lib/client/errors";
 import { formatList, i18n } from "@/lib/i18n";
+import { joinSentences } from "@/lib/i18n/sentences";
 import { getClient } from "@/lib/store/appStore";
 
 /**
@@ -265,18 +266,6 @@ export function removeDescription(row: TrackedWorktree): string {
  */
 export function forceRemoveDescription(threadNote: string): string {
   return joinSentences([i18n.t("settings:worktrees.force.description"), threadNote]);
-}
-
-/**
- * Sentences in one paragraph. Latin scripts separate them with a space;
- * Chinese and Japanese full stops already end the sentence.
- */
-export function joinSentences(sentences: string[]): string {
-  const separator = i18n.t("settings:worktrees.sentenceSeparator");
-  return sentences
-    .map((sentence) => sentence.trim())
-    .filter(Boolean)
-    .join(separator);
 }
 
 /**

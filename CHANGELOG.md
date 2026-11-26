@@ -66,8 +66,10 @@ All notable changes to h4rn are recorded here. The format follows
   failures ("Settling failed on atlas."), the MCP, skills, guest, import and
   update failure toasts, and the errors the client writes itself (not
   connected, timed out, the connection closed) follow the Language choice.
-  An error already on screen, such as a pairing or sign-in error or the
-  banner's reason, switches language with the rest of the page. The daemon's
+  An error already on screen, such as a pairing, sign-in or guest-link error
+  or the banner's reason, switches language with the rest of the page, and
+  the list of files a rewind left alone reads the same in its dialog and its
+  toast. The daemon's
   and the relay's own error text is shown as sent.
 - **Dialogs and confirmations in Chinese, Spanish and Japanese.** New thread,
   rename, edit from here (rewind), the branch and pull request dialogs, Share

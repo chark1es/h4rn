@@ -127,6 +127,18 @@ describe("RewindDialog", () => {
     expect(screen.getByText(/Ignored files stay as they are: \.env, secret\.log\./)).toBeTruthy();
   });
 
+  it("names four ignored files and counts the rest, as the rewind toast does", async () => {
+    mock.plan.leftAlone = [".env", "a.log", "b.log", "c.log", "d.log"];
+    open();
+    await screen.findByText("Revert files too");
+    fireEvent.click(screen.getByLabelText(/Revert files too/));
+    expect(
+      screen.getByText(
+        /Ignored files stay as they are: \.env, a\.log, b\.log, c\.log and 1 more\./,
+      ),
+    ).toBeTruthy();
+  });
+
   it("sends the file choice to the daemon and closes on success", async () => {
     const onOpenChange = vi.fn();
     mock.planRewind.mockImplementation(async () => ({

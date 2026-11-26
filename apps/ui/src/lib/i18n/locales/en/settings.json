@@ -732,7 +732,6 @@
     "empty": "No worktrees yet. Subagents that run with worktree isolation, and threads working in a worktree, show up here.",
     "nothingSettled": "Nothing has settled.",
     "removeLabel": "Remove {{name}}",
-    "sentenceSeparator": " ",
     "origin": {
       "subagent": "Subagent worktree",
       "thread": "Thread workspace",

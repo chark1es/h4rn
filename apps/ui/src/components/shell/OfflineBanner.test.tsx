@@ -95,7 +95,7 @@ describe("connection banner", () => {
     await act(() => setLocalePreference("es"));
     expect(screen.getByRole("status").textContent).toBe("Reconectando · intento 1200Reconectar");
     await act(() => setLocalePreference("ja"));
-    expect(screen.getByRole("status").textContent).toBe("再接続中 · 1,200 回目の試行再接続");
+    expect(screen.getByRole("status").textContent).toBe("再接続中 · 1,200 回目再接続");
   });
 });
 

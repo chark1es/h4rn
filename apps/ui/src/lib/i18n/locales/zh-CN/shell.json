@@ -88,7 +88,6 @@
     "native": "{{harness}} 已从自己的历史中删除被移除的回合。",
     "handoff": "新的会话将从保留的对话继续。",
     "leftAlone": "被忽略的文件保持原样：{{files}}。",
-    "more_other": "另外 {{count, number}} 个",
     "failed": "无法回退 {{title}}。",
     "failedUntitled": "无法回退此对话。"
   },
@@ -108,7 +107,7 @@
     "checkPath": "请检查路径后重试。",
     "importFailed": "无法应用导入。",
     "noneAdded": "没有添加新的服务器。",
-    "resolveFailed": "无法解决 {{name}}。",
+    "resolveFailed": "无法解决 {{name}} 的冲突。",
     "conflictOpen": "冲突仍未解决。",
     "shareFailed": "无法共享 {{name}}。",
     "stillLocal": "该服务器仍仅限本地使用。",
@@ -139,7 +138,7 @@
     "checkDirectories": "请确认 harness 目录可读。",
     "importFailed": "无法导入这些技能。",
     "rescan": "请重新扫描后重试。",
-    "resolveFailed": "无法解决该冲突。",
+    "resolveFailed": "无法解决 {{name}} 的冲突。",
     "stillOpen": "冲突仍未解决。",
     "syncFailed": "无法同步技能。",
     "localStillWork": "本地技能仍可使用。",
@@ -234,8 +233,16 @@
       "hint": "请确认守护进程正在运行，然后重新连接。"
     },
     "noRoute": {
-      "message": "没有可通往这台机器的路由。",
+      "message": "无法连接到这台机器。",
       "hint": "这台机器的守护进程可能已离线。请检查主机列表，然后重新连接。"
+    },
+    "allPathsClosed": {
+      "message": "通往守护进程的所有安全路径都已关闭。",
+      "hint": "客户端会自动重新连接。如果反复出现，请检查这台机器的网络。"
+    },
+    "noSecurePath": {
+      "message": "没有可通往守护进程的安全路径。",
+      "hint": "客户端会自动重新连接。如果反复出现，请检查这台机器的网络。"
     },
     "notPaired": {
       "message": "此浏览器尚未与守护进程配对。",
@@ -243,11 +250,11 @@
     },
     "invalidPairingCode": {
       "message": "配对码无效：{{detail}}",
-      "hint": "扫描守护进程的配对码，然后重新打开应用。"
+      "hint": "请扫描守护进程上新的配对码。"
     },
     "invalidPairingCodeBare": {
       "message": "配对码无效。",
-      "hint": "扫描守护进程的配对码，然后重新打开应用。"
+      "hint": "请扫描守护进程上新的配对码。"
     },
     "helloUnexpected": {
       "message": "守护进程对 hello 的应答不符合预期。",
@@ -278,7 +285,7 @@
       "hint": "请向主机所有者申请访问权限。"
     },
     "offline": {
-      "message": "与守护进程的连接已离线。",
+      "message": "已与守护进程断开连接。",
       "hint": "启动守护进程或检查网络，然后点击“重新连接”。"
     },
     "unexpected": {
@@ -295,7 +302,7 @@
     },
     "noAgentTurn": {
       "message": "此工作区还没有可供比较的智能体回合。",
-      "hint": "先运行一个回合，再打开“回合变更”。"
+      "hint": "先运行一个回合，再选择“Turn”作为差异来源。"
     },
     "noCommit": {
       "message": "请先选择一个要比较的提交。",

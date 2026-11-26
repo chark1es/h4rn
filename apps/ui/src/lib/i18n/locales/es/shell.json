@@ -56,28 +56,28 @@
   },
   "threadActions": {
     "theHost": "el host",
-    "moveToSettled": "No se pudo resolver en {{host}}.",
-    "moveToDone": "No se pudo mover a «Terminado» en {{host}}.",
-    "moveToWorking": "No se pudo mover a «En curso» en {{host}}.",
-    "acknowledge": "No se pudo confirmar en {{host}}.",
-    "settle": "No se pudo resolver en {{host}}.",
-    "pin": "No se pudo fijar en {{host}}.",
-    "unpin": "No se pudo desfijar en {{host}}.",
-    "snooze": "No se pudo posponer en {{host}}.",
-    "wake": "No se pudo reactivar en {{host}}.",
-    "interrupt": "No se pudo interrumpir en {{host}}.",
+    "moveToSettled": "No se pudo resolver el hilo en {{host}}.",
+    "moveToDone": "No se pudo mover el hilo a «Terminado» en {{host}}.",
+    "moveToWorking": "No se pudo mover el hilo a «En curso» en {{host}}.",
+    "acknowledge": "No se pudo confirmar el hilo en {{host}}.",
+    "settle": "No se pudo resolver el hilo en {{host}}.",
+    "pin": "No se pudo fijar el hilo en {{host}}.",
+    "unpin": "No se pudo desfijar el hilo en {{host}}.",
+    "snooze": "No se pudo posponer el hilo en {{host}}.",
+    "wake": "No se pudo reactivar el hilo en {{host}}.",
+    "interrupt": "No se pudo interrumpir el hilo en {{host}}.",
     "mode": "No se pudo cambiar el modo en {{host}}.",
     "model": "No se pudo cambiar el modelo en {{host}}.",
     "effort": "No se pudo cambiar el esfuerzo en {{host}}.",
     "fastOn": "No se pudo activar el modo rápido en {{host}}.",
     "fastOff": "No se pudo desactivar el modo rápido en {{host}}.",
-    "rename": "No se pudo cambiar el nombre en {{host}}.",
+    "rename": "No se pudo cambiar el nombre del hilo en {{host}}.",
     "switchHarness": "No se pudo cambiar de harness en {{host}}.",
-    "rewind": "No se pudo rebobinar en {{host}}."
+    "rewind": "No se pudo rebobinar el hilo en {{host}}."
   },
   "approval": {
     "approveFailed": "No se pudo enviar la aprobación a {{host}}.",
-    "denyFailed": "No se pudo enviar el rechazo a {{host}}.",
+    "denyFailed": "No se pudo enviar la denegación a {{host}}.",
     "stillPending": "La aprobación sigue pendiente."
   },
   "rewind": {
@@ -88,9 +88,6 @@
     "native": "{{harness}} eliminó los turnos quitados de su propio historial.",
     "handoff": "Una sesión nueva continuará desde la conversación conservada.",
     "leftAlone": "Los archivos ignorados se quedan como están: {{files}}.",
-    "more_one": "{{count, number}} más",
-    "more_many": "{{count, number}} más",
-    "more_other": "{{count, number}} más",
     "failed": "No se pudo rebobinar {{title}}.",
     "failedUntitled": "No se pudo rebobinar el hilo."
   },
@@ -110,7 +107,7 @@
     "checkPath": "Revisa la ruta y vuelve a intentarlo.",
     "importFailed": "No se pudo aplicar la importación.",
     "noneAdded": "No se añadió ningún servidor nuevo.",
-    "resolveFailed": "No se pudo resolver {{name}}.",
+    "resolveFailed": "No se pudo resolver el conflicto de {{name}}.",
     "conflictOpen": "El conflicto sigue abierto.",
     "shareFailed": "No se pudo compartir {{name}}.",
     "stillLocal": "El servidor sigue siendo solo local.",
@@ -141,7 +138,7 @@
     "checkDirectories": "Comprueba que los directorios de los harness se pueden leer.",
     "importFailed": "No se pudieron importar esas skills.",
     "rescan": "Vuelve a explorar e inténtalo de nuevo.",
-    "resolveFailed": "No se pudo resolver el conflicto.",
+    "resolveFailed": "No se pudo resolver el conflicto de {{name}}.",
     "stillOpen": "Sigue abierto.",
     "syncFailed": "No se pudieron sincronizar las skills.",
     "localStillWork": "Las skills locales siguen funcionando.",
@@ -239,17 +236,25 @@
       "message": "No hay ninguna ruta disponible hacia esta máquina.",
       "hint": "Puede que el daemon de la máquina esté sin conexión. Revisa la lista de hosts y vuelve a conectar."
     },
+    "allPathsClosed": {
+      "message": "Se cerraron todas las rutas seguras hacia el daemon.",
+      "hint": "El cliente se reconecta automáticamente. Si sigue ocurriendo, revisa la red de la máquina."
+    },
+    "noSecurePath": {
+      "message": "No hay ninguna ruta segura disponible hacia el daemon.",
+      "hint": "El cliente se reconecta automáticamente. Si sigue ocurriendo, revisa la red de la máquina."
+    },
     "notPaired": {
       "message": "Este navegador no está vinculado con ningún daemon.",
       "hint": "Escanea el código de vinculación del daemon y vuelve a abrir la app."
     },
     "invalidPairingCode": {
       "message": "Código de vinculación no válido: {{detail}}",
-      "hint": "Escanea el código de vinculación del daemon y vuelve a abrir la app."
+      "hint": "Escanea un código de vinculación nuevo del daemon."
     },
     "invalidPairingCodeBare": {
       "message": "Código de vinculación no válido.",
-      "hint": "Escanea el código de vinculación del daemon y vuelve a abrir la app."
+      "hint": "Escanea un código de vinculación nuevo del daemon."
     },
     "helloUnexpected": {
       "message": "El daemon respondió al hello con una respuesta inesperada.",
@@ -280,7 +285,7 @@
       "hint": "Pide acceso al propietario del host."
     },
     "offline": {
-      "message": "La conexión con el daemon está sin conexión.",
+      "message": "No hay conexión con el daemon.",
       "hint": "Inicia el daemon o revisa la red y pulsa «Reconectar»."
     },
     "unexpected": {
@@ -297,7 +302,7 @@
     },
     "noAgentTurn": {
       "message": "Este espacio de trabajo aún no tiene ningún turno del agente con el que comparar.",
-      "hint": "Ejecuta primero un turno y luego abre «Cambios del turno»."
+      "hint": "Ejecuta primero un turno y luego elige «Turn» como origen del diff."
     },
     "noCommit": {
       "message": "Elige primero un commit con el que comparar.",
