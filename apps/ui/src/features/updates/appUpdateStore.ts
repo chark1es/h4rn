@@ -159,9 +159,9 @@ export async function installAppUpdate(): Promise<void> {
     // The shell also emits a `failed` progress with the sentence to show.
     if (state.progress?.phase !== "failed") {
       patch({
-        // The shell writes its own sentence in the same field; this one is
-        // worded when it is raised, like the shell's.
-        progress: { phase: "failed", message: i18n.t("shell:update.installFailed") },
+        // The shell writes its own sentence in the same field and it is shown
+        // as sent; null is the client's own failure, worded by the notice.
+        progress: { phase: "failed", message: null },
       });
     }
   }

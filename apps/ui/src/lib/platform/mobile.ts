@@ -21,6 +21,8 @@
  * shell, build pipeline and native integrations. A later UI pass replaces it.
  */
 
+import { i18n } from "@/lib/i18n";
+import { joinSentences } from "@/lib/i18n/sentences";
 import { openThread } from "@/lib/store/appStore";
 
 import { parsePairingUrl as classifyPairingUrl, isDirectPairingUrl } from "./pairingUrl";
@@ -62,7 +64,7 @@ const isMobileShell =
 /** Normalises what someone types or scans into a WebSocket URL. */
 export function normaliseDaemon(raw: string): string {
   let value = raw.trim();
-  if (value.length === 0) throw new Error("Enter a daemon URL.");
+  if (value.length === 0) throw new Error(i18n.t("pairing:phoneShell.enterUrl"));
 
   // `10.0.2.2:47800` and `http://host:47800` are the two things people paste
   // most often; the protocol must become ws/wss, and `/ws` is the daemon route.
@@ -71,7 +73,7 @@ export function normaliseDaemon(raw: string): string {
   if (url.protocol === "http:") url.protocol = "ws:";
   if (url.protocol === "https:") url.protocol = "wss:";
   if (url.protocol !== "ws:" && url.protocol !== "wss:") {
-    throw new Error("The daemon URL must be ws:// or wss:// (http/https also work).");
+    throw new Error(i18n.t("pairing:phoneShell.badScheme"));
   }
   if (url.pathname === "" || url.pathname === "/") url.pathname = "/ws";
   return url.toString();
@@ -254,6 +256,7 @@ function safeAreaStyle(): void {
   // Android status bar icons follow it too (MainActivity enables edge-to-edge
   // with the platform default styles). Keeping the two in sync means the clock
   // never disappears into the overlay background.
+  // i18n-ignore-next-line: the CSS of a <style> element, not words
   style.textContent = `
     :root {
       --h4rn-safe-area-top: env(safe-area-inset-top, 0px);
@@ -342,19 +345,19 @@ function renderConnect(initialMessage?: string): void {
   );
   const title = el(
     "h1",
-    "Connect this phone",
+    i18n.t("pairing:phoneShell.title"),
     "margin:0;font:600 30px/1.1 system-ui, sans-serif;letter-spacing:-.03em",
   );
   const intro = el(
     "p",
-    "Point h4rn at the daemon you already run. The token is the one `h4rnd token` prints; it is stored in the Android Keystore, not in plain text.",
+    i18n.t("pairing:phoneShell.intro", { command: "h4rnd token" }),
     "margin:0;color:var(--h4rn-pair-muted);max-width:34rem",
   );
 
   const form = el("form", undefined, "display:flex;flex-direction:column;gap:12px;max-width:34rem");
   const daemonLabel = el(
     "label",
-    "Daemon URL",
+    i18n.t("pairing:phoneShell.daemonUrl"),
     "display:flex;flex-direction:column;gap:6px;font-weight:600;font-size:13px;color:var(--h4rn-pair-muted)",
   );
   const daemonInput = el(
@@ -373,7 +376,7 @@ function renderConnect(initialMessage?: string): void {
 
   const tokenLabel = el(
     "label",
-    "Access token",
+    i18n.t("pairing:phoneShell.accessToken"),
     "display:flex;flex-direction:column;gap:6px;font-weight:600;font-size:13px;color:var(--h4rn-pair-muted)",
   );
   const tokenInput = el(
@@ -385,19 +388,19 @@ function renderConnect(initialMessage?: string): void {
   tokenInput.autocapitalize = "off";
   tokenInput.autocomplete = "off";
   tokenInput.spellcheck = false;
-  tokenInput.placeholder = "64-character hex token";
+  tokenInput.placeholder = i18n.t("pairing:phoneShell.tokenPlaceholder");
   tokenLabel.append(tokenInput);
 
   const actions = el("div", undefined, "display:flex;gap:10px;flex-wrap:wrap;align-items:center");
   const connect = el(
     "button",
-    "Connect",
+    i18n.t("pairing:phoneShell.connect"),
     "appearance:none;border:0;border-radius:10px;padding:12px 18px;background:var(--h4rn-pair-accent);color:var(--h4rn-pair-accent-fg);font:650 14px/1 system-ui, sans-serif;cursor:pointer",
   );
   connect.type = "submit";
   const scan = el(
     "button",
-    "Scan QR",
+    i18n.t("pairing:phoneShell.scan"),
     "appearance:none;border:1px solid var(--h4rn-pair-field-border);border-radius:10px;padding:12px 18px;background:var(--h4rn-pair-field-bg);color:var(--h4rn-pair-fg);font:650 14px/1 system-ui, sans-serif;cursor:pointer",
   );
   scan.type = "button";
@@ -411,7 +414,10 @@ function renderConnect(initialMessage?: string): void {
 
   const hint = el(
     "p",
-    "Emulator build: run `scripts/mobile-android.sh run`, which starts the daemon, wires `adb reverse tcp:47800 tcp:47800` and passes this URL and token. Or paste the pairing link / direct QR shown on the host.",
+    i18n.t("pairing:phoneShell.hint", {
+      script: "scripts/mobile-android.sh run",
+      reverse: "adb reverse tcp:47800 tcp:47800",
+    }),
     "margin:0;color:var(--h4rn-pair-faint);font-size:12px;max-width:34rem",
   );
 
@@ -427,9 +433,9 @@ function renderConnect(initialMessage?: string): void {
   };
 
   const apply = async (pairing: Pairing): Promise<void> => {
-    setStatus("Saving the pairing…");
+    setStatus(i18n.t("pairing:phoneShell.saving"));
     await commitPairing(pairing);
-    setStatus("Connecting…");
+    setStatus(i18n.t("pairing:phoneShell.connecting"));
   };
 
   form.addEventListener("submit", (event) => {
@@ -444,7 +450,7 @@ function renderConnect(initialMessage?: string): void {
       try {
         if (/^h4rn:\/\//i.test(raw)) {
           if (isDirectPairingUrl(raw)) {
-            setStatus("Saving the pairing…");
+            setStatus(i18n.t("pairing:phoneShell.saving"));
             // Await the backend write: the reload starts a new page whose
             // synchronous boot read would not see this page's memory cache.
             await setSecret(DIRECT_PAIRING_KEY, raw);
@@ -470,7 +476,7 @@ function renderConnect(initialMessage?: string): void {
   scan.addEventListener("click", () => {
     if (!internals || busy) return;
     busy = true;
-    setStatus("Opening the camera…");
+    setStatus(i18n.t("pairing:phoneShell.openingCamera"));
     void (async () => {
       try {
         // The barcode plugin checks instead of requesting, so the camera prompt
@@ -484,7 +490,7 @@ function renderConnect(initialMessage?: string): void {
         // A direct QR carries a one-time PSK and an endpoint, not a token, so
         // it goes to the same secret store `?pair=` uses and the page reloads.
         if (isDirectPairingUrl(scanned)) {
-          setStatus("Saving the pairing…");
+          setStatus(i18n.t("pairing:phoneShell.saving"));
           await setSecret(DIRECT_PAIRING_KEY, scanned);
           window.location.reload();
           return;
@@ -499,9 +505,12 @@ function renderConnect(initialMessage?: string): void {
           overlay.remove();
           return;
         }
-        throw new Error("That QR code is not an h4rn pairing link.");
+        throw new Error(i18n.t("pairing:errors.notPairingLink"));
       } catch (error) {
-        setStatus(`${describeError(error)} You can still type the URL and token.`, true);
+        setStatus(
+          joinSentences([describeError(error), i18n.t("pairing:phoneShell.typeInstead")]),
+          true,
+        );
       } finally {
         busy = false;
       }
@@ -509,7 +518,7 @@ function renderConnect(initialMessage?: string): void {
   });
 }
 
-async function boot(): Promise<void> {
+async function boot(languageReady: Promise<unknown>): Promise<void> {
   safeAreaStyle();
   // A tapped alert that cold-started the app names a thread; pair first only
   // when there is no stored daemon to open it on. `watchDeepLinks` ran first,
@@ -537,7 +546,9 @@ async function boot(): Promise<void> {
     return;
   }
 
-  // 4. First launch on this device.
+  // 4. First launch on this device. The form is drawn once, outside React,
+  //    so it waits for the saved language's catalogue before it is worded.
+  await languageReady;
   renderConnect();
 }
 
@@ -547,12 +558,17 @@ async function boot(): Promise<void> {
  * Every shell loads its secret store first: `readBootConfig()` is synchronous
  * and needs the daemon token from the cache. On a mobile shell this also
  * consumes a cold-start pairing/deep link and repaints the safe-area CSS.
+ * `languageReady` settles once the saved language's catalogue is loaded; the
+ * first-launch connect form waits for it, because it is drawn outside React
+ * and never re-renders on a language change.
  */
-export async function preparePlatform(): Promise<void> {
+export async function preparePlatform(
+  languageReady: Promise<unknown> = Promise.resolve(),
+): Promise<void> {
   await prepareSecrets();
   if (!isMobileShell) return;
   watchDeepLinks();
-  await boot();
+  await boot(languageReady);
 }
 
 function watchDeepLinks(): void {

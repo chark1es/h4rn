@@ -195,7 +195,9 @@
     "downloadHint": "{{message}} Comprueba la conexión y vuelve a intentarlo.",
     "loading": "Cargando {{name}}…",
     "previewFailed": "{{message}} Comprueba la conexión o descarga el original.",
-    "loadFailed": "No se pudo cargar el archivo."
+    "loadFailed": "No se pudo cargar el archivo.",
+    "cancelled": "Se canceló la descarga.",
+    "stalled": "El daemon dejó de enviar el archivo."
   },
   "fork": {
     "open": "Abrir {{title}}",

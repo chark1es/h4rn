@@ -906,6 +906,7 @@ export function buildPreviewDocument(options: {
       if (!replacement) continue;
       kept.push(candidate.descriptor ? `${replacement} ${candidate.descriptor}` : replacement);
     }
+    // i18n-ignore-next-line: a srcset attribute's own syntax, not a list a person reads
     return changed ? (kept.length > 0 ? kept.join(", ") : null) : undefined;
   };
 

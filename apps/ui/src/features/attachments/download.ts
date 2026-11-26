@@ -1,5 +1,6 @@
 import type { AttachmentId } from "@/gen";
 import type { H4rnClient } from "@/lib/client/client";
+import { i18n } from "@/lib/i18n";
 
 import { BinaryKind, binaryRouter } from "./frames";
 
@@ -32,6 +33,7 @@ export async function downloadBlob(
     thumbnail: options.thumbnail ?? false,
   });
   if (response.type !== "blob") {
+    // i18n-ignore-next-line: a reply of the wrong type is a bug, not a state
     throw new Error("The daemon answered the blob request with an unexpected response.");
   }
 
@@ -43,7 +45,7 @@ export async function downloadBlob(
     let settled = false;
     let off: () => void = () => undefined;
     let timer: ReturnType<typeof setTimeout> | null = null;
-    const abort = () => finish(new Error("The download was cancelled."));
+    const abort = () => finish(new Error(i18n.t("thread:attachments.cancelled")));
     const finish = (error?: Error) => {
       if (settled) return;
       settled = true;
@@ -80,7 +82,7 @@ export async function downloadBlob(
     if (settled) return;
 
     timer = setTimeout(
-      () => finish(new Error("The daemon stopped sending the file.")),
+      () => finish(new Error(i18n.t("thread:attachments.stalled"))),
       DOWNLOAD_TIMEOUT_MS,
     );
 

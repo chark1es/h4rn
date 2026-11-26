@@ -148,7 +148,8 @@
       "noSender": "This Connect server has no push sender configured for this phone. An operator has to add one before alerts can arrive.",
       "senderUnknown": "Could not check whether this Connect server can send alerts."
     },
-    "agentAlertsFailed": "Agent alerts could not be changed"
+    "agentAlertsFailed": "Agent alerts could not be changed",
+    "phoneAppOnly": "Device alerts are only available in the h4rn phone app."
   },
   "chat": {
     "title": "Chat",
@@ -618,7 +619,8 @@
       "callbackState": "The sign-in callback is missing its state.",
       "denied": "Sign-in was denied.",
       "expired": "That code expired.",
-      "noSignInWindow": "This app cannot open a sign-in window."
+      "noSignInWindow": "This app cannot open a sign-in window.",
+      "status": "h4rn-connect answered {{status}}."
     }
   },
   "localMachine": {
@@ -1111,7 +1113,8 @@
     "outsideAgents": "Outside agents",
     "outsideAgentsOAuth": "Outside agents (OAuth)",
     "outsideAgentsHint": "Let Claude Code, Codex or another local MCP client sign in over OAuth and work with your projects and threads. Off by default. Turning it off revokes every grant and drops every sign-in waiting for you.",
-    "outsideOffNote": "While this is off, h4rn’s OAuth routes do not exist, outside-agent tokens are refused, and no sign-in can be created. Agents h4rn runs keep their own tools."
+    "outsideOffNote": "While this is off, h4rn’s OAuth routes do not exist, outside-agent tokens are refused, and no sign-in can be created. Agents h4rn runs keep their own tools.",
+    "rewindFilesFailed": "The rewind file switch could not be changed"
   },
   "access": {
     "title": "Sharing & access",

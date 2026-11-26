@@ -19,8 +19,8 @@ function Command({ className, ...props }: React.ComponentProps<typeof CommandPri
 }
 
 function CommandDialog({
-  title = "Command palette",
-  description = "Search for a command to run.",
+  title,
+  description,
   children,
   className,
   showCloseButton = false,
@@ -30,8 +30,10 @@ function CommandDialog({
   ...props
 }: React.ComponentProps<typeof Dialog> & {
   filter?: React.ComponentProps<typeof CommandPrimitive>["filter"];
-  title?: string;
-  description?: string;
+  /** The dialog's accessible name; the caller translates it. */
+  title: string;
+  /** The dialog's accessible description; the caller translates it. */
+  description: string;
   className?: string;
   showCloseButton?: boolean;
   onOpenAutoFocus?: React.ComponentProps<typeof DialogContent>["onOpenAutoFocus"];

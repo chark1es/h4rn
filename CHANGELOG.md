@@ -102,6 +102,13 @@ All notable changes to h4rn are recorded here. The format follows
   numbers and file sizes use the language's own numbers. A review comment
   added to the draft keeps its English framing, since it is written for the
   agent.
+- **The whole interface follows the Language choice.** The last English
+  corners are translated: the desktop update notice and its download
+  progress, system notifications, the phone's first-launch connect screen,
+  attachment download errors, the Labs rewind switch, the ACP harness name and
+  the "or press" hint under empty states. A check now reads every UI file, not
+  an opt-in list, so new English text fails the tests unless it is demo data
+  or code (see `docs/i18n.md`).
 - **Android Live Updates show a running agent.** A separate switch under
   Settings → Notifications → Phone alerts shows each running thread as an
   ongoing notification with its project and whether it is working, waiting for

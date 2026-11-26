@@ -146,7 +146,8 @@
       "noSender": "此 Connect 服务器没有为这台手机配置推送发送方。需要运维人员添加后提醒才能送达。",
       "senderUnknown": "无法检查此 Connect 服务器能否发送提醒。"
     },
-    "agentAlertsFailed": "无法更改智能体提醒"
+    "agentAlertsFailed": "无法更改智能体提醒",
+    "phoneAppOnly": "设备提醒仅在 h4rn 手机应用中可用。"
   },
   "chat": {
     "title": "聊天",
@@ -613,7 +614,8 @@
       "callbackState": "登录回调缺少 state 参数。",
       "denied": "登录被拒绝。",
       "expired": "该授权码已过期。",
-      "noSignInWindow": "此应用无法打开登录窗口。"
+      "noSignInWindow": "此应用无法打开登录窗口。",
+      "status": "h4rn-connect 返回了 {{status}}。"
     }
   },
   "localMachine": {
@@ -1094,7 +1096,8 @@
     "outsideAgents": "外部智能体",
     "outsideAgentsOAuth": "外部智能体（OAuth）",
     "outsideAgentsHint": "允许 Claude Code、Codex 或其他本地 MCP 客户端通过 OAuth 登录，并操作你的项目和对话。默认关闭。关闭后会撤销所有授权，并丢弃所有等待你处理的登录请求。",
-    "outsideOffNote": "关闭时，h4rn 的 OAuth 路由不存在，外部智能体令牌会被拒绝，也无法创建登录请求。h4rn 运行的智能体保留自己的工具。"
+    "outsideOffNote": "关闭时，h4rn 的 OAuth 路由不存在，外部智能体令牌会被拒绝，也无法创建登录请求。h4rn 运行的智能体保留自己的工具。",
+    "rewindFilesFailed": "无法更改回退文件开关"
   },
   "access": {
     "title": "共享与访问",

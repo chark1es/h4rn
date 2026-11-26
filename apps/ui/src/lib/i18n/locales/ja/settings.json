@@ -146,7 +146,8 @@
       "noSender": "この Connect サーバーには、このスマートフォン向けのプッシュ送信元が設定されていません。通知が届くようにするには、運用者が追加する必要があります。",
       "senderUnknown": "この Connect サーバーが通知を送信できるか確認できませんでした。"
     },
-    "agentAlertsFailed": "エージェントの通知を変更できませんでした"
+    "agentAlertsFailed": "エージェントの通知を変更できませんでした",
+    "phoneAppOnly": "デバイスへの通知は h4rn のスマートフォンアプリでのみ使えます。"
   },
   "chat": {
     "title": "チャット",
@@ -613,7 +614,8 @@
       "callbackState": "サインインのコールバックに state がありません。",
       "denied": "サインインが拒否されました。",
       "expired": "コードの有効期限が切れました。",
-      "noSignInWindow": "このアプリではサインイン用のウィンドウを開けません。"
+      "noSignInWindow": "このアプリではサインイン用のウィンドウを開けません。",
+      "status": "h4rn-connect が {{status}} を返しました。"
     }
   },
   "localMachine": {
@@ -1094,7 +1096,8 @@
     "outsideAgents": "外部エージェント",
     "outsideAgentsOAuth": "外部エージェント（OAuth）",
     "outsideAgentsHint": "Claude Code、Codex、その他のローカル MCP クライアントが OAuth でサインインし、あなたのプロジェクトやスレッドで作業できるようにします。デフォルトはオフです。オフにすると、すべての許可が取り消され、対応待ちのサインインはすべて破棄されます。",
-    "outsideOffNote": "オフの間、h4rn の OAuth ルートは存在せず、外部エージェントのトークンは拒否され、サインインは作成できません。h4rn が実行するエージェントは自身のツールを保持します。"
+    "outsideOffNote": "オフの間、h4rn の OAuth ルートは存在せず、外部エージェントのトークンは拒否され、サインインは作成できません。h4rn が実行するエージェントは自身のツールを保持します。",
+    "rewindFilesFailed": "ファイル巻き戻しのスイッチを変更できませんでした"
   },
   "access": {
     "title": "共有とアクセス",

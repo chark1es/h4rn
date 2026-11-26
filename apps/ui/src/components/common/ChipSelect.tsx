@@ -1,5 +1,6 @@
 import { CheckIcon, ChevronDownIcon } from "lucide-react";
 import type { ReactNode } from "react";
+import { useTranslation } from "react-i18next";
 
 import {
   DropdownMenu,
@@ -29,7 +30,7 @@ export function ChipSelect<T extends string>({
   onChange,
   label,
   id,
-  placeholder = "Choose…",
+  placeholder,
   disabled,
   className,
   width,
@@ -49,6 +50,7 @@ export function ChipSelect<T extends string>({
   /** Fill the field like an input (28 px) instead of hugging the label. */
   block?: boolean;
 }) {
+  const { t } = useTranslation("common");
   const current = options.find((option) => option.value === value);
   return (
     <DropdownMenu>
@@ -58,12 +60,12 @@ export function ChipSelect<T extends string>({
           id={id}
           className={`q-chip q-chip-select${block ? " block" : ""}${className ? ` ${className}` : ""}`}
           style={width ? { width, maxWidth: "100%" } : undefined}
-          aria-label={`${label}: ${current?.label ?? placeholder}`}
+          aria-label={`${label}: ${current?.label ?? placeholder ?? t("choose")}`}
           aria-haspopup="menu"
           disabled={disabled || options.length === 0}
         >
           {current?.icon}
-          <span className="q-chip-label">{current?.label ?? placeholder}</span>
+          <span className="q-chip-label">{current?.label ?? placeholder ?? t("choose")}</span>
           <ChevronDownIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
         </button>
       </DropdownMenuTrigger>

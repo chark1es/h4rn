@@ -12,6 +12,8 @@
  * events.
  */
 
+import { i18n } from "@/lib/i18n";
+
 export type PairingTarget =
   | { kind: "connect"; raw: string }
   | { kind: "direct"; raw: string }
@@ -75,7 +77,7 @@ export function parsePairingUrl(raw: string): PairingTarget | null {
   const daemon = url.searchParams.get("daemon");
   const token = url.searchParams.get("token");
   if (!daemon || !token) {
-    throw new Error("The pairing link is missing daemon or token.");
+    throw new Error(i18n.t("pairing:errors.missingDaemonOrToken"));
   }
   return { kind: "daemon", daemon, token };
 }

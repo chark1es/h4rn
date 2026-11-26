@@ -155,7 +155,12 @@
   },
   "update": {
     "unreachable": "No se pudo contactar con el servidor de actualizaciones.",
-    "installFailed": "No se pudo instalar la actualización."
+    "installFailed": "No se pudo instalar la actualización.",
+    "available": "<b>h4rn {{version}}</b> está disponible",
+    "downloading": "Descargando h4rn {{version}}",
+    "installing": "<b>Instalando h4rn {{version}}</b> · reiniciando",
+    "restart": "Reiniciar para actualizar",
+    "later": "Más tarde"
   },
   "errors": {
     "notConnected": {
@@ -306,5 +311,26 @@
       "message": "Elige primero un commit con el que comparar.",
       "hint": "Elige un commit en el selector de origen."
     }
+  },
+  "notifications": {
+    "untitledThread": "Un hilo",
+    "question": "Hay una pregunta esperando.",
+    "wantsToRun": "Quiere ejecutar: {{command}}",
+    "wantsToRunCommand": "Quiere ejecutar un comando.",
+    "wantsToChange": "Quiere cambiar: {{files}}",
+    "wantsToChangeFiles": "Quiere cambiar archivos.",
+    "needsApproval": "Necesita una aprobación.",
+    "finished": "Terminado: el turno ha acabado.",
+    "failed": "Falló: {{error}}",
+    "failedUnknown": "Falló: el turno terminó con un error.",
+    "interrupted": "Detenido: el turno se interrumpió.",
+    "tokenLimit": "Detenido: el agente alcanzó su límite de tokens.",
+    "turnLimit": "Detenido: el agente alcanzó su límite de turnos.",
+    "hostOffline": "Host sin conexión: h4rn ya no puede alcanzarlo."
+  },
+  "secureStorage": {
+    "requestFailed": "La solicitud a IndexedDB falló.",
+    "writeFailed": "La escritura en IndexedDB falló.",
+    "writeAborted": "La escritura en IndexedDB se interrumpió."
   }
 }

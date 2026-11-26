@@ -155,7 +155,12 @@
   },
   "update": {
     "unreachable": "アップデートサーバーに接続できませんでした。",
-    "installFailed": "アップデートをインストールできませんでした。"
+    "installFailed": "アップデートをインストールできませんでした。",
+    "available": "<b>h4rn {{version}}</b> が利用可能です",
+    "downloading": "h4rn {{version}} をダウンロード中",
+    "installing": "<b>h4rn {{version}} をインストール中</b> · 再起動します",
+    "restart": "再起動して更新",
+    "later": "後で"
   },
   "errors": {
     "notConnected": {
@@ -306,5 +311,26 @@
       "message": "先に比較するコミットを選んでください。",
       "hint": "ソースの選択メニューからコミットを選んでください。"
     }
+  },
+  "notifications": {
+    "untitledThread": "スレッド",
+    "question": "質問が回答を待っています。",
+    "wantsToRun": "実行しようとしています：{{command}}",
+    "wantsToRunCommand": "コマンドを実行しようとしています。",
+    "wantsToChange": "変更しようとしています：{{files}}",
+    "wantsToChangeFiles": "ファイルを変更しようとしています。",
+    "needsApproval": "承認が必要です。",
+    "finished": "完了：ターンが終わりました。",
+    "failed": "失敗：{{error}}",
+    "failedUnknown": "失敗：ターンがエラーで終了しました。",
+    "interrupted": "停止：ターンが中断されました。",
+    "tokenLimit": "停止：エージェントがトークンの上限に達しました。",
+    "turnLimit": "停止：エージェントがターンの上限に達しました。",
+    "hostOffline": "ホストがオフラインです：h4rn から接続できなくなりました。"
+  },
+  "secureStorage": {
+    "requestFailed": "IndexedDB の要求に失敗しました。",
+    "writeFailed": "IndexedDB への書き込みに失敗しました。",
+    "writeAborted": "IndexedDB への書き込みが中止されました。"
   }
 }

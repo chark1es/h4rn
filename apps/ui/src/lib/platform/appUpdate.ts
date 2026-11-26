@@ -27,7 +27,11 @@ export type AppUpdateStatus = {
 export type AppUpdateProgress =
   | { phase: "downloading"; downloaded: number; total: number | null }
   | { phase: "installing" }
-  | { phase: "failed"; message: string };
+  /**
+   * The shell always sends its own sentence, shown as sent. `null` is the
+   * client's own install failure, which the notice words in the language.
+   */
+  | { phase: "failed"; message: string | null };
 
 export type AppUpdateBridge = {
   status(): Promise<AppUpdateStatus>;

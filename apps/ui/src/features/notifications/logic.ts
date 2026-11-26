@@ -4,6 +4,10 @@
  * This module is deliberately free of the DOM: the runtime asks it what a
  * protocol event means and when a queued message is due, and the tests drive
  * the same functions directly.
+ *
+ * A notification is worded in the active language when it is drafted, like a
+ * toast: the system shows it once and h4rn cannot relabel it afterwards. The
+ * thread title, the agent's prompt and a turn's error are shown as written.
  */
 
 import type {
@@ -15,6 +19,7 @@ import type {
   TurnStatus,
 } from "@/gen";
 import type { ConnectionStatus, EventEnvelope } from "@/lib/client/types";
+import { i18n } from "@/lib/i18n";
 
 import type { NotificationSettings } from "./settings";
 
@@ -59,16 +64,24 @@ export const COALESCE_MAX_MS = 3_000;
 
 /** A thread with no loaded summary still gets a readable title. */
 export function threadTitle(threads: Record<ThreadId, ThreadSummary>, threadId: ThreadId): string {
-  return threads[threadId]?.title ?? "A thread";
+  return threads[threadId]?.title ?? i18n.t("shell:notifications.untitledThread");
 }
 
 /** The one-line reason an approval needs a person. */
 export function approvalBody(kind: ApprovalKind, prompt: string): string {
   const text = prompt.trim();
-  if (kind === "question") return text || "A question is waiting.";
-  if (kind === "command") return text ? `Wants to run: ${text}` : "Wants to run a command.";
-  if (kind === "file_change") return text ? `Wants to change: ${text}` : "Wants to change files.";
-  return text || "Needs an approval.";
+  if (kind === "question") return text || i18n.t("shell:notifications.question");
+  if (kind === "command") {
+    return text
+      ? i18n.t("shell:notifications.wantsToRun", { command: text })
+      : i18n.t("shell:notifications.wantsToRunCommand");
+  }
+  if (kind === "file_change") {
+    return text
+      ? i18n.t("shell:notifications.wantsToChange", { files: text })
+      : i18n.t("shell:notifications.wantsToChangeFiles");
+  }
+  return text || i18n.t("shell:notifications.needsApproval");
 }
 
 /** Whether the person is already looking at the thing the notification names. */
@@ -142,18 +155,22 @@ export type LastTurn = { status: TurnStatus; error: string | null };
  * it got there. Limits are stops, not finishes.
  */
 export function finishedBody(lastTurn: LastTurn | null): string {
-  if (!lastTurn) return "Finished: the turn is done.";
+  if (!lastTurn) return i18n.t("shell:notifications.finished");
   switch (lastTurn.status) {
-    case "failed":
-      return `Failed: ${lastTurn.error?.trim() || "the turn ended with an error."}`;
+    case "failed": {
+      const error = lastTurn.error?.trim();
+      return error
+        ? i18n.t("shell:notifications.failed", { error })
+        : i18n.t("shell:notifications.failedUnknown");
+    }
     case "interrupted":
-      return "Stopped: the turn was interrupted.";
+      return i18n.t("shell:notifications.interrupted");
     case "token_limit":
-      return "Stopped: the agent hit its token limit.";
+      return i18n.t("shell:notifications.tokenLimit");
     case "turn_limit":
-      return "Stopped: the agent hit its turn limit.";
+      return i18n.t("shell:notifications.turnLimit");
     default:
-      return "Finished: the turn is done.";
+      return i18n.t("shell:notifications.finished");
   }
 }
 
@@ -511,7 +528,7 @@ export function offlineTransitions(
       key: `host:${hostId}`,
       kind: "host_offline",
       title: host.name,
-      body: "Host offline: h4rn can no longer reach it.",
+      body: i18n.t("shell:notifications.hostOffline"),
       threadId: null,
     };
     if (!alreadyVisible(draft, focus)) drafts.push(draft);

@@ -18,10 +18,12 @@ import { preparePlatform } from "./lib/platform/mobile";
 const container = document.getElementById("root");
 
 if (!container) {
+  // i18n-ignore-next-line: index.html ships the root, and no catalogue is loaded yet
   throw new Error("Root element #root is missing from index.html");
 }
 
-void Promise.allSettled([preparePlatform(), prepareI18n()]).finally(() => {
+const languageReady = prepareI18n();
+void Promise.allSettled([preparePlatform(languageReady), languageReady]).finally(() => {
   createRoot(container).render(
     <StrictMode>
       <TooltipProvider>

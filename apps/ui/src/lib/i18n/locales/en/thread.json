@@ -192,7 +192,9 @@
     "downloadHint": "{{message}} Check the connection, then try again.",
     "loading": "Loading {{name}}…",
     "previewFailed": "{{message}} Check the connection, or download the original.",
-    "loadFailed": "The file could not be loaded."
+    "loadFailed": "The file could not be loaded.",
+    "cancelled": "The download was cancelled.",
+    "stalled": "The daemon stopped sending the file."
   },
   "fork": {
     "open": "Open {{title}}",

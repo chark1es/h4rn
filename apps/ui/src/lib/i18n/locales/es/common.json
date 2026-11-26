@@ -44,5 +44,9 @@
     "working": "En curso",
     "done": "Terminado",
     "settled": "Resuelto"
-  }
+  },
+  "orPress": "o pulsa <kbd/>",
+  "acpAgent": "Agente ACP",
+  "thisAgent": "Este agente",
+  "choose": "Elegir…"
 }

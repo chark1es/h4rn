@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import type {
   ApprovalKind,
   Event,
@@ -8,6 +8,7 @@ import type {
   TurnStatus,
 } from "@/gen";
 import type { EventEnvelope } from "@/lib/client/types";
+import { setLocalePreference } from "@/lib/i18n";
 
 import {
   alreadyVisible,
@@ -30,6 +31,7 @@ import {
   offlineTransitions,
   type PresenceSource,
   stillOffline,
+  threadTitle,
 } from "./logic";
 import { NOTIFICATION_DEFAULTS, type NotificationSettings } from "./settings";
 
@@ -849,5 +851,24 @@ describe("host offline", () => {
         focus({ windowFocused: true }),
       ),
     ).toBe(true);
+  });
+});
+
+describe("notification wording", () => {
+  afterEach(() => setLocalePreference("en"));
+
+  it("words the client's own text in the active language and keeps the agent's as written", async () => {
+    await setLocalePreference("zh-CN");
+    expect(approvalBody("command", "")).toBe("想要运行一条命令。");
+    expect(approvalBody("command", "rm -rf build")).toBe("想要运行：rm -rf build");
+    expect(approvalBody("question", "Which branch?")).toBe("Which branch?");
+    expect(finishedBody(null)).toBe("已完成：本回合已结束。");
+    expect(finishedBody({ status: "failed", error: "exit 1" })).toBe("失败：exit 1");
+    expect(threadTitle({}, "t-missing" as ThreadId)).toBe("一个对话");
+
+    await setLocalePreference("es");
+    expect(finishedBody({ status: "token_limit", error: null })).toBe(
+      "Detenido: el agente alcanzó su límite de tokens.",
+    );
   });
 });

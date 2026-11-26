@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { setLocalePreference } from "@/lib/i18n";
+
 const signed = vi.hoisted(() => [] as { method: string; path: string }[]);
 
 vi.mock("@/gen/transport-wasm/h4rn_transport_wasm", () => ({
@@ -32,8 +34,10 @@ import {
   normalizeTokens,
   requestTimeoutSignal,
 } from "./connect";
+import { remoteErrorText, toRemoteError } from "./remoteError";
 
-afterEach(() => {
+afterEach(async () => {
+  await setLocalePreference("en");
   vi.unstubAllGlobals();
   signed.length = 0;
 });
@@ -188,5 +192,30 @@ describe("signed request path", () => {
     // The older relay ignored the query and returned the whole account; the
     // caller must not mistake that for this device's links.
     await expect(client.linkedMachines()).resolves.toEqual({ supported: false, machines: [] });
+  });
+});
+
+describe("connect errors", () => {
+  it("keeps a bare HTTP status as a kind the active language words", async () => {
+    vi.stubGlobal("fetch", async () => new Response("bad gateway", { status: 502 }));
+    const failure = await listProviders("http://relay.test").catch((error: unknown) => error);
+    const remote = toRemoteError(failure);
+    expect(remote).toEqual({ kind: "connectStatus", params: { status: 502 } });
+    expect(remoteErrorText(remote)).toBe("h4rn-connect answered 502.");
+    await setLocalePreference("ja");
+    expect(remoteErrorText(remote)).toBe("h4rn-connect が 502 を返しました。");
+  });
+
+  it("shows the relay's own message as sent", async () => {
+    vi.stubGlobal(
+      "fetch",
+      async () =>
+        new Response(JSON.stringify({ code: "rate_limited", message: "Slow down.", hint: null }), {
+          status: 429,
+          headers: { "content-type": "application/json" },
+        }),
+    );
+    const failure = await listProviders("http://relay.test").catch((error: unknown) => error);
+    expect(toRemoteError(failure)).toEqual({ kind: "sent", text: "Slow down." });
   });
 });

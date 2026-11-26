@@ -147,4 +147,26 @@ describe("Settings → Labs", () => {
       "El daemon no está conectado.",
     );
   });
+
+  it("words a rewind-switch error the client wrote again when the language changes", async () => {
+    const fallback = request.getMockImplementation();
+    request.mockImplementation((body: { type: string }) => {
+      if (body.type === "get_rewind_settings") {
+        return Promise.reject(new H4rnRequestError(clientProto("internal", "notConnected")));
+      }
+      return fallback?.(body);
+    });
+    render(<GuestSettingsForm />);
+    const group = (await screen.findByRole("heading", { name: "Threads" })).closest(".q-group");
+    await waitFor(() =>
+      expect(group?.querySelector('[role="alert"]')?.textContent).toBe(
+        "The daemon is not connected.",
+      ),
+    );
+
+    await act(() => setLocalePreference("ja"));
+    expect(group?.querySelector('[role="alert"]')?.textContent).toBe(
+      "デーモンに接続されていません。",
+    );
+  });
 });

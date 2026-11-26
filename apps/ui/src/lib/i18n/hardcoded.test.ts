@@ -1,19 +1,28 @@
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join, relative, sep } from "node:path";
 import ts from "typescript";
 import { describe, expect, it } from "vitest";
 
 /**
- * Converted files must not grow new hard-coded, user-facing English.
+ * No file under `src/` may hold hard-coded, user-facing English.
  *
- * Each later area PR adds its files to `CONVERTED`. The check reads the
- * source with the TypeScript parser and flags:
+ * Every `.ts` and `.tsx` file is checked by default, including a file added
+ * tomorrow. Tests, the generated protocol bindings (`src/gen/`) and the files
+ * in `EXCLUDED` below are the only ones left out, and each exclusion says
+ * why. The check reads the source with the TypeScript parser and flags:
  *   - JSX text with letters in it;
  *   - string or template literals rendered as a JSX child, or given to an
  *     attribute a person reads (`aria-label`, `title`, `placeholder`, …);
+ *   - the same attributes' English default values in a component's props
+ *     (`{ title = "Command palette" }`);
+ *   - text written straight into the DOM (`node.textContent = "…"`,
+ *     `input.placeholder = "…"`, `setAttribute("aria-label", "…")`). A
+ *     `<style>` element's CSS opts out with `// i18n-ignore-next-line: <why>`;
  *   - string literals in an object's `title`, `description`, `label`,
- *     `hint`, `sub`, `subtitle` or `message` (toasts, picker options, error
- *     objects), or in a store field named `error`, `…Error` or `notice`;
+ *     `hint`, `sub`, `subtitle`, `message` or `body` (toasts, picker options,
+ *     error objects, notifications), or in a store field named `error`,
+ *     `…Error` or `notice`;
  *   - template literals rendered the same way that interpolate a value read
  *     from a store as is (`const busy = useRemote((s) => s.busy)` then
  *     `` `${busy}…` ``): a store keeps kinds, and the component translates
@@ -33,151 +42,60 @@ import { describe, expect, it } from "vitest";
  * Values that are not prose are let through: URLs, paths, e-mail addresses,
  * identifiers such as `NAME` or `gpt-5.4-mini`, and the product names below.
  */
-const CONVERTED = [
-  "src/features/remote/remoteStore.ts",
-  "src/features/remote/remoteError.ts",
-  "src/components/shell/AppShell.tsx",
-  "src/components/shell/OfflineBanner.tsx",
-  "src/components/shell/Toasts.tsx",
-  "src/features/access/store.ts",
-  "src/features/git-actions/store.ts",
-  "src/features/guest/guestStore.ts",
-  "src/features/harnesses/harnessStore.ts",
-  "src/features/ide/useIdeSession.ts",
-  "src/features/mcp/store.ts",
-  "src/features/projects/importStore.ts",
-  "src/features/proxy/proxyStore.ts",
-  "src/features/remote/networkAccessStore.ts",
-  "src/features/remote/secretStore.ts",
-  "src/features/schedules/store.ts",
-  "src/features/skills/store.ts",
-  "src/features/text-generation/textGenerationStore.ts",
-  "src/features/updates/appUpdateStore.ts",
-  "src/lib/client/client.ts",
-  "src/lib/client/errors.ts",
-  "src/lib/client/secure.ts",
-  "src/lib/client/ws.ts",
-  "src/lib/i18n/sentences.ts",
-  "src/lib/store/appStore.ts",
-  "src/features/remote/QrCode.tsx",
-  "src/components/shell/PhoneNav.tsx",
-  "src/components/pages/PairingPage.tsx",
-  "src/components/hosts/HostsPane.tsx",
-  "src/components/agent/AgentGlyph.tsx",
-  "src/components/dialogs/CommandPalette.tsx",
-  "src/components/dialogs/ShortcutsDialog.tsx",
-  "src/components/inbox/PhoneInbox.tsx",
-  "src/components/inbox/StateTabs.tsx",
-  "src/components/inbox/ThreadRow.tsx",
-  "src/components/pages/SettingsPage.tsx",
-  "src/components/pages/UsagePage.tsx",
-  "src/components/panel/ChangesSection.tsx",
-  "src/components/panel/FileDiff.tsx",
-  "src/components/panel/PhonePanelSheet.tsx",
-  "src/components/panel/RightPanel.tsx",
-  "src/components/panel/usePanelChanges.ts",
-  "src/components/shell/Sidebar.tsx",
-  "src/components/shell/hostStatus.ts",
-  "src/components/shell/snoozeWake.ts",
-  "src/components/thread/ApprovalCard.tsx",
-  "src/components/thread/Composer.tsx",
-  "src/components/thread/ComposerMenu.tsx",
-  "src/components/thread/GuestRequestCard.tsx",
-  "src/components/thread/HarnessSwitch.tsx",
-  "src/components/thread/Markdown.tsx",
-  "src/components/thread/PhoneApproval.tsx",
-  "src/components/thread/QueuedTurn.tsx",
-  "src/components/thread/ThreadControls.tsx",
-  "src/components/thread/ThreadForkLine.tsx",
-  "src/components/thread/ThreadHeader.tsx",
-  "src/components/thread/ThreadPane.tsx",
-  "src/components/thread/ThreadStream.tsx",
-  "src/components/thread/ToolCard.tsx",
-  "src/components/thread/TurnBlock.tsx",
-  "src/features/access/AccessSettings.tsx",
-  "src/features/attachments/AttachmentTray.tsx",
-  "src/features/attachments/MessageAttachments.tsx",
-  "src/features/attachments/upload.ts",
-  "src/features/attachments/use-attachments.ts",
-  "src/features/attachments/use-blob.ts",
-  "src/features/changes/ChangeSetCard.tsx",
-  "src/features/changes/store.ts",
-  "src/features/composer/workspaceFiles.ts",
-  "src/features/forge/ForgeSettings.tsx",
-  "src/features/forge/LinkPullRequestDialog.tsx",
-  "src/features/forge/PullRequestsPage.tsx",
-  "src/features/forge/ThreadPullRequestBadge.tsx",
-  "src/features/forge/store.ts",
-  "src/features/guest/GuestSettings.tsx",
-  "src/features/harnesses/HarnessSettings.tsx",
-  "src/features/harnesses/acpForm.ts",
-  "src/features/issues/IssuesPage.tsx",
-  "src/features/issues/LinearSettings.tsx",
-  "src/features/issues/store.ts",
-  "src/features/projects/SidebarProjects.tsx",
-  "src/features/projects/store.ts",
-  "src/features/proxy/ProxySettings.tsx",
-  "src/features/remote/ConnectSignIn.tsx",
-  "src/features/remote/LocalMachineAction.tsx",
-  "src/features/remote/NetworkAccess.tsx",
-  "src/features/remote/SettingsRemote.tsx",
-  "src/features/remote/pairingScopes.ts",
-  "src/features/schedules/SchedulesSettings.tsx",
-  "src/features/schedules/scheduleForm.ts",
-  "src/features/source-control/SourceControlSettings.tsx",
-  "src/features/subagents/SubagentsPanel.tsx",
-  "src/features/subagents/subagentStore.ts",
-  "src/features/terminal/TerminalPanel.tsx",
-  "src/features/terminal/TerminalView.tsx",
-  "src/features/terminal/terminal-controller.ts",
-  "src/features/text-generation/TextGenerationSettings.tsx",
-  "src/features/threads/ThreadSettings.tsx",
-  "src/features/updates/AboutSettings.tsx",
-  "src/features/usage/AutoResumeCard.tsx",
-  "src/features/usage/AutoResumeSettings.tsx",
-  "src/features/usage/UsageFooter.tsx",
-  "src/features/usage/UsagePage.tsx",
-  "src/features/usage/presentation.ts",
-  "src/features/worktrees/WorktreeSettings.tsx",
-  "src/features/worktrees/worktreeStore.ts",
-  "src/lib/agent.ts",
-  "src/lib/composerCommands.ts",
-  "src/lib/keybindings.ts",
-  "src/lib/settings.ts",
-  "src/lib/threadControls.ts",
-  "src/lib/turn.ts",
-  "src/components/common/ConfirmDialog.tsx",
-  "src/components/dialogs/NewThreadDialog.tsx",
-  "src/components/thread/GitActionsDialog.tsx",
-  "src/components/thread/RenameThreadDialog.tsx",
-  "src/components/thread/RewindDialog.tsx",
-  "src/components/ui/dialog.tsx",
-  "src/components/ui/sheet.tsx",
-  "src/features/guest/GuestShareDialog.tsx",
-  "src/features/mcp/McpDialogs.tsx",
-  "src/features/projects/AddProjectDialog.tsx",
-  "src/features/projects/ImportPanel.tsx",
-  "src/features/skills/SkillDialogs.tsx",
-  "src/features/subagents/DelegateDialog.tsx",
-  "src/components/pages/LibraryPage.tsx",
-  "src/components/pages/LibraryErrorBanner.tsx",
-  "src/features/mcp/McpPage.tsx",
-  "src/features/mcp/McpApprovalCard.tsx",
-  "src/features/mcp/labels.ts",
-  "src/features/skills/SkillsPage.tsx",
-  "src/components/panel/WorkspaceFiles.tsx",
-  "src/features/ide/CodeEditor.tsx",
-  "src/features/ide/DiffView.tsx",
-  "src/features/ide/IdePane.tsx",
-  "src/features/ide/SearchPanel.tsx",
-  "src/features/ide/TabStrip.tsx",
-  "src/features/ide/language.ts",
-  "src/features/ide/reviewComments.ts",
-  "src/features/ide/sources.ts",
-  "src/features/preview/PreviewPanel.tsx",
-  "src/features/preview/loadPreview.ts",
-  "src/features/preview/useHtmlPreview.ts",
-];
+
+/**
+ * Files that are not the app's own words. Each needs a one-line reason; a
+ * path that no longer exists fails the suite, so the list cannot go stale.
+ */
+const EXCLUDED: Record<string, string> = {
+  // Demo mode (`?mock=1`) only. Its threads, hosts and forge data are sample
+  // content standing in for what a daemon or forge would send.
+  "src/lib/client/mock.ts": "the demo daemon's sample threads, hosts and replies",
+  "src/lib/client/mockForge.ts": "the demo forge's sample pull requests and issues",
+  "src/features/ide/mockFs.ts": "the demo workspace's sample files",
+  "src/features/attachments/demo.ts": "the demo transcript's sample attachment",
+  // The catalogue code itself: it holds no copy, only the means to load it.
+  "src/lib/i18n/index.ts": "loads the catalogues; language names are each language's own",
+  "src/lib/i18n/i18next.d.ts": "types the catalogue keys; no text",
+};
+
+/** `apps/ui`, the folder that holds `src/`. */
+const ROOT = join(__dirname, "../../..");
+
+/** Tests and the generated protocol bindings are never checked. */
+function alwaysSkipped(file: string): boolean {
+  return /\.test\.tsx?$/.test(file) || file.startsWith("src/gen/");
+}
+
+/** Every `.ts`/`.tsx` path under `<root>/src`, as `src/…`, sorted. */
+function sourceFiles(root: string): string[] {
+  const src = join(root, "src");
+  const files: string[] = [];
+  const walk = (dir: string) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) walk(path);
+      else if (/\.tsx?$/.test(entry.name))
+        files.push(`src/${relative(src, path).split(sep).join("/")}`);
+    }
+  };
+  walk(src);
+  return files.sort();
+}
+
+/** The files the guard checks under `<root>`: all of them, minus the exclusions. */
+function checkedFiles(root: string, excluded: Record<string, string> = EXCLUDED): string[] {
+  return sourceFiles(root).filter((file) => !alwaysSkipped(file) && !(file in excluded));
+}
+
+/** Every finding under `<root>`, formatted `file:line "text"`. */
+function scan(root: string, excluded: Record<string, string> = EXCLUDED): string[] {
+  return checkedFiles(root, excluded).flatMap((file) =>
+    findHardcoded(file, readFileSync(join(root, file), "utf8")).map(
+      (finding) => `${finding.file}:${finding.line} ${JSON.stringify(finding.text)}`,
+    ),
+  );
+}
 
 /** Names that read the same in every language. */
 const PRODUCT_NAMES = new Set([
@@ -210,7 +128,16 @@ const READ_PROPERTIES = new Set([
   "sub",
   "subtitle",
   "message",
+  "body",
 ]);
+
+/** DOM properties a person reads, set by code that draws outside React. */
+const DOM_TEXT = new Set(["textContent", "innerText", "placeholder", "title", "ariaLabel", "alt"]);
+
+/** A prop or parameter name whose English default a person would read. */
+function isReadName(name: string): boolean {
+  return READ_ATTRIBUTES.has(name) || READ_PROPERTIES.has(name);
+}
 
 /** A store field a component shows as is: `error`, `clearError`, `notice`. */
 function isReadProperty(name: string): boolean {
@@ -362,9 +289,35 @@ function findHardcoded(file: string, source: string): Finding[] {
             ? parent.name.text
             : null;
         const thrown = isErrorConstruction(parent) && !ignored(parent) && !ignored(node);
+        // `{ title = "Command palette" }` or `(label = "Close")`.
+        const readDefault =
+          parent &&
+          (ts.isBindingElement(parent) || ts.isParameter(parent)) &&
+          ts.isIdentifier(parent.name) &&
+          isReadName(parent.name.text);
+        // `node.textContent = "…"` and the like.
+        const domText =
+          parent &&
+          ts.isBinaryExpression(parent) &&
+          parent.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+          ts.isPropertyAccessExpression(parent.left) &&
+          DOM_TEXT.has(parent.left.name.text) &&
+          !ignored(parent);
+        // `node.setAttribute("aria-label", "…")`.
+        const domAttribute =
+          parent &&
+          ts.isCallExpression(parent) &&
+          ts.isPropertyAccessExpression(parent.expression) &&
+          parent.expression.name.text === "setAttribute" &&
+          parent.arguments[1] !== undefined &&
+          ts.isStringLiteralLike(parent.arguments[0] as ts.Expression) &&
+          READ_ATTRIBUTES.has((parent.arguments[0] as ts.StringLiteralLike).text);
         if (
           inChild ||
           thrown ||
+          readDefault ||
+          domText ||
+          domAttribute ||
           (attribute && READ_ATTRIBUTES.has(attribute.name.getText(sourceFile))) ||
           (property && isReadProperty(property))
         ) {
@@ -378,7 +331,7 @@ function findHardcoded(file: string, source: string): Finding[] {
   return findings;
 }
 
-describe("hard-coded strings in converted files", () => {
+describe("hard-coded strings in the UI", () => {
   it("recognises prose and lets values through", () => {
     expect(isProse("Save task")).toBe(true);
     expect(isProse("Saved.")).toBe(true);
@@ -505,9 +458,84 @@ export function A({ label }: { label: string }) {
     expect(texts).toEqual(["No reason given here", "Still flagged here"]);
   });
 
-  for (const file of CONVERTED) {
+  it("flags English defaults for read props and text written into the DOM", () => {
+    const sample = [
+      "function Dialog({ title = 'Command palette', kind = 'plain words' }) {}",
+      "function close(label = 'Close the panel', id = 'close') {}",
+      "heading.textContent = 'Connect this phone';",
+      "input.placeholder = 'Paste the link';",
+      "input.value = 'ws://127.0.0.1:47800/ws';",
+      "node.dataset.kind = 'plain words are fine';",
+      "// i18n-ignore-next-line: a style element's CSS, not words",
+      "style.textContent = ':root { color-scheme: light dark; }';",
+      "button.setAttribute('aria-label', 'Scan the code');",
+      "button.setAttribute('style', 'color: red; font weight');",
+      "draft = { key: 'k', body: 'Host offline: unreachable.' };",
+      "fetch(url, { body: JSON.stringify(payload) });",
+    ].join("\n");
+    const texts = findHardcoded("sample.ts", sample).map((finding) => finding.text);
+    expect(texts).toEqual([
+      "Command palette",
+      "Close the panel",
+      "Connect this phone",
+      "Paste the link",
+      "Scan the code",
+      "Host offline: unreachable.",
+    ]);
+  });
+
+  it("checks every source file outside the exclusions, so a new one is covered", () => {
+    const root = mkdtempSync(join(tmpdir(), "h4rn-i18n-guard-"));
+    try {
+      const write = (file: string, text: string) => {
+        mkdirSync(dirname(join(root, file)), { recursive: true });
+        writeFileSync(join(root, file), text);
+      };
+      write(
+        "src/features/fresh/FreshPane.tsx",
+        "export const A = () => <p>Nothing here yet</p>;\n",
+      );
+      write("src/features/fresh/fresh.ts", "export const toast = { title: 'Saved the draft.' };\n");
+      write("src/features/fresh/FreshPane.test.tsx", "const t = <p>Test words are fine</p>;\n");
+      write("src/gen/Fresh.ts", "export const doc = { title: 'Generated text is fine' };\n");
+      write("src/lib/client/mock.ts", "export const demo = { title: 'Demo text is fine' };\n");
+      write("src/features/fresh/clean.ts", "export const k = i18n.t('shell:fresh.title');\n");
+
+      expect(checkedFiles(root)).toEqual([
+        "src/features/fresh/FreshPane.tsx",
+        "src/features/fresh/clean.ts",
+        "src/features/fresh/fresh.ts",
+      ]);
+      expect(scan(root)).toEqual([
+        'src/features/fresh/FreshPane.tsx:1 "Nothing here yet"',
+        'src/features/fresh/fresh.ts:1 "Saved the draft."',
+      ]);
+      // Without its exclusion, the demo file is checked like any other.
+      expect(scan(root, {})).toContain('src/lib/client/mock.ts:1 "Demo text is fine"');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("lists only exclusions that exist, each with a reason", () => {
+    const all = new Set(sourceFiles(ROOT));
+    for (const [file, reason] of Object.entries(EXCLUDED)) {
+      expect(all.has(file), `${file} is excluded but does not exist`).toBe(true);
+      expect(alwaysSkipped(file), `${file} is skipped already`).toBe(false);
+      expect(reason.trim().length, `${file} needs a reason`).toBeGreaterThan(10);
+    }
+  });
+
+  it("checks the app itself, not an opt-in list", () => {
+    const checked = checkedFiles(ROOT);
+    expect(checked).toContain("src/App.tsx");
+    expect(checked).toContain("src/lib/platform/mobile.ts");
+    expect(checked.length).toBeGreaterThan(200);
+  });
+
+  for (const file of checkedFiles(ROOT)) {
     it(`${file} has no hard-coded user-facing text`, () => {
-      const source = readFileSync(join(__dirname, "../../..", file), "utf8");
+      const source = readFileSync(join(ROOT, file), "utf8");
       const findings = findHardcoded(file, source).map(
         (finding) => `${finding.file}:${finding.line} ${JSON.stringify(finding.text)}`,
       );

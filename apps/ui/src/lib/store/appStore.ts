@@ -1760,7 +1760,7 @@ function harnessName(harness: ThreadSummary["harness"]): string {
     case "antigravity":
       return "Antigravity";
     case "acp":
-      return "This agent";
+      return i18n.t("common:thisAgent");
   }
 }
 export type SendOptions = {
@@ -2208,7 +2208,8 @@ function reconcileCreatedThread(
 export async function createThread(input: CreateThreadInput): Promise<boolean> {
   const state = getState();
   const tempId = `local-thread-${++localCounter}`;
-  const title = input.prompt.split("\n")[0]?.slice(0, 56) || "New thread";
+  // Shown until the daemon names the thread; the prompt's own words win.
+  const title = input.prompt.split("\n")[0]?.slice(0, 56) || i18n.t("sidebar:newThread");
   const now = new Date().toISOString();
   const optimistic: ThreadSummary = {
     thread_id: tempId,

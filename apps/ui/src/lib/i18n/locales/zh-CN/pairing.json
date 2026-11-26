@@ -57,7 +57,8 @@
     "otherConnect": "此代码属于 {{url}}。请先退出登录，再在那里登录。",
     "claimFailed": "无法完成该配对。",
     "notApproved": "{{name}} 尚未批准此设备。请在 {{name}} 上打开“设置 → 设备”，确认相同的代码，然后重试。",
-    "codesDiffer": "代码不一致，因此此设备已被撤销。请在你信任的网络中重新配对。"
+    "codesDiffer": "代码不一致，因此此设备已被撤销。请在你信任的网络中重新配对。",
+    "missingDaemonOrToken": "配对链接缺少 daemon 或 token。"
   },
   "toasts": {
     "paired": "已与 {{name}} 配对。"
@@ -70,5 +71,21 @@
     "emptyBody": "主机是运行 h4rn 守护进程的机器。配对此设备，或在你的 tailnet 上添加主机，让智能体有地方运行。",
     "lastSeen": "最后在线：{{when}}",
     "note": "在线状态由一个圆点加一个词表示。WSL 发行版是独立的主机，因此配对 Windows 主机不会授予该发行版的访问权限。"
+  },
+  "phoneShell": {
+    "title": "连接这部手机",
+    "intro": "让 h4rn 指向你已在运行的守护进程。token 就是 `{{command}}` 打印出的那个；它保存在 Android Keystore 中，不以明文存储。",
+    "daemonUrl": "守护进程 URL",
+    "accessToken": "访问 token",
+    "tokenPlaceholder": "64 位十六进制 token",
+    "connect": "连接",
+    "scan": "扫描二维码",
+    "hint": "模拟器构建：运行 `{{script}}`，它会启动守护进程、设置 `{{reverse}}`，并传入这个 URL 和 token。也可以粘贴主机上显示的配对链接或直连二维码。",
+    "saving": "正在保存配对…",
+    "connecting": "正在连接…",
+    "openingCamera": "正在打开相机…",
+    "typeInstead": "你仍然可以手动输入 URL 和 token。",
+    "enterUrl": "请输入守护进程 URL。",
+    "badScheme": "守护进程 URL 必须是 ws:// 或 wss://（http/https 也可以）。"
   }
 }

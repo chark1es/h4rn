@@ -1,6 +1,7 @@
 import { FlaskConicalIcon } from "lucide-react";
 import { useEffect } from "react";
 import { useTranslation } from "react-i18next";
+import { errorWords } from "@/lib/client/errors";
 import { loadOutsideAgentSettings, setOutsideAgentEnabled, useAccess } from "../access/store";
 import { loadRewindSettings, setRewindFilesEnabled, useRewindSettings } from "../rewind/settings";
 import { guestErrorText, loadGuestSettings, setGuestLinksEnabled, useGuest } from "./guestStore";
@@ -56,7 +57,7 @@ export function GuestSettingsForm() {
         </div>
         {rewindError ? (
           <p className="q-danger" role="alert" style={{ margin: "8px 0 0", fontSize: 12 }}>
-            {rewindError}
+            {errorWords(rewindError).message}
           </p>
         ) : null}
         <p className="q-muted" style={{ fontSize: 12.5 }}>

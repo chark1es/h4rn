@@ -189,7 +189,9 @@
     "downloadHint": "{{message}} 接続を確認してから、もう一度お試しください。",
     "loading": "{{name}} を読み込み中…",
     "previewFailed": "{{message}} 接続を確認するか、元のファイルをダウンロードしてください。",
-    "loadFailed": "ファイルを読み込めませんでした。"
+    "loadFailed": "ファイルを読み込めませんでした。",
+    "cancelled": "ダウンロードはキャンセルされました。",
+    "stalled": "デーモンがファイルの送信を停止しました。"
   },
   "fork": {
     "open": "{{title}} を開く",

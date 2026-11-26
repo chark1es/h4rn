@@ -22,7 +22,8 @@ export type RemoteError =
   | { kind: "signInToType" }
   | { kind: "otherConnect"; params: { url: string } }
   | { kind: "notApproved"; params: { name: string } }
-  | { kind: "codesDiffer" };
+  | { kind: "codesDiffer" }
+  | { kind: "connectStatus"; params: { status: number } };
 
 /** The error in the active language; `sent` text is returned as is. */
 export function remoteErrorText(error: RemoteError): string {
@@ -56,6 +57,9 @@ export function remoteErrorText(error: RemoteError): string {
       return i18n.t("pairing:errors.notApproved", { name: error.params.name });
     case "codesDiffer":
       return i18n.t("pairing:errors.codesDiffer");
+    case "connectStatus":
+      // An HTTP status is a code, not an amount: no digit grouping.
+      return i18n.t("settings:connect.errors.status", { status: String(error.params.status) });
   }
 }
 

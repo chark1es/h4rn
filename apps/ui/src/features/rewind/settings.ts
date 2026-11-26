@@ -9,7 +9,9 @@
 
 import { useSyncExternalStore } from "react";
 
-import { toProtoError } from "@/lib/client/errors";
+import type { ProtoError } from "@/gen";
+import { errorWords, toProtoError } from "@/lib/client/errors";
+import { i18n } from "@/lib/i18n";
 import { getClient, pushToast } from "@/lib/store/appStore";
 
 export type RewindSettingsState = {
@@ -17,7 +19,11 @@ export type RewindSettingsState = {
   filesEnabled: boolean | null;
   loading: boolean;
   saving: boolean;
-  error: string | null;
+  /**
+   * The last failure, kept as the error itself so a client-written kind is
+   * worded again in the active language where it is shown.
+   */
+  error: ProtoError | null;
 };
 
 const initialState: RewindSettingsState = {
@@ -33,10 +39,6 @@ const listeners = new Set<() => void>();
 function update(patch: Partial<RewindSettingsState>): void {
   state = { ...state, ...patch };
   for (const listener of listeners) listener();
-}
-
-function describe(error: unknown): string {
-  return toProtoError(error).message;
 }
 
 export function getRewindSettingsState(): RewindSettingsState {
@@ -79,7 +81,7 @@ export async function loadRewindSettings(): Promise<void> {
       update({ loading: false });
     }
   } catch (error) {
-    update({ loading: false, error: describe(error) });
+    update({ loading: false, error: toProtoError(error) });
   }
 }
 
@@ -101,11 +103,12 @@ export async function setRewindFilesEnabled(enabled: boolean): Promise<boolean> 
     update({ saving: false });
     return false;
   } catch (error) {
-    update({ saving: false, error: describe(error) });
+    const proto = toProtoError(error);
+    update({ saving: false, error: proto });
     pushToast({
       variant: "error",
-      title: "The rewind file switch could not be changed",
-      description: describe(error),
+      title: i18n.t("settings:labs.rewindFilesFailed"),
+      description: errorWords(proto).message,
     });
     return false;
   }
