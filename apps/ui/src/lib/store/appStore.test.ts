@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { HostSummary, ThreadSummary } from "@/gen";
 
 const fake = vi.hoisted(() => {
@@ -16,6 +16,7 @@ import { onManualPlacement } from "@/features/notifications/placement";
 import { H4rnRequestError, protoError } from "@/lib/client/errors";
 import type { EventEnvelope } from "@/lib/client/types";
 import { drafts, flushDrafts, readThreadDraft } from "@/lib/drafts";
+import { setLocalePreference } from "@/lib/i18n";
 import {
   applyEvent,
   createThread,
@@ -419,6 +420,39 @@ describe("manual placements", () => {
     unsubscribe();
 
     expect(seen).toEqual([]);
+  });
+});
+
+describe("thread action failures", () => {
+  afterEach(() => setLocalePreference("system"));
+
+  it("say which action failed on which host, in the active language", async () => {
+    const state = getState();
+    store.setState({
+      ...state,
+      threads: {
+        ...state.threads,
+        thread_tab: threadSummary({ threadId: "thread_tab", host: "atlas" }),
+      },
+    });
+    fake.response.current = null;
+
+    fake.request.mockRejectedValueOnce(new Error("the host is unreachable"));
+    await setThreadTab("thread_tab", "done");
+    expect(getState().toasts.at(-1)?.title).toBe("Moving to Done failed on atlas.");
+
+    await setLocalePreference("es");
+    fake.request.mockRejectedValueOnce(new Error("the host is unreachable"));
+    const pending = setThreadTab("thread_tab", "settled");
+    // What is in flight is a kind; nothing stores English words.
+    expect(getState().pendingActions.thread_tab).toBe("moveToSettled");
+    await pending;
+    const toast = getState().toasts.at(-1);
+    expect(toast?.title).toBe("No se pudo resolver en atlas.");
+    expect(toast?.description).toBe(
+      "Vuelve a intentarlo. Si sigue ocurriendo, abre los detalles de la conexión en la barra de estado.",
+    );
+    expect(getState().pendingActions.thread_tab).toBeUndefined();
   });
 });
 

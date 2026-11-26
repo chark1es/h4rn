@@ -60,6 +60,15 @@ All notable changes to h4rn are recorded here. The format follows
   with no published key or a shell that cannot open a sign-in window are
   translated. Japanese and Chinese no longer put a space after 。 between
   two sentences in Settings → Worktrees.
+- **The connection banner, toasts and client errors in Chinese, Spanish and
+  Japanese.** The offline and reconnecting banner, the toast list, the
+  inbox's Start a thread box, the phone's IDE notice, the thread action
+  failures ("Settling failed on atlas."), the MCP, skills, guest, import and
+  update failure toasts, and the errors the client writes itself (not
+  connected, timed out, the connection closed) follow the Language choice.
+  An error already on screen, such as a pairing or sign-in error or the
+  banner's reason, switches language with the rest of the page. The daemon's
+  and the relay's own error text is shown as sent.
 - **Android Live Updates show a running agent.** A separate switch under
   Settings → Notifications → Phone alerts shows each running thread as an
   ongoing notification with its project and whether it is working, waiting for

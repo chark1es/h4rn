@@ -81,6 +81,7 @@ import {
   readNewThreadDraft,
   writeNewThreadDraft,
 } from "@/lib/drafts";
+import { setLocalePreference } from "@/lib/i18n";
 import { NewThreadDraftSession } from "@/lib/newThreadDraft";
 import { InboxDetailEmpty } from "./AppShell";
 
@@ -470,5 +471,60 @@ describe("inbox start composer drafts", () => {
     expect(taskBox().value).toBe("");
     // A folder the person never picked is not the one the next open remembers.
     expect(drafts.readLastWorkspace("host_ui")).toBe("");
+  });
+});
+
+describe("inbox start composer language", () => {
+  beforeEach(() => {
+    flushDrafts();
+    window.localStorage.clear();
+    mock.state.connection.status = "online";
+    mock.state.ui.newThreadOpen = false;
+    mock.state.projects = [];
+    mock.navigate.mockReset();
+  });
+
+  afterEach(async () => {
+    cleanup();
+    await act(() => setLocalePreference("system"));
+  });
+
+  it("reads the same in English as before", async () => {
+    render(<InboxDetailEmpty />);
+    await waitFor(() =>
+      expect(taskBox().getAttribute("placeholder")).toBe(
+        "Describe the task for Claude Code on atlas",
+      ),
+    );
+    expect(screen.getByRole("heading", { name: "Start a thread" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Host: atlas" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Start thread" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Attach files" })).toBeTruthy();
+    expect(screen.getByText("h4rn host").className).toContain("q-mono");
+    expect(screen.getByRole("button", { name: "Pair a device" }).parentElement?.textContent).toBe(
+      "No host yet? Pair a device or run h4rn host on the machine.",
+    );
+  });
+
+  it("switches language in place and keeps the command and names as they are", async () => {
+    render(<InboxDetailEmpty />);
+    await act(() => setLocalePreference("es"));
+    expect(screen.getByRole("heading", { name: "Iniciar un hilo" })).toBeTruthy();
+    expect(screen.getByLabelText("Describe la tarea").getAttribute("placeholder")).toBe(
+      "Describe la tarea para Claude Code en atlas",
+    );
+    expect(screen.getByRole("button", { name: "Iniciar hilo" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Adjuntar archivos" })).toBeTruthy();
+    expect(screen.getByText("h4rn host")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Vincula un dispositivo" }));
+    expect(mock.navigate).toHaveBeenCalledWith({
+      kind: "placeholder",
+      surface: "settings",
+      path: "/settings/devices",
+    });
+
+    await act(() => setLocalePreference("ja"));
+    expect(screen.getByRole("heading", { name: "スレッドを開始" })).toBeTruthy();
+    expect(screen.queryByText("Start a thread")).toBeNull();
   });
 });

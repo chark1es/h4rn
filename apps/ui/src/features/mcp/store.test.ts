@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { McpRequest, McpServerView, ResponseBody } from "@/gen";
 import { H4rnRequestError, protoError } from "@/lib/client/errors";
+import { setLocalePreference } from "@/lib/i18n";
 import { getState, store } from "@/lib/store/appStore";
 import { CONFLICT_CHOICES, conflictResolution } from "./labels";
 import {
@@ -122,6 +123,23 @@ describe("MCP store", () => {
     const toast = getState().toasts.at(-1);
     expect(toast?.title).toBe("Couldn't turn off playwright.");
     expect(toast?.description).toContain("The switch is back where it was");
+  });
+
+  it("words a failure toast in the active language, the daemon's text as sent", async () => {
+    setMcpRequesterForTests(() => ok({ type: "mcp_servers", servers: [server()] }));
+    await loadMcpServers();
+    setMcpRequesterForTests(() =>
+      Promise.reject(new H4rnRequestError(protoError("conflict", "In use.", "Stop it first."))),
+    );
+    await setLocalePreference("ja");
+    try {
+      await removeMcpServer("playwright");
+      const toast = getState().toasts.at(-1);
+      expect(toast?.title).toBe("playwright を削除できませんでした。");
+      expect(toast?.description).toBe("In use. サーバーは設定されたままです。Stop it first.");
+    } finally {
+      await setLocalePreference("system");
+    }
   });
 
   it("restores a server when removal fails", async () => {
