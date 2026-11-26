@@ -1,5 +1,6 @@
 import { CircleDotIcon, ExternalLinkIcon, EyeIcon, GitPullRequestIcon, XIcon } from "lucide-react";
 import { useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import {
   DropdownMenu,
@@ -12,6 +13,7 @@ import {
 import { IssueApi, issueStateLabel } from "@/features/issues/store";
 import { notifyThreadIssueLinks, useThreadIssues } from "@/features/issues/threadLinks";
 import type { ThreadIssue, ThreadPullRequest } from "@/gen";
+import { i18n } from "@/lib/i18n";
 import { getClient, pushToast } from "@/lib/store/appStore";
 import { cn } from "@/lib/utils";
 import { ForgeApi, linkedPullLabel, linkedPullTone, prWebUrl, stateLabel } from "./store";
@@ -39,7 +41,7 @@ function issueScopeLabel(issue: ThreadIssue): string {
   // A failed refresh empties the state. The identifier stored at link time
   // still names the issue; a link made before it was stored gets a label
   // instead of the provider's internal id.
-  return issue.identifier ?? "Linear issue";
+  return issue.identifier ?? i18n.t("pullRequests:linked.linearIssue");
 }
 
 /**
@@ -65,7 +67,7 @@ function issueLabel(issue: ThreadIssue): string {
 }
 
 function issueTitle(issue: ThreadIssue): string {
-  return issue.state?.issue.title ?? issue.title ?? "Issue unavailable";
+  return issue.state?.issue.title ?? issue.title ?? i18n.t("pullRequests:linked.issueUnavailable");
 }
 
 /**
@@ -76,7 +78,7 @@ function issueTitle(issue: ThreadIssue): string {
 function issueErrorMessage(issue: ThreadIssue): string {
   const error = issue.error ?? "";
   if (issue.scope.tracker !== "linear" || !issue.issue_id) return error;
-  const name = issue.identifier ?? "Linear issue";
+  const name = issue.identifier ?? i18n.t("pullRequests:linked.linearIssue");
   // An older daemon may have echoed the id in either case.
   const id = issue.issue_id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   return error
@@ -94,6 +96,7 @@ function issueUrl(issue: ThreadIssue): string {
 export function ThreadPullRequestBadge({ threadId }: { threadId: string }) {
   const { pulls, reload } = useThreadPullRequests(threadId, resolveApi);
   const { issues, reload: reloadIssues } = useThreadIssues(threadId, resolveIssueApi);
+  const { t } = useTranslation("pullRequests");
   const [busy, setBusy] = useState<string | null>(null);
 
   if (pulls.length === 0 && issues.length === 0) return null;
@@ -106,7 +109,7 @@ export function ThreadPullRequestBadge({ threadId }: { threadId: string }) {
       notifyThreadIssueLinks(threadId);
     } catch (cause) {
       pushToast({
-        title: "The linked item did not change.",
+        title: t("linked.changeFailed"),
         description: cause instanceof Error ? cause.message : String(cause),
         variant: "error",
       });
@@ -169,6 +172,7 @@ export function LinkedPullRequestsMenu({
   onUnwatch: (pull: ThreadPullRequest) => void;
   onUnlinkIssue?: (issue: ThreadIssue) => void;
 }) {
+  const { t } = useTranslation("pullRequests");
   const primary = pulls[0];
   const primaryIssue = issues[0];
   if (!primary && !primaryIssue) return null;
@@ -180,8 +184,8 @@ export function LinkedPullRequestsMenu({
         <button
           type="button"
           className={cn("q-badge q-pr-badge", primary ? linkedPullTone(primary) : "")}
-          aria-label="Linked items"
-          title="Linked items"
+          aria-label={t("linked.items")}
+          title={t("linked.items")}
         >
           {primary ? (
             <GitPullRequestIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
@@ -195,7 +199,7 @@ export function LinkedPullRequestsMenu({
         </button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-80 max-h-80 overflow-y-auto">
-        <DropdownMenuLabel>Linked items</DropdownMenuLabel>
+        <DropdownMenuLabel>{t("linked.items")}</DropdownMenuLabel>
         <DropdownMenuSeparator />
         {pulls.map((pull, index) => {
           const url = pull.summary?.web_url || prWebUrl(pull.repo, pull.number);
@@ -212,7 +216,7 @@ export function LinkedPullRequestsMenu({
                 <GitPullRequestIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
                 <span className="q-num">#{pull.number}</span>
                 <span className="q-pr-link-name">
-                  {pull.summary?.title ?? "Pull request unavailable"}
+                  {pull.summary?.title ?? t("linked.pullUnavailable")}
                 </span>
                 <span
                   className={cn(
@@ -221,7 +225,7 @@ export function LinkedPullRequestsMenu({
                     state?.tone === "ok" && "q-ok",
                   )}
                 >
-                  {state?.label ?? "State unavailable"}
+                  {state?.label ?? t("linked.stateUnavailable")}
                 </span>
                 <ExternalLinkIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
               </DropdownMenuItem>
@@ -237,13 +241,13 @@ export function LinkedPullRequestsMenu({
                   {pull.watching ? (
                     <EyeIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
                   ) : null}
-                  {pull.watching ? "Stop watching" : "Watch for changes"}
+                  {pull.watching ? t("linked.stopWatching") : t("linked.watch")}
                 </DropdownMenuItem>
               ) : null}
               {pull.watch_notice ? <p className="q-pr-note">{pull.watch_notice}</p> : null}
               <DropdownMenuItem disabled={busy !== null} onSelect={() => onUnlink(pull)}>
                 <XIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
-                Unlink
+                {t("linked.unlink")}
               </DropdownMenuItem>
             </div>
           );
@@ -269,7 +273,7 @@ export function LinkedPullRequestsMenu({
               {onUnlinkIssue ? (
                 <DropdownMenuItem disabled={busy !== null} onSelect={() => onUnlinkIssue(issue)}>
                   <XIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
-                  Unlink issue
+                  {t("linked.unlinkIssue")}
                 </DropdownMenuItem>
               ) : null}
             </div>

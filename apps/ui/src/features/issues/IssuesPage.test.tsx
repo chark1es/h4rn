@@ -14,6 +14,7 @@ import type {
   ForgeRepoRef,
   ResponseBody,
 } from "@/gen";
+import { setLocalePreference } from "@/lib/i18n";
 
 const repo: ForgeRepoRef = {
   forge: "github",
@@ -1537,5 +1538,58 @@ describe("the phone layout", () => {
     // Five involvement tabs do not fit across a 390 px screen in one row.
     expect(block).toMatch(/\.q-issues-head \.q-seg \{[^}]*flex-wrap: wrap;/);
     expect(block).toMatch(/\.q-issues-head \.q-seg > button \{[^}]*min-height: 44px;/);
+  });
+});
+
+describe("the Issues page in another language", () => {
+  afterEach(async () => {
+    await setLocalePreference("en");
+  });
+
+  it("words the page and the issue pane in Japanese, and keeps tracker text as sent", async () => {
+    resetTracker({
+      detailLabels: [
+        { name: "bug", color: null },
+        { name: "frontend", color: null },
+      ],
+      detailAssignees: [
+        { login: "alice", name: null },
+        { login: "bob", name: null },
+      ],
+    });
+    await setLocalePreference("ja");
+    render(<IssuesPage />);
+    expect(await screen.findByRole("heading", { name: "Issue", level: 1 })).toBeTruthy();
+    expect(screen.getByRole("tab", { name: "クローズ" })).toBeTruthy();
+    expect(screen.getByPlaceholderText("トラッカーを検索")).toBeTruthy();
+
+    fireEvent.click(await screen.findByRole("button", { name: /Dark mode flickers/ }));
+    const title = await screen.findByLabelText("Issue のタイトル");
+    // The issue's own title is the tracker's, never translated.
+    expect((title as HTMLInputElement).value).toBe("Dark mode flickers");
+    expect(screen.getByText("オープン", { selector: ".q-issue-state" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Issue をクローズ" })).toBeTruthy();
+    // The read-only list of assignees joins the Japanese way; the editable
+    // field keeps the comma-separated text it is saved from.
+    expect(screen.getByText("alice、bob")).toBeTruthy();
+    expect((screen.getByDisplayValue("alice, bob") as HTMLInputElement).value).toBe("alice, bob");
+    expect(screen.getByDisplayValue("bug, frontend")).toBeTruthy();
+  });
+
+  it("names an unmatched project in Spanish with its name in bold", async () => {
+    resetTracker({
+      accounts: [
+        account({
+          account_id: "acct_gl",
+          forge: "gitlab",
+          base_url: "https://gitlab.com",
+          username: "alice",
+        }),
+      ],
+    });
+    await setLocalePreference("es");
+    render(<IssuesPage />);
+    const note = await screen.findByText(/ninguna cuenta de GitHub coincide con este repositorio/);
+    expect(note.querySelector("strong")?.textContent).toBe("widget");
   });
 });

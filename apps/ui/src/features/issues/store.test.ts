@@ -1,10 +1,19 @@
 // @vitest-environment jsdom
 
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { ForgeIssueSummary, LinearIssueSummary } from "@/gen";
+import { i18n, setLocalePreference } from "@/lib/i18n";
 
-import { forgeIssueRow, groupLabel, ISSUE_FILTERS, issueKey, linearIssueRow } from "./store";
+import {
+  forgeIssueRow,
+  groupLabel,
+  ISSUE_FILTERS,
+  issueKey,
+  issueStateLabel,
+  linearIssueRow,
+  relativeIssueAge,
+} from "./store";
 
 const repo = {
   forge: "github" as const,
@@ -89,12 +98,35 @@ describe("issue rows", () => {
   });
 
   it("offers every filter the brief names", () => {
-    expect(ISSUE_FILTERS.map((filter) => filter.label)).toEqual([
+    expect(ISSUE_FILTERS.map((filter) => i18n.t(`issues:filters.${filter}`))).toEqual([
       "Open",
       "Closed",
       "Assigned to me",
       "Opened by me",
       "Mentioning me",
     ]);
+  });
+});
+
+describe("issue words in another language", () => {
+  afterEach(async () => {
+    vi.useRealTimers();
+    await setLocalePreference("en");
+  });
+
+  it("names the state and the age in the active language", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-03-10T12:00:00Z"));
+    expect(relativeIssueAge("2026-03-10T11:59:40Z")).toBe("just now");
+    expect(relativeIssueAge("2026-03-10T09:00:00Z")).toBe("3h ago");
+    await setLocalePreference("es");
+    expect(issueStateLabel("closed")).toBe("Cerrada");
+    expect(relativeIssueAge("2026-03-10T11:59:40Z")).toBe("ahora mismo");
+    expect(relativeIssueAge("2026-03-10T09:00:00Z")).toBe("hace 3h");
+    await setLocalePreference("zh-CN");
+    expect(issueStateLabel("open")).toBe("打开");
+    expect(relativeIssueAge("2026-03-10T09:00:00Z")).toBe("3小时前");
+    // A month or more reads as the date, in the language's own order.
+    expect(relativeIssueAge("2026-01-02T12:00:00Z")).toBe("2026/1/2");
   });
 });

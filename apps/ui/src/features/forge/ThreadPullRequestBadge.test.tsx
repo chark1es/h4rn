@@ -11,6 +11,7 @@ import type {
   ThreadPullRequest,
 } from "@/gen";
 
+import { setLocalePreference } from "@/lib/i18n";
 import { LinkedPullRequestsMenu } from "./ThreadPullRequestBadge";
 
 const repo: ForgeRepoRef = {
@@ -456,5 +457,37 @@ describe("linked pull request badge and panel", () => {
     );
     openBadge();
     expect(screen.getByText(notice)).toBeTruthy();
+  });
+});
+
+describe("linked items in another language", () => {
+  afterEach(async () => {
+    await setLocalePreference("en");
+  });
+
+  it("words the badge and the watch and unlink actions in Chinese", async () => {
+    await setLocalePreference("zh-CN");
+    render(
+      <LinkedPullRequestsMenu
+        pulls={pulls}
+        issues={issues}
+        onUnlink={() => undefined}
+        onWatch={() => undefined}
+        onUnwatch={() => undefined}
+        onUnlinkIssue={() => undefined}
+      />,
+    );
+    const trigger = screen.getByRole("button", { name: "关联项" });
+    expect(trigger.textContent).toContain("#7 打开");
+    fireEvent.pointerDown(trigger, { button: 0, ctrlKey: false, pointerType: "mouse" });
+    fireEvent.pointerUp(trigger, { button: 0, pointerType: "mouse" });
+    fireEvent.click(trigger);
+    expect(await screen.findByText("停止关注")).toBeTruthy();
+    expect(screen.getByText("关注变更")).toBeTruthy();
+    expect(screen.getByText("草稿")).toBeTruthy();
+    expect(screen.getAllByText("取消关联").length).toBe(2);
+    expect(screen.getByText("取消关联议题")).toBeTruthy();
+    // Titles come from the forge and stay as sent.
+    expect(screen.getByText("Add PR watch")).toBeTruthy();
   });
 });

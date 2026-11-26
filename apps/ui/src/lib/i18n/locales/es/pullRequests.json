@@ -1,0 +1,218 @@
+{
+  "title": "Pull requests",
+  "loading": "Cargando pull requests",
+  "repository": "Repositorio",
+  "refresh": "Actualizar pull requests",
+  "loadMore": "Cargar más",
+  "filters": {
+    "label": "Filtros de pull requests",
+    "open": "Abiertos",
+    "mine": "Míos",
+    "review": "Revisión",
+    "branch": "Esta rama"
+  },
+  "noForge": {
+    "title": "Conecta una forja",
+    "body": "Los pull requests están en GitHub, GitLab, Gitea, Forgejo, Bitbucket Cloud o Azure DevOps. Añade una cuenta y el token se queda en este host.",
+    "action": "Añadir una cuenta de forja"
+  },
+  "noRepo": {
+    "title": "No se detectó ningún repositorio",
+    "body": "Abre un hilo en un checkout de git con un remoto de GitHub, GitLab, Gitea, Forgejo, Bitbucket Cloud o Azure DevOps, o añade un host autoalojado en Ajustes.",
+    "action": "Abrir ajustes de forjas"
+  },
+  "accountsFailed": "No se cargaron las cuentas de forja",
+  "listFailed": "No se cargaron los pull requests",
+  "empty": {
+    "open": "No hay pull requests",
+    "review": "No hay revisiones pendientes",
+    "branch": "No hay pull requests en esta rama",
+    "openBody": "Este repositorio no tiene pull requests abiertos.",
+    "mineBody": "No tienes nada abierto en este repositorio.",
+    "reviewBody": "Nadie te ha pedido que revises un pull request.",
+    "branchBody": "Ningún pull request abierto usa {{branch}} como rama de origen.",
+    "thisBranchBody": "Ningún pull request abierto usa esta rama como rama de origen."
+  },
+  "state": {
+    "open": "Abierto",
+    "draft": "Borrador",
+    "merged": "Fusionado",
+    "closed": "Cerrado"
+  },
+  "checksState": {
+    "passing": "{{passed}} de {{total}} comprobaciones superadas",
+    "failing_one": "{{count, number}} con fallos",
+    "failing_many": "{{count, number}} con fallos",
+    "failing_other": "{{count, number}} con fallos",
+    "pending": "Comprobaciones en curso",
+    "unknown": "Sin comprobaciones"
+  },
+  "summaryChecks": {
+    "passing": "Todas las comprobaciones superadas",
+    "failing": "Comprobaciones con fallos",
+    "pending": "Comprobaciones en curso"
+  },
+  "reviewChip": {
+    "changes_requested": "Cambios solicitados",
+    "approved": "Aprobado",
+    "pending": "Revisión solicitada",
+    "commented": "Comentarios de revisión"
+  },
+  "mergeable": {
+    "mergeable": "Sin conflictos",
+    "conflicting": "Conflictos de fusión"
+  },
+  "rerun": {
+    "unsupported": "Esta forja no puede volver a ejecutar comprobaciones",
+    "nothing": "No falló ninguna comprobación"
+  },
+  "required": "obligatoria",
+  "open": {
+    "button": "Abrir PR",
+    "needsThread": "Abre primero un hilo en este repositorio; la rama del hilo será la rama de origen del PR",
+    "noAccount": "Ninguna cuenta de {{forge}} coincide con este repositorio",
+    "title": "Abrir un pull request desde {{branch}}",
+    "description": "El daemon sube la rama del hilo cuando hace falta y abre la solicitud en {{forge}}.",
+    "titleField": "Título",
+    "titleLabel": "Título del pull request",
+    "base": "Rama de destino",
+    "descriptionField": "Descripción",
+    "descriptionLabel": "Descripción del pull request",
+    "submit": "Abrir pull request",
+    "submitting": "Abriendo…",
+    "opened": "Se abrió {{repo}}#{{number}}.",
+    "failed": "No se abrió el pull request."
+  },
+  "detail": {
+    "label": "Pull request",
+    "failed": "No se cargó este pull request",
+    "noDetail": "La forja no devolvió ningún detalle.",
+    "back": "Volver a la lista",
+    "breadcrumb": "Ruta de navegación",
+    "commits_one": "{{count, number}} commit",
+    "commits_many": "{{count, number}} commits",
+    "commits_other": "{{count, number}} commits",
+    "openedBy": "abierto por {{author}} hace {{age}}",
+    "openedByNow": "abierto por {{author}} ahora mismo",
+    "onForge": "{{repo}} en {{forge}}",
+    "openOn": "Abrir en {{forge}}"
+  },
+  "tabs": {
+    "conversation": "Conversación",
+    "commits": "Commits",
+    "checks": "Comprobaciones",
+    "files": "Archivos",
+    "filesUnknown": "La forja no informó de cuántos archivos cambiaron"
+  },
+  "conversation": {
+    "noDescription": "Sin descripción.",
+    "loading": "Cargando comentarios…",
+    "failed": "No se cargaron los comentarios",
+    "sending": "enviando…",
+    "line": "línea {{line}}",
+    "resolved": "Resuelto",
+    "unresolved": "Sin resolver",
+    "outdated": "desactualizado",
+    "replyTo": "Responder a {{name}}",
+    "replyToReview": "Responder a la revisión",
+    "replyLabel": "Responder en {{path}}",
+    "sendReply": "Enviar respuesta",
+    "sendingReply": "Enviando…",
+    "reply": "Responder",
+    "sendTo": "Enviar a {{title}}",
+    "needsThread": "Abre primero un hilo para que el agente tenga un espacio de trabajo",
+    "handing": "Pasando…",
+    "handToAgent": "Pasar al agente",
+    "commentOn": "Comentar en #{{number}}",
+    "posting": "Publicando…",
+    "comment": "Comentar",
+    "you": "tú"
+  },
+  "commits": {
+    "loading": "Cargando commits…",
+    "failed": "No se cargaron los commits",
+    "openCommit": "Abrir este commit",
+    "truncated_one": "Se muestra el primer commit. Abre el PR en {{forge}} para ver el resto.",
+    "truncated_many": "Se muestran los primeros {{count, number}} commits. Abre el PR en {{forge}} para ver el resto.",
+    "truncated_other": "Se muestran los primeros {{count, number}} commits. Abre el PR en {{forge}} para ver el resto.",
+    "none": "Sin commits",
+    "noneBody": "Este pull request no tiene commits."
+  },
+  "checks": {
+    "loading": "Cargando comprobaciones…",
+    "failed": "No se cargaron las comprobaciones",
+    "viewLog": "Ver registro",
+    "rerunning": "Reejecutando…",
+    "rerunFailed": "Reejecutar fallidas",
+    "none": "Sin comprobaciones",
+    "noneBody": "Esta forja no informa de comprobaciones para el commit actual."
+  },
+  "files": {
+    "loading": "Cargando el diff…",
+    "failed": "No se cargó el diff",
+    "binary": "Archivo binario",
+    "truncated": "Parche truncado por la forja",
+    "noPatch": "Sin parche en línea",
+    "loadMore": "Cargar más archivos"
+  },
+  "side": {
+    "merge": "Fusión",
+    "checks": "Comprobaciones",
+    "passedOf": "{{passed}} de {{total}} superadas",
+    "checksFailed": "No se cargaron las comprobaciones.",
+    "noChecks": "No hay comprobaciones.",
+    "reviews": "Revisiones",
+    "noReviews": "Aún no hay revisiones.",
+    "reviewState": {
+      "approved": "aprobado",
+      "changes_requested": "cambios solicitados",
+      "commented": "comentado",
+      "pending": "pendiente",
+      "dismissed": "descartado"
+    },
+    "linkedThreads": "Hilos vinculados",
+    "noLinkedThreads": "Ningún hilo ha vinculado este pull request. Vincúlalo desde un hilo con ⌘K.",
+    "watching": "Siguiendo este pull request",
+    "agentThread": "Hilo del agente",
+    "noAgentThread": "Abre un hilo en este repositorio para pasar revisiones a un agente.",
+    "handPr": "Pasar el PR al agente",
+    "noAccount": "Ninguna cuenta coincide con este host.",
+    "addOne": "Añadir una"
+  },
+  "toast": {
+    "rerunStarted": "Reejecutando las comprobaciones fallidas.",
+    "rerunFailed": "No se pudieron reejecutar las comprobaciones.",
+    "diffMoreFailed": "No se cargó el resto del diff.",
+    "replyFailed": "No se publicó la respuesta.",
+    "commentFailed": "No se publicó el comentario.",
+    "openThreadFirst": "Abre primero un hilo.",
+    "openThreadFirstBody": "El agente necesita un espacio de trabajo, un harness y un modelo para recibir el PR.",
+    "handed": "Se pasó #{{number}} a {{title}}.",
+    "handedBody": "El agente empieza con el contexto del PR y no hará push sin aprobación.",
+    "handFailed": "No se pasó el PR a un agente."
+  },
+  "linked": {
+    "items": "Elementos vinculados",
+    "pullUnavailable": "Pull request no disponible",
+    "stateUnavailable": "Estado no disponible",
+    "stopWatching": "Dejar de seguir",
+    "watch": "Seguir los cambios",
+    "unlink": "Desvincular",
+    "unlinkIssue": "Desvincular issue",
+    "linearIssue": "Issue de Linear",
+    "issueUnavailable": "Issue no disponible",
+    "changeFailed": "El elemento vinculado no cambió."
+  },
+  "linkDialog": {
+    "title": "Vincular pull request",
+    "pickFrom": "Pega un enlace o elige un pull request abierto de {{repo}}.",
+    "noRemote": "Pega un enlace a un pull request. Este espacio de trabajo no tiene remoto de forja, así que no hay repositorio del que elegir.",
+    "urlLabel": "URL del pull request",
+    "link": "Vincular",
+    "invalid": "Ese no es un enlace de pull request que h4rn pueda leer (GitHub, GitLab, Gitea, Forgejo, Bitbucket o Azure DevOps). Pega la URL de la página, con el número.",
+    "reading": "Leyendo el repositorio…",
+    "openList": "Pull requests abiertos",
+    "noneOpen": "No hay pull requests abiertos en {{repo}}.",
+    "linked": "Se vinculó #{{number}} a este hilo."
+  }
+}

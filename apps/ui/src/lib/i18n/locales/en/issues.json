@@ -1,0 +1,80 @@
+{
+  "title": "Issues",
+  "search": {
+    "label": "Search issues",
+    "placeholder": "Search the tracker",
+    "clear": "Clear"
+  },
+  "filters": {
+    "label": "Issue filters",
+    "open": "Open",
+    "closed": "Closed",
+    "all": "All",
+    "assigned": "Assigned to me",
+    "created": "Opened by me",
+    "mentioning": "Mentioning me"
+  },
+  "projects": {
+    "label": "Projects",
+    "none": "No projects yet.",
+    "accountFor": "Account for {{name}}"
+  },
+  "reading": "Reading trackers…",
+  "bitbucket": "<strong>{{name}}</strong>: Bitbucket Cloud has no issue API. Atlassian removed it in August 2026, so this project shows pull requests only.",
+  "noAccount": "<strong>{{name}}</strong>: No {{forge}} account matches this repository.",
+  "empty": {
+    "title": "No issues to show",
+    "body": "Add a project with a forge remote, or choose a Linear team in Settings → Source control & issues."
+  },
+  "loadMore": "Load more",
+  "select": {
+    "title": "Select an issue",
+    "body": "Its description, comments and actions open here."
+  },
+  "age": {
+    "now": "just now",
+    "ago": "{{age}} ago"
+  },
+  "state": {
+    "open": "Open",
+    "closed": "Closed"
+  },
+  "detail": {
+    "label": "Issue",
+    "reading": "Reading the issue…",
+    "openOnTracker": "Open on the tracker",
+    "linkNeedsThread": "Open a thread to link this issue",
+    "unlink": "Unlink",
+    "link": "Link to this thread",
+    "readOnlyLinear": "This Linear team is not attached to a project, so its issues are read-only. Choose the team for a project in Settings → Source control.",
+    "readOnlyForge": "This project does not own the repository, so the issue is read-only.",
+    "titleLabel": "Issue title",
+    "descriptionLabel": "Issue description",
+    "noDescription": "_No description._",
+    "labels": "Labels",
+    "labelsPlaceholder": "bug, frontend",
+    "assignees": "Assignees",
+    "assigneesPlaceholder": "alice, bob",
+    "closeReason": "Close reason",
+    "reasons": {
+      "completed": "Completed",
+      "not_planned": "Not planned",
+      "duplicate": "Duplicate"
+    },
+    "duplicateLabel": "Duplicate of issue number",
+    "duplicatePlaceholder": "Issue number",
+    "duplicateMissing": "Name the issue this one duplicates",
+    "close": "Close issue",
+    "reopen": "Reopen issue",
+    "linkedPrs": "Linked pull requests",
+    "comments": "Comments",
+    "noComments": "No comments yet.",
+    "someone": "Someone",
+    "loadMoreComments": "Load more comments",
+    "newComment": "New comment",
+    "writeComment": "Write a comment",
+    "sending": "Sending…",
+    "comment": "Comment",
+    "rejected": "The tracker did not accept that."
+  }
+}

@@ -3,6 +3,7 @@
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ClientRequest, ForgeChecks, ForgeRepoRef, ResponseBody } from "@/gen";
+import { setLocalePreference } from "@/lib/i18n";
 
 const repo: ForgeRepoRef = {
   forge: "github",
@@ -418,5 +419,39 @@ describe("PR detail tabs", () => {
     fireEvent.click(screen.getByRole("tab", { name: /Files/ }));
     expect(await screen.findByText("Loading the diff…")).toBeTruthy();
     expect(screen.queryByText("The diff did not load")).toBeNull();
+  });
+});
+
+describe("the pull requests page in another language", () => {
+  afterEach(async () => {
+    await setLocalePreference("en");
+  });
+
+  it("words the list, its chips and the detail in Spanish, and keeps forge text as sent", async () => {
+    await setLocalePreference("es");
+    render(<PullRequestsPage />);
+
+    expect(await screen.findByRole("heading", { name: "Pull requests" })).toBeTruthy();
+    expect(screen.getByRole("tab", { name: "Abiertos" })).toBeTruthy();
+    expect(screen.getByRole("tab", { name: "Revisión" })).toBeTruthy();
+    expect(await screen.findByText("Abierto")).toBeTruthy();
+    expect(screen.getByText("Todas las comprobaciones superadas")).toBeTruthy();
+    expect(screen.getByText("Revisión solicitada")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Actualizar pull requests" })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: /Fix the widget/ }));
+    await screen.findByRole("heading", { name: /Fix the widget/ });
+    expect(screen.getByRole("tab", { name: /Conversación/ })).toBeTruthy();
+    expect(screen.getByText(/1 commit ·/)).toBeTruthy();
+    expect(screen.getByText(/abierto por alice hace/)).toBeTruthy();
+    expect(screen.getByText("1 de 1 superadas")).toBeTruthy();
+    expect(screen.getByText("Sin conflictos")).toBeTruthy();
+    expect(screen.getAllByText(/· obligatoria/).length).toBeGreaterThan(0);
+
+    fireEvent.click(screen.getByRole("tab", { name: /Archivos/ }));
+    expect(await screen.findByText("No se cargó el diff")).toBeTruthy();
+    // The forge's own error is shown as it was sent.
+    expect(screen.getByText(/the diff failed/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Reintentar" })).toBeTruthy();
   });
 });

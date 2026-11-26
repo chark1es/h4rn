@@ -13,6 +13,7 @@ import {
   RotateCwIcon,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { AgentGlyph } from "@/components/agent/AgentGlyph";
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
@@ -64,18 +65,14 @@ import type {
 } from "@/gen";
 import { glyphForThread } from "@/lib/agent";
 import { userSeed } from "@/lib/entities";
-import { relativeAge } from "@/lib/format";
+import { formatAge, formatList, formatNumber } from "@/lib/i18n";
 import { getClient, navigate, openThread, pushToast, useApp } from "@/lib/store/appStore";
 
 const api = () => new ForgeApi((request) => getClient().request(request));
 
 type FilterKey = "open" | "mine" | "review" | "branch";
 
-const FILTERS: Array<{ key: FilterKey; label: string }> = [
-  { key: "open", label: "Open" },
-  { key: "mine", label: "Mine" },
-  { key: "review", label: "Review" },
-];
+const FILTERS: FilterKey[] = ["open", "mine", "review"];
 
 function filterFor(key: FilterKey, branch: string | null): ForgePrFilter {
   switch (key) {
@@ -119,12 +116,24 @@ function splitPath(path: string): { directory: string; name: string } {
     : { directory: path.slice(0, index + 1), name: path.slice(index + 1) };
 }
 
+/** A check's run time in the narrow column: "42s", "3m 5s", "3min 5s". */
 function duration(ms: bigint | null): string {
   if (ms === null) return "";
-  const seconds = Number(ms) / 1000;
-  if (seconds < 60) return `${Math.round(seconds)}s`;
-  const minutes = Math.floor(seconds / 60);
-  return `${minutes}m ${String(Math.round(seconds % 60)).padStart(2, "0")}s`;
+  const unit = (value: number, name: "minute" | "second") =>
+    formatNumber(value, { style: "unit", unit: name, unitDisplay: "narrow" });
+  const total = Math.round(Number(ms) / 1000);
+  if (total < 60) return unit(total, "second");
+  return formatList(
+    [unit(Math.floor(total / 60), "minute"), unit(total % 60, "second")],
+    "unit",
+    "narrow",
+  );
+}
+
+/** "now" under a minute, otherwise the one-unit age ("5m"). */
+function isNow(iso: string): boolean {
+  const then = Date.parse(iso);
+  return Number.isFinite(then) && Date.now() - then < 60_000;
 }
 
 function errorMessage(cause: unknown): string {
@@ -141,12 +150,13 @@ function TabError({
   message: string;
   onRetry: () => void;
 }) {
+  const { t } = useTranslation("common");
   return (
     <div className="q-empty" style={{ margin: "18px 0" }}>
       <h3>{title}</h3>
       <p>{message}</p>
       <button type="button" className="q-btn secondary" onClick={onRetry}>
-        Retry
+        {t("retry")}
       </button>
     </div>
   );
@@ -178,6 +188,7 @@ function ChecksActions({
   /** The Checks tab already has a View log on every row. */
   showLog?: boolean;
 }) {
+  const { t } = useTranslation("pullRequests");
   const log = showLog ? logCheck(checks) : null;
   const rerun = rerunAction(checks);
   const blocked = rerun.kind !== "ready";
@@ -190,12 +201,12 @@ function ChecksActions({
           target="_blank"
           rel="noopener noreferrer"
         >
-          View log
+          {t("checks.viewLog")}
         </a>
       ) : null}
       <span title={blocked ? rerun.reason : undefined}>
         <button type="button" className="q-btn ghost" disabled={blocked || busy} onClick={onRerun}>
-          {busy ? "Re-running…" : "Re-run failed"}
+          {busy ? t("checks.rerunning") : t("checks.rerunFailed")}
         </button>
       </span>
     </div>
@@ -219,8 +230,9 @@ function CheckIcon({ status }: { status: string }) {
 }
 
 function PrSkeleton() {
+  const { t } = useTranslation("pullRequests");
   return (
-    <div className="q-page" role="status" aria-busy="true" aria-label="Loading pull requests">
+    <div className="q-page" role="status" aria-busy="true" aria-label={t("loading")}>
       <div style={{ maxWidth: 860, margin: "0 auto", padding: "24px 32px" }}>
         <div className="q-skel" style={{ width: 220, height: 20, marginBottom: 18 }} />
         {[0, 1, 2, 3].map((row) => (
@@ -232,18 +244,16 @@ function PrSkeleton() {
 }
 
 function EmptyForge({ onSettings }: { onSettings: () => void }) {
+  const { t } = useTranslation("pullRequests");
   return (
     <div className="q-page">
       <div className="q-center-empty">
         <div className="q-empty" style={{ width: 400 }}>
           <GitPullRequestIcon className="q-icon s22 q-faint" strokeWidth={1.5} aria-hidden />
-          <h3>Connect a forge</h3>
-          <p>
-            Pull requests live on GitHub, GitLab, Gitea, Forgejo, Bitbucket Cloud or Azure DevOps.
-            Add an account and the token stays on this host.
-          </p>
+          <h3>{t("noForge.title")}</h3>
+          <p>{t("noForge.body")}</p>
           <button type="button" className="q-btn primary" onClick={onSettings}>
-            Add a forge account
+            {t("noForge.action")}
           </button>
         </div>
       </div>
@@ -252,18 +262,16 @@ function EmptyForge({ onSettings }: { onSettings: () => void }) {
 }
 
 function NoRepo({ onSettings }: { onSettings: () => void }) {
+  const { t } = useTranslation("pullRequests");
   return (
     <div className="q-page">
       <div className="q-center-empty">
         <div className="q-empty" style={{ width: 420 }}>
           <GitPullRequestIcon className="q-icon s22 q-faint" strokeWidth={1.5} aria-hidden />
-          <h3>No repository detected</h3>
-          <p>
-            Open a thread in a git checkout with a GitHub, GitLab, Gitea, Forgejo, Bitbucket Cloud
-            or Azure DevOps remote, or add a self-hosted host in Settings.
-          </p>
+          <h3>{t("noRepo.title")}</h3>
+          <p>{t("noRepo.body")}</p>
           <button type="button" className="q-btn secondary" onClick={onSettings}>
-            Open forge settings
+            {t("noRepo.action")}
           </button>
         </div>
       </div>
@@ -272,6 +280,7 @@ function NoRepo({ onSettings }: { onSettings: () => void }) {
 }
 
 export function PullRequestsPage() {
+  const { t } = useTranslation(["pullRequests", "common"]);
   const threads = useApp((state) => state.threads);
   // A cold deep link mounts this page before the socket handshake finishes.
   const connection = useApp((state) => state.connection.status);
@@ -298,7 +307,7 @@ export function PullRequestsPage() {
   );
   const threadBranch = activeThread?.branch ?? null;
   const filters = useMemo(
-    () => (threadBranch ? [...FILTERS, { key: "branch" as const, label: "This branch" }] : FILTERS),
+    () => (threadBranch ? [...FILTERS, "branch" as const] : FILTERS),
     [threadBranch],
   );
 
@@ -407,19 +416,19 @@ export function PullRequestsPage() {
   if (loadingAccounts) return <PrSkeleton />;
   if (accountsError) {
     return (
-      <main className="q-main" aria-label="Pull requests">
+      <main className="q-main" aria-label={t("title")}>
         <div className="q-page">
           <div className="q-center-empty">
             <div className="q-empty" style={{ width: 420 }}>
               <CircleAlertIcon className="q-icon s22 q-danger" strokeWidth={1.5} aria-hidden />
-              <h3>Forge accounts did not load</h3>
+              <h3>{t("accountsFailed")}</h3>
               <p>{accountsError}</p>
               <button
                 type="button"
                 className="q-btn secondary"
                 onClick={() => setReloadNonce((value) => value + 1)}
               >
-                Retry
+                {t("common:retry")}
               </button>
             </div>
           </div>
@@ -449,9 +458,9 @@ export function PullRequestsPage() {
   if (!repo) {
     if (detecting) return <PrSkeleton />;
     return (
-      <main className="q-main" aria-label="Pull requests">
+      <main className="q-main" aria-label={t("title")}>
         <header className="q-page-head">
-          <h1>Pull requests</h1>
+          <h1>{t("title")}</h1>
         </header>
         <NoRepo onSettings={openSettings} />
       </main>
@@ -461,15 +470,15 @@ export function PullRequestsPage() {
   const account = accountForRepo(accounts, repo);
 
   return (
-    <main className="q-main" aria-label="Pull requests">
+    <main className="q-main" aria-label={t("title")}>
       <header className="q-page-head q-pr-list-head">
-        <h1>Pull requests</h1>
+        <h1>{t("title")}</h1>
         <span className="q-faint" style={{ fontSize: 12 }}>
           {repo.owner}/{repo.repo}
         </span>
         {repos.length > 1 ? (
           <ChipSelect
-            label="Repository"
+            label={t("repository")}
             value={`${repo.forge}:${repo.base_url}:${repo.owner}/${repo.repo}`}
             options={repos.map((item) => ({
               value: `${item.repo.forge}:${item.repo.base_url}:${item.repo.owner}/${item.repo.repo}`,
@@ -490,19 +499,19 @@ export function PullRequestsPage() {
           />
         ) : null}
         <span className="grow" />
-        <div className="q-seg" role="tablist" aria-label="Pull request filters">
-          {filters.map((item) => (
+        <div className="q-seg" role="tablist" aria-label={t("filters.label")}>
+          {filters.map((key) => (
             <button
-              key={item.key}
+              key={key}
               type="button"
               role="tab"
-              aria-selected={filter === item.key}
+              aria-selected={filter === key}
               onClick={() => {
-                setFilter(item.key);
+                setFilter(key);
                 setPage(1);
               }}
             >
-              {item.label}
+              {t(`filters.${key}`)}
             </button>
           ))}
         </div>
@@ -518,7 +527,7 @@ export function PullRequestsPage() {
         <button
           type="button"
           className="q-ibtn"
-          aria-label="Refresh pull requests"
+          aria-label={t("refresh")}
           onClick={() => setReloadNonce((value) => value + 1)}
         >
           <RotateCwIcon className="q-icon" strokeWidth={1.5} aria-hidden />
@@ -529,14 +538,14 @@ export function PullRequestsPage() {
           <div className="q-center-empty">
             <div className="q-empty" style={{ width: 420 }}>
               <CircleAlertIcon className="q-icon s22 q-danger" strokeWidth={1.5} aria-hidden />
-              <h3>The pull requests did not load</h3>
+              <h3>{t("listFailed")}</h3>
               <p>{listError}</p>
               <button
                 type="button"
                 className="q-btn secondary"
                 onClick={() => setReloadNonce((value) => value + 1)}
               >
-                Retry
+                {t("common:retry")}
               </button>
             </div>
           </div>
@@ -551,21 +560,22 @@ export function PullRequestsPage() {
             <div className="q-empty" style={{ width: 380 }}>
               <GitPullRequestIcon className="q-icon s22 q-faint" strokeWidth={1.5} aria-hidden />
               <h3>
-                No{" "}
                 {filter === "review"
-                  ? "reviews waiting"
+                  ? t("empty.review")
                   : filter === "branch"
-                    ? "pull requests on this branch"
-                    : "pull requests"}
+                    ? t("empty.branch")
+                    : t("empty.open")}
               </h3>
               <p>
                 {filter === "mine"
-                  ? "Nothing you opened is open on this repository."
+                  ? t("empty.mineBody")
                   : filter === "review"
-                    ? "No one has asked you to review a pull request."
+                    ? t("empty.reviewBody")
                     : filter === "branch"
-                      ? `No open pull request uses ${threadBranch ?? "this branch"} as its head.`
-                      : "This repository has no open pull requests."}
+                      ? threadBranch
+                        ? t("empty.branchBody", { branch: threadBranch })
+                        : t("empty.thisBranchBody")
+                      : t("empty.openBody")}
               </p>
             </div>
           </div>
@@ -616,7 +626,7 @@ export function PullRequestsPage() {
                   disabled={listLoading}
                   onClick={() => setPage((value) => value + 1)}
                 >
-                  {listLoading ? "Loading…" : "Load more"}
+                  {listLoading ? t("common:loading") : t("loadMore")}
                 </button>
               </div>
             ) : null}
@@ -638,6 +648,7 @@ function OpenPrButton({
   account: ForgeAccount | undefined;
   onOpened: (pr: ForgePullRequest) => void;
 }) {
+  const { t } = useTranslation(["pullRequests", "common"]);
   const [open, setOpen] = useState(false);
   const [title, setTitle] = useState(thread?.title ?? "");
   const [body, setBody] = useState("");
@@ -646,13 +657,8 @@ function OpenPrButton({
 
   if (!thread?.branch) {
     return (
-      <button
-        type="button"
-        className="q-btn secondary"
-        disabled
-        title="Open a thread in this repository first; the thread branch becomes the PR head"
-      >
-        <GitPullRequestIcon className="q-icon s14" aria-hidden /> Open PR
+      <button type="button" className="q-btn secondary" disabled title={t("open.needsThread")}>
+        <GitPullRequestIcon className="q-icon s14" aria-hidden /> {t("open.button")}
       </button>
     );
   }
@@ -662,9 +668,9 @@ function OpenPrButton({
         type="button"
         className="q-btn secondary"
         disabled
-        title={`No ${forgeLabel(repo.forge)} account matches this repository`}
+        title={t("open.noAccount", { forge: forgeLabel(repo.forge) })}
       >
-        <GitPullRequestIcon className="q-icon s14" aria-hidden /> Open PR
+        <GitPullRequestIcon className="q-icon s14" aria-hidden /> {t("open.button")}
       </button>
     );
   }
@@ -674,14 +680,14 @@ function OpenPrButton({
     try {
       const pr = await api().openPr(thread.thread_id, repo, title, body, base);
       pushToast({
-        title: `Opened ${repo.owner}/${repo.repo}#${pr.summary.number}.`,
+        title: t("open.opened", { repo: `${repo.owner}/${repo.repo}`, number: pr.summary.number }),
         variant: "success",
       });
       setOpen(false);
       onOpened(pr);
     } catch (cause) {
       pushToast({
-        title: "The pull request was not opened.",
+        title: t("open.failed"),
         description: cause instanceof Error ? cause.message : String(cause),
         variant: "error",
       });
@@ -693,47 +699,46 @@ function OpenPrButton({
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <button type="button" className="q-btn secondary" onClick={() => setOpen(true)}>
-        <GitPullRequestIcon className="q-icon s14" aria-hidden /> Open PR
+        <GitPullRequestIcon className="q-icon s14" aria-hidden /> {t("open.button")}
       </button>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Open a pull request from {thread.branch}</DialogTitle>
+          <DialogTitle>{t("open.title", { branch: thread.branch })}</DialogTitle>
           <DialogDescription>
-            The daemon pushes the thread branch when needed and opens the request on{" "}
-            {forgeLabel(repo.forge)}.
+            {t("open.description", { forge: forgeLabel(repo.forge) })}
           </DialogDescription>
         </DialogHeader>
         <label className="q-field" style={{ display: "block" }}>
-          <span className="t">Title</span>
+          <span className="t">{t("open.titleField")}</span>
           <input
             className="q-input"
             value={title}
             onChange={(event) => setTitle(event.target.value)}
-            aria-label="Pull request title"
+            aria-label={t("open.titleLabel")}
           />
         </label>
         <label className="q-field" style={{ display: "block" }}>
-          <span className="t">Base branch</span>
+          <span className="t">{t("open.base")}</span>
           <input
             className="q-input"
             value={base}
             onChange={(event) => setBase(event.target.value)}
-            aria-label="Base branch"
+            aria-label={t("open.base")}
           />
         </label>
         <label className="q-field" style={{ display: "block" }}>
-          <span className="t">Description</span>
+          <span className="t">{t("open.descriptionField")}</span>
           <textarea
             className="q-input"
             rows={4}
             value={body}
             onChange={(event) => setBody(event.target.value)}
-            aria-label="Pull request description"
+            aria-label={t("open.descriptionLabel")}
           />
         </label>
         <DialogFooter>
           <button type="button" className="q-btn ghost" onClick={() => setOpen(false)}>
-            Cancel
+            {t("common:cancel")}
           </button>
           <button
             type="button"
@@ -741,7 +746,7 @@ function OpenPrButton({
             disabled={busy || title.trim() === "" || base.trim() === ""}
             onClick={() => void submit()}
           >
-            {busy ? "Opening…" : "Open pull request"}
+            {busy ? t("open.submitting") : t("open.submit")}
           </button>
         </DialogFooter>
       </DialogContent>
@@ -795,6 +800,7 @@ function PrDetail({
   onBack: () => void;
   onOpenSettings: () => void;
 }) {
+  const { t } = useTranslation(["pullRequests", "common"]);
   const [pr, setPr] = useState<ForgePullRequest | null>(null);
   const [comments, setComments] = useState<ForgeCommentPage | null>(null);
   const [checks, setChecks] = useState<ForgeChecks | null>(null);
@@ -1020,11 +1026,11 @@ function PrDetail({
       const result = await api().rerunChecks(repo, number);
       if (generation !== checksGeneration.current) return;
       setChecks(result);
-      pushToast({ title: "Re-running the failed checks.", variant: "success" });
+      pushToast({ title: t("toast.rerunStarted"), variant: "success" });
     } catch (cause) {
       if (generation !== checksGeneration.current) return;
       pushToast({
-        title: "Could not re-run the checks.",
+        title: t("toast.rerunFailed"),
         description: cause instanceof Error ? cause.message : String(cause),
         variant: "error",
       });
@@ -1042,7 +1048,7 @@ function PrDetail({
       setDiffFiles((current) => mergeDiffPages(current, next));
     } catch (cause) {
       pushToast({
-        title: "The rest of the diff did not load.",
+        title: t("toast.diffMoreFailed"),
         description: cause instanceof Error ? cause.message : String(cause),
         variant: "error",
       });
@@ -1062,7 +1068,7 @@ function PrDetail({
         {
           comment_id: temporaryId,
           thread_id: thread.thread_id,
-          author: "you",
+          author: t("conversation.you"),
           body,
           created_at: new Date().toISOString(),
           updated_at: null,
@@ -1131,7 +1137,7 @@ function PrDetail({
       );
       setReplyDrafts((current) => ({ ...current, [thread.thread_id]: body }));
       pushToast({
-        title: "The reply was not posted.",
+        title: t("toast.replyFailed"),
         description: cause instanceof Error ? cause.message : String(cause),
         variant: "error",
       });
@@ -1146,7 +1152,7 @@ function PrDetail({
     const temporaryId = `tmp_${Date.now()}`;
     const optimistic: ForgeComment = {
       comment_id: temporaryId,
-      author: "you",
+      author: t("conversation.you"),
       body,
       created_at: new Date().toISOString(),
       updated_at: null,
@@ -1175,7 +1181,7 @@ function PrDetail({
       );
       setCommentDraft(body);
       pushToast({
-        title: "The comment was not posted.",
+        title: t("toast.commentFailed"),
         description: cause instanceof Error ? cause.message : String(cause),
         variant: "error",
       });
@@ -1187,8 +1193,8 @@ function PrDetail({
   const handToAgent = async (thread: ForgeReviewThread | null) => {
     if (!linkedThread) {
       pushToast({
-        title: "Open a thread first.",
-        description: "The agent needs a workspace, harness and model to receive the PR.",
+        title: t("toast.openThreadFirst"),
+        description: t("toast.openThreadFirstBody"),
         variant: "error",
       });
       return;
@@ -1203,14 +1209,14 @@ function PrDetail({
         workspace_path: linkedThread.workspace_path,
       });
       pushToast({
-        title: `Handed #${number} to ${linkedThread.title}.`,
-        description: "The agent starts with the PR context and won't push without approval.",
+        title: t("toast.handed", { number, title: linkedThread.title }),
+        description: t("toast.handedBody"),
         variant: "success",
       });
       openThread(result.thread_id);
     } catch (cause) {
       pushToast({
-        title: "The PR was not handed to an agent.",
+        title: t("toast.handFailed"),
         description: cause instanceof Error ? cause.message : String(cause),
         variant: "error",
       });
@@ -1222,7 +1228,7 @@ function PrDetail({
 
   if (loading) {
     return (
-      <main className="q-main" aria-label="Pull request" aria-busy="true">
+      <main className="q-main" aria-label={t("detail.label")} aria-busy="true">
         <header className="q-page-head" style={{ height: "auto", padding: "14px 16px 14px 32px" }}>
           <div style={{ flex: 1 }}>
             <div className="q-skel" style={{ width: 320, height: 22 }} />
@@ -1237,19 +1243,19 @@ function PrDetail({
 
   if (error || !pr) {
     return (
-      <main className="q-main" aria-label="Pull request">
+      <main className="q-main" aria-label={t("detail.label")}>
         <div className="q-page">
           <div className="q-center-empty">
             <div className="q-empty" style={{ width: 420 }}>
               <CircleAlertIcon className="q-icon s22 q-danger" strokeWidth={1.5} aria-hidden />
-              <h3>This pull request did not load</h3>
-              <p>{error ?? "The forge returned no detail."}</p>
+              <h3>{t("detail.failed")}</h3>
+              <p>{error ?? t("detail.noDetail")}</p>
               <div style={{ display: "flex", gap: 6, justifyContent: "center" }}>
                 <button type="button" className="q-btn secondary" onClick={onBack}>
-                  Back to list
+                  {t("detail.back")}
                 </button>
                 <button type="button" className="q-btn secondary" onClick={retryPage}>
-                  Retry
+                  {t("common:retry")}
                 </button>
               </div>
             </div>
@@ -1266,12 +1272,12 @@ function PrDetail({
   const total = checks?.total ?? 0;
 
   return (
-    <main className="q-main" aria-label="Pull request">
+    <main className="q-main" aria-label={t("detail.label")}>
       <header className="q-page-head q-pr-head">
         <div style={{ flex: 1, minWidth: 0 }}>
-          <nav className="q-crumb" aria-label="Breadcrumb">
+          <nav className="q-crumb" aria-label={t("detail.breadcrumb")}>
             <button type="button" className="q-crumb-link" onClick={onBack}>
-              Pull requests
+              {t("title")}
             </button>
             <span className="q-sep" aria-hidden>
               /
@@ -1301,8 +1307,18 @@ function PrDetail({
             <span className="mono" style={{ fontSize: 11.5 }}>
               {pr.summary.base_branch}
             </span>{" "}
-            · {pr.commits} commits · opened by {pr.summary.author} {relativeAge(pr.created_at)} ·{" "}
-            {repo.owner}/{repo.repo} on {forgeLabel(repo.forge)}
+            · {t("detail.commits", { count: pr.commits })} ·{" "}
+            {isNow(pr.created_at)
+              ? t("detail.openedByNow", { author: pr.summary.author })
+              : t("detail.openedBy", {
+                  author: pr.summary.author,
+                  age: formatAge(pr.created_at),
+                })}{" "}
+            ·{" "}
+            {t("detail.onForge", {
+              repo: `${repo.owner}/${repo.repo}`,
+              forge: forgeLabel(repo.forge),
+            })}
           </div>
         </div>
         <button
@@ -1310,7 +1326,8 @@ function PrDetail({
           className="q-btn secondary"
           onClick={() => window.open(pr.summary.web_url, "_blank", "noopener")}
         >
-          <ExternalLinkIcon className="q-icon s14" aria-hidden /> Open on {forgeLabel(repo.forge)}
+          <ExternalLinkIcon className="q-icon s14" aria-hidden />{" "}
+          {t("detail.openOn", { forge: forgeLabel(repo.forge) })}
         </button>
       </header>
 
@@ -1324,8 +1341,10 @@ function PrDetail({
                 aria-selected={tab === "conversation"}
                 onClick={() => setTab("conversation")}
               >
-                Conversation{" "}
-                <span className="c">{(comments?.comments.length ?? 0) + unresolved}</span>
+                {t("tabs.conversation")}{" "}
+                <span className="c">
+                  {formatNumber((comments?.comments.length ?? 0) + unresolved)}
+                </span>
               </button>
               <button
                 type="button"
@@ -1333,7 +1352,8 @@ function PrDetail({
                 aria-selected={tab === "commits"}
                 onClick={() => setTab("commits")}
               >
-                Commits <span className="c">{commits?.commits.length ?? pr.commits}</span>
+                {t("tabs.commits")}{" "}
+                <span className="c">{formatNumber(commits?.commits.length ?? pr.commits)}</span>
               </button>
               <button
                 type="button"
@@ -1341,7 +1361,7 @@ function PrDetail({
                 aria-selected={tab === "checks"}
                 onClick={() => setTab("checks")}
               >
-                Checks <span className="c">{total}</span>
+                {t("tabs.checks")} <span className="c">{formatNumber(total)}</span>
               </button>
               <button
                 type="button"
@@ -1349,16 +1369,12 @@ function PrDetail({
                 aria-selected={tab === "files"}
                 onClick={() => setTab("files")}
               >
-                Files{" "}
+                {t("tabs.files")}{" "}
                 <span
                   className="c"
-                  title={
-                    pr.changed_files_known
-                      ? undefined
-                      : "The forge did not report how many files changed"
-                  }
+                  title={pr.changed_files_known ? undefined : t("tabs.filesUnknown")}
                 >
-                  {pr.changed_files_known ? pr.changed_files : "—"}
+                  {pr.changed_files_known ? formatNumber(pr.changed_files) : "—"}
                 </span>
               </button>
             </div>
@@ -1373,20 +1389,20 @@ function PrDetail({
                       label={pr.summary.author}
                       size={18}
                     />
-                    <b>{pr.summary.author}</b> · {relativeAge(pr.created_at)}
+                    <b>{pr.summary.author}</b> · {formatAge(pr.created_at)}
                   </div>
                   {pr.body ? (
                     <Markdown text={pr.body} />
                   ) : (
-                    <p className="q-faint">No description.</p>
+                    <p className="q-faint">{t("conversation.noDescription")}</p>
                   )}
                 </div>
 
                 {commentsLoading ? (
-                  <TabLoading label="Loading comments…" />
+                  <TabLoading label={t("conversation.loading")} />
                 ) : commentsError ? (
                   <TabError
-                    title="Comments did not load"
+                    title={t("conversation.failed")}
                     message={commentsError}
                     onRetry={() => setCommentsNonce((value) => value + 1)}
                   />
@@ -1401,9 +1417,9 @@ function PrDetail({
                             label={comment.author}
                             size={18}
                           />
-                          <b>{comment.author}</b> · {relativeAge(comment.created_at)}
+                          <b>{comment.author}</b> · {formatAge(comment.created_at)}
                           {comment.comment_id.startsWith("tmp_") ? (
-                            <span className="q-faint"> · sending…</span>
+                            <span className="q-faint"> · {t("conversation.sending")}</span>
                           ) : null}
                         </div>
                         <Markdown text={comment.body} />
@@ -1416,24 +1432,28 @@ function PrDetail({
                           <MessageSquareIcon className="q-icon s14 q-faint" aria-hidden />
                           <span className="q-mono">
                             {thread.path}
-                            {thread.line !== null ? ` · line ${thread.line}` : ""}
+                            {thread.line !== null
+                              ? ` · ${t("conversation.line", { line: thread.line })}`
+                              : ""}
                           </span>
                           {thread.resolved ? (
                             <span className="q-badge ok" style={{ height: 18 }}>
-                              Resolved
+                              {t("conversation.resolved")}
                             </span>
                           ) : (
-                            <span className="q-faint">Unresolved</span>
+                            <span className="q-faint">{t("conversation.unresolved")}</span>
                           )}
-                          {thread.outdated ? <span className="q-faint">· outdated</span> : null}
+                          {thread.outdated ? (
+                            <span className="q-faint">· {t("conversation.outdated")}</span>
+                          ) : null}
                         </div>
                         <ThreadQuote thread={thread} files={diffFiles} />
                         {thread.comments.map((comment) => (
                           <div key={comment.comment_id} style={{ marginBottom: 10 }}>
                             <div className="q-cmt-h" style={{ marginBottom: 2 }}>
-                              <b>{comment.author}</b> · {relativeAge(comment.created_at)}
+                              <b>{comment.author}</b> · {formatAge(comment.created_at)}
                               {comment.comment_id.startsWith("tmp_") ? (
-                                <span className="q-faint"> · sending…</span>
+                                <span className="q-faint"> · {t("conversation.sending")}</span>
                               ) : null}
                             </div>
                             <Markdown text={comment.body} />
@@ -1446,7 +1466,13 @@ function PrDetail({
                               className="q-input"
                               rows={2}
                               ref={focusOnMount}
-                              placeholder={`Reply to ${thread.comments.at(-1)?.author ?? "review"}`}
+                              placeholder={
+                                thread.comments.at(-1)?.author
+                                  ? t("conversation.replyTo", {
+                                      name: thread.comments.at(-1)?.author,
+                                    })
+                                  : t("conversation.replyToReview")
+                              }
                               value={replyDrafts[thread.thread_id] ?? ""}
                               onChange={(event) =>
                                 setReplyDrafts((current) => ({
@@ -1454,7 +1480,7 @@ function PrDetail({
                                   [thread.thread_id]: event.target.value,
                                 }))
                               }
-                              aria-label={`Reply to ${thread.path}`}
+                              aria-label={t("conversation.replyLabel", { path: thread.path })}
                             />
                             <div className="q-cmt-a">
                               <button
@@ -1466,7 +1492,9 @@ function PrDetail({
                                 }
                                 onClick={() => void submitReply(thread)}
                               >
-                                {replyBusy[thread.thread_id] ? "Sending…" : "Send reply"}
+                                {replyBusy[thread.thread_id]
+                                  ? t("conversation.sendingReply")
+                                  : t("conversation.sendReply")}
                               </button>
                               <button
                                 type="button"
@@ -1482,7 +1510,7 @@ function PrDetail({
                                   }));
                                 }}
                               >
-                                Cancel
+                                {t("common:cancel")}
                               </button>
                             </div>
                           </div>
@@ -1496,7 +1524,7 @@ function PrDetail({
                             }
                           >
                             <MessageSquareIcon className="q-icon s14" aria-hidden />
-                            Reply
+                            {t("conversation.reply")}
                           </button>
                           <button
                             type="button"
@@ -1504,13 +1532,15 @@ function PrDetail({
                             disabled={handBusy || !linkedThread}
                             title={
                               linkedThread
-                                ? `Send to ${linkedThread.title}`
-                                : "Open a thread first so the agent has a workspace"
+                                ? t("conversation.sendTo", { title: linkedThread.title })
+                                : t("conversation.needsThread")
                             }
                             onClick={() => void handToAgent(thread)}
                           >
                             <HandIcon className="q-icon s14" aria-hidden />
-                            {handoff === thread.thread_id ? "Handing…" : "Hand to agent"}
+                            {handoff === thread.thread_id
+                              ? t("conversation.handing")
+                              : t("conversation.handToAgent")}
                           </button>
                         </div>
                       </div>
@@ -1519,8 +1549,8 @@ function PrDetail({
                     <div style={{ marginTop: 18 }}>
                       <div className="q-composer">
                         <textarea
-                          aria-label={`Comment on #${number}`}
-                          placeholder={`Comment on #${number}`}
+                          aria-label={t("conversation.commentOn", { number })}
+                          placeholder={t("conversation.commentOn", { number })}
                           value={commentDraft}
                           onChange={(event) => setCommentDraft(event.target.value)}
                         />
@@ -1536,7 +1566,7 @@ function PrDetail({
                             onClick={() => void submitComment()}
                           >
                             <MessageSquareTextIcon className="q-icon s14" aria-hidden />
-                            {commentBusy ? "Posting…" : "Comment"}
+                            {commentBusy ? t("conversation.posting") : t("conversation.comment")}
                           </button>
                         </div>
                       </div>
@@ -1549,10 +1579,10 @@ function PrDetail({
             {tab === "commits" ? (
               <div>
                 {commitsLoading ? (
-                  <TabLoading label="Loading commits…" />
+                  <TabLoading label={t("commits.loading")} />
                 ) : commitsError ? (
                   <TabError
-                    title="Commits did not load"
+                    title={t("commits.failed")}
                     message={commitsError}
                     onRetry={() => setCommitsNonce((value) => value + 1)}
                   />
@@ -1564,7 +1594,7 @@ function PrDetail({
                           <div className="t">{commit.title}</div>
                           <div className="s">
                             {commit.author_login ?? commit.author}
-                            {commit.authored_at ? ` · ${relativeAge(commit.authored_at)}` : ""}
+                            {commit.authored_at ? ` · ${formatAge(commit.authored_at)}` : ""}
                           </div>
                         </div>
                         {commit.web_url ? (
@@ -1573,7 +1603,7 @@ function PrDetail({
                             href={commit.web_url}
                             target="_blank"
                             rel="noopener noreferrer"
-                            title="Open this commit"
+                            title={t("commits.openCommit")}
                           >
                             {shortSha(commit.sha)}
                           </a>
@@ -1584,15 +1614,17 @@ function PrDetail({
                     ))}
                     {commits.truncated ? (
                       <p className="q-faint" style={{ fontSize: 12, marginTop: 10 }}>
-                        Showing the first {commits.commits.length} commits. Open the PR on{" "}
-                        {forgeLabel(repo.forge)} for the rest.
+                        {t("commits.truncated", {
+                          count: commits.commits.length,
+                          forge: forgeLabel(repo.forge),
+                        })}
                       </p>
                     ) : null}
                   </>
                 ) : (
                   <div className="q-empty">
-                    <h3>No commits</h3>
-                    <p>This pull request has no commits.</p>
+                    <h3>{t("commits.none")}</h3>
+                    <p>{t("commits.noneBody")}</p>
                   </div>
                 )}
               </div>
@@ -1601,10 +1633,10 @@ function PrDetail({
             {tab === "checks" ? (
               <div>
                 {checksLoading ? (
-                  <TabLoading label="Loading checks…" />
+                  <TabLoading label={t("checks.loading")} />
                 ) : checksError ? (
                   <TabError
-                    title="Checks did not load"
+                    title={t("checks.failed")}
                     message={checksError}
                     onRetry={() => setChecksNonce((value) => value + 1)}
                   />
@@ -1635,7 +1667,7 @@ function PrDetail({
                               window.open(check.details_url ?? "", "_blank", "noopener")
                             }
                           >
-                            View log
+                            {t("checks.viewLog")}
                           </button>
                         ) : null}
                       </div>
@@ -1649,8 +1681,8 @@ function PrDetail({
                   </>
                 ) : (
                   <div className="q-empty">
-                    <h3>No checks</h3>
-                    <p>This forge reports no checks for the current commit.</p>
+                    <h3>{t("checks.none")}</h3>
+                    <p>{t("checks.noneBody")}</p>
                   </div>
                 )}
               </div>
@@ -1659,12 +1691,12 @@ function PrDetail({
             {tab === "files" ? (
               <div>
                 {diffInitialLoading ? (
-                  <TabLoading label="Loading the diff…" />
+                  <TabLoading label={t("files.loading")} />
                 ) : (
                   <>
                     {diffError ? (
                       <TabError
-                        title="The diff did not load"
+                        title={t("files.failed")}
                         message={diffError}
                         onRetry={() => setDiffNonce((value) => value + 1)}
                       />
@@ -1729,10 +1761,10 @@ function PrDetail({
                                 <div className="q-hunk">
                                   <div className="hh">
                                     {file.binary
-                                      ? "Binary file"
+                                      ? t("files.binary")
                                       : file.truncated
-                                        ? "Patch truncated by the forge"
-                                        : "No inline patch"}
+                                        ? t("files.truncated")
+                                        : t("files.noPatch")}
                                   </div>
                                 </div>
                               )}
@@ -1748,7 +1780,7 @@ function PrDetail({
                           disabled={diffLoading}
                           onClick={() => void loadMoreDiff()}
                         >
-                          {diffLoading ? "Loading…" : "Load more files"}
+                          {diffLoading ? t("common:loading") : t("files.loadMore")}
                         </button>
                       </div>
                     ) : null}
@@ -1763,7 +1795,7 @@ function PrDetail({
               <div className="q-side-sec">
                 {mergeable ? (
                   <h3>
-                    <span>Merge</span>
+                    <span>{t("side.merge")}</span>
                     <span className={mergeable.tone === "ok" ? "q-ok" : "q-warn"}>
                       {mergeable.label}
                     </span>
@@ -1782,14 +1814,21 @@ function PrDetail({
             ) : null}
             <div className="q-side-sec" hidden={tab === "checks"}>
               <h3>
-                <span>Checks</span>
+                <span>{t("side.checks")}</span>
                 <span>
-                  {checksLoading ? "Loading…" : checks ? `${passed} of ${total} passed` : "Unknown"}
+                  {checksLoading
+                    ? t("common:loading")
+                    : checks
+                      ? t("side.passedOf", {
+                          passed: formatNumber(passed),
+                          total: formatNumber(total),
+                        })
+                      : t("common:unknown")}
                 </span>
               </h3>
               {checksLoading ? (
                 <p className="q-faint" style={{ fontSize: 12, margin: "4px 0" }}>
-                  Loading checks…
+                  {t("checks.loading")}
                 </p>
               ) : checks && checks.checks.length > 0 ? (
                 checks.checks.slice(0, 8).map((check) => (
@@ -1806,7 +1845,7 @@ function PrDetail({
                 ))
               ) : (
                 <p className="q-faint" style={{ fontSize: 12, margin: "4px 0" }}>
-                  {checksError ? "Checks did not load." : "No checks reported."}
+                  {checksError ? t("side.checksFailed") : t("side.noChecks")}
                 </p>
               )}
               {checks && checks.checks.length > 0 ? (
@@ -1815,11 +1854,11 @@ function PrDetail({
             </div>
             <div className="q-side-sec">
               <h3>
-                <span>Reviews</span>
+                <span>{t("side.reviews")}</span>
               </h3>
               {pr.reviewers.length === 0 ? (
                 <p className="q-faint" style={{ fontSize: 12, margin: "4px 0" }}>
-                  No reviews yet.
+                  {t("side.noReviews")}
                 </p>
               ) : (
                 pr.reviewers.map((review) => (
@@ -1841,7 +1880,7 @@ function PrDetail({
                       }
                       style={{ fontSize: 12 }}
                     >
-                      {review.state.replace("_", " ")}
+                      {t(`side.reviewState.${review.state}`)}
                     </span>
                   </div>
                 ))
@@ -1849,11 +1888,11 @@ function PrDetail({
             </div>
             <div className="q-side-sec">
               <h3>
-                <span>Linked threads</span>
+                <span>{t("side.linkedThreads")}</span>
               </h3>
               {linkedThreads.length === 0 ? (
                 <p className="q-faint" style={{ fontSize: 12, margin: "4px 0" }}>
-                  No thread has linked this pull request. Link it from a thread with ⌘K.
+                  {t("side.noLinkedThreads")}
                 </p>
               ) : (
                 linkedThreads.map((link) => {
@@ -1877,7 +1916,7 @@ function PrDetail({
                         <EyeIcon
                           className="q-icon s12 q-faint"
                           strokeWidth={1.5}
-                          aria-label="Watching this pull request"
+                          aria-label={t("side.watching")}
                         />
                       ) : null}
                     </button>
@@ -1887,7 +1926,7 @@ function PrDetail({
             </div>
             <div className="q-side-sec" style={{ border: 0 }}>
               <h3>
-                <span>Agent thread</span>
+                <span>{t("side.agentThread")}</span>
               </h3>
               {linkedThread ? (
                 <button
@@ -1912,7 +1951,7 @@ function PrDetail({
                 </button>
               ) : (
                 <p className="q-faint" style={{ fontSize: 12, margin: "4px 0" }}>
-                  Open a thread in this repository to hand reviews to an agent.
+                  {t("side.noAgentThread")}
                 </p>
               )}
               <div style={{ marginTop: 8 }}>
@@ -1923,16 +1962,16 @@ function PrDetail({
                   onClick={() => void handToAgent(null)}
                 >
                   <HandIcon className="q-icon s14" aria-hidden />
-                  {handoff === "general" ? "Handing…" : "Hand PR to agent"}
+                  {handoff === "general" ? t("conversation.handing") : t("side.handPr")}
                 </button>
               </div>
             </div>
             {!account ? (
               <div className="q-side-sec" style={{ border: 0 }}>
                 <p className="q-faint" style={{ fontSize: 12 }}>
-                  No account matches this host.{" "}
+                  {t("side.noAccount")}{" "}
                   <button type="button" className="q-link" onClick={onOpenSettings}>
-                    Add one
+                    {t("side.addOne")}
                   </button>
                 </p>
               </div>
