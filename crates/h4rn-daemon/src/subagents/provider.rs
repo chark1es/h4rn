@@ -180,7 +180,11 @@ impl ToolProvider for SubagentProvider {
         match tool {
             "spawn_subagent" => {
                 let request = spawn_request(&parent, &arguments)?;
-                let view = self.manager().spawn(request).await.map_err(to_tool_error)?;
+                let view = self
+                    .manager()
+                    .spawn_admitted(request, context.admission.clone())
+                    .await
+                    .map_err(to_tool_error)?;
                 Ok(view_result(&view, "spawned"))
             }
             "get_subagent_status" => {

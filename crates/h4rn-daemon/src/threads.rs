@@ -80,6 +80,15 @@ pub trait McpSessionProvider: Send + Sync {
     /// Returns the injection for one harness session, or `None` before the
     /// endpoint is bound.
     fn prepare(&self, harness: HarnessKind, thread_id: &ThreadId) -> Option<McpSession>;
+
+    /// Revokes every tool token belonging to a thread.
+    ///
+    /// Returns how many tokens it ended. The default does nothing, for tests
+    /// and embedders without a hub.
+    fn revoke_thread(&self, thread_id: &ThreadId) -> usize {
+        let _ = thread_id;
+        0
+    }
 }
 
 /// Resolves what one configured ACP agent really offers.
@@ -176,6 +185,37 @@ pub trait SettleHook: Send + Sync {
 pub trait GrantAuthority: Send + Sync {
     /// Whether `family` still has a live, unrevoked token.
     fn family_is_live(&self, family: &str) -> bool;
+
+    /// Registers one prompt write under `family`, or refuses it when the
+    /// family was revoked.
+    ///
+    /// A revoke marks the family revoked and then waits for every write it
+    /// registered. The returned guard is held across the adapter write; with no
+    /// override (a test authority) liveness alone decides and nothing is
+    /// tracked.
+    fn begin_delivery(&self, family: &str) -> Option<GrantWrite> {
+        self.family_is_live(family)
+            .then_some(GrantWrite::untracked())
+    }
+}
+
+/// One registered prompt write, released when it is dropped.
+pub struct GrantWrite {
+    _token: Option<Box<dyn Send>>,
+}
+
+impl GrantWrite {
+    /// A write no revoker waits for (used when there is nothing to track).
+    pub fn untracked() -> Self {
+        Self { _token: None }
+    }
+
+    /// Wraps a store ticket.
+    pub fn tracked(token: Box<dyn Send>) -> Self {
+        Self {
+            _token: Some(token),
+        }
+    }
 }
 
 /// A request to create a thread (the protocol fields without the wire id).
@@ -1379,6 +1419,14 @@ impl SessionSlot {
         }
     }
 
+    /// The grant the live session last delivered, whoever issued it.
+    fn current_grant(&self) -> Option<&WorkGrant> {
+        match self {
+            Self::Live { grant, .. } => grant.as_ref(),
+            Self::None | Self::Starting(_) => None,
+        }
+    }
+
     /// Records the grant of the turn `generation` is about to deliver.
     fn note_delivery_grant(&mut self, generation: u64, grant: Option<WorkGrant>) {
         if let Self::Live {
@@ -1571,6 +1619,16 @@ const NO_SWITCH_GENERATION: u64 = u64::MAX;
 /// limit. It shares the content bound rather than getting a cap of its own, and
 /// the first few diagnostics are kept because the hold starts empty.
 const HELD_PROMOTED_EVENTS: usize = 1024;
+
+/// How long a refused acceptance write waits before it retries.
+///
+/// A journal can be busy for a moment (a long settlement, a checkpoint). The
+/// turn's output stays held until the acceptance and its handoff clear land, so
+/// the retry is what lets a healthy journal finish the turn instead of leaving
+/// its completion waiting on a discarded error.
+const ACCEPTED_WRITE_RETRY: std::time::Duration = std::time::Duration::from_millis(50);
+/// The longest pause between acceptance-write retries.
+const ACCEPTED_WRITE_RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Whether a harness event is a lifecycle report the hold must never drop.
 ///
@@ -2730,6 +2788,21 @@ impl Inner {
                 .grant_authority
                 .get()
                 .is_some_and(|authority| authority.family_is_live(&grant.family)),
+        }
+    }
+
+    /// Registers a prompt write under the grant, or refuses it when revoked.
+    ///
+    /// This is the same gate as [`Self::grant_allows`], plus a ticket the
+    /// revoker waits for, so a revoke that returns cannot race the write.
+    fn grant_admit(&self, grant: Option<&WorkGrant>) -> Option<Option<GrantWrite>> {
+        match grant {
+            None => Some(None),
+            Some(grant) => self
+                .grant_authority
+                .get()
+                .and_then(|authority| authority.begin_delivery(&grant.family))
+                .map(Some),
         }
     }
 
@@ -4302,10 +4375,64 @@ impl ThreadManager {
     /// A tool called inside the turn uses this to bind any work that outlives
     /// the turn (a PR watch) to the grant and its limit.
     pub async fn active_turn_grant(&self, thread_id: &ThreadId) -> Option<WorkGrant> {
+        self.active_turn_admission(thread_id)
+            .await
+            .and_then(|(_, grant)| grant)
+    }
+
+    /// The running turn and its outside grant, read under one lock.
+    ///
+    /// An MCP request binds to this at admission: the turn can end and another
+    /// start while the tool's own setup runs, and work that call asks for must
+    /// still belong to the turn the client was talking to.
+    pub async fn active_turn_admission(
+        &self,
+        thread_id: &ThreadId,
+    ) -> Option<(TurnId, Option<WorkGrant>)> {
         let handle = self.inner.handle(thread_id).await.ok()?;
         let record = handle.lock().await;
         let dispatch = &record.active.as_ref()?.dispatch;
-        dispatch.grant().cloned()
+        Some((dispatch.turn_id.clone(), dispatch.grant().cloned()))
+    }
+
+    /// Drops the tool token of every session working under one of `families`.
+    ///
+    /// A revoke ends the grant's future work; this closes the live half too: a
+    /// turn already running may finish, but its agent can no longer call h4rn's
+    /// tools with the token it was handed.
+    pub async fn revoke_tool_tokens_for_families(&self, families: &[String]) -> usize {
+        if families.is_empty() {
+            return 0;
+        }
+        let handles: Vec<ThreadHandle> = {
+            let threads = self.inner.threads.lock().await;
+            threads.values().cloned().collect()
+        };
+        let mut revoked = 0;
+        for handle in handles {
+            let (thread_id, holds_grant) = {
+                let record = handle.lock().await;
+                let active = record
+                    .active
+                    .as_ref()
+                    .and_then(|active| active.dispatch.grant())
+                    .map(|grant| families.contains(&grant.family));
+                let delivered = record
+                    .session
+                    .current_grant()
+                    .map(|grant| families.contains(&grant.family));
+                (
+                    record.meta.thread_id.clone(),
+                    active.unwrap_or(false) || delivered.unwrap_or(false),
+                )
+            };
+            if holds_grant {
+                if let Some(provider) = self.inner.mcp.get() {
+                    revoked += provider.revoke_thread(&thread_id);
+                }
+            }
+        }
+        revoked
     }
 
     /// Whether a turn is in flight for this thread.
@@ -6541,13 +6668,24 @@ impl ThreadManager {
                     }
                     #[cfg(test)]
                     self.inner.pause_direct_steer().await;
-                    let steered = guard
-                        .steer(UserInput {
-                            text: text.clone(),
-                            attachments: harness_attachments.clone(),
-                        })
-                        .await
-                        .map_err(steer_failure);
+                    // The last check under the session lock, with the write
+                    // registered so a revoke cannot return while it lands.
+                    let steered = match self.inner.grant_admit(grant.as_ref()) {
+                        Some(write_ticket) => {
+                            let steered = guard
+                                .steer(UserInput {
+                                    text: text.clone(),
+                                    attachments: harness_attachments.clone(),
+                                })
+                                .await
+                                .map_err(steer_failure);
+                            drop(write_ticket);
+                            steered
+                        }
+                        None => Err(SteerFailure::Rejected(ManagerError::Conflict(
+                            REVOKED_GRANT_MESSAGE.into(),
+                        ))),
+                    };
                     drop(guard);
                     match steered {
                         Ok(()) => {}
@@ -7300,30 +7438,34 @@ impl ThreadManager {
                 // immediately before the adapter write. The first check runs
                 // before the `sending` append, so a family revoked in between
                 // would otherwise still deliver its work.
-                let (still_active, granted) = {
+                let still_active = {
                     let record = handle.lock().await;
-                    (
-                        record
-                            .active
-                            .as_ref()
-                            .is_some_and(|active| active.turn_id == active_turn_id)
-                            && record.session.is_live(&session),
-                        self.inner.grant_allows(grant.as_ref()),
-                    )
+                    record
+                        .active
+                        .as_ref()
+                        .is_some_and(|active| active.turn_id == active_turn_id)
+                        && record.session.is_live(&session)
                 };
                 if !still_active {
                     Err(SteerFailure::Rejected(ManagerError::Conflict(
                         "that turn ended before the message could be steered; try again".into(),
                     )))
-                } else if !granted {
-                    Err(SteerFailure::Rejected(ManagerError::Conflict(
-                        REVOKED_GRANT_MESSAGE.into(),
-                    )))
                 } else {
-                    guard
-                        .steer(queued_input(&message.message))
-                        .await
-                        .map_err(steer_failure)
+                    match self.inner.grant_admit(grant.as_ref()) {
+                        // The write is registered across the adapter call so a
+                        // revoke returning cannot race this steer.
+                        Some(write_ticket) => {
+                            let steered = guard
+                                .steer(queued_input(&message.message))
+                                .await
+                                .map_err(steer_failure);
+                            drop(write_ticket);
+                            steered
+                        }
+                        None => Err(SteerFailure::Rejected(ManagerError::Conflict(
+                            REVOKED_GRANT_MESSAGE.into(),
+                        ))),
+                    }
                 }
             };
             match steered {
@@ -11268,7 +11410,10 @@ impl Inner {
                 }
             }
         }
-        match self.retry_with_handoff(handle, turn, generation).await {
+        match self
+            .retry_with_handoff(handle, turn, generation, false)
+            .await
+        {
             HandoffRetry::Started => {}
             HandoffRetry::Declined | HandoffRetry::Stopped => {
                 // The turn is not the retry's to run again. Finish it the way the
@@ -11445,6 +11590,7 @@ impl Inner {
                     Some(generation),
                     turn,
                     format!("no {harness_kind:?} adapter is available in this daemon build"),
+                    None,
                 )
                 .await;
                 return;
@@ -11588,11 +11734,21 @@ impl Inner {
             Err(StartFailure::Failed(error)) => {
                 // An imported conversation prefers its harness-native resume.
                 // A resume the harness cannot honour falls back to a bounded
-                // handoff on this same turn instead of failing it.
-                if self.fall_back_to_handoff(&handle, &turn, generation).await {
+                // handoff on this same turn instead of failing it. The same
+                // applies to a resume whose reply could not confirm its mode:
+                // a fresh session applies and checks that mode itself, so the
+                // grant still fails closed.
+                let resume_unconfirmed =
+                    matches!(error, h4rn_harness::HarnessError::ResumeUnconfirmed { .. });
+                if self
+                    .fall_back_to_handoff(&handle, &turn, generation, resume_unconfirmed)
+                    .await
+                {
                     return;
                 }
-                self.fail_session(handle, Some(generation), turn, error.to_string())
+                let hint = resume_unconfirmed
+                    .then(|| "Send the message again to start a fresh session".into());
+                self.fail_session(handle, Some(generation), turn, error.to_string(), hint)
                     .await;
                 return;
             }
@@ -11604,7 +11760,10 @@ impl Inner {
                     %thread_id,
                     "a native fork did not finish copying in time; handing off instead"
                 );
-                if self.fall_back_to_handoff(&handle, &turn, generation).await {
+                if self
+                    .fall_back_to_handoff(&handle, &turn, generation, false)
+                    .await
+                {
                     return;
                 }
                 self.fail_session(
@@ -11613,6 +11772,7 @@ impl Inner {
                     turn,
                     "the native fork did not finish copying this thread's conversation in time"
                         .into(),
+                    None,
                 )
                 .await;
                 return;
@@ -11907,16 +12067,19 @@ impl Inner {
     ///
     /// The resume id is dropped for good, the turn's prompt becomes a bounded
     /// handoff of the saved messages, and a fresh session is started for the
-    /// same turn. [`HandoffRetry::Declined`] when this turn was not an imported
-    /// native resume, or no longer owns the startup slot: the ordinary failure
-    /// path then runs. [`HandoffRetry::Stopped`] when a Stop took the turn
-    /// inside the recovery window; it must end interrupted, so the caller must
-    /// not start anything for it.
+    /// same turn. A resume whose reply could not confirm its mode is the same
+    /// shape of refusal: `resume_unconfirmed` lets it fall back too.
+    /// [`HandoffRetry::Declined`] when this turn was not an imported native
+    /// resume, or no longer owns the startup slot: the ordinary failure path
+    /// then runs. [`HandoffRetry::Stopped`] when a Stop took the turn inside
+    /// the recovery window; it must end interrupted, so the caller must not
+    /// start anything for it.
     async fn fall_back_to_handoff(
         self: &Arc<Self>,
         handle: &ThreadHandle,
         turn: &Arc<TurnDispatch>,
         generation: u64,
+        resume_unconfirmed: bool,
     ) -> bool {
         {
             let record = handle.lock().await;
@@ -11927,18 +12090,21 @@ impl Inner {
             }
             // An imported or forked thread still holding its one native
             // attempt falls back, and so does a pending native rewind the
-            // adapter refused; every other startup failure keeps the ordinary
-            // path.
-            let applies = matches!(
-                record.meta.pending_rewind,
-                Some(h4rn_protocol::PendingRewind::Native { .. })
-            ) || record.native_origin_pending();
+            // adapter refused or a resume whose mode could not be confirmed;
+            // every other startup failure keeps the ordinary path.
+            let applies = resume_unconfirmed
+                || matches!(
+                    record.meta.pending_rewind,
+                    Some(h4rn_protocol::PendingRewind::Native { .. })
+                )
+                || record.native_origin_pending();
             if !applies {
                 return false;
             }
         }
         matches!(
-            self.retry_with_handoff(handle, turn, generation).await,
+            self.retry_with_handoff(handle, turn, generation, resume_unconfirmed)
+                .await,
             HandoffRetry::Started
         )
     }
@@ -11958,6 +12124,7 @@ impl Inner {
         generation: Option<u64>,
         turn: Arc<TurnDispatch>,
         message: String,
+        hint: Option<String>,
     ) {
         // This startup is over without a session, so a fork's copy window has
         // closed: let the source dispatch again. Only the generation that owned
@@ -12004,7 +12171,9 @@ impl Inner {
                         &turn_id,
                         TurnEnd::failed(
                             message,
-                            Some("Install the harness or pick a different one, then retry".into()),
+                            Some(hint.unwrap_or_else(|| {
+                                "Install the harness or pick a different one, then retry".into()
+                            })),
                             false,
                         ),
                     )
@@ -12786,11 +12955,14 @@ impl Inner {
         // `sending` write, immediately before the adapter call. A family
         // revoked between the delivery claim and this write must not receive
         // the prompt; nothing has been written yet, so the refusal is definite.
-        if !self.grant_allows(dispatch.grant()) {
+        // The ticket is held across the write, so a revoke that starts now
+        // waits for this prompt and nothing under the grant reaches the agent
+        // after it returns.
+        let Some(write_ticket) = self.grant_admit(dispatch.grant()) else {
             drop(guard);
             self.refuse_revoked_delivery(handle, &dispatch).await;
             return;
-        }
+        };
         // From here on the adapter may emit this turn's own events, including
         // while the write is still running; before this, the pump treats them
         // as the finished turn's late output. A promoted turn's pump holds them
@@ -12802,6 +12974,7 @@ impl Inner {
         // record no prompt id ignore the tag.
         let prompt_tag = turn_suffix(&turn_id).to_owned();
         let sent = guard.send_tagged(dispatch.input(), Some(&prompt_tag)).await;
+        drop(write_ticket);
         drop(guard);
         match sent {
             Ok(()) => {
@@ -12862,19 +13035,8 @@ impl Inner {
                 // calls the person's prompt undelivered. The handoff would then
                 // contain the reply without the request that produced it.
                 dispatch.accept_write(attempt);
-                let prompt_item = dispatch.prompt_item_id();
-                self.mark_item_accepted(&handle, prompt_item).await;
-                if dispatch.handoff_applied()
-                    && let Some(generation) = dispatch.handoff_generation()
-                {
-                    // The new session now holds the history, so the next turn
-                    // resumes it instead of sending the handoff again. Only an
-                    // accepted prompt clears this: a failed write must keep the
-                    // history for the retry.
-                    self.clear_handoff_pending(&handle, generation).await;
-                }
-                dispatch.note_write_durable(attempt);
-                dispatch.note_write_settled();
+                self.record_accepted_write(&handle, &dispatch, attempt)
+                    .await;
                 // Record the acceptance before the claim is cleared, so a crash
                 // in between shows "may have been delivered" rather than
                 // queuing the text for a second run.
@@ -13104,14 +13266,72 @@ impl Inner {
         }
     }
 
+    /// Records the acceptance of `attempt`'s prompt, and the handoff clear that
+    /// belongs to it, before the attempt is marked durable.
+    ///
+    /// The durable mark is what releases the turn's held output and lets its
+    /// completion publish. A journal error must therefore leave it unset: the
+    /// pump would otherwise publish a finished turn while the journal still
+    /// calls the person's prompt undelivered, and a switch in that window would
+    /// hand the reply over without the request that produced it. Both writes
+    /// only change state the journal owns, so retrying them is safe; the retry
+    /// ends when they land or the turn stops being the one this write owns.
+    async fn record_accepted_write(
+        &self,
+        handle: &ThreadHandle,
+        dispatch: &Arc<TurnDispatch>,
+        attempt: u64,
+    ) {
+        let prompt_item = dispatch.prompt_item_id();
+        let mut delay = ACCEPTED_WRITE_RETRY;
+        loop {
+            if dispatch.state() != DispatchState::Claimed || dispatch.write_attempt() != attempt {
+                // A Stop or another path settled the turn while the journal
+                // was refusing its acceptance: its durable mark must not be
+                // set for it. A pump whose stream already ended may be parked
+                // on this write, though, and nothing else will wake it, so the
+                // wait is still released: the Stop is then what settles it.
+                dispatch.note_write_settled();
+                return;
+            }
+            let accepted = self.mark_item_accepted(handle, prompt_item.clone()).await;
+            let cleared = if accepted && dispatch.handoff_applied() {
+                match dispatch.handoff_generation() {
+                    Some(generation) => self.clear_handoff_pending(handle, generation).await,
+                    None => true,
+                }
+            } else {
+                accepted
+            };
+            if cleared {
+                dispatch.note_write_durable(attempt);
+                dispatch.note_write_settled();
+                return;
+            }
+            // The journal is busy or failing. The turn's output stays held and
+            // its completion waits; retry without holding the record lock,
+            // backing off so a journal that stays broken is not hammered (a
+            // Stop still ends the turn).
+            tokio::time::sleep(delay).await;
+            delay = (delay * 2).min(ACCEPTED_WRITE_RETRY_MAX);
+        }
+    }
+
     /// Forgets the durable "undelivered" mark of a prompt a provider accepted.
-    async fn mark_item_accepted(&self, handle: &ThreadHandle, item_id: Option<String>) {
+    ///
+    /// Returns whether the journal now records the acceptance (or had nothing
+    /// to record): the caller may mark the write durable only when it did.
+    async fn mark_item_accepted(&self, handle: &ThreadHandle, item_id: Option<String>) -> bool {
         let Some(item_id) = item_id else {
-            return;
+            return true;
         };
         let thread_id = handle.lock().await.meta.thread_id.clone();
-        if let Err(error) = self.journal.mark_item_accepted(&thread_id, &item_id).await {
-            tracing::warn!(%error, "could not record an accepted user message");
+        match self.journal.mark_item_accepted(&thread_id, &item_id).await {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::warn!(%error, "could not record an accepted user message");
+                false
+            }
         }
     }
 
@@ -13157,21 +13377,34 @@ impl Inner {
     /// changes only this flag. A session that accepted the prompt after the
     /// thread switched again must not restore the old harness, model or resume
     /// id: by then its generation no longer matches and the row is untouched.
-    async fn clear_handoff_pending(&self, handle: &ThreadHandle, switch_generation: u64) {
+    ///
+    /// The in-memory flag changes only once the journal has the clear, so a
+    /// refused write leaves the record still owing its history. Returns whether
+    /// the row now records the clear (or no longer needs it).
+    async fn clear_handoff_pending(&self, handle: &ThreadHandle, switch_generation: u64) -> bool {
         let thread_id = {
-            let mut record = handle.lock().await;
+            let record = handle.lock().await;
             if record.meta.switch_generation != switch_generation || !record.meta.handoff_pending {
-                return;
+                return true;
             }
-            record.meta.handoff_pending = false;
             record.meta.thread_id.clone()
         };
-        if let Err(error) = self
+        match self
             .journal
             .clear_handoff_pending(&thread_id, switch_generation)
             .await
         {
-            tracing::warn!(%error, "could not clear a thread's pending history handoff");
+            Ok(_) => {
+                let mut record = handle.lock().await;
+                if record.meta.switch_generation == switch_generation {
+                    record.meta.handoff_pending = false;
+                }
+                true
+            }
+            Err(error) => {
+                tracing::warn!(%error, "could not clear a thread's pending history handoff");
+                false
+            }
         }
     }
 
@@ -13418,6 +13651,30 @@ impl Inner {
                 }
             };
             let Some(event) = event else {
+                // The adapter's stream can end while the prompt's acceptance
+                // is still being written. Everything read in that window is
+                // the reply to a prompt the provider took; settling the end
+                // now would drop it. Wait for the write to settle, then let the
+                // top of the loop release the hold (its acceptance is durable)
+                // or drop it (the attempt failed, and its own failure settles
+                // the turn).
+                if let Some((dispatch, attempt)) = held_owner.as_ref()
+                    && !held.is_empty()
+                    && dispatch.state() == DispatchState::Claimed
+                    && dispatch.write_attempt() == *attempt
+                    && !dispatch.write_durable()
+                {
+                    let settled = dispatch.write_settled.notified();
+                    tokio::pin!(settled);
+                    settled.as_mut().enable();
+                    // Re-check after arming: a write that settled just before
+                    // this wait keeps its permit, so the wait returns at once
+                    // instead of sitting until the next event (there is none).
+                    if !dispatch.write_durable() {
+                        settled.await;
+                    }
+                    continue;
+                }
                 break;
             };
             // A test can hold the pump here: the write may be accepted after it
@@ -13446,6 +13703,17 @@ impl Inner {
                     pending.push_back(event);
                     held_counted = 0;
                     held_owner = None;
+                    continue;
+                }
+                // Consecutive text is coalesced in this window too, exactly as
+                // the longer hold above does it. An event read behind an open
+                // hold used to be kept one for one, so a slow journal let a
+                // long reply pass the content bound and lose everything past
+                // it. Merging keeps the *count* bounded without dropping words.
+                if let HarnessEvent::TextDelta { text } = &event
+                    && let Some(HarnessEvent::TextDelta { text: last }) = held.back_mut()
+                {
+                    last.push_str(text);
                     continue;
                 }
                 let lifecycle = is_held_lifecycle(&event);
@@ -13629,7 +13897,7 @@ impl Inner {
                     record.take_transport_report(&dispatch.turn_id);
                     drop(record);
                     match self
-                        .retry_with_handoff(&handle, &dispatch, generation)
+                        .retry_with_handoff(&handle, &dispatch, generation, false)
                         .await
                     {
                         HandoffRetry::Started => {
@@ -14567,7 +14835,10 @@ impl Inner {
         if let Some(retry) = retry {
             // The retry arms a fresh session for the same turn; `spawn_session`
             // delivers the handoff-built prompt.
-            match self.retry_with_handoff(&handle, &retry, generation).await {
+            match self
+                .retry_with_handoff(&handle, &retry, generation, false)
+                .await
+            {
                 HandoffRetry::Started => {}
                 HandoffRetry::Declined => self.spawn_advance(handle),
                 HandoffRetry::Stopped => {
@@ -14684,11 +14955,18 @@ impl Inner {
     /// when a Stop took the turn before it could be requeued: it must end
     /// interrupted instead. The cleared id is persisted before the retry, so a
     /// daemon restart cannot try the dead session again.
+    ///
+    /// `resume_unconfirmed` also falls back when the resume itself answered but
+    /// its reply named no mode catalogue. Starting fresh from the handoff is
+    /// what makes that a recoverable refusal rather than a thread that fails
+    /// every later send on the same resume; the new session applies and checks
+    /// the requested mode, so the grant still fails closed.
     async fn retry_with_handoff(
         self: &Arc<Self>,
         handle: &ThreadHandle,
         turn: &Arc<TurnDispatch>,
         generation: u64,
+        resume_unconfirmed: bool,
     ) -> HandoffRetry {
         let mut fell_back = false;
         let (thread_id, switch_generation) = {
@@ -14706,7 +14984,7 @@ impl Inner {
                 record.meta.pending_rewind,
                 Some(h4rn_protocol::PendingRewind::Native { .. })
             );
-            let applies = rewinding || record.native_origin_pending();
+            let applies = resume_unconfirmed || rewinding || record.native_origin_pending();
             if !applies {
                 return HandoffRetry::Declined;
             }
@@ -16187,6 +16465,7 @@ fn steer_failure(error: h4rn_harness::HarnessError) -> SteerFailure {
         | HarnessError::Spawn { .. }
         | HarnessError::Protocol { .. }
         | HarnessError::Unsupported { .. }
+        | HarnessError::ResumeUnconfirmed { .. }
         | HarnessError::Deferred { .. }
         | HarnessError::NotSent { .. } => SteerFailure::Rejected(steer_error(error)),
         HarnessError::Transport { .. } | HarnessError::RateLimited { .. } => {
@@ -16669,6 +16948,82 @@ mod tests {
         }
     }
 
+    /// A thread that restarted with one message still queued behind a handoff.
+    ///
+    /// A gated startup takes the handoff prompt, the follow-up queues behind
+    /// it, and the daemon stops before either is accepted. The durable queue is
+    /// what the reopened daemon finds.
+    async fn restarted_with_a_queued_message()
+    -> (tempfile::TempDir, std::path::PathBuf, HostId, ThreadId) {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let host = HostId::new("host_test");
+        let journal_path = workspace.path().join("journal.sqlite");
+        let journal = Arc::new(
+            SqliteJournal::connect(&journal_path)
+                .await
+                .expect("journal"),
+        );
+        let (codex, start_gate) = FakeHarness::new()
+            .with_kind(HarnessKind::Codex)
+            .with_start_gate_after(0);
+        let manager = Arc::new(
+            ThreadManager::open(
+                journal,
+                Arc::new(
+                    StaticHarnessCatalog::with(Arc::new(FakeHarness::new())).and(Arc::new(codex)),
+                ),
+                host.clone(),
+                ThreadManagerOptions {
+                    tick_interval: Duration::from_secs(3600),
+                    ..ThreadManagerOptions::default()
+                },
+                None,
+            )
+            .await
+            .expect("manager"),
+        );
+        let mut events = manager.subscribe();
+        let created = manager
+            .create_thread(new_thread(host.clone(), workspace.path(), "first"))
+            .await
+            .expect("create");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+        manager
+            .switch_thread_harness(&created.thread_id, switch_request(HarnessKind::Codex))
+            .await
+            .expect("switch to Codex");
+        let handle = manager
+            .inner
+            .handle(&created.thread_id)
+            .await
+            .expect("handle");
+        manager
+            .send_message(&created.thread_id, "handoff first".into(), Vec::new())
+            .await
+            .expect("the gated startup owns the first prompt");
+        assert!(
+            wait_until(|| handle
+                .try_lock()
+                .map(|record| matches!(record.session, SessionSlot::Starting(_)))
+                .unwrap_or(false))
+            .await,
+            "the new provider's startup is gated"
+        );
+        manager
+            .send_message(&created.thread_id, "queued follow-up".into(), Vec::new())
+            .await
+            .expect("the follow-up queues behind the startup");
+        assert_eq!(handle.lock().await.meta.queued.len(), 1);
+
+        // A crash before the startup accepts either prompt.
+        drop(manager);
+        assert!(
+            !start_gate.is_released(),
+            "the startup stays gated across the restart"
+        );
+        (workspace, journal_path, host, created.thread_id)
+    }
+
     /// The journal's stored record of one thread.
     async fn persisted_meta(journal: &Arc<dyn Journal>, thread_id: &ThreadId) -> ThreadMeta {
         journal
@@ -17003,6 +17358,12 @@ mod tests {
         fallback_gate: std::sync::Mutex<Option<Arc<FallbackGate>>>,
         accept_gate: std::sync::Mutex<Option<Arc<AcceptGate>>>,
         fork_append_gate: std::sync::Mutex<Option<Arc<ForkAppendGate>>>,
+        /// How many of the next acceptance-clearing writes fail.
+        fail_next_accepts: std::sync::atomic::AtomicUsize,
+        /// How many of the next handoff-clear writes fail.
+        fail_next_handoff_clears: std::sync::atomic::AtomicUsize,
+        /// Handoff-clear writes attempted, so a test can prove one was retried.
+        handoff_clears: std::sync::atomic::AtomicUsize,
     }
 
     /// A test's hold on a fork's journal append.
@@ -17060,7 +17421,25 @@ mod tests {
                 fallback_gate: std::sync::Mutex::new(None),
                 accept_gate: std::sync::Mutex::new(None),
                 fork_append_gate: std::sync::Mutex::new(None),
+                fail_next_accepts: std::sync::atomic::AtomicUsize::new(0),
+                fail_next_handoff_clears: std::sync::atomic::AtomicUsize::new(0),
+                handoff_clears: std::sync::atomic::AtomicUsize::new(0),
             })
+        }
+
+        /// How many handoff-clear writes this journal has been asked for.
+        fn handoff_clear_attempts(&self) -> usize {
+            self.handoff_clears.load(Ordering::SeqCst)
+        }
+
+        /// Makes the next `count` "prompt accepted" writes fail.
+        fn fail_next_accepts(&self, count: usize) {
+            self.fail_next_accepts.store(count, Ordering::SeqCst);
+        }
+
+        /// Makes the next `count` handoff-clear writes fail.
+        fn fail_next_handoff_clears(&self, count: usize) {
+            self.fail_next_handoff_clears.store(count, Ordering::SeqCst);
         }
 
         /// Makes the next `count` journal appends fail.
@@ -17331,6 +17710,13 @@ mod tests {
             thread_id: &ThreadId,
             switch_generation: u64,
         ) -> Result<bool, crate::journal::JournalError> {
+            self.handoff_clears.fetch_add(1, Ordering::SeqCst);
+            if self.fail_next_handoff_clears.load(Ordering::SeqCst) > 0 {
+                self.fail_next_handoff_clears.fetch_sub(1, Ordering::SeqCst);
+                return Err(crate::journal::JournalError::Io(std::io::Error::other(
+                    "injected handoff-clear write failure",
+                )));
+            }
             let gate = self
                 .clear_gate
                 .lock()
@@ -17382,6 +17768,12 @@ mod tests {
             thread_id: &ThreadId,
             item_id: &str,
         ) -> Result<(), crate::journal::JournalError> {
+            if self.fail_next_accepts.load(Ordering::SeqCst) > 0 {
+                self.fail_next_accepts.fetch_sub(1, Ordering::SeqCst);
+                return Err(crate::journal::JournalError::Io(std::io::Error::other(
+                    "injected acceptance write failure",
+                )));
+            }
             let gate = self
                 .accept_gate
                 .lock()
@@ -19146,6 +19538,7 @@ mod tests {
                         Some(generation),
                         a,
                         "the harness could not start".into(),
+                        None,
                     )
                     .await;
             }
@@ -19250,6 +19643,7 @@ mod tests {
                 Some(generation),
                 turn,
                 "the harness could not start".into(),
+                None,
             )
             .await;
 
@@ -29372,6 +29766,76 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(5), gate.done.notified())
             .await
             .expect("the acceptance write finished");
+        manager.shutdown().await;
+    }
+
+    /// Text read behind an open hold is coalesced, so a long reply survives it.
+    ///
+    /// An event read while output is already held used to be kept one for one,
+    /// without merging consecutive text. A slow journal let a long reply arrive
+    /// in that window, and everything past the content bound was dropped from
+    /// the transcript. Consecutive deltas now merge in the hold, the way the
+    /// longer promoted-write hold already did it.
+    #[tokio::test]
+    async fn a_long_reply_read_behind_a_held_write_keeps_every_delta() {
+        const DELTAS: usize = HELD_PROMOTED_EVENTS + 200;
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let host = HostId::new("host_test");
+        let completed = || {
+            vec![HarnessEvent::TurnCompleted {
+                status: TurnStatus::Completed,
+                usage: Usage::default(),
+            }]
+        };
+        let harness = FakeHarness::with_session_scripts(vec![completed(), completed(), Vec::new()]);
+        let (harness, injector) = harness.with_event_injector();
+        let (harness, sends) = harness.with_send_count();
+        let (harness, write) = harness.with_send_gate_after(2);
+        // A small queue makes each injected delta wait for the pump to read it,
+        // so every one of them is read while the write is still in flight.
+        let harness = harness.with_bounded_event_queue(8);
+        let manager = Arc::new(open_test_manager(harness, host.clone()).await);
+        let mut events = manager.subscribe();
+        let created = manager
+            .create_thread(new_thread(host, workspace.path(), "first"))
+            .await
+            .expect("create");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+        wait_for_idle(&manager, &created.thread_id).await;
+
+        let promoted = promote_a_queued_message(&manager, &mut events, &created.thread_id).await;
+        tokio::time::timeout(Duration::from_secs(10), sends.wait_for(3))
+            .await
+            .expect("the promoted write never reached the fake");
+
+        let mut expected = String::new();
+        for index in 0..DELTAS {
+            let text = format!("{index},");
+            expected.push_str(&text);
+            injector.send(HarnessEvent::TextDelta { text }).await;
+        }
+        write.release();
+
+        let mut applied = String::new();
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let wire = next_event(&mut events).await;
+                if let Event::MessageDelta { turn_id, text, .. } = wire.event
+                    && turn_id == promoted
+                {
+                    applied.push_str(&text);
+                    if applied.len() >= expected.len() {
+                        return;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("the held reply never reached the transcript");
+        assert_eq!(
+            applied, expected,
+            "text read behind the held write was dropped"
+        );
         manager.shutdown().await;
     }
 
@@ -44054,6 +44518,140 @@ mod tests {
         manager.shutdown().await;
     }
 
+    /// A message promoted from a restart's queue stays undelivered until the
+    /// provider takes it.
+    ///
+    /// A Send behind a queue left by a restart promotes the oldest waiting
+    /// message as its own turn. Its user row must carry the same undelivered
+    /// marker a Send gets, in the same commit, or a failed write puts the
+    /// message in a later handoff as a request that already ran.
+    #[tokio::test]
+    async fn a_restart_queue_promotion_stays_undelivered_until_the_provider_takes_it() {
+        let (_workspace, journal_path, host, thread_id) = restarted_with_a_queued_message().await;
+        let journal = Arc::new(
+            SqliteJournal::connect(&journal_path)
+                .await
+                .expect("journal after restart"),
+        );
+        let (codex, sends) = FakeHarness::new()
+            .with_kind(HarnessKind::Codex)
+            .with_send_count();
+        let (codex, write) = codex.with_send_gate_after(0);
+        let manager = Arc::new(
+            open_test_manager_with_journal(codex, host, Arc::clone(&journal) as Arc<dyn Journal>)
+                .await,
+        );
+        let mut events = manager.subscribe();
+
+        // The send promotes the queued message instead of starting its own, so
+        // the returned turn is the promoted one.
+        let sent = manager
+            .send_message(&thread_id, "next".into(), Vec::new())
+            .await
+            .expect("send after restart");
+        tokio::time::timeout(Duration::from_secs(10), sends.wait_for(1))
+            .await
+            .expect("the promoted write never reached the fake");
+
+        let item_id = user_item_id(&sent.turn_id);
+        let pending = journal
+            .pending_item_ids(&thread_id)
+            .await
+            .expect("pending items");
+        assert!(
+            pending.contains(&item_id),
+            "the promoted message was recorded as delivered before the provider took it: {pending:?}"
+        );
+
+        write.release();
+        let (turn, status) = next_turn_completion(&mut events).await;
+        assert_eq!(turn, sent.turn_id);
+        assert_eq!(status, TurnStatus::Completed);
+        let pending = journal
+            .pending_item_ids(&thread_id)
+            .await
+            .expect("pending items");
+        assert!(
+            !pending.contains(&item_id),
+            "the accepted promotion was left undelivered: {pending:?}"
+        );
+        manager.shutdown().await;
+    }
+
+    /// A message promoted by Send now stays undelivered until the provider
+    /// takes it.
+    ///
+    /// The idle promotion in `move_queued_to_front` is its own site, separate
+    /// from a settlement's. Its user row must be marked undelivered in the same
+    /// commit as the row and cleared by acceptance, like every other promoted
+    /// prompt.
+    #[tokio::test]
+    async fn a_send_now_promotion_stays_undelivered_until_the_provider_takes_it() {
+        let (_workspace, journal_path, host, thread_id) = restarted_with_a_queued_message().await;
+        let journal = Arc::new(
+            SqliteJournal::connect(&journal_path)
+                .await
+                .expect("journal after restart"),
+        );
+        let (codex, sends) = FakeHarness::new()
+            .with_kind(HarnessKind::Codex)
+            .with_send_count();
+        let (codex, write) = codex.with_send_gate_after(0);
+        let manager = Arc::new(
+            open_test_manager_with_journal(codex, host, Arc::clone(&journal) as Arc<dyn Journal>)
+                .await,
+        );
+        let mut events = manager.subscribe();
+
+        let queue = manager.thread_queue(&thread_id, 0).await.expect("queue");
+        assert_eq!(queue.queued.len(), 1, "the restart restored the queue");
+        manager
+            .queue_message(
+                &thread_id,
+                &queue.queued[0].message_id,
+                QueueAction::SendNow { turn_id: None },
+            )
+            .await
+            .expect("send now");
+        tokio::time::timeout(Duration::from_secs(10), sends.wait_for(1))
+            .await
+            .expect("the promoted write never reached the fake");
+
+        let turn_id = {
+            let handle = manager.inner.handle(&thread_id).await.expect("handle");
+            let record = handle.lock().await;
+            record
+                .active
+                .as_ref()
+                .expect("the promoted turn is active")
+                .turn_id
+                .clone()
+        };
+        let item_id = user_item_id(&turn_id);
+        let pending = journal
+            .pending_item_ids(&thread_id)
+            .await
+            .expect("pending items");
+        assert!(
+            pending.contains(&item_id),
+            "Send now recorded the message as delivered before the provider took it: {pending:?}"
+        );
+
+        write.release();
+        let (turn, status) = next_turn_completion(&mut events).await;
+        assert_eq!(turn, turn_id);
+        assert_eq!(status, TurnStatus::Completed);
+        let pending = journal
+            .pending_item_ids(&thread_id)
+            .await
+            .expect("pending items");
+        assert!(
+            !pending.contains(&item_id),
+            "the accepted promotion was left undelivered: {pending:?}"
+        );
+        manager.shutdown().await;
+    }
+
     /// A closed transport does not skip the hold for the prompt it accepted.
     ///
     /// A harness that reports a finished turn and then closes has taken the
@@ -44159,6 +44757,247 @@ mod tests {
         assert!(
             echoed.contains("the reply"),
             "the reply is missing from the handoff: {echoed}"
+        );
+        manager.shutdown().await;
+    }
+
+    /// A reply read when the stream ends inside the durability window is kept.
+    ///
+    /// The adapter's stream can end after it reported a turn while the journal
+    /// is still recording that the prompt was accepted. The end used to settle
+    /// the turn as a failed stream end and drop the held reply; the daemon now
+    /// waits for that write and applies the reply before the end is settled.
+    #[tokio::test]
+    async fn a_stream_that_ends_inside_the_durability_window_keeps_its_reply() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let host = HostId::new("host_test");
+        let journal = FlakyJournal::in_memory().await;
+        // The first two turns are scripted completions; the promoted turn's
+        // script is empty, so the test reports that turn's output itself.
+        let completed = || {
+            vec![HarnessEvent::TurnCompleted {
+                status: TurnStatus::Completed,
+                usage: Usage::default(),
+            }]
+        };
+        let harness = FakeHarness::with_session_scripts(vec![completed(), completed(), Vec::new()]);
+        let (harness, injector) = harness.with_event_injector();
+        let (harness, sends) = harness.with_send_count();
+        // The first turn is send 1, the running turn behind the merge is send
+        // 2, and the promoted message is send 3: that write is the one held.
+        let (harness, write) = harness.with_send_gate_after(2);
+        let (harness, stream_end) = harness.with_stream_end_gate();
+        let manager = Arc::new(
+            ThreadManager::open(
+                Arc::clone(&journal) as Arc<dyn Journal>,
+                Arc::new(StaticHarnessCatalog::with(Arc::new(harness))),
+                host.clone(),
+                ThreadManagerOptions {
+                    tick_interval: Duration::from_secs(3600),
+                    ..ThreadManagerOptions::default()
+                },
+                None,
+            )
+            .await
+            .expect("manager"),
+        );
+        let mut events = manager.subscribe();
+        let created = manager
+            .create_thread(new_thread(host, workspace.path(), "first"))
+            .await
+            .expect("create");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+        wait_for_idle(&manager, &created.thread_id).await;
+
+        let promoted = promote_a_queued_message(&manager, &mut events, &created.thread_id).await;
+        tokio::time::timeout(Duration::from_secs(10), sends.wait_for(3))
+            .await
+            .expect("the promoted write never reached the fake");
+
+        // The provider takes the prompt, and its acceptance cannot be written.
+        let gate = journal.hold_next_accept();
+        write.release();
+        tokio::time::timeout(Duration::from_secs(5), gate.reached.notified())
+            .await
+            .expect("the acceptance write was reached");
+
+        // The provider reports the whole turn, then its stream ends while the
+        // acceptance write is still open. The pause after each read proves the
+        // completion is behind the held text before the stream ends.
+        let pause = Arc::new(HeldReleasePause::default());
+        *manager
+            .inner
+            .held_release_pause
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(pause.clone());
+        injector.emit(HarnessEvent::TextDelta {
+            text: "the reply".into(),
+        });
+        injector.emit(HarnessEvent::TurnCompleted {
+            status: TurnStatus::Completed,
+            usage: Usage::default(),
+        });
+        tokio::time::timeout(Duration::from_secs(5), pause.read.notified())
+            .await
+            .expect("the pump never read the completion behind the held text");
+        stream_end.release();
+        pause.resume.notify_one();
+
+        let early = tokio::time::timeout(Duration::from_millis(300), async {
+            loop {
+                let wire = next_event(&mut events).await;
+                if let Event::TurnCompleted { turn_id, .. } = wire.event
+                    && turn_id == promoted
+                {
+                    return true;
+                }
+            }
+        })
+        .await
+        .unwrap_or(false);
+        assert!(
+            !early,
+            "the stream end settled the turn while its acceptance was still being written"
+        );
+
+        gate.resume.notify_one();
+        tokio::time::timeout(Duration::from_secs(5), gate.done.notified())
+            .await
+            .expect("the acceptance write finished");
+        let mut applied = String::new();
+        let (turn, status) = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let wire = next_event(&mut events).await;
+                match wire.event {
+                    Event::MessageDelta { turn_id, text, .. } if turn_id == promoted => {
+                        applied.push_str(&text)
+                    }
+                    Event::TurnCompleted {
+                        turn_id, status, ..
+                    } if turn_id == promoted => return (turn_id, status),
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("the reply read before the stream end was lost");
+        assert_eq!(turn, promoted);
+        assert_eq!(status, TurnStatus::Completed);
+        assert_eq!(
+            applied, "the reply",
+            "the reply read inside the durability window never reached the transcript"
+        );
+        manager.shutdown().await;
+    }
+
+    /// A Stop ends a turn whose stream ended while its acceptance kept failing.
+    ///
+    /// The pump waits at the stream end for the acceptance write. When a Stop
+    /// ends the turn while the journal still refuses that write, the retry
+    /// gives up, and it must still release that wait: otherwise the turn stays
+    /// running for good and everything queued behind it stalls.
+    #[tokio::test]
+    async fn a_stop_ends_a_turn_whose_acceptance_never_lands() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let host = HostId::new("host_test");
+        let journal = FlakyJournal::in_memory().await;
+        let completed = || {
+            vec![HarnessEvent::TurnCompleted {
+                status: TurnStatus::Completed,
+                usage: Usage::default(),
+            }]
+        };
+        let harness = FakeHarness::with_session_scripts(vec![completed(), completed(), Vec::new()]);
+        let (harness, injector) = harness.with_event_injector();
+        let (harness, sends) = harness.with_send_count();
+        let (harness, write) = harness.with_send_gate_after(2);
+        let (harness, stream_end) = harness.with_stream_end_gate();
+        let manager = Arc::new(
+            ThreadManager::open(
+                Arc::clone(&journal) as Arc<dyn Journal>,
+                Arc::new(StaticHarnessCatalog::with(Arc::new(harness))),
+                host.clone(),
+                ThreadManagerOptions {
+                    tick_interval: Duration::from_secs(3600),
+                    ..ThreadManagerOptions::default()
+                },
+                None,
+            )
+            .await
+            .expect("manager"),
+        );
+        let mut events = manager.subscribe();
+        let created = manager
+            .create_thread(new_thread(host, workspace.path(), "first"))
+            .await
+            .expect("create");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+        wait_for_idle(&manager, &created.thread_id).await;
+
+        let promoted = promote_a_queued_message(&manager, &mut events, &created.thread_id).await;
+        tokio::time::timeout(Duration::from_secs(10), sends.wait_for(3))
+            .await
+            .expect("the promoted write never reached the fake");
+
+        // The provider takes the prompt; the journal never records it.
+        journal.fail_next_accepts(usize::MAX);
+        write.release();
+
+        let pause = Arc::new(HeldReleasePause::default());
+        *manager
+            .inner
+            .held_release_pause
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(pause.clone());
+        injector.emit(HarnessEvent::TextDelta {
+            text: "the reply".into(),
+        });
+        injector.emit(HarnessEvent::TurnCompleted {
+            status: TurnStatus::Completed,
+            usage: Usage::default(),
+        });
+        tokio::time::timeout(Duration::from_secs(5), pause.read.notified())
+            .await
+            .expect("the pump never read the completion behind the held text");
+        stream_end.release();
+        pause.resume.notify_one();
+
+        // The pump is now parked at the stream end, waiting for a write the
+        // journal keeps refusing: nothing settles on its own.
+        let early = tokio::time::timeout(Duration::from_millis(300), async {
+            loop {
+                let wire = next_event(&mut events).await;
+                if let Event::TurnCompleted { turn_id, .. } = wire.event
+                    && turn_id == promoted
+                {
+                    return true;
+                }
+            }
+        })
+        .await
+        .unwrap_or(false);
+        assert!(!early, "the turn settled while its acceptance kept failing");
+
+        manager.interrupt(&created.thread_id).await.expect("stop");
+        let status = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let wire = next_event(&mut events).await;
+                if let Event::TurnCompleted {
+                    turn_id, status, ..
+                } = wire.event
+                    && turn_id == promoted
+                {
+                    return status;
+                }
+            }
+        })
+        .await
+        .expect("a Stop left the turn running while its acceptance never landed");
+        // The provider already reported the turn, so the Stop may land on a
+        // completed turn or interrupt it; either way the turn ends.
+        assert!(
+            matches!(status, TurnStatus::Completed | TurnStatus::Interrupted),
+            "{status:?}"
         );
         manager.shutdown().await;
     }
@@ -44270,6 +45109,124 @@ mod tests {
         assert!(
             !echoed.contains("Earlier conversation history"),
             "the cleared handoff was sent again: {echoed}"
+        );
+        manager.shutdown().await;
+    }
+
+    /// A refused "prompt accepted" write is retried, not reported as durable.
+    ///
+    /// The journal must record that the provider took the prompt before the
+    /// turn is published as done. The write used to swallow its error and mark
+    /// the attempt durable anyway, so the prompt stayed marked undelivered for
+    /// every later handoff even though the turn had run.
+    #[tokio::test]
+    async fn a_refused_acceptance_write_is_retried_before_the_turn_is_durable() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let host = HostId::new("host_test");
+        let journal = FlakyJournal::in_memory().await;
+        let harness = FakeHarness::new();
+        let manager = Arc::new(
+            ThreadManager::open(
+                Arc::clone(&journal) as Arc<dyn Journal>,
+                Arc::new(StaticHarnessCatalog::with(Arc::new(harness))),
+                host.clone(),
+                ThreadManagerOptions {
+                    tick_interval: Duration::from_secs(3600),
+                    ..ThreadManagerOptions::default()
+                },
+                None,
+            )
+            .await
+            .expect("manager"),
+        );
+        let mut events = manager.subscribe();
+        let created = manager
+            .create_thread(new_thread(host, workspace.path(), "first"))
+            .await
+            .expect("create");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+        wait_for_idle(&manager, &created.thread_id).await;
+
+        journal.fail_next_accepts(1);
+        let sent = manager
+            .send_message(&created.thread_id, "the retry".into(), Vec::new())
+            .await
+            .expect("send");
+        let (turn, status) = next_turn_completion(&mut events).await;
+        assert_eq!(turn, sent.turn_id);
+        assert_eq!(status, TurnStatus::Completed);
+        let pending = journal
+            .pending_item_ids(&created.thread_id)
+            .await
+            .expect("pending items");
+        assert!(
+            !pending.contains(&user_item_id(&sent.turn_id)),
+            "the refused acceptance write was never retried: {pending:?}"
+        );
+        manager.shutdown().await;
+    }
+
+    /// A refused handoff clear is retried, and the row keeps owing its history
+    /// until the clear lands.
+    ///
+    /// Clearing only in memory on a failed write would let the session resume
+    /// as if the history had been delivered; a restart would then send it
+    /// again, or a later switch would carry it twice.
+    #[tokio::test]
+    async fn a_refused_handoff_clear_is_retried_instead_of_reported_as_cleared() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let host = HostId::new("host_test");
+        let journal = FlakyJournal::in_memory().await;
+        let claude = FakeHarness::new();
+        let codex = FakeHarness::new().with_kind(HarnessKind::Codex);
+        let manager = Arc::new(
+            ThreadManager::open(
+                Arc::clone(&journal) as Arc<dyn Journal>,
+                Arc::new(StaticHarnessCatalog::with(Arc::new(claude)).and(Arc::new(codex))),
+                host.clone(),
+                ThreadManagerOptions {
+                    tick_interval: Duration::from_secs(3600),
+                    ..ThreadManagerOptions::default()
+                },
+                None,
+            )
+            .await
+            .expect("manager"),
+        );
+        let mut events = manager.subscribe();
+        let created = manager
+            .create_thread(new_thread(host, workspace.path(), "first"))
+            .await
+            .expect("create");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+        manager
+            .switch_thread_harness(&created.thread_id, switch_request(HarnessKind::Codex))
+            .await
+            .expect("switch to Codex");
+
+        journal.fail_next_handoff_clears(1);
+        let sent = manager
+            .send_message(&created.thread_id, "carry on".into(), Vec::new())
+            .await
+            .expect("the Codex turn starts");
+        let (turn, status) = next_turn_completion(&mut events).await;
+        assert_eq!(turn, sent.turn_id);
+        assert_eq!(status, TurnStatus::Completed);
+
+        let row = journal
+            .list_threads()
+            .await
+            .expect("threads")
+            .into_iter()
+            .find(|meta| meta.thread_id == created.thread_id)
+            .expect("thread row");
+        assert!(
+            journal.handoff_clear_attempts() >= 2,
+            "the refused handoff clear was not retried"
+        );
+        assert!(
+            !row.handoff_pending,
+            "the refused handoff clear was reported as cleared anyway"
         );
         manager.shutdown().await;
     }
@@ -44418,6 +45375,67 @@ mod tests {
             "the second queued message repeated the history: {next_echo}"
         );
         assert!(next_echo.ends_with("next"), "{next_echo}");
+        manager.shutdown().await;
+    }
+
+    /// A message queued at restart stays out of the handoff's history.
+    ///
+    /// This is the regression test the switch PR's last merge dropped. The
+    /// queue is durable across the crash: the reopened daemon promotes the
+    /// waiting message as its own turn, so it appears once as that turn's
+    /// request and never inside the history block, and the prompt the dead
+    /// startup never accepted is left out entirely. (Its neighbour above covers
+    /// the same rule together with the settlement's promotion site.)
+    #[tokio::test]
+    async fn a_restart_with_a_queued_follow_up_leaves_it_out_of_the_handoff() {
+        let (_workspace, journal_path, host, thread_id) = restarted_with_a_queued_message().await;
+        let journal = Arc::new(
+            SqliteJournal::connect(&journal_path)
+                .await
+                .expect("journal after restart"),
+        );
+        let manager = Arc::new(
+            open_test_manager_with_journal(
+                FakeHarness::new().with_kind(HarnessKind::Codex),
+                host,
+                journal as Arc<dyn Journal>,
+            )
+            .await,
+        );
+        let mut events = manager.subscribe();
+        let sent = manager
+            .send_message(&thread_id, "next".into(), Vec::new())
+            .await
+            .expect("send after restart");
+
+        let mut echoed = String::new();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let wire = next_event(&mut events).await;
+                match wire.event {
+                    Event::MessageDelta { text, .. } => echoed.push_str(&text),
+                    Event::TurnCompleted { turn_id, .. } if turn_id == sent.turn_id => break,
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("the handoff turn completed");
+        assert_eq!(
+            echoed.matches("Earlier conversation history").count(),
+            1,
+            "one handoff block: {echoed}"
+        );
+        assert!(echoed.contains("first"), "accepted history is carried");
+        assert_eq!(
+            echoed.matches("queued follow-up").count(),
+            1,
+            "the queued message is the request once, never history: {echoed}"
+        );
+        assert!(
+            !echoed.contains("handoff first"),
+            "an unaccepted prompt became history: {echoed}"
+        );
         manager.shutdown().await;
     }
 

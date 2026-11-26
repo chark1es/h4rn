@@ -539,6 +539,10 @@ impl DaemonBuilder {
                 Arc::clone(&oauth),
             )),
         );
+        // Watches outlive the daemon; load the ones the journal holds before
+        // the poll loop starts, so a restart neither drops them nor loses the
+        // grants they were created under.
+        pr_links.restore_watches().await;
         pr_links.start();
         let linear = match self.linear_endpoint.as_deref() {
             Some(endpoint) => {
@@ -680,6 +684,11 @@ impl DaemonBuilder {
         // The endpoint is unknown until `bind`; until then `prepare` returns
         // `None` and a session starts without MCP rather than with a bogus URL.
         manager.set_mcp_provider(Arc::clone(&mcp) as Arc<dyn McpSessionProvider>);
+        // A request is bound to the turn that was running when it arrived, so
+        // work it asks for (a watch, a delegated child) inherits that turn's
+        // grant even if another turn starts while the tool is still setting up.
+        mcp.http_state()
+            .set_tool_admission(Arc::new(ThreadToolAdmission(Arc::clone(&manager))));
 
         // h4rn's own tools for the agents it runs act on the calling thread
         // (ADR-046); the hub's per-session token names that thread.
@@ -862,6 +871,35 @@ struct OAuthGrantAuthority(Arc<crate::mcp_server::OutsideAgents>);
 impl crate::threads::GrantAuthority for OAuthGrantAuthority {
     fn family_is_live(&self, family: &str) -> bool {
         self.0.store().grant_is_live(family)
+    }
+
+    fn begin_delivery(&self, family: &str) -> Option<crate::threads::GrantWrite> {
+        self.0
+            .store()
+            .begin_delivery(family)
+            .map(|ticket| crate::threads::GrantWrite::tracked(Box::new(ticket)))
+    }
+}
+
+/// Binds each admitted MCP request to the turn that was running then.
+struct ThreadToolAdmission(Arc<crate::threads::ThreadManager>);
+
+#[async_trait::async_trait]
+impl h4rn_mcp::provider::ToolAdmissionSource for ThreadToolAdmission {
+    async fn admission(
+        &self,
+        scope: &h4rn_mcp::session::McpScope,
+    ) -> h4rn_mcp::provider::ToolAdmission {
+        let Some(thread_id) = &scope.thread_id else {
+            return h4rn_mcp::provider::ToolAdmission::default();
+        };
+        match self.0.active_turn_admission(thread_id).await {
+            Some((turn_id, grant)) => h4rn_mcp::provider::ToolAdmission {
+                turn_id: Some(turn_id),
+                grant,
+            },
+            None => h4rn_mcp::provider::ToolAdmission::default(),
+        }
     }
 }
 

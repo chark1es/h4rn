@@ -12,11 +12,12 @@ use std::time::Duration;
 use h4rn_daemon::acp_agents::AcpAgentService;
 use h4rn_daemon::harnesses::StaticHarnessCatalog;
 use h4rn_daemon::journal::SqliteJournal;
+use h4rn_daemon::provider_switch::SwitchRequest;
 use h4rn_daemon::threads::{NewThread, ThreadManager, ThreadManagerOptions};
-use h4rn_harness::GenericAcpHarness;
+use h4rn_harness::{FakeHarness, GenericAcpHarness};
 use h4rn_protocol::{
-    AcpAgentSpec, AcpWorkingDir, ApprovalDecision, Event, HarnessKind, HostId, RuntimeMode,
-    ThreadId, TurnStatus,
+    AcpAgentSpec, AcpWorkingDir, ApprovalDecision, DroppedSettingKind, Event, HarnessKind, HostId,
+    RuntimeMode, ThreadId, TurnStatus,
 };
 use tokio::sync::broadcast;
 
@@ -251,6 +252,123 @@ async fn a_configured_agent_can_be_probed_for_its_version_and_models() {
             .collect::<Vec<_>>(),
         vec!["fixture-model"]
     );
+}
+
+/// A switch to a configured ACP agent resolves that agent's own catalogue.
+///
+/// The UI sends a switch with the configured agent's id. The daemon resolves
+/// what that agent really offers through the same source Settings uses (a
+/// probe when this daemon has no answer yet), then carries over only what the
+/// agent advertised. The agent here publishes a single `default` mode; the
+/// thread's Plan mode is dropped to approval required and reported, and the
+/// switched thread runs on that agent.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_switch_to_a_configured_agent_resolves_its_catalogue() {
+    let Some(binary) = fixture_binary() else {
+        return skip_without_fixture();
+    };
+    let workspace = tempfile::tempdir().expect("workspace");
+    let data = tempfile::tempdir().expect("data dir");
+    let agents = Arc::new(AcpAgentService::open(data.path()).expect("agent service"));
+    agents
+        .add(AcpAgentSpec {
+            id: "fixture".into(),
+            name: "ACP fixture".into(),
+            command: binary.display().to_string(),
+            args: Vec::new(),
+            env: std::collections::BTreeMap::new(),
+            working_dir: AcpWorkingDir::ThreadWorkspace,
+        })
+        .expect("configure");
+    let catalog = StaticHarnessCatalog::with(Arc::new(FakeHarness::new()))
+        .and(Arc::new(GenericAcpHarness::new(agents.clone())));
+    let manager = Arc::new(
+        ThreadManager::open(
+            Arc::new(SqliteJournal::in_memory().await.expect("journal")),
+            Arc::new(catalog),
+            HostId::new("host_test"),
+            ThreadManagerOptions {
+                tick_interval: Duration::from_secs(3600),
+                ..ThreadManagerOptions::default()
+            },
+            None,
+        )
+        .await
+        .expect("manager"),
+    );
+    // The switch resolves the target through this source, exactly as Settings
+    // and the thread header's picker do.
+    manager.set_acp_capabilities(agents.clone());
+    let mut events = manager.subscribe();
+    let created = manager
+        .create_thread(NewThread {
+            thread_id: None,
+            parent_thread_id: None,
+            subagent_id: None,
+            host: HostId::new("host_test"),
+            harness: HarnessKind::ClaudeCode,
+            agent_id: None,
+            workspace_path: workspace.path().display().to_string(),
+            model: "claude-sonnet-5".into(),
+            prompt: "plan the work".into(),
+            attachments: Vec::new(),
+            runtime_mode: RuntimeMode::Plan,
+            reasoning_effort: None,
+            fast: false,
+            worktree: None,
+        })
+        .await
+        .expect("create")
+        .thread_id;
+    let (status, _, _) = next_turn(&mut events, |_| {}).await;
+    assert_eq!(status, TurnStatus::Completed);
+
+    let switched = manager
+        .switch_thread_harness(
+            &created,
+            SwitchRequest {
+                harness: HarnessKind::Acp,
+                agent_id: Some("fixture".into()),
+                model: "fixture-model".into(),
+            },
+        )
+        .await
+        .expect("switch to the configured agent");
+    assert_eq!(switched.summary.harness, HarnessKind::Acp);
+    assert_eq!(switched.summary.agent_id.as_deref(), Some("fixture"));
+    assert_eq!(
+        switched.summary.runtime_mode,
+        RuntimeMode::ApprovalRequired,
+        "the agent does not offer Plan"
+    );
+    assert!(
+        switched
+            .dropped
+            .iter()
+            .any(|setting| setting.setting == DroppedSettingKind::RuntimeMode),
+        "the dropped Plan mode was not reported: {:?}",
+        switched.dropped
+    );
+    // The resolution was a real probe: the catalogue the fixture advertises is
+    // now what Settings shows for this agent.
+    assert!(
+        agents.list()[0]
+            .modes
+            .iter()
+            .any(|mode| mode.id == "default"),
+        "the switch did not resolve the agent's own catalogue"
+    );
+
+    // The switched thread really runs on that agent.
+    manager
+        .send_message(&created, "after the switch".into(), Vec::new())
+        .await
+        .expect("send");
+    let (status, text, _) = next_turn(&mut events, |_| {}).await;
+    assert_eq!(status, TurnStatus::Completed);
+    assert!(text.contains("after the switch"), "got {text:?}");
+    manager.shutdown().await;
 }
 
 #[cfg(unix)]
@@ -692,7 +810,7 @@ async fn a_dual_catalogue_agent_probes_and_starts_with_its_v1_catalogue() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn an_empty_resume_reply_keeps_the_saved_model_and_mode() {
+async fn an_empty_resume_reply_cannot_confirm_a_non_full_access_mode() {
     let workspace = tempfile::tempdir().expect("workspace");
     let mut env = std::collections::BTreeMap::new();
     // Resume-only, and the reply names the session without repeating a
@@ -708,26 +826,54 @@ async fn an_empty_resume_reply_keeps_the_saved_model_and_mode() {
     assert_eq!(status, TurnStatus::Completed);
     assert!(text.contains("echo: hello"), "got {text:?}");
 
-    // The agent knows the model and mode from the session it continues; an
-    // empty catalogue must not reject the saved selection.
+    // The reply names no mode, so h4rn cannot prove the resumed session is not
+    // running wider than this approval-required thread (or an outside grant's
+    // ceiling). The resumed session is refused, the stored id is dropped, and
+    // the same turn is retried on a fresh session, which applies and checks the
+    // mode itself. The refusal must not strand the thread on the same resume.
     manager.restart_sessions(&[HarnessKind::Acp]).await;
     manager
         .send_message(&thread, "after the empty resume".into(), Vec::new())
         .await
         .expect("send");
     let (status, text, _) = next_turn(&mut events, |_| {}).await;
-    assert_eq!(status, TurnStatus::Completed);
+    assert_eq!(
+        status,
+        TurnStatus::Completed,
+        "the refused resume must fall back to a fresh session instead of failing the turn"
+    );
     assert!(
-        text.contains("echo: after the empty resume"),
-        "got {text:?}"
+        text.contains("after the empty resume"),
+        "the fresh session answered the same prompt: {text:?}"
+    );
+    assert!(
+        text.contains("echo: hello"),
+        "the fresh session's handoff carried the saved conversation: {text:?}"
     );
 
     let starts = std::fs::read_to_string(workspace.path().join(".agy-fixture-sessions"))
         .expect("the fixture recorded its sessions");
+    let resumed_at = starts
+        .lines()
+        .position(|line| line.starts_with("resume"))
+        .expect("the restart used session/resume");
     assert!(
-        starts.lines().any(|line| line.starts_with("resume")),
-        "the restart used session/resume: {starts:?}"
+        starts
+            .lines()
+            .skip(resumed_at + 1)
+            .any(|line| line.starts_with("new")),
+        "the refused resume did not start a fresh session: {starts:?}"
     );
+
+    // The fresh session is live, so the next send must not try the refused
+    // resume again.
+    manager
+        .send_message(&thread, "and again".into(), Vec::new())
+        .await
+        .expect("send");
+    let (status, text, _) = next_turn(&mut events, |_| {}).await;
+    assert_eq!(status, TurnStatus::Completed);
+    assert!(text.contains("echo: and again"), "got {text:?}");
 
     manager.shutdown().await;
 }

@@ -191,6 +191,28 @@ pub trait PrSource: Send + Sync {
     ) -> Result<ForgeChecks, PrSourceError>;
 }
 
+/// One watcher as the journal keeps it across restarts.
+///
+/// The watch outlives both the turn and the daemon, so its exact grant travels
+/// with it. A restart restores the watcher from this row instead of dropping it
+/// or recreating it without the grant (which would widen it to the thread's
+/// mode).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StoredPrWatch {
+    /// Thread the wake runs in.
+    pub thread_id: ThreadId,
+    /// Forge account the read uses.
+    pub account_id: String,
+    /// Repository the PR belongs to.
+    pub repo: ForgeRepoRef,
+    /// Pull request number.
+    pub number: u32,
+    /// The outside grant the watch was created under, when one was.
+    pub grant: Option<WatchGrant>,
+    /// When the watch started (or last restarted).
+    pub watched_at: chrono::DateTime<chrono::Utc>,
+}
+
 /// The outside grant that asked for a watched PR's turn.
 ///
 /// A watch outlives the turn that created it, so it keeps both halves of the
@@ -317,6 +339,35 @@ impl PrWakeSink for ThreadWakeSink {
     }
 }
 
+/// A test-only stop between a watch snapshot and its journal write.
+#[cfg(test)]
+pub(crate) struct PersistPause {
+    used: std::sync::atomic::AtomicBool,
+    arrived: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+#[cfg(test)]
+impl PersistPause {
+    /// Waits until a persist has snapshotted and reached the pause.
+    pub(crate) async fn arrived(&self) {
+        self.arrived.notified().await;
+    }
+
+    /// Lets the paused persist write its snapshot.
+    pub(crate) fn release(&self) {
+        self.release.notify_one();
+    }
+
+    async fn hold(&self) {
+        if self.used.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        self.arrived.notify_waiters();
+        self.release.notified().await;
+    }
+}
+
 /// The service behind the link and watch requests.
 pub struct PrLinkService {
     journal: Arc<dyn Journal>,
@@ -324,6 +375,20 @@ pub struct PrLinkService {
     sink: Arc<dyn PrWakeSink>,
     watches: Mutex<WatchRegistry>,
     poller: Mutex<Option<JoinHandle<()>>>,
+    /// Orders watch snapshots' journal writes.
+    ///
+    /// Two persists that both snapshot under the `watches` lock would
+    /// otherwise race their writes, and the older snapshot could win: a
+    /// restart would then bring back a watch that had already been removed.
+    /// Holding this across the snapshot and its write makes the file follow the
+    /// order in which the state was read.
+    persist: tokio::sync::Mutex<()>,
+    /// An interleaving point between a snapshot and its journal write.
+    ///
+    /// Test-only: production never installs one, so this costs one option
+    /// check per persist.
+    #[cfg(test)]
+    persist_pause: Mutex<Option<Arc<PersistPause>>>,
 }
 
 impl PrLinkService {
@@ -339,6 +404,9 @@ impl PrLinkService {
             sink,
             watches: Mutex::new(WatchRegistry::default()),
             poller: Mutex::new(None),
+            persist: tokio::sync::Mutex::new(()),
+            #[cfg(test)]
+            persist_pause: Mutex::new(None),
         })
     }
 
@@ -373,6 +441,115 @@ impl PrLinkService {
         self.watches
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Arms a stop on the next watch snapshot, before its journal write.
+    ///
+    /// Used only by the test that proves an older snapshot cannot overtake a
+    /// newer one.
+    #[cfg(test)]
+    pub(crate) fn pause_next_persist(&self) -> Arc<PersistPause> {
+        let pause = Arc::new(PersistPause {
+            used: std::sync::atomic::AtomicBool::new(false),
+            arrived: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        });
+        *self
+            .persist_pause
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Arc::clone(&pause));
+        pause
+    }
+
+    /// Reloads every watch the journal holds.
+    ///
+    /// A watch outlives the daemon, and so does its grant: a restart neither
+    /// drops the watch nor restores it with a wider ceiling. Baselines are not
+    /// stored, so the first read after a restart becomes the new baseline
+    /// instead of replaying changes that happened while h4rn was closed.
+    pub async fn restore_watches(&self) {
+        let rows = match self.journal.pr_watches().await {
+            Ok(rows) => rows,
+            Err(error) => {
+                tracing::warn!(%error, "could not read persisted PR watches");
+                return;
+            }
+        };
+        let mut active = Vec::new();
+        for row in rows {
+            if self.sink.is_active(&row.thread_id).await {
+                active.push(row);
+            }
+        }
+        {
+            let mut watches = self.lock_watches();
+            for row in active {
+                let key = PrKey {
+                    account_id: row.account_id,
+                    repo: row.repo,
+                    number: row.number,
+                };
+                let generation = watches.allocate_generation();
+                watches.prs.entry(key).or_default().watchers.insert(
+                    row.thread_id.as_str().to_owned(),
+                    ThreadWatch {
+                        generation,
+                        grant: row.grant,
+                        ..ThreadWatch::default()
+                    },
+                );
+            }
+        }
+        // Keep the file in step with what was actually restored (an inactive
+        // thread's row is dropped here rather than polled forever).
+        self.persist_watches().await;
+    }
+
+    /// Writes the current watches, with their grants, to the journal.
+    ///
+    /// One snapshot replaces the previous one, so a watch that ended by any
+    /// path (unwatch, terminal PR, revoked grant, repeated failures) cannot be
+    /// left behind for a restart to resurrect.
+    async fn persist_watches(&self) {
+        // The whole snapshot-and-write is one ordered step. Without this, a
+        // persist that snapshotted before an unwatch could write after the
+        // unwatch's own persist and bring the removed watch back on restart.
+        let _order = self.persist.lock().await;
+        let now = Utc::now();
+        let rows: Vec<StoredPrWatch> = {
+            let watches = self.lock_watches();
+            watches
+                .prs
+                .iter()
+                .flat_map(|(key, watched)| {
+                    watched
+                        .watchers
+                        .iter()
+                        .map(move |(thread, watch)| StoredPrWatch {
+                            thread_id: ThreadId::new(thread.clone()),
+                            account_id: key.account_id.clone(),
+                            repo: key.repo.clone(),
+                            number: key.number,
+                            grant: watch.grant.clone(),
+                            watched_at: now,
+                        })
+                })
+                .collect()
+        };
+        #[cfg(test)]
+        {
+            let pause = self
+                .persist_pause
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone();
+            if let Some(pause) = pause {
+                pause.hold().await;
+            }
+        }
+        if let Err(error) = self.journal.replace_pr_watches(&rows).await {
+            tracing::warn!(%error, "could not save the PR watches");
+        }
     }
 
     /// Links a PR after reading it once, so the caller gets its current state.
@@ -452,15 +629,8 @@ impl PrLinkService {
         number: u32,
     ) -> Result<(), PrLinkError> {
         self.journal.remove_pr_link(thread_id, repo, number).await?;
-        let mut watches = self.lock_watches();
-        for key in matching_keys(&watches, repo, number) {
-            if let Some(watched) = watches.prs.get_mut(&key) {
-                watched.watchers.remove(thread_id.as_str());
-                if watched.watchers.is_empty() {
-                    watches.prs.remove(&key);
-                }
-            }
-        }
+        self.unwatch_unpersisted(thread_id, repo, number);
+        self.persist_watches().await;
         Ok(())
     }
 
@@ -533,6 +703,20 @@ impl PrLinkService {
     /// The grant and its ceiling are kept on the watcher: every wake it causes
     /// re-checks the grant and starts its turn at no more than this ceiling.
     pub async fn watch_with_grant(
+        &self,
+        thread_id: &ThreadId,
+        repo: &ForgeRepoRef,
+        number: u32,
+        grant: Option<WatchGrant>,
+    ) -> Result<(), PrLinkError> {
+        let outcome = self
+            .watch_with_grant_unpersisted(thread_id, repo, number, grant)
+            .await;
+        self.persist_watches().await;
+        outcome
+    }
+
+    async fn watch_with_grant_unpersisted(
         &self,
         thread_id: &ThreadId,
         repo: &ForgeRepoRef,
@@ -680,7 +864,12 @@ impl PrLinkService {
     }
 
     /// Stops watching one PR.
-    pub fn unwatch(&self, thread_id: &ThreadId, repo: &ForgeRepoRef, number: u32) {
+    pub async fn unwatch(&self, thread_id: &ThreadId, repo: &ForgeRepoRef, number: u32) {
+        self.unwatch_unpersisted(thread_id, repo, number);
+        self.persist_watches().await;
+    }
+
+    fn unwatch_unpersisted(&self, thread_id: &ThreadId, repo: &ForgeRepoRef, number: u32) {
         let mut watches = self.lock_watches();
         for key in matching_keys(&watches, repo, number) {
             if let Some(watched) = watches.prs.get_mut(&key) {
@@ -690,6 +879,23 @@ impl PrLinkService {
                 }
             }
         }
+    }
+
+    /// The grant a watch currently holds, for tests and diagnostics.
+    #[doc(hidden)]
+    pub fn watch_grant(
+        &self,
+        thread_id: &ThreadId,
+        repo: &ForgeRepoRef,
+        number: u32,
+    ) -> Option<WatchGrant> {
+        let watches = self.lock_watches();
+        watches
+            .prs
+            .iter()
+            .find(|(key, _)| key.repo == *repo && key.number == number)
+            .and_then(|(_, watched)| watched.watchers.get(thread_id.as_str()))
+            .and_then(|watch| watch.grant.clone())
     }
 
     fn watching_threads(&self, repo: &ForgeRepoRef, number: u32) -> HashSet<String> {
@@ -911,10 +1117,15 @@ impl PrLinkService {
         }
 
         // Forget PRs whose last watcher went away.
-        let mut watches = self.lock_watches();
-        watches
-            .prs
-            .retain(|_, watched| !watched.watchers.is_empty());
+        {
+            let mut watches = self.lock_watches();
+            watches
+                .prs
+                .retain(|_, watched| !watched.watchers.is_empty());
+        }
+        // Watchers ended by this poll (terminal, revoked, inactive, repeated
+        // failures) must not come back on a restart.
+        self.persist_watches().await;
     }
 
     fn remove_watch(&self, key: &PrKey, thread_id: &ThreadId) {
@@ -2186,6 +2397,110 @@ mod tests {
         assert!(!pulls[0].watching);
     }
 
+    /// A watch and its grant survive a restart.
+    ///
+    /// The watch is work that outlives the daemon: dropping it would stop the
+    /// PR notifications, and restoring it without the triple would let its next
+    /// wake run at the thread's mode instead of the ceiling it was created
+    /// under.
+    #[tokio::test]
+    async fn a_watch_and_its_grant_survive_a_restart() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("journal.db");
+        let thread_id = thread("th_watch_restart");
+        let grant = WatchGrant {
+            client_id: "client-1".into(),
+            family: "family-1".into(),
+            ceiling: Some(RuntimeMode::ApprovalRequired),
+        };
+        {
+            let journal: Arc<dyn Journal> =
+                Arc::new(SqliteJournal::connect(&path).await.expect("journal"));
+            let (service, _source, sink) = service_with_journal(journal);
+            sink.add(&thread_id);
+            service
+                .link_known(&thread_id, "acct_1", &repo(), 7)
+                .await
+                .expect("link");
+            service
+                .watch_with_grant(&thread_id, &repo(), 7, Some(grant.clone()))
+                .await
+                .expect("watch");
+        }
+
+        let journal: Arc<dyn Journal> =
+            Arc::new(SqliteJournal::connect(&path).await.expect("reopen journal"));
+        let (service, source, sink) = service_with_journal(journal);
+        sink.add(&thread_id);
+        service.restore_watches().await;
+        assert_eq!(
+            service.watch_grant(&thread_id, &repo(), 7),
+            Some(grant.clone()),
+            "the restart lost the watch or its grant"
+        );
+
+        // The first read after a restart is the restored watcher's baseline.
+        service.poll_once().await;
+        // The restored watcher still polls, and its wake carries the grant.
+        source.set(|state| {
+            state.checks = checks(
+                "sha-1",
+                vec![check(
+                    "build",
+                    ForgeCheckStatus::Failure,
+                    Some(true),
+                    Some(3),
+                )],
+            );
+        });
+        service.poll_once().await;
+        assert_eq!(
+            sink.wake_grants(),
+            vec![Some(grant)],
+            "the restored watch woke without its grant"
+        );
+    }
+
+    /// A snapshot taken before a watch ended cannot overwrite the newer one.
+    ///
+    /// Without ordering, the older persist could finish after the unwatch's,
+    /// leaving a watch in the journal that a restart would bring back.
+    #[tokio::test]
+    async fn a_stale_watch_snapshot_cannot_resurrect_a_removed_watch() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("journal.db");
+        let journal: Arc<dyn Journal> =
+            Arc::new(SqliteJournal::connect(&path).await.expect("journal"));
+        let (service, _source, sink) = service_with_journal(Arc::clone(&journal));
+        let thread_id = thread("th_watch_order");
+        watched(&service, &sink, &thread_id).await;
+
+        // The older persist has snapshotted the watch and is held before its
+        // write.
+        let pause = service.pause_next_persist();
+        let older = tokio::spawn({
+            let service = Arc::clone(&service);
+            async move { service.persist_watches().await }
+        });
+        pause.arrived().await;
+        // The watch ends in memory while that snapshot waits.
+        service.lock_watches().prs.clear();
+        let newer = tokio::spawn({
+            let service = Arc::clone(&service);
+            async move { service.persist_watches().await }
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        pause.release();
+        older.await.expect("join the older persist");
+        newer.await.expect("join the newer persist");
+
+        let rows = journal.pr_watches().await.expect("read the saved watches");
+        assert!(
+            rows.is_empty(),
+            "the older snapshot overwrote the removed watch: {rows:?}"
+        );
+    }
+
     #[tokio::test]
     async fn a_link_can_be_removed_and_is_reverse_listed() {
         let (service, _source, sink) = service().await;
@@ -3046,7 +3361,7 @@ mod tests {
         service.poll_once().await;
         assert_eq!(sink.wakes().len(), 1);
 
-        service.unwatch(&thread_id, &repo(), 7);
+        service.unwatch(&thread_id, &repo(), 7).await;
         service
             .unlink(&thread_id, &repo(), 7)
             .await
@@ -3604,7 +3919,7 @@ mod tests {
         // The thread unwatches and watches again while that poll is in flight.
         // The replacement's read is held too, so it is still at its fresh
         // generation when the older poll is released.
-        service.unwatch(&thread_id, &repo(), 7);
+        service.unwatch(&thread_id, &repo(), 7).await;
         source.set(|state| {
             state.checks = checks(
                 "sha-1",
@@ -3686,7 +4001,7 @@ mod tests {
         source.set(|state| {
             state.error = Some(PrSourceError::Other("network down".into()));
         });
-        service.unwatch(&thread_id, &repo(), 7);
+        service.unwatch(&thread_id, &repo(), 7).await;
         service
             .watch(&thread_id, &repo(), 7)
             .await
@@ -3741,7 +4056,7 @@ mod tests {
         // The thread unwatches and watches again while that wake is in
         // flight. The re-watch reads a body that already contains the
         // failure, so the failure is not news for the replacement.
-        service.unwatch(&thread_id, &repo(), 7);
+        service.unwatch(&thread_id, &repo(), 7).await;
         service
             .watch(&thread_id, &repo(), 7)
             .await
@@ -3924,7 +4239,7 @@ mod tests {
             forge.watched_prs()
         );
 
-        service.unwatch(&thread_id, &repo_ref, 7);
+        service.unwatch(&thread_id, &repo_ref, 7).await;
         service
             .unlink(&thread_id, &repo_ref, 7)
             .await

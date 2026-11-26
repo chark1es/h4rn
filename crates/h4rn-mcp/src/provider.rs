@@ -18,6 +18,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use h4rn_protocol::{TurnId, WorkGrant};
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -27,6 +28,30 @@ use crate::types::{
     CallToolResult, PromptDefinition, PromptMessage, ResourceContents, ResourceDefinition,
     ToolDefinition,
 };
+
+/// The turn a harness tool call was admitted under.
+///
+/// A tool can outlive the turn that called it (a PR watch, a delegated child),
+/// so the daemon captures the calling turn and its outside grant when the MCP
+/// request arrives, not when the tool's async setup finishes. A later turn's
+/// grant can then never be inherited by work an earlier turn asked for.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ToolAdmission {
+    /// The turn that was running when the request was admitted.
+    pub turn_id: Option<TurnId>,
+    /// The outside grant that turn ran under, when one did.
+    pub grant: Option<WorkGrant>,
+}
+
+/// Supplies the admission snapshot for one MCP request.
+///
+/// The daemon implements this over its thread manager. The hub itself knows no
+/// threads, so a scope with no thread simply gets the empty admission.
+#[async_trait]
+pub trait ToolAdmissionSource: Send + Sync {
+    /// The turn and grant a request from this scope is admitted under.
+    async fn admission(&self, scope: &McpScope) -> ToolAdmission;
+}
 
 /// One progress report from a long-running tool call.
 #[derive(Clone, Debug, PartialEq)]
@@ -44,6 +69,8 @@ pub struct ProgressUpdate {
 pub struct ToolCallContext {
     /// Caller identity, for authorization and logging.
     pub scope: McpScope,
+    /// The turn this call was admitted under, captured before any await.
+    pub admission: ToolAdmission,
     /// Server namespace the call arrived through.
     pub server: String,
     /// Progress sink, present when the harness supplied a progress token.
@@ -59,11 +86,18 @@ impl ToolCallContext {
     pub fn new(scope: McpScope, server: impl Into<String>, timeout: Duration) -> Self {
         Self {
             scope,
+            admission: ToolAdmission::default(),
             server: server.into(),
             progress: None,
             cancel: CancellationToken::new(),
             deadline: Some(Instant::now() + timeout),
         }
+    }
+
+    /// Attaches the turn and grant the request was admitted under.
+    pub fn with_admission(mut self, admission: ToolAdmission) -> Self {
+        self.admission = admission;
+        self
     }
 
     /// Attaches a progress sink.
