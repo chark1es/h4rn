@@ -1106,7 +1106,7 @@ function McpHealthGlyph({ status }: { status: ReturnType<typeof serverStatus> })
   if (status.tone === "danger")
     return <CircleXIcon {...common} aria-label={label} style={{ color: "var(--danger)" }} />;
   if (status.tone === "warn")
-    return label === "Needs credential" ? (
+    return status.kind === "needsCredential" ? (
       <KeyRoundIcon {...common} aria-label={label} style={{ color: "var(--warn)" }} />
     ) : (
       <CircleAlertIcon {...common} aria-label={label} style={{ color: "var(--warn)" }} />

@@ -54,6 +54,31 @@ afterEach(() => {
 });
 
 describe("MCP store", () => {
+  it("keeps a failed list's error as sent and names the request as a kind", async () => {
+    setMcpRequesterForTests(() =>
+      Promise.reject(
+        new H4rnRequestError(protoError("internal", "hub is restarting", "Try again shortly.")),
+      ),
+    );
+
+    await loadMcpServers();
+
+    // The page words the request (`library:errors.actions.listServers`), so
+    // the message is not rewritten in the language active when it failed.
+    expect(getMcpState().error).toEqual({
+      code: "internal",
+      message: "hub is restarting",
+      hint: "Try again shortly.",
+    });
+    expect(getMcpState().errorAction).toBe("listServers");
+    expect(getMcpState().loading).toBe(false);
+
+    setMcpRequesterForTests(() => ok({ type: "mcp_servers", servers: [] }));
+    await loadMcpServers({ force: true });
+    expect(getMcpState().error).toBeNull();
+    expect(getMcpState().errorAction).toBeNull();
+  });
+
   it("loads and sorts servers", async () => {
     setMcpRequesterForTests(() =>
       ok({

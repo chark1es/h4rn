@@ -116,6 +116,33 @@ describe("Skills store", () => {
 
     expect(getSkillsState().inventory).toBeNull();
     expect(getSkillsState().error?.message).toBe("The daemon has not reported its host yet.");
+    expect(getSkillsState().errorAction).toBeNull();
+  });
+
+  it("keeps a failed list's error as sent and names the request as a kind", async () => {
+    setSkillsRequesterForTests((request) =>
+      request.type === "skills_list"
+        ? Promise.reject(new H4rnRequestError(protoError("internal", "registry is locked", null)))
+        : ok({ type: "skill_conflicts", conflicts: [] }),
+    );
+
+    await loadSkills();
+
+    expect(getSkillsState().error).toEqual({
+      code: "internal",
+      message: "registry is locked",
+      hint: null,
+    });
+    expect(getSkillsState().errorAction).toBe("listSkills");
+
+    setSkillsRequesterForTests((request) =>
+      request.type === "skills_list"
+        ? ok({ type: "skills", inventory: inventory() })
+        : ok({ type: "skill_conflicts", conflicts: [] }),
+    );
+    await loadSkills({ force: true });
+    expect(getSkillsState().error).toBeNull();
+    expect(getSkillsState().errorAction).toBeNull();
   });
 
   it("flips a harness install immediately and rolls it back on rejection", async () => {

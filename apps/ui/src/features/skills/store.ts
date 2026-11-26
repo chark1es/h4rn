@@ -33,7 +33,10 @@ export type SkillsState = {
   inventory: SkillInventory | null;
   loading: boolean;
   refreshing: boolean;
+  /** Why the inventory could not load, kept as sent so a client error relabels. */
   error: ProtoError | null;
+  /** Which request failed, worded by the page as `library:errors.actions.<kind>`. */
+  errorAction: SkillsAction | null;
   conflicts: SkillConflict[];
   preview: SkillImportPreview | null;
   previewing: boolean;
@@ -44,11 +47,15 @@ export type SkillsState = {
   pending: Record<string, boolean>;
 };
 
+/** A request whose failure the Skills page shows in its error banner. */
+export type SkillsAction = "listSkills";
+
 const initialState: SkillsState = {
   inventory: null,
   loading: false,
   refreshing: false,
   error: null,
+  errorAction: null,
   conflicts: [],
   preview: null,
   previewing: false,
@@ -108,14 +115,9 @@ export function skillsHost(): HostId | null {
   return getState().localHostId;
 }
 
-function fail(action: string, error: unknown): ProtoError {
+function fail(action: SkillsAction, error: unknown): ProtoError {
   const proto = toProtoError(error);
-  set({
-    loading: false,
-    refreshing: false,
-    previewing: false,
-    error: { ...proto, message: `${proto.message} (${action})` },
-  });
+  set({ loading: false, refreshing: false, previewing: false, error: proto, errorAction: action });
   return proto;
 }
 
@@ -141,6 +143,7 @@ export async function loadSkills(options: { force?: boolean } = {}): Promise<voi
     set({
       loading: false,
       error: clientProto("unsupported", "noHost"),
+      errorAction: null,
     });
     return;
   }
@@ -149,6 +152,7 @@ export async function loadSkills(options: { force?: boolean } = {}): Promise<voi
     loading: state.inventory === null,
     refreshing: state.inventory !== null,
     error: null,
+    errorAction: null,
   });
   try {
     const [inventory, conflicts] = await Promise.all([
@@ -168,10 +172,11 @@ export async function loadSkills(options: { force?: boolean } = {}): Promise<voi
       loading: false,
       refreshing: false,
       error: null,
+      errorAction: null,
       checkedAt: Date.now(),
     });
   } catch (error) {
-    fail(i18n.t("shell:skills.listSkills"), error);
+    fail("listSkills", error);
   }
 }
 

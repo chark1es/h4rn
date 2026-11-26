@@ -1,6 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
 import type { McpServerView } from "@/gen";
+import { setLocalePreference } from "@/lib/i18n";
 import { serverStatus } from "./labels";
 
 function remote(patch: Partial<McpServerView> = {}): McpServerView {
@@ -23,10 +24,27 @@ function remote(patch: Partial<McpServerView> = {}): McpServerView {
 
 describe("serverStatus for a server shared from another machine", () => {
   it("names the owning machine", () => {
-    expect(serverStatus(remote())).toEqual({ label: "Shared from host_owner", tone: "off" });
+    expect(serverStatus(remote())).toEqual({
+      kind: "sharedFrom",
+      label: "Shared from host_owner",
+      tone: "off",
+    });
   });
 
   it("reports an unreachable owner as an error", () => {
     expect(serverStatus(remote({ status: "error" })).label).toBe("Unreachable");
+  });
+});
+
+describe("serverStatus in another language", () => {
+  afterEach(() => setLocalePreference("en"));
+
+  it("keeps the kind the Sidebar picks its glyph from while the label is translated", async () => {
+    await setLocalePreference("ja");
+    const status = serverStatus(
+      remote({ runs_on: null, status: "error", last_error: "GITHUB_TOKEN is not set" }),
+    );
+    expect(status).toEqual({ kind: "needsCredential", label: "認証情報が必要", tone: "warn" });
+    expect(serverStatus(remote()).label).toBe("host_owner から共有");
   });
 });

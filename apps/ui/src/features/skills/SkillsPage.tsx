@@ -9,14 +9,16 @@ import {
   WifiOffIcon,
 } from "lucide-react";
 import { useEffect, useState } from "react";
+import { Trans, useTranslation } from "react-i18next";
 
 import { ChipSelect } from "@/components/common/ChipSelect";
+import { LibraryErrorBanner } from "@/components/pages/LibraryErrorBanner";
 import { Button } from "@/components/ui/button";
 import type { HarnessKind, SkillConflict, SkillInstallState, SkillSummary } from "@/gen";
 import { useIsPhone } from "@/hooks/use-media-query";
 import { useNow } from "@/hooks/use-now";
 import { HARNESS_LABELS } from "@/lib/entities";
-import { relativeAge } from "@/lib/format";
+import { formatRelativeTime } from "@/lib/i18n";
 import { useApp } from "@/lib/store/appStore";
 import { cn } from "@/lib/utils";
 import { SkillAddDialog, SkillDetailsDialog, SkillImportDialog, sourceLabel } from "./SkillDialogs";
@@ -33,6 +35,7 @@ import {
 
 const ALL_HARNESSES: HarnessKind[] = ["claude_code", "codex", "opencode", "antigravity"];
 
+/** Product names, shortened so four fit across a phone row. */
 const SHORT_HARNESS: Record<HarnessKind, string> = {
   claude_code: "Claude",
   codex: "Codex",
@@ -50,33 +53,36 @@ function SyncBanner() {
   const syncing = useSkills((state) => state.syncing);
   const connection = useApp((state) => state.connection.status);
   const now = useNow();
+  const { t } = useTranslation(["library", "common"]);
 
   const offline = connection === "offline";
   const label = syncing
-    ? "Syncing…"
+    ? t("skills.sync.syncing")
     : !sync
       ? offline
-        ? "Offline"
-        : "Not synced yet"
+        ? t("skills.sync.offline")
+        : t("skills.sync.notSynced")
       : sync.state === "synced"
-        ? "Synced"
+        ? t("skills.sync.synced")
         : sync.state === "blocked"
-          ? "Needs attention"
+          ? t("skills.sync.blocked")
           : sync.state === "offline"
-            ? "Offline"
+            ? t("skills.sync.offline")
             : sync.state === "syncing"
-              ? "Syncing…"
-              : "Idle";
+              ? t("skills.sync.syncing")
+              : t("skills.sync.idle");
 
   const detail = sync
     ? [
-        sync.last_sync ? `last sync ${relativeAge(sync.last_sync, now)} ago` : "no completed sync",
-        `${sync.pushed} pushed`,
-        `${sync.pulled} pulled`,
+        sync.last_sync
+          ? t("skills.sync.lastSync", { when: formatRelativeTime(sync.last_sync, now) })
+          : t("skills.sync.noSync"),
+        t("skills.sync.pushed", { pushed: sync.pushed }),
+        t("skills.sync.pulled", { pulled: sync.pulled }),
       ].join(" · ")
     : offline
-      ? "Local skills keep working; sync resumes when the daemon is online."
-      : "Run a cycle to publish local changes and pull the shared registry.";
+      ? t("skills.sync.offlineDetail")
+      : t("skills.sync.idleDetail");
   const summary = sync?.message?.trim() || detail;
 
   return (
@@ -102,14 +108,12 @@ function SyncBanner() {
         {sync && (sync.conflicts > 0 || sync.hint) ? (
           <span className="q-faint">
             {" "}
-            ·{" "}
-            {sync.hint ??
-              `${sync.conflicts} ${sync.conflicts === 1 ? "conflict" : "conflicts"} to settle.`}
+            · {sync.hint ?? t("skills.sync.conflicts", { count: sync.conflicts })}
           </span>
         ) : null}
       </span>
       <Button variant="ghost" size="sm" onClick={() => void syncSkillsNow()} disabled={syncing}>
-        {syncing ? "Syncing…" : "Sync now"}
+        {syncing ? t("skills.sync.syncing") : t("skills.sync.syncNow")}
       </Button>
     </div>
   );
@@ -117,14 +121,15 @@ function SyncBanner() {
 
 function Conflicts({ conflicts }: { conflicts: SkillConflict[] }) {
   const isPhone = useIsPhone();
+  const { t } = useTranslation(["library", "dialogs", "common"]);
   const [choices, setChoices] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState<Record<string, boolean>>({});
   if (conflicts.length === 0) return null;
   return (
     <div className="q-sec">
       <div className="q-sec-h">
-        <h2>Conflicts</h2>
-        <span className="aside">Settle these before the next sync</span>
+        <h2>{t("skills.conflicts.title")}</h2>
+        <span className="aside">{t("skills.conflicts.aside")}</span>
       </div>
       <div className="flex flex-col gap-2">
         {conflicts.map((conflict) => {
@@ -135,20 +140,27 @@ function Conflicts({ conflicts }: { conflicts: SkillConflict[] }) {
               <div className="grow" style={{ minWidth: isPhone ? "calc(100% - 28px)" : undefined }}>
                 <div className="t">{conflict.name}</div>
                 <div className="q-muted" style={{ fontSize: 12, marginTop: 2 }}>
-                  {conflict.reason} · local{" "}
-                  <span className="q-mono">
-                    {conflict.local_version ? shortVersion(conflict.local_version) : "none"}
-                  </span>{" "}
-                  → remote <span className="q-mono">{shortVersion(conflict.remote_version)}</span>
+                  <Trans
+                    t={t}
+                    i18nKey="skills.conflicts.versions"
+                    values={{
+                      reason: conflict.reason,
+                      local: conflict.local_version
+                        ? shortVersion(conflict.local_version)
+                        : t("skills.conflicts.none"),
+                      remote: shortVersion(conflict.remote_version),
+                    }}
+                    components={{ v: <span className="q-mono" /> }}
+                  />
                 </div>
               </div>
               <ChipSelect
-                label={`Resolution for ${conflict.name}`}
+                label={t("dialogs:mcp.import.resolutionFor", { name: conflict.name })}
                 value={choice}
                 options={[
-                  { value: "keep_local", label: "Keep local" },
-                  { value: "keep_remote", label: "Keep remote" },
-                  { value: "keep_both", label: "Keep both" },
+                  { value: "keep_local", label: t("skills.conflicts.keepLocal") },
+                  { value: "keep_remote", label: t("skills.conflicts.keepRemote") },
+                  { value: "keep_both", label: t("skills.conflicts.keepBoth") },
                 ]}
                 onChange={(next) => setChoices((current) => ({ ...current, [conflict.id]: next }))}
               />
@@ -164,7 +176,7 @@ function Conflicts({ conflicts }: { conflicts: SkillConflict[] }) {
                   ).finally(() => setBusy((current) => ({ ...current, [conflict.id]: false })));
                 }}
               >
-                {busy[conflict.id] ? "Settling…" : "Resolve"}
+                {busy[conflict.id] ? t("skills.conflicts.settling") : t("skills.conflicts.resolve")}
               </Button>
             </div>
           );
@@ -176,6 +188,7 @@ function Conflicts({ conflicts }: { conflicts: SkillConflict[] }) {
 
 function HarnessMatrix({ skill, isPhone }: { skill: SkillSummary; isPhone: boolean }) {
   const pending = useSkills((state) => state.pending);
+  const { t } = useTranslation(["library", "common"]);
   const installs = new Map<HarnessKind, SkillInstallState>(
     skill.installs.map((install) => [install.harness, install]),
   );
@@ -199,11 +212,17 @@ function HarnessMatrix({ skill, isPhone }: { skill: SkillSummary; isPhone: boole
               aria-checked={enabled}
               aria-disabled={pending[`${skill.id}:${harness}`] ? "true" : undefined}
               disabled={!install || Boolean(pending[`${skill.id}:${harness}`])}
-              aria-label={`${skill.name} for ${HARNESS_LABELS[harness]}`}
+              aria-label={t("skills.row.toggle", {
+                skill: skill.name,
+                harness: HARNESS_LABELS[harness],
+              })}
               title={
                 !install
-                  ? `${HARNESS_LABELS[harness]} has no skill directory on this host`
-                  : `${HARNESS_LABELS[harness]} · ${install.version ?? "not installed"}`
+                  ? t("skills.row.noDirectory", { harness: HARNESS_LABELS[harness] })
+                  : t("skills.row.version", {
+                      harness: HARNESS_LABELS[harness],
+                      version: install.version ?? t("skills.row.notInstalled"),
+                    })
               }
               onClick={() => {
                 if (!install) return;
@@ -215,7 +234,7 @@ function HarnessMatrix({ skill, isPhone }: { skill: SkillSummary; isPhone: boole
             </span>
             <span
               className={cn("q-mono text-[10px]", failed ? "q-warn" : "text-[var(--fg-3)]")}
-              title={failed ? "Enabled in the registry but no managed copy was found" : undefined}
+              title={failed ? t("skills.row.missingCopy") : undefined}
             >
               {shortVersion(install?.version ?? null)}
             </span>
@@ -235,6 +254,7 @@ function SkillRow({
   isPhone: boolean;
   onOpen: () => void;
 }) {
+  const { t } = useTranslation(["library", "common"]);
   const installed = skill.installs.filter((install) => install.installed).length;
   return (
     <div className="q-li" style={{ flexWrap: isPhone ? "wrap" : undefined }}>
@@ -252,14 +272,18 @@ function SkillRow({
           </span>
           {skill.conflicts > 0 ? (
             <span className="q-badge warn">
-              <TriangleAlertIcon className="q-icon s12" aria-hidden /> {skill.conflicts}{" "}
-              {skill.conflicts === 1 ? "conflict" : "conflicts"}
+              <TriangleAlertIcon className="q-icon s12" aria-hidden />{" "}
+              {t("skills.row.conflicts", { count: skill.conflicts })}
             </span>
           ) : null}
         </div>
         <div className="s">{skill.description}</div>
         <div className="q-faint mt-1 text-[11.5px]">
-          {installed} of {skill.installs.length} harnesses · {sourceLabel(skill.source)}
+          {t("skills.row.installs", {
+            installed,
+            count: skill.installs.length,
+            source: sourceLabel(skill.source),
+          })}
         </div>
       </button>
       <HarnessMatrix skill={skill} isPhone={isPhone} />
@@ -268,9 +292,9 @@ function SkillRow({
   );
 }
 
-function SkeletonList() {
+function SkeletonList({ label }: { label: string }) {
   return (
-    <div className="q-list" role="status" aria-busy="true" aria-label="Loading skills">
+    <div className="q-list" role="status" aria-busy="true" aria-label={label}>
       {[0, 1, 2].map((row) => (
         <div className="q-li" key={row}>
           <div className="q-skel" style={{ width: 26, height: 26, borderRadius: 6 }} />
@@ -295,6 +319,8 @@ export function SkillsPage() {
   const inventory = useSkills((state) => state.inventory);
   const loading = useSkills((state) => state.loading);
   const error = useSkills((state) => state.error);
+  const errorAction = useSkills((state) => state.errorAction);
+  const { t } = useTranslation(["library", "settings", "dialogs", "common"]);
   const conflicts = useSkills((state) => state.conflicts);
   const [addOpen, setAddOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
@@ -324,27 +350,28 @@ export function SkillsPage() {
 
   return (
     <>
-      <main className="q-main" aria-label="Skills">
+      <main className="q-main" aria-label={t("settings:nav.skills")}>
         <div className="q-page">
           <div className="q-wrap" style={{ maxWidth: 920 }}>
-            <div className="mb-5 flex items-start gap-3">
-              <div className="grow">
+            <div className="mb-5 flex flex-wrap items-start gap-3">
+              <div className="grow basis-0">
                 <h1 className="text-[20px] leading-[26px] font-semibold tracking-[-0.015em]">
-                  Skills
+                  {t("settings:nav.skills")}
                 </h1>
                 <div className="q-muted mt-1">
                   {loading && !inventory
-                    ? "Reading the skill registry…"
-                    : isPhone
-                      ? `${skills.length} installed · ${detected} harnesses`
-                      : `${skills.length} installed · ${detected} harnesses detected · available wherever you choose`}
+                    ? t("skills.loadingRegistry")
+                    : t(isPhone ? "skills.summaryShort" : "skills.summary", {
+                        installed: skills.length,
+                        count: detected,
+                      })}
                 </div>
               </div>
               <Button variant="secondary" onClick={() => setImportOpen(true)}>
-                <DownloadIcon className="q-icon s14" aria-hidden /> Find existing
+                <DownloadIcon className="q-icon s14" aria-hidden /> {t("skills.findExisting")}
               </Button>
               <Button onClick={() => setAddOpen(true)}>
-                <PlusIcon className="q-icon s14" aria-hidden /> Add skill
+                <PlusIcon className="q-icon s14" aria-hidden /> {t("dialogs:skills.add.submit")}
               </Button>
             </div>
 
@@ -358,61 +385,49 @@ export function SkillsPage() {
                 <span className="grow">
                   <b>
                     {unmanaged.length === 1
-                      ? `${unmanaged[0]?.name} is in a harness folder`
-                      : `${unmanaged.length} skills are in your harness folders`}{" "}
-                    but not managed by h4rn.
+                      ? t("skills.found.one", { name: unmanaged[0]?.name ?? "" })
+                      : t("skills.found.many", { count: unmanaged.length })}
                   </b>{" "}
-                  Bring {unmanaged.length === 1 ? "it" : "them"} in to sync across your machines.
+                  {unmanaged.length === 1
+                    ? t("skills.found.bringOne")
+                    : t("skills.found.bringMany")}
                 </span>
                 <Button variant="ghost" size="sm" onClick={() => setFoundDismissed(true)}>
-                  Not now
+                  {t("skills.found.notNow")}
                 </Button>
                 <Button size="sm" onClick={() => setImportOpen(true)}>
-                  Review
+                  {t("skills.found.review")}
                 </Button>
               </div>
             ) : null}
 
-            {error ? (
-              <div className="q-banner err" style={{ margin: "0 0 18px" }}>
-                <span className="ic">
-                  <TriangleAlertIcon className="q-icon s14" aria-hidden />
-                </span>
-                <span className="grow">
-                  <b>{error.message}</b> {error.hint ?? "The daemon did not answer."}
-                </span>
-                <Button variant="ghost" size="sm" onClick={() => void loadSkills({ force: true })}>
-                  Retry
-                </Button>
-              </div>
-            ) : null}
+            <LibraryErrorBanner
+              error={error}
+              action={errorAction}
+              style={{ margin: "0 0 18px" }}
+              onRetry={() => void loadSkills({ force: true })}
+            />
 
             <Conflicts conflicts={conflicts} />
 
             <div className="q-sec" style={{ marginTop: conflicts.length > 0 ? 24 : 0 }}>
               <div className="q-sec-h">
-                <h2>Installed skills</h2>
-                {isPhone ? null : (
-                  <span className="aside">
-                    Each harness gets a managed copy; versions can differ until the next sync
-                  </span>
-                )}
+                <h2>{t("skills.installed.title")}</h2>
+                {isPhone ? null : <span className="aside">{t("skills.installed.aside")}</span>}
               </div>
               {loading && !inventory ? (
-                SkeletonList()
+                <SkeletonList label={t("skills.loading")} />
               ) : skills.length === 0 ? (
                 <div className="q-empty">
-                  <h3>No skills yet</h3>
-                  <p>
-                    Add a folder with a SKILL.md, clone one from git, or import what your harnesses
-                    already installed.
-                  </p>
+                  <h3>{t("skills.installed.emptyTitle")}</h3>
+                  <p>{t("skills.installed.emptyBody")}</p>
                   <div className="flex gap-2">
                     <Button onClick={() => setAddOpen(true)}>
-                      <PlusIcon className="q-icon s14" aria-hidden /> Add skill
+                      <PlusIcon className="q-icon s14" aria-hidden />{" "}
+                      {t("dialogs:skills.add.submit")}
                     </Button>
                     <Button variant="secondary" onClick={() => setImportOpen(true)}>
-                      <DownloadIcon className="q-icon s14" aria-hidden /> Import
+                      <DownloadIcon className="q-icon s14" aria-hidden /> {t("skills.import")}
                     </Button>
                   </div>
                 </div>
@@ -433,8 +448,8 @@ export function SkillsPage() {
             {inventory && inventory.harnesses.length > 0 ? (
               <div className="q-sec">
                 <div className="q-sec-h">
-                  <h2>Harness directories</h2>
-                  <span className="aside">Where h4rn installs managed copies on this machine</span>
+                  <h2>{t("skills.directories.title")}</h2>
+                  <span className="aside">{t("skills.directories.aside")}</span>
                 </div>
                 <div className="q-list">
                   {inventory.harnesses.map((entry) => (
@@ -452,11 +467,13 @@ export function SkillsPage() {
                       <div className="grow">
                         <div className="t">{HARNESS_LABELS[entry.harness]}</div>
                         <div className="s q-mono">
-                          {entry.user_root ?? "No user skill directory"}
+                          {entry.user_root ?? t("skills.directories.noUserRoot")}
                         </div>
                       </div>
                       <span className="q-faint" style={{ fontSize: 12 }}>
-                        {entry.detected ? "Detected" : "Not installed"}
+                        {entry.detected
+                          ? t("skills.directories.detected")
+                          : t("skills.directories.notInstalled")}
                       </span>
                     </div>
                   ))}

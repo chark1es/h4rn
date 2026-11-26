@@ -35,7 +35,10 @@ export type McpState = {
   servers: McpServerView[];
   loading: boolean;
   refreshing: boolean;
+  /** Why the list could not load, kept as sent so a client error relabels. */
   error: ProtoError | null;
+  /** Which request failed, worded by the page as `library:errors.actions.<kind>`. */
+  errorAction: McpAction | null;
   /** Wall-clock time of the last authoritative list or status event. */
   checkedAt: number | null;
   /** `server` -> tools from the last `ListTools` call. */
@@ -49,6 +52,9 @@ export type McpState = {
   /** Shared tool calls waiting for this machine's decision, oldest first. */
   approvals: McpShareApproval[];
 };
+
+/** A request whose failure the MCP page shows in its error banner. */
+export type McpAction = "listServers";
 
 export type McpToolActivity = {
   id: string;
@@ -69,6 +75,7 @@ const initialState: McpState = {
   loading: false,
   refreshing: false,
   error: null,
+  errorAction: null,
   checkedAt: null,
   tools: {},
   calls: {},
@@ -151,16 +158,9 @@ function replaceServer(server: McpServerView): McpServerView[] {
   );
 }
 
-function fail(request: string, error: unknown): ProtoError {
+function fail(action: McpAction, error: unknown): ProtoError {
   const proto = toProtoError(error);
-  set({
-    loading: false,
-    refreshing: false,
-    error: {
-      ...proto,
-      message: `${proto.message} (${request})`,
-    },
-  });
+  set({ loading: false, refreshing: false, error: proto, errorAction: action });
   return proto;
 }
 
@@ -171,6 +171,7 @@ export async function loadMcpServers(options: { force?: boolean } = {}): Promise
     loading: state.servers.length === 0,
     refreshing: state.servers.length > 0,
     error: null,
+    errorAction: null,
   });
   try {
     const response = await send({ type: "list_servers" });
@@ -183,10 +184,11 @@ export async function loadMcpServers(options: { force?: boolean } = {}): Promise
       loading: false,
       refreshing: false,
       error: null,
+      errorAction: null,
       checkedAt: Date.now(),
     });
   } catch (error) {
-    fail(i18n.t("shell:mcp.listServers"), error);
+    fail("listServers", error);
   }
 }
 

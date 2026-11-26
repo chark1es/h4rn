@@ -159,6 +159,12 @@ const CONVERTED = [
   "src/features/projects/ImportPanel.tsx",
   "src/features/skills/SkillDialogs.tsx",
   "src/features/subagents/DelegateDialog.tsx",
+  "src/components/pages/LibraryPage.tsx",
+  "src/components/pages/LibraryErrorBanner.tsx",
+  "src/features/mcp/McpPage.tsx",
+  "src/features/mcp/McpApprovalCard.tsx",
+  "src/features/mcp/labels.ts",
+  "src/features/skills/SkillsPage.tsx",
 ];
 
 /** Names that read the same in every language. */

@@ -5,6 +5,7 @@ import type enCommon from "./locales/en/common.json";
 import type enComposer from "./locales/en/composer.json";
 import type enDialogs from "./locales/en/dialogs.json";
 import type enIssues from "./locales/en/issues.json";
+import type enLibrary from "./locales/en/library.json";
 import type enPairing from "./locales/en/pairing.json";
 import type enPullRequests from "./locales/en/pullRequests.json";
 import type enSettings from "./locales/en/settings.json";
@@ -24,6 +25,7 @@ declare module "i18next" {
       composer: typeof enComposer;
       dialogs: typeof enDialogs;
       issues: typeof enIssues;
+      library: typeof enLibrary;
       pairing: typeof enPairing;
       pullRequests: typeof enPullRequests;
       settings: typeof enSettings;

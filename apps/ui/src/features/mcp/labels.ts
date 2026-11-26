@@ -7,6 +7,7 @@ import type {
   McpTransportView,
 } from "@/gen";
 import { HARNESS_LABELS } from "@/lib/entities";
+import { i18n } from "@/lib/i18n";
 
 /** Every harness the hub can deliver a server to. */
 export const MCP_HARNESSES: HarnessKind[] = ["claude_code", "codex", "opencode", "antigravity"];
@@ -17,13 +18,9 @@ export const MCP_HARNESSES: HarnessKind[] = ["claude_code", "codex", "opencode",
  * This is a property of the adapter, not of one server, so it is presented
  * here rather than shipped over the wire.
  */
-export const DELIVERY: Record<HarnessKind, string> = {
-  claude_code: "Host config file",
-  codex: "Session request",
-  opencode: "Harness API",
-  antigravity: "ACP or stdio bridge",
-  acp: "ACP",
-};
+export function deliveryLabel(harness: HarnessKind): string {
+  return i18n.t(`library:mcp.delivery.${harness}`);
+}
 
 export function transportKind(transport: McpTransportView): string {
   return transport.type === "stdio" ? "stdio" : transport.type === "http" ? "HTTP" : "SSE";
@@ -40,12 +37,6 @@ export function secretNames(transport: McpTransportView): string[] {
   return transport.type === "stdio" ? transport.env_keys : transport.header_keys;
 }
 
-export function secretLabel(transport: McpTransportView, count = 2): string {
-  if (transport.type === "stdio")
-    return count === 1 ? "environment variable" : "environment variables";
-  return count === 1 ? "header" : "headers";
-}
-
 /** The daemon reports missing credentials as a redacted start or call error. */
 function needsCredential(server: McpServerView): boolean {
   return Boolean(
@@ -56,50 +47,39 @@ function needsCredential(server: McpServerView): boolean {
   );
 }
 
+/** What a server's health is, as a kind the Sidebar and the page both word. */
+export type ServerStatusKind =
+  | "unreachable"
+  | "sharedFrom"
+  | "needsCredential"
+  | McpServerStatusKind;
+
 export function serverStatus(server: McpServerView): {
+  kind: ServerStatusKind;
   label: string;
   tone: "ok" | "warn" | "danger" | "off";
 } {
+  const status = (kind: ServerStatusKind, tone: "ok" | "warn" | "danger" | "off") => ({
+    kind,
+    tone,
+    // A state a newer daemon adds has no words yet; it is shown as sent.
+    label: i18n.t(`library:mcp.status.${kind}`, { host: server.runs_on ?? "", defaultValue: kind }),
+  });
   if (server.runs_on) {
     return server.status === "error"
-      ? { label: "Unreachable", tone: "danger" }
-      : { label: `Shared from ${server.runs_on}`, tone: "off" };
+      ? status("unreachable", "danger")
+      : status("sharedFrom", "off");
   }
-  if (needsCredential(server)) return { label: "Needs credential", tone: "warn" };
+  if (needsCredential(server)) return status("needsCredential", "warn");
   switch (server.status) {
     case "ready":
-      return { label: "Healthy", tone: "ok" };
+      return status("ready", "ok");
     case "starting":
-      return { label: "Starting", tone: "warn" };
+      return status("starting", "warn");
     case "error":
-      return { label: "Error", tone: "danger" };
-    case "disabled":
-      return { label: "Off", tone: "off" };
-    case "remote":
-      return { label: "Remote", tone: "off" };
-    case "stopped":
-      return { label: "Stopped", tone: "off" };
+      return status("error", "danger");
     default:
-      return { label: server.status, tone: "off" };
-  }
-}
-
-export function statusLabel(status: McpServerStatusKind): string {
-  switch (status) {
-    case "ready":
-      return "Healthy";
-    case "starting":
-      return "Starting";
-    case "error":
-      return "Error";
-    case "disabled":
-      return "Off";
-    case "remote":
-      return "Remote";
-    case "stopped":
-      return "Stopped";
-    default:
-      return status;
+      return status(server.status, "off");
   }
 }
 
@@ -134,29 +114,28 @@ export function enabledFor(
 /** Who asked for a tool call, in words rather than protocol variants. */
 export function callerLabel(caller: McpCaller): string {
   switch (caller.kind) {
-    case "harness": {
-      const thread = caller.thread_id ? ` · ${caller.thread_id}` : "";
-      return `${harnessName(caller.harness)}${thread}`;
-    }
+    case "harness":
+      return caller.thread_id
+        ? i18n.t("library:mcp.caller.harnessThread", {
+            harness: harnessName(caller.harness),
+            thread: caller.thread_id,
+          })
+        : harnessName(caller.harness);
     case "client":
-      return "This device";
-    case "remote": {
-      const machine = caller.machine ? ` · ${caller.machine}` : "";
-      return `Remote${machine}`;
-    }
+      return i18n.t("library:mcp.caller.device");
+    case "remote":
+      return caller.machine
+        ? i18n.t("library:mcp.caller.remoteFrom", { machine: caller.machine })
+        : i18n.t("library:mcp.caller.remote");
   }
 }
 
 /** The four ways to settle a name conflict, in the order the popover lists them. */
 export const CONFLICT_CHOICES = [
-  {
-    value: "keep_mine",
-    label: "Keep mine",
-    hint: "h4rn's server stays; the harness's copy is ignored",
-  },
-  { value: "use_theirs", label: "Use theirs", hint: "The harness's configuration replaces mine" },
-  { value: "rename", label: "Rename theirs", hint: "Import the harness's server under a new name" },
-  { value: "skip", label: "Skip", hint: "Decide later; nothing changes" },
+  { value: "keep_mine" },
+  { value: "use_theirs" },
+  { value: "rename" },
+  { value: "skip" },
 ] as const;
 
 export type ConflictChoice = (typeof CONFLICT_CHOICES)[number]["value"];

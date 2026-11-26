@@ -1,0 +1,208 @@
+{
+  "errors": {
+    "withAction": "{{message}}（{{action}}）",
+    "noAnswer": "デーモンが応答しませんでした。",
+    "actions": {
+      "listServers": "サーバーの一覧取得",
+      "listSkills": "スキルの一覧取得"
+    }
+  },
+  "mcp": {
+    "summary_other": "サーバー {{count, number}} 件 · harness とマシンごとに配信",
+    "import": "インポート",
+    "empty": {
+      "title": "MCP サーバーはまだありません",
+      "body": "サーバーを一度追加すると、h4rn が選んだ harness とマシンに配信します。シークレットはそのサーバーを実行するマシンに残ります。"
+    },
+    "detail": "MCP サーバーの詳細",
+    "loading": "サーバーを読み込んでいます",
+    "allServers": "すべてのサーバー",
+    "tools_other": "ツール {{count, number}} 件",
+    "checked": {
+      "never": "未確認",
+      "justNow": "たった今確認",
+      "ago": "{{when}}に確認"
+    },
+    "test": "テスト",
+    "actions": "サーバーの操作",
+    "menu": {
+      "tools": "ツールの一覧とテスト",
+      "edit": "設定を編集",
+      "share": "共有…",
+      "remove": "サーバーを削除…"
+    },
+    "credential": {
+      "title": "認証情報",
+      "hint": "ホストの外には出ません",
+      "storedOn": "{{host}} に保存",
+      "thisHost": "このホスト",
+      "env_other": "環境変数 {{count, number}} 件 · 値は書き込み専用",
+      "headers_other": "ヘッダー {{count, number}} 件 · 値は書き込み専用",
+      "noEnv": "このサーバーには環境変数が保存されていません。",
+      "noHeaders": "このサーバーにはヘッダーが保存されていません。",
+      "sharedWith": "{{hosts}} と共有中"
+    },
+    "where": {
+      "title": "実行場所",
+      "aside": "それぞれの対象が独自の方法でサーバーを受け取ります",
+      "host": "ホスト",
+      "harness": "Harness",
+      "deliveredAs": "配信方法",
+      "status": "状態",
+      "ready": "準備完了",
+      "nameConflict": "名前の競合",
+      "canCall": "このマシンのサーバーを呼び出せます",
+      "turnOn": "{{host}} の {{harness}} で {{name}} をオンにする",
+      "turnOff": "{{host}} の {{harness}} で {{name}} をオフにする"
+    },
+    "delivery": {
+      "claude_code": "ホストの設定ファイル",
+      "codex": "セッションリクエスト",
+      "opencode": "Harness API",
+      "antigravity": "ACP または stdio ブリッジ",
+      "acp": "ACP",
+      "proxied": "プロキシ経由の hub エントリー"
+    },
+    "status": {
+      "unreachable": "到達できません",
+      "sharedFrom": "{{host}} から共有",
+      "needsCredential": "認証情報が必要",
+      "ready": "正常",
+      "starting": "起動中",
+      "error": "エラー",
+      "disabled": "オフ",
+      "remote": "リモート",
+      "stopped": "停止中"
+    },
+    "caller": {
+      "harnessThread": "{{harness}} · {{thread}}",
+      "device": "このデバイス",
+      "remote": "リモート",
+      "remoteFrom": "リモート · {{machine}}"
+    },
+    "conflict": {
+      "body": "harness に使わせる設定を選んでください。解決するまで何も上書きされません。",
+      "label": "{{name}} の競合を解決",
+      "trigger": "解決…"
+    },
+    "resolve": {
+      "title": "{{name}} を解決",
+      "choose": "{{harness}} に使わせる設定を選んでください。",
+      "otherCopy": "もう一方のコピーは {{harness}} 自身の設定にあります。",
+      "harness": "Harness",
+      "resolution": "解決方法",
+      "hints": {
+        "keep_mine": "h4rn のサーバーを残し、harness のコピーは無視します",
+        "use_theirs": "harness の設定で自分の設定を置き換えます",
+        "rename": "harness のサーバーを新しい名前でインポートします",
+        "skip": "後で決めます。何も変わりません"
+      },
+      "newName": "新しい名前",
+      "resolving": "解決しています…",
+      "resolve": "解決"
+    },
+    "sharedWithYou": {
+      "title": "共有されたサーバー",
+      "aside": "別のホストで定義",
+      "from": "{{host}} から",
+      "runsOn": "{{host}} で実行",
+      "use": "このマシンで {{name}} を使う"
+    },
+    "sharedFromHere": {
+      "title": "このマシンから共有",
+      "aside": "このマシンがサーバーを実行し、ポリシーを適用します",
+      "proxies": "リレーまたは Tailscale 経由でこのサーバーをプロキシします。",
+      "unshare": "共有を解除"
+    },
+    "activity": {
+      "title": "最近のツール呼び出し",
+      "aside": "デーモンからのライブ情報"
+    },
+    "config": {
+      "title": "設定",
+      "importedFrom": "{{source}} からインポート",
+      "managed": "h4rn が管理",
+      "transport": "トランスポート",
+      "transportHint": "hub がサーバーを起動または接続する方法",
+      "cwd": "cwd {{path}}"
+    },
+    "approval": {
+      "label": "共有ツールの承認",
+      "wantsToRun": "{{machine}} が <tool>{{tool}}</tool> を実行しようとしています",
+      "more_other": "ほか {{count, number}} 件",
+      "needsYou": "対応待ち",
+      "expires": "共有 MCP サーバー · {{when}}に期限切れ",
+      "expiring": "共有 MCP サーバー · まもなく期限切れ",
+      "noArgs": "引数なし",
+      "reconnect": "応答するには再接続してください。承認するまで何も実行されません。",
+      "deny": "拒否",
+      "answering": "応答しています…",
+      "approveOnce": "今回のみ承認"
+    }
+  },
+  "skills": {
+    "loadingRegistry": "スキルのレジストリを読み取っています…",
+    "summaryShort_other": "{{installed, number}} 件インストール済み · harness {{count, number}} 件",
+    "summary_other": "{{installed, number}} 件インストール済み · harness を {{count, number}} 件検出 · 好きな場所で利用可能",
+    "findExisting": "既存のスキルを探す",
+    "import": "インポート",
+    "loading": "スキルを読み込んでいます",
+    "sync": {
+      "syncing": "同期しています…",
+      "offline": "オフライン",
+      "notSynced": "未同期",
+      "synced": "同期済み",
+      "blocked": "対応が必要",
+      "idle": "待機中",
+      "lastSync": "最終同期 {{when}}",
+      "noSync": "完了した同期なし",
+      "pushed": "{{pushed, number}} 件送信",
+      "pulled": "{{pulled, number}} 件受信",
+      "offlineDetail": "ローカルのスキルは引き続き使えます。デーモンがオンラインになると同期が再開します。",
+      "idleDetail": "同期を 1 回実行して、ローカルの変更を公開し、共有レジストリを取得します。",
+      "conflicts_other": "解決が必要な競合が {{count, number}} 件あります。",
+      "syncNow": "今すぐ同期"
+    },
+    "found": {
+      "one": "{{name}} は harness のフォルダーにありますが、h4rn では管理されていません。",
+      "many_other": "{{count, number}} 件のスキルが harness のフォルダーにありますが、h4rn では管理されていません。",
+      "bringOne": "取り込むと、マシン間で同期できます。",
+      "bringMany": "取り込むと、マシン間で同期できます。",
+      "notNow": "後で",
+      "review": "確認"
+    },
+    "conflicts": {
+      "title": "競合",
+      "aside": "次の同期の前に解決してください",
+      "versions": "{{reason}} · ローカル <v>{{local}}</v> → リモート <v>{{remote}}</v>",
+      "none": "なし",
+      "keepLocal": "ローカルを残す",
+      "keepRemote": "リモートを残す",
+      "keepBoth": "両方を残す",
+      "settling": "解決しています…",
+      "resolve": "解決"
+    },
+    "installed": {
+      "title": "インストール済みのスキル",
+      "aside": "各 harness に管理されたコピーが置かれます。次の同期まではバージョンが異なることがあります",
+      "emptyTitle": "スキルはまだありません",
+      "emptyBody": "SKILL.md を含むフォルダーを追加するか、git からクローンするか、harness にインストール済みのものをインポートしてください。"
+    },
+    "row": {
+      "conflicts_other": "競合 {{count, number}} 件",
+      "installs_other": "harness {{count, number}} 件中 {{installed, number}} 件 · {{source}}",
+      "toggle": "{{harness}} の {{skill}}",
+      "noDirectory": "{{harness}} にはこのホスト上のスキルディレクトリがありません",
+      "version": "{{harness}} · {{version}}",
+      "notInstalled": "未インストール",
+      "missingCopy": "レジストリでは有効ですが、管理されたコピーが見つかりません"
+    },
+    "directories": {
+      "title": "Harness のディレクトリ",
+      "aside": "h4rn がこのマシンで管理コピーをインストールする場所",
+      "noUserRoot": "ユーザーのスキルディレクトリなし",
+      "detected": "検出済み",
+      "notInstalled": "未インストール"
+    }
+  }
+}

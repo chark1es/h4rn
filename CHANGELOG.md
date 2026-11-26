@@ -86,6 +86,13 @@ All notable changes to h4rn are recorded here. The format follows
   branches, paths, commit messages, server and skill names and the daemon's
   own errors are shown as they are; a guest link's expiry, sizes and dates use
   the language's own formats.
+- **The MCP servers and Skills pages in Chinese, Spanish and Japanese.** Both
+  pages, the conflict and sync banners, server health in the Settings sidebar
+  and the shared tool approval card follow the Language choice. A failed list
+  now names the request in the current language and relabels when you switch,
+  instead of keeping the words it failed in. Server, tool and skill names,
+  commands, URLs and what the daemon or registry wrote are shown as sent;
+  counts and times use the language's own formats.
 - **Android Live Updates show a running agent.** A separate switch under
   Settings → Notifications → Phone alerts shows each running thread as an
   ongoing notification with its project and whether it is working, waiting for

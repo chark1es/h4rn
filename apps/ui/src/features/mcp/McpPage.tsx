@@ -14,9 +14,11 @@ import {
   WrenchIcon,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
 import { Popover } from "@/components/common/Popover";
+import { LibraryErrorBanner } from "@/components/pages/LibraryErrorBanner";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -25,11 +27,11 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import type { HarnessKind, HostId, McpServerView, ProtoError } from "@/gen";
+import type { HarnessKind, HostId, McpServerView } from "@/gen";
 import { useIsPhone } from "@/hooks/use-media-query";
 import { useNow } from "@/hooks/use-now";
 import { HARNESS_LABELS, harnessSeed, machineSeed } from "@/lib/entities";
-import { relativeAge } from "@/lib/format";
+import { formatAge, formatClockUnit, formatList, formatRelativeTime, i18n } from "@/lib/i18n";
 import { setLibrarySelected, useApp } from "@/lib/store/appStore";
 import { cn } from "@/lib/utils";
 import {
@@ -38,11 +40,10 @@ import {
   callerLabel,
   conflictResolution,
   conflictText,
-  DELIVERY,
+  deliveryLabel,
   enabledFor,
   harnessName,
   MCP_HARNESSES,
-  secretLabel,
   secretNames,
   serverStatus,
   transportKind,
@@ -66,13 +67,22 @@ import {
 } from "./store";
 
 const NEW_SERVER = "__new";
+const BANNER_STYLE = { margin: "0 0 16px" };
+
+/** A conflict choice's name; the import dialog uses the same words. */
+const CHOICE_LABELS = {
+  keep_mine: "dialogs:mcp.import.keepMine",
+  use_theirs: "dialogs:mcp.import.useTheirs",
+  rename: "dialogs:mcp.import.renameTheirs",
+  skip: "dialogs:mcp.import.skip",
+} as const satisfies Record<ConflictChoice, string>;
 /** Machine-wide rows are not harness specific; show them under the first harness. */
 const PRIMARY_HARNESS: HarnessKind = MCP_HARNESSES[0] ?? "claude_code";
 
 function checkedLabel(checkedAt: number | null, now: number): string {
-  if (!checkedAt) return "not checked yet";
-  const age = relativeAge(new Date(checkedAt).toISOString(), now);
-  return age === "now" ? "checked just now" : `checked ${age} ago`;
+  if (!checkedAt) return i18n.t("library:mcp.checked.never");
+  if (now - checkedAt < 60_000) return i18n.t("library:mcp.checked.justNow");
+  return i18n.t("library:mcp.checked.ago", { when: formatRelativeTime(checkedAt, now) });
 }
 
 function Health({ server }: { server: McpServerView }) {
@@ -153,9 +163,13 @@ function matrixRows(server: McpServerView): MatrixRow[] {
       hostName: "",
       harness,
       target: "harness",
-      delivery: DELIVERY[harness],
+      delivery: deliveryLabel(harness),
       enabled,
-      note: enabled ? (server.tool_count > 0 ? `${server.tool_count} tools` : "Ready") : "Off",
+      note: enabled
+        ? server.tool_count > 0
+          ? i18n.t("library:mcp.tools", { count: server.tool_count })
+          : i18n.t("library:mcp.where.ready")
+        : i18n.t("common:off"),
       tone: enabled ? "ok" : "off",
       busy: false,
       onToggle: () => undefined,
@@ -179,13 +193,13 @@ function matrixRows(server: McpServerView): MatrixRow[] {
       hostName: "",
       harness,
       target: "machine",
-      delivery: "Proxied hub entry",
+      delivery: i18n.t("library:mcp.delivery.proxied"),
       enabled,
       note: !enabled
-        ? "Off"
+        ? i18n.t("common:off")
         : conflict && index === 0
-          ? "Name conflict"
-          : "Can call this machine's server",
+          ? i18n.t("library:mcp.where.nameConflict")
+          : i18n.t("library:mcp.where.canCall"),
       tone: !enabled ? "off" : conflict && index === 0 ? "warn" : "ok",
       busy: false,
       onToggle: () => undefined,
@@ -195,6 +209,7 @@ function matrixRows(server: McpServerView): MatrixRow[] {
 }
 
 function ConflictCard({ server }: { server: McpServerView }) {
+  const { t } = useTranslation(["library", "common"]);
   const text = conflictText(server);
   if (!text) return null;
   return (
@@ -203,15 +218,14 @@ function ConflictCard({ server }: { server: McpServerView }) {
       <div className="grow">
         <div className="t">{text}</div>
         <div className="q-muted" style={{ fontSize: 12, marginTop: 2 }}>
-          Pick which configuration the harness should see. Nothing is overwritten until you settle
-          this.
+          {t("mcp.conflict.body")}
         </div>
       </div>
       <Popover
-        label={`Resolve the ${server.name} conflict`}
+        label={t("mcp.conflict.label", { name: server.name })}
         align="end"
         width={340}
-        trigger={() => "Resolve…"}
+        trigger={() => t("mcp.conflict.trigger")}
       >
         {({ close }) => <ResolvePanel server={server} close={close} />}
       </Popover>
@@ -226,6 +240,7 @@ function ResolvePanel({ server, close }: { server: McpServerView; close: () => v
       ? (server.imported_from as HarnessKind)
       : "claude_code",
   );
+  const { t } = useTranslation(["library", "dialogs", "common"]);
   const [choice, setChoice] = useState<ConflictChoice>("keep_mine");
   const [rename, setRename] = useState("");
   const [busy, setBusy] = useState(false);
@@ -248,16 +263,22 @@ function ResolvePanel({ server, close }: { server: McpServerView; close: () => v
         void settle();
       }}
     >
-      <div style={{ fontWeight: 600, marginBottom: 2 }}>Resolve {server.name}</div>
+      <div style={{ fontWeight: 600, marginBottom: 2 }}>
+        {t("mcp.resolve.title", { name: server.name })}
+      </div>
       <div className="q-muted" style={{ fontSize: 12, marginBottom: 10 }}>
-        Choose which configuration {HARNESS_LABELS[harness]} should see.
+        {t("mcp.resolve.choose", { harness: HARNESS_LABELS[harness] })}
       </div>
       {locked ? (
         <div className="q-faint" style={{ fontSize: 12, marginBottom: 8 }}>
-          The other copy comes from {HARNESS_LABELS[harness]}'s own config.
+          {t("mcp.resolve.otherCopy", { harness: HARNESS_LABELS[harness] })}
         </div>
       ) : (
-        <div className="q-seg q-resolve-seg" role="radiogroup" aria-label="Harness">
+        <div
+          className="q-seg q-resolve-seg"
+          role="radiogroup"
+          aria-label={t("mcp.resolve.harness")}
+        >
           {MCP_HARNESSES.map((entry) => (
             // biome-ignore lint/a11y/useSemanticElements: a segmented radio group, not a form radio
             <button
@@ -273,7 +294,7 @@ function ResolvePanel({ server, close }: { server: McpServerView; close: () => v
           ))}
         </div>
       )}
-      <div role="radiogroup" aria-label="Resolution">
+      <div role="radiogroup" aria-label={t("mcp.resolve.resolution")}>
         {CONFLICT_CHOICES.map((option) => (
           <label key={option.value} className="q-resolve-opt">
             <input
@@ -285,8 +306,8 @@ function ResolvePanel({ server, close }: { server: McpServerView; close: () => v
             />
             <span className={cn("q-radio", choice === option.value && "on")} aria-hidden />
             <span>
-              <span style={{ fontWeight: 500 }}>{option.label}</span>
-              <span className="q-faint sub">{option.hint}</span>
+              <span style={{ fontWeight: 500 }}>{t(CHOICE_LABELS[option.value])}</span>
+              <span className="q-faint sub">{t(`mcp.resolve.hints.${option.value}`)}</span>
             </span>
           </label>
         ))}
@@ -297,16 +318,16 @@ function ResolvePanel({ server, close }: { server: McpServerView; close: () => v
           style={{ marginTop: 8 }}
           value={rename}
           onChange={(event) => setRename(event.target.value)}
-          placeholder="New name"
-          aria-label={`New name for ${server.name}`}
+          placeholder={t("mcp.resolve.newName")}
+          aria-label={t("dialogs:mcp.import.newNameFor", { name: server.name })}
         />
       ) : null}
       <div style={{ display: "flex", justifyContent: "flex-end", gap: 6, marginTop: 12 }}>
         <button type="button" className="q-btn ghost" onClick={close}>
-          Cancel
+          {t("common:cancel")}
         </button>
         <button type="submit" className="q-btn primary" disabled={busy || !target}>
-          {busy ? "Resolving…" : "Resolve"}
+          {busy ? t("mcp.resolve.resolving") : t("mcp.resolve.resolve")}
         </button>
       </div>
     </form>
@@ -314,36 +335,41 @@ function ResolvePanel({ server, close }: { server: McpServerView; close: () => v
 }
 
 function CredentialField({ server }: { server: McpServerView }) {
+  const { t } = useTranslation(["library", "common"]);
   const hosts = useApp((state) => state.hosts);
   const local = useApp((state) => state.localHostId);
   const keys = secretNames(server.transport);
-  const hostName = local ? (hosts[local]?.name ?? local) : "this host";
+  const hostName = local ? (hosts[local]?.name ?? local) : t("mcp.credential.thisHost");
+  const env = server.transport.type === "stdio";
   const remoteHost = server.runs_on ? (hosts[server.runs_on]?.name ?? server.runs_on) : null;
   return (
     <div className="q-field">
       <div className="lab">
-        <div className="t">Credential</div>
-        <div className="s">Never leaves the host</div>
+        <div className="t">{t("mcp.credential.title")}</div>
+        <div className="s">{t("mcp.credential.hint")}</div>
       </div>
       <div className="ctl">
         {keys.length > 0 ? (
           <>
             <span className="q-secret">
-              <KeyRoundIcon className="q-icon s12" aria-hidden /> Stored on {remoteHost ?? hostName}
+              <KeyRoundIcon className="q-icon s12" aria-hidden />{" "}
+              {t("mcp.credential.storedOn", { host: remoteHost ?? hostName })}
             </span>
             <span className="q-faint" style={{ fontSize: 12 }}>
-              {keys.length} {secretLabel(server.transport, keys.length)} · values are write-only
+              {t(env ? "mcp.credential.env" : "mcp.credential.headers", { count: keys.length })}
             </span>
           </>
         ) : (
           <span className="q-faint" style={{ fontSize: 12 }}>
-            No {secretLabel(server.transport)} stored for this server.
+            {t(env ? "mcp.credential.noEnv" : "mcp.credential.noHeaders")}
           </span>
         )}
         {server.shared_to.length > 0 ? (
           <span className="q-secret">
-            <Share2Icon className="q-icon s12" aria-hidden /> Shared with{" "}
-            {server.shared_to.map((machine) => hosts[machine]?.name ?? machine).join(", ")}
+            <Share2Icon className="q-icon s12" aria-hidden />{" "}
+            {t("mcp.credential.sharedWith", {
+              hosts: formatList(server.shared_to.map((machine) => hosts[machine]?.name ?? machine)),
+            })}
           </span>
         ) : null}
       </div>
@@ -352,6 +378,7 @@ function CredentialField({ server }: { server: McpServerView }) {
 }
 
 function SharedWithYou({ current }: { current: McpServerView | null }) {
+  const { t } = useTranslation(["library", "common"]);
   const servers = useMcp((state) => state.servers);
   const hosts = useApp((state) => state.hosts);
   const shared = servers.filter((server) => Boolean(server.runs_on));
@@ -359,8 +386,8 @@ function SharedWithYou({ current }: { current: McpServerView | null }) {
   return (
     <div className="q-sec">
       <div className="q-sec-h">
-        <h2>Shared with you</h2>
-        <span className="aside">Defined on another host</span>
+        <h2>{t("mcp.sharedWithYou.title")}</h2>
+        <span className="aside">{t("mcp.sharedWithYou.aside")}</span>
       </div>
       <div className="q-list">
         {shared.map((server) => {
@@ -383,22 +410,22 @@ function SharedWithYou({ current }: { current: McpServerView | null }) {
                 <div className="t">
                   {server.name}{" "}
                   <span className="q-faint" style={{ fontWeight: 400 }}>
-                    from {host?.name ?? machine}
+                    {t("mcp.sharedWithYou.from", { host: host?.name ?? machine })}
                   </span>
                 </div>
                 <div className="s">
                   {transportKind(server.transport)} ·{" "}
-                  <span className="q-mono">{transportSummary(server.transport)}</span> · runs on{" "}
-                  {host?.name ?? machine}
+                  <span className="q-mono">{transportSummary(server.transport)}</span> ·{" "}
+                  {t("mcp.sharedWithYou.runsOn", { host: host?.name ?? machine })}
                 </div>
               </button>
               <span className="q-secret">
-                <KeyRoundIcon className="q-icon s12" aria-hidden /> Stored on{" "}
-                {host?.name ?? machine}
+                <KeyRoundIcon className="q-icon s12" aria-hidden />{" "}
+                {t("mcp.credential.storedOn", { host: host?.name ?? machine })}
               </span>
               <Toggle
                 checked={enabled}
-                label={`Use ${server.name} on this machine`}
+                label={t("mcp.sharedWithYou.use", { name: server.name })}
                 onToggle={() =>
                   void setMcpEnabled(server.name, { machine: localHostId() ?? "" }, !enabled)
                 }
@@ -415,13 +442,14 @@ function SharedWithYou({ current }: { current: McpServerView | null }) {
 }
 
 function SharedFromHere({ server }: { server: McpServerView }) {
+  const { t } = useTranslation(["library", "common"]);
   const hosts = useApp((state) => state.hosts);
   if (server.shared_to.length === 0) return null;
   return (
     <div className="q-sec">
       <div className="q-sec-h">
-        <h2>Shared from this machine</h2>
-        <span className="aside">This machine runs the server and enforces the policy</span>
+        <h2>{t("mcp.sharedFromHere.title")}</h2>
+        <span className="aside">{t("mcp.sharedFromHere.aside")}</span>
       </div>
       <div className="q-list">
         {server.shared_to.map((machine) => (
@@ -434,14 +462,14 @@ function SharedFromHere({ server }: { server: McpServerView }) {
             />
             <div className="grow">
               <div className="t">{hosts[machine]?.name ?? machine}</div>
-              <div className="s">Proxies this server over the relay or Tailscale.</div>
+              <div className="s">{t("mcp.sharedFromHere.proxies")}</div>
             </div>
             <Button
               variant="ghost"
               size="sm"
               onClick={() => void unshareMcpServer(server.name, machine)}
             >
-              Unshare
+              {t("mcp.sharedFromHere.unshare")}
             </Button>
           </div>
         ))}
@@ -451,6 +479,7 @@ function SharedFromHere({ server }: { server: McpServerView }) {
 }
 
 function Activity({ server }: { server: McpServerView }) {
+  const { t } = useTranslation(["library", "common"]);
   const activity = useMcp((state) => state.activity);
   const now = useNow();
   const forServer = activity.filter((entry) => entry.server === server.name);
@@ -458,8 +487,8 @@ function Activity({ server }: { server: McpServerView }) {
   return (
     <div className="q-sec">
       <div className="q-sec-h">
-        <h2>Recent tool calls</h2>
-        <span className="aside">Live from the daemon</span>
+        <h2>{t("mcp.activity.title")}</h2>
+        <span className="aside">{t("mcp.activity.aside")}</span>
       </div>
       <div className="q-list">
         {forServer.slice(0, 8).map((entry) => (
@@ -476,12 +505,13 @@ function Activity({ server }: { server: McpServerView }) {
                 {entry.qualifiedName}
               </div>
               <div className="s">
-                {callerLabel(entry.caller)} · {Number(entry.durationMs)} ms
+                {callerLabel(entry.caller)} ·{" "}
+                {formatClockUnit(Number(entry.durationMs), "millisecond")}
                 {entry.error ? ` · ${entry.error}` : ""}
               </div>
             </div>
             <span className="q-faint q-num" style={{ fontSize: 12 }}>
-              {relativeAge(entry.at, now)}
+              {formatAge(entry.at, now)}
             </span>
           </div>
         ))}
@@ -490,14 +520,14 @@ function Activity({ server }: { server: McpServerView }) {
   );
 }
 
-function SkeletonDetail() {
+function SkeletonDetail({ label }: { label: string }) {
   return (
     <div
       className="q-wrap"
       style={{ maxWidth: 860 }}
       role="status"
       aria-busy="true"
-      aria-label="Loading server"
+      aria-label={label}
     >
       <div className="q-skel" style={{ width: 180, height: 22, marginBottom: 8 }} />
       <div className="q-skel" style={{ width: 420, height: 12, marginBottom: 28 }} />
@@ -507,38 +537,19 @@ function SkeletonDetail() {
   );
 }
 
-function ErrorBanner({ error, onRetry }: { error: ProtoError | null; onRetry: () => void }) {
-  if (!error) return null;
-  return (
-    <div className="q-banner err" style={{ margin: "0 0 16px" }}>
-      <span className="ic">
-        <TriangleAlertIcon className="q-icon s14" aria-hidden />
-      </span>
-      <span className="grow">
-        <b>{error.message}</b> {error.hint ?? "The daemon did not answer."}
-      </span>
-      <Button variant="ghost" size="sm" onClick={onRetry}>
-        Retry
-      </Button>
-    </div>
-  );
-}
-
 function EmptyState({ onAdd, onImport }: { onAdd: () => void; onImport: () => void }) {
+  const { t } = useTranslation(["library", "dialogs", "common"]);
   return (
     <div className="q-center-empty">
       <div className="q-empty q-box" style={{ alignItems: "flex-start", padding: 0 }}>
-        <h3>No MCP servers yet</h3>
-        <p>
-          Add a server once and h4rn delivers it to the harnesses and machines you choose. Secrets
-          stay on the machine that runs it.
-        </p>
+        <h3>{t("mcp.empty.title")}</h3>
+        <p>{t("mcp.empty.body")}</p>
         <div className="flex gap-2">
           <Button onClick={onAdd}>
-            <PlusIcon className="q-icon s14" aria-hidden /> Add server
+            <PlusIcon className="q-icon s14" aria-hidden /> {t("dialogs:mcp.server.add")}
           </Button>
           <Button variant="secondary" onClick={onImport}>
-            <UploadIcon className="q-icon s14" aria-hidden /> Import from a harness
+            <UploadIcon className="q-icon s14" aria-hidden /> {t("dialogs:mcp.import.title")}
           </Button>
         </div>
       </div>
@@ -558,13 +569,15 @@ function ServerList({
   const servers = useMcp((state) => state.servers);
   const loading = useMcp((state) => state.loading);
   const error = useMcp((state) => state.error);
+  const errorAction = useMcp((state) => state.errorAction);
   const isPhone = useIsPhone();
+  const { t } = useTranslation(["library", "settings", "common"]);
   return (
-    <main className="q-main" aria-label="MCP servers">
+    <main className="q-main" aria-label={t("settings:nav.mcpServers")}>
       <div className="q-page">
         <div className={cn("q-wrap", isPhone && "q-wrap-phone")} style={{ maxWidth: 860 }}>
-          <div className="mb-5 flex items-start gap-3">
-            <div className="grow">
+          <div className="mb-5 flex flex-wrap items-start gap-3">
+            <div className="grow basis-0">
               <h1
                 className={
                   isPhone
@@ -572,22 +585,24 @@ function ServerList({
                     : "text-[20px] leading-[26px] font-semibold tracking-[-0.015em]"
                 }
               >
-                MCP servers
+                {t("settings:nav.mcpServers")}
               </h1>
-              <div className="q-muted mt-1">
-                {servers.length} {servers.length === 1 ? "server" : "servers"} · delivered per
-                harness and machine
-              </div>
+              <div className="q-muted mt-1">{t("mcp.summary", { count: servers.length })}</div>
             </div>
             <Button variant="secondary" onClick={onImport}>
-              <UploadIcon className="q-icon s14" aria-hidden /> Import
+              <UploadIcon className="q-icon s14" aria-hidden /> {t("mcp.import")}
             </Button>
             <Button onClick={onAdd}>
-              <PlusIcon className="q-icon s14" aria-hidden /> Add
+              <PlusIcon className="q-icon s14" aria-hidden /> {t("common:add")}
             </Button>
           </div>
 
-          <ErrorBanner error={error} onRetry={() => void loadMcpServers({ force: true })} />
+          <LibraryErrorBanner
+            error={error}
+            action={errorAction}
+            style={BANNER_STYLE}
+            onRetry={() => void loadMcpServers({ force: true })}
+          />
 
           {loading && servers.length === 0 ? (
             <div className="q-list" aria-busy="true">
@@ -649,12 +664,22 @@ export function McpPage() {
   const loading = useMcp((state) => state.loading);
   const refreshing = useMcp((state) => state.refreshing);
   const error = useMcp((state) => state.error);
+  const errorAction = useMcp((state) => state.errorAction);
   const pending = useMcp((state) => state.pending);
   const checkedAt = useMcp((state) => state.checkedAt);
   const selected = useApp((state) => state.ui.layout.librarySelected);
   const hosts = useApp((state) => state.hosts);
   const daemonHost = useApp((state) => state.localHostId);
   const now = useNow();
+  const { t } = useTranslation(["library", "common"]);
+  const errorBanner = (
+    <LibraryErrorBanner
+      error={error}
+      action={errorAction}
+      style={BANNER_STYLE}
+      onRetry={() => void loadMcpServers({ force: true })}
+    />
+  );
 
   const [phoneOpen, setPhoneOpen] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
@@ -748,8 +773,10 @@ export function McpPage() {
   if (loading && servers.length === 0) {
     return (
       <>
-        <main className="q-main" aria-label="MCP server detail">
-          <div className="q-page">{SkeletonDetail()}</div>
+        <main className="q-main" aria-label={t("mcp.detail")}>
+          <div className="q-page">
+            <SkeletonDetail label={t("mcp.loading")} />
+          </div>
         </main>
         {dialogs}
       </>
@@ -759,10 +786,10 @@ export function McpPage() {
   if (!server) {
     return (
       <>
-        <main className="q-main" aria-label="MCP server detail">
+        <main className="q-main" aria-label={t("mcp.detail")}>
           <div className="q-page">
             <div className="q-wrap" style={{ maxWidth: 860 }}>
-              <ErrorBanner error={error} onRetry={() => void loadMcpServers({ force: true })} />
+              {errorBanner}
             </div>
             <EmptyState onAdd={openAdd} onImport={openImport} />
           </div>
@@ -800,12 +827,10 @@ export function McpPage() {
 
   return (
     <>
-      <main className="q-main" aria-label="MCP server detail">
+      <main className="q-main" aria-label={t("mcp.detail")}>
         <div className="q-page">
           <div className="q-wrap" style={{ maxWidth: 860 }}>
-            {error ? (
-              <ErrorBanner error={error} onRetry={() => void loadMcpServers({ force: true })} />
-            ) : null}
+            {errorBanner}
 
             {isPhone ? (
               <button
@@ -813,7 +838,7 @@ export function McpPage() {
                 className="q-btn ghost mb-3"
                 onClick={() => setPhoneOpen(false)}
               >
-                <ArrowLeftIcon className="q-icon s14" aria-hidden /> All servers
+                <ArrowLeftIcon className="q-icon s14" aria-hidden /> {t("mcp.allServers")}
               </button>
             ) : null}
 
@@ -827,7 +852,7 @@ export function McpPage() {
                   <span>·</span>
                   <span className="q-mono">{transportSummary(server.transport)}</span>
                   <span>·</span>
-                  <span>{server.tool_count} tools</span>
+                  <span>{t("mcp.tools", { count: server.tool_count })}</span>
                   <span>·</span>
                   <span>{checkedLabel(checkedAt, now)}</span>
                   {refreshing ? <RefreshCwIcon className="q-icon s12 q-faint" aria-hidden /> : null}
@@ -836,7 +861,7 @@ export function McpPage() {
               <Health server={server} />
               <div className="hidden items-center gap-2 sm:flex">
                 <Button variant="secondary" onClick={() => setToolsServer(server)}>
-                  <RefreshCwIcon className="q-icon s14" aria-hidden /> Test
+                  <RefreshCwIcon className="q-icon s14" aria-hidden /> {t("mcp.test")}
                 </Button>
                 <Button
                   variant="secondary"
@@ -845,18 +870,18 @@ export function McpPage() {
                     setAddOpen(true);
                   }}
                 >
-                  Edit
+                  {t("common:edit")}
                 </Button>
               </div>
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
-                  <button type="button" className="q-ibtn" aria-label="Server actions">
+                  <button type="button" className="q-ibtn" aria-label={t("mcp.actions")}>
                     <MoreHorizontalIcon className="q-icon" aria-hidden />
                   </button>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="end" className="w-48">
                   <DropdownMenuItem onSelect={() => setToolsServer(server)}>
-                    <WrenchIcon className="q-icon s14" aria-hidden /> List tools and test
+                    <WrenchIcon className="q-icon s14" aria-hidden /> {t("mcp.menu.tools")}
                   </DropdownMenuItem>
                   <DropdownMenuItem
                     onSelect={() => {
@@ -864,16 +889,16 @@ export function McpPage() {
                       setAddOpen(true);
                     }}
                   >
-                    Edit configuration
+                    {t("mcp.menu.edit")}
                   </DropdownMenuItem>
                   {server.runs_on ? null : (
                     <DropdownMenuItem onSelect={() => setShareServer(server)}>
-                      <Share2Icon className="q-icon s14" aria-hidden /> Share…
+                      <Share2Icon className="q-icon s14" aria-hidden /> {t("mcp.menu.share")}
                     </DropdownMenuItem>
                   )}
                   <DropdownMenuSeparator />
                   <DropdownMenuItem variant="destructive" onSelect={() => setRemoveServer(server)}>
-                    <Trash2Icon className="q-icon s14" aria-hidden /> Remove server…
+                    <Trash2Icon className="q-icon s14" aria-hidden /> {t("mcp.menu.remove")}
                   </DropdownMenuItem>
                 </DropdownMenuContent>
               </DropdownMenu>
@@ -882,7 +907,7 @@ export function McpPage() {
             {isPhone ? (
               <div className="mb-3 flex gap-2">
                 <Button variant="secondary" onClick={() => setToolsServer(server)}>
-                  <RefreshCwIcon className="q-icon s14" aria-hidden /> Test
+                  <RefreshCwIcon className="q-icon s14" aria-hidden /> {t("mcp.test")}
                 </Button>
                 <Button
                   variant="secondary"
@@ -891,7 +916,7 @@ export function McpPage() {
                     setAddOpen(true);
                   }}
                 >
-                  Edit
+                  {t("common:edit")}
                 </Button>
               </div>
             ) : null}
@@ -900,19 +925,19 @@ export function McpPage() {
 
             <div className="q-sec" style={{ marginTop: 28 }}>
               <div className="q-sec-h">
-                <h2>Where it runs</h2>
-                <span className="aside">Each target receives the server its own way</span>
+                <h2>{t("mcp.where.title")}</h2>
+                <span className="aside">{t("mcp.where.aside")}</span>
               </div>
               <div style={{ overflowX: "auto" }}>
                 <table className="q-tbl">
                   <thead>
                     <tr>
-                      <th style={{ width: "24%" }}>Host</th>
-                      <th style={{ width: "22%" }}>Harness</th>
-                      <th>Delivered as</th>
-                      <th>Status</th>
+                      <th style={{ width: "24%" }}>{t("mcp.where.host")}</th>
+                      <th style={{ width: "22%" }}>{t("mcp.where.harness")}</th>
+                      <th>{t("mcp.where.deliveredAs")}</th>
+                      <th>{t("mcp.where.status")}</th>
                       <th className="r" style={{ paddingRight: 0 }}>
-                        On
+                        {t("common:on")}
                       </th>
                     </tr>
                   </thead>
@@ -943,15 +968,14 @@ export function McpPage() {
                         </td>
                         <td className={row.enabled ? "q-muted" : "q-faint"}>{row.delivery}</td>
                         <td>
-                          {row.note === "Off" ? (
-                            <span className="q-faint">Off</span>
+                          {row.tone === "off" ? (
+                            <span className="q-faint">{row.note}</span>
                           ) : (
                             <span
                               className={cn(
                                 "q-health",
                                 row.tone === "ok" && "q-ok",
                                 row.tone === "warn" && "q-warn",
-                                row.tone === "off" && "q-faint",
                               )}
                             >
                               {row.tone === "warn" ? (
@@ -967,7 +991,11 @@ export function McpPage() {
                           <Toggle
                             checked={row.enabled}
                             busy={row.busy}
-                            label={`${row.enabled ? "Turn off" : "Turn on"} ${server.name} for ${harnessName(row.harness)} on ${row.hostName}`}
+                            label={t(row.enabled ? "mcp.where.turnOff" : "mcp.where.turnOn", {
+                              name: server.name,
+                              harness: harnessName(row.harness),
+                              host: row.hostName,
+                            })}
                             onToggle={row.onToggle}
                           />
                         </td>
@@ -985,17 +1013,17 @@ export function McpPage() {
 
             <div className="q-sec">
               <div className="q-sec-h">
-                <h2>Configuration</h2>
+                <h2>{t("mcp.config.title")}</h2>
                 <span className="aside">
                   {server.imported_from
-                    ? `Imported from ${server.imported_from}`
-                    : "Managed by h4rn"}
+                    ? t("mcp.config.importedFrom", { source: server.imported_from })
+                    : t("mcp.config.managed")}
                 </span>
               </div>
               <div className="q-field">
                 <div className="lab">
-                  <div className="t">Transport</div>
-                  <div className="s">How the hub starts or reaches it</div>
+                  <div className="t">{t("mcp.config.transport")}</div>
+                  <div className="s">{t("mcp.config.transportHint")}</div>
                 </div>
                 <div className="ctl">
                   <span className="q-mono" style={{ fontSize: 12 }}>
@@ -1003,7 +1031,7 @@ export function McpPage() {
                   </span>
                   {server.transport.type === "stdio" && server.transport.cwd ? (
                     <span className="q-faint" style={{ fontSize: 12 }}>
-                      cwd {server.transport.cwd}
+                      {t("mcp.config.cwd", { path: server.transport.cwd })}
                     </span>
                   ) : null}
                 </div>

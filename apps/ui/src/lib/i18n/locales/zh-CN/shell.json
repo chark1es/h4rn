@@ -95,7 +95,6 @@
     "failed": "无法从这个回合分叉。"
   },
   "mcp": {
-    "listServers": "列出服务器",
     "saveFailed": "无法保存 {{name}}。",
     "nothingChanged": "这台机器上没有任何更改。",
     "removeFailed": "无法移除 {{name}}。",
@@ -122,7 +121,6 @@
     "callBlocked": "该调用仍被阻止。"
   },
   "skills": {
-    "listSkills": "列出技能",
     "addFailed": "无法添加该技能。",
     "checkSkillFile": "请确认 SKILL.md 存在且路径可读。",
     "updateFailed": "无法更新该技能。",

@@ -1,0 +1,219 @@
+{
+  "errors": {
+    "withAction": "{{message}} ({{action}})",
+    "noAnswer": "The daemon did not answer.",
+    "actions": {
+      "listServers": "list servers",
+      "listSkills": "list skills"
+    }
+  },
+  "mcp": {
+    "summary_one": "{{count, number}} server · delivered per harness and machine",
+    "summary_other": "{{count, number}} servers · delivered per harness and machine",
+    "import": "Import",
+    "empty": {
+      "title": "No MCP servers yet",
+      "body": "Add a server once and h4rn delivers it to the harnesses and machines you choose. Secrets stay on the machine that runs it."
+    },
+    "detail": "MCP server detail",
+    "loading": "Loading server",
+    "allServers": "All servers",
+    "tools_one": "{{count, number}} tool",
+    "tools_other": "{{count, number}} tools",
+    "checked": {
+      "never": "not checked yet",
+      "justNow": "checked just now",
+      "ago": "checked {{when}}"
+    },
+    "test": "Test",
+    "actions": "Server actions",
+    "menu": {
+      "tools": "List tools and test",
+      "edit": "Edit configuration",
+      "share": "Share…",
+      "remove": "Remove server…"
+    },
+    "credential": {
+      "title": "Credential",
+      "hint": "Never leaves the host",
+      "storedOn": "Stored on {{host}}",
+      "thisHost": "this host",
+      "env_one": "{{count, number}} environment variable · values are write-only",
+      "env_other": "{{count, number}} environment variables · values are write-only",
+      "headers_one": "{{count, number}} header · values are write-only",
+      "headers_other": "{{count, number}} headers · values are write-only",
+      "noEnv": "No environment variables stored for this server.",
+      "noHeaders": "No headers stored for this server.",
+      "sharedWith": "Shared with {{hosts}}"
+    },
+    "where": {
+      "title": "Where it runs",
+      "aside": "Each target receives the server its own way",
+      "host": "Host",
+      "harness": "Harness",
+      "deliveredAs": "Delivered as",
+      "status": "Status",
+      "ready": "Ready",
+      "nameConflict": "Name conflict",
+      "canCall": "Can call this machine's server",
+      "turnOn": "Turn on {{name}} for {{harness}} on {{host}}",
+      "turnOff": "Turn off {{name}} for {{harness}} on {{host}}"
+    },
+    "delivery": {
+      "claude_code": "Host config file",
+      "codex": "Session request",
+      "opencode": "Harness API",
+      "antigravity": "ACP or stdio bridge",
+      "acp": "ACP",
+      "proxied": "Proxied hub entry"
+    },
+    "status": {
+      "unreachable": "Unreachable",
+      "sharedFrom": "Shared from {{host}}",
+      "needsCredential": "Needs credential",
+      "ready": "Healthy",
+      "starting": "Starting",
+      "error": "Error",
+      "disabled": "Off",
+      "remote": "Remote",
+      "stopped": "Stopped"
+    },
+    "caller": {
+      "harnessThread": "{{harness}} · {{thread}}",
+      "device": "This device",
+      "remote": "Remote",
+      "remoteFrom": "Remote · {{machine}}"
+    },
+    "conflict": {
+      "body": "Pick which configuration the harness should see. Nothing is overwritten until you settle this.",
+      "label": "Resolve the {{name}} conflict",
+      "trigger": "Resolve…"
+    },
+    "resolve": {
+      "title": "Resolve {{name}}",
+      "choose": "Choose which configuration {{harness}} should see.",
+      "otherCopy": "The other copy comes from {{harness}}'s own config.",
+      "harness": "Harness",
+      "resolution": "Resolution",
+      "hints": {
+        "keep_mine": "h4rn's server stays; the harness's copy is ignored",
+        "use_theirs": "The harness's configuration replaces mine",
+        "rename": "Import the harness's server under a new name",
+        "skip": "Decide later; nothing changes"
+      },
+      "newName": "New name",
+      "resolving": "Resolving…",
+      "resolve": "Resolve"
+    },
+    "sharedWithYou": {
+      "title": "Shared with you",
+      "aside": "Defined on another host",
+      "from": "from {{host}}",
+      "runsOn": "runs on {{host}}",
+      "use": "Use {{name}} on this machine"
+    },
+    "sharedFromHere": {
+      "title": "Shared from this machine",
+      "aside": "This machine runs the server and enforces the policy",
+      "proxies": "Proxies this server over the relay or Tailscale.",
+      "unshare": "Unshare"
+    },
+    "activity": {
+      "title": "Recent tool calls",
+      "aside": "Live from the daemon"
+    },
+    "config": {
+      "title": "Configuration",
+      "importedFrom": "Imported from {{source}}",
+      "managed": "Managed by h4rn",
+      "transport": "Transport",
+      "transportHint": "How the hub starts or reaches it",
+      "cwd": "cwd {{path}}"
+    },
+    "approval": {
+      "label": "Shared tool approval",
+      "wantsToRun": "{{machine}} wants to run <tool>{{tool}}</tool>",
+      "more_one": "+{{count, number}} more",
+      "more_other": "+{{count, number}} more",
+      "needsYou": "Needs you",
+      "expires": "Shared MCP server · expires {{when}}",
+      "expiring": "Shared MCP server · expiring now",
+      "noArgs": "No arguments",
+      "reconnect": "Reconnect to answer. Nothing runs until you approve.",
+      "deny": "Deny",
+      "answering": "Answering…",
+      "approveOnce": "Approve once"
+    }
+  },
+  "skills": {
+    "loadingRegistry": "Reading the skill registry…",
+    "summaryShort_one": "{{installed, number}} installed · {{count, number}} harness",
+    "summaryShort_other": "{{installed, number}} installed · {{count, number}} harnesses",
+    "summary_one": "{{installed, number}} installed · {{count, number}} harness detected · available wherever you choose",
+    "summary_other": "{{installed, number}} installed · {{count, number}} harnesses detected · available wherever you choose",
+    "findExisting": "Find existing",
+    "import": "Import",
+    "loading": "Loading skills",
+    "sync": {
+      "syncing": "Syncing…",
+      "offline": "Offline",
+      "notSynced": "Not synced yet",
+      "synced": "Synced",
+      "blocked": "Needs attention",
+      "idle": "Idle",
+      "lastSync": "last sync {{when}}",
+      "noSync": "no completed sync",
+      "pushed": "{{pushed, number}} pushed",
+      "pulled": "{{pulled, number}} pulled",
+      "offlineDetail": "Local skills keep working; sync resumes when the daemon is online.",
+      "idleDetail": "Run a cycle to publish local changes and pull the shared registry.",
+      "conflicts_one": "{{count, number}} conflict to settle.",
+      "conflicts_other": "{{count, number}} conflicts to settle.",
+      "syncNow": "Sync now"
+    },
+    "found": {
+      "one": "{{name}} is in a harness folder but not managed by h4rn.",
+      "many_one": "{{count, number}} skill is in your harness folders but not managed by h4rn.",
+      "many_other": "{{count, number}} skills are in your harness folders but not managed by h4rn.",
+      "bringOne": "Bring it in to sync across your machines.",
+      "bringMany": "Bring them in to sync across your machines.",
+      "notNow": "Not now",
+      "review": "Review"
+    },
+    "conflicts": {
+      "title": "Conflicts",
+      "aside": "Settle these before the next sync",
+      "versions": "{{reason}} · local <v>{{local}}</v> → remote <v>{{remote}}</v>",
+      "none": "none",
+      "keepLocal": "Keep local",
+      "keepRemote": "Keep remote",
+      "keepBoth": "Keep both",
+      "settling": "Settling…",
+      "resolve": "Resolve"
+    },
+    "installed": {
+      "title": "Installed skills",
+      "aside": "Each harness gets a managed copy; versions can differ until the next sync",
+      "emptyTitle": "No skills yet",
+      "emptyBody": "Add a folder with a SKILL.md, clone one from git, or import what your harnesses already installed."
+    },
+    "row": {
+      "conflicts_one": "{{count, number}} conflict",
+      "conflicts_other": "{{count, number}} conflicts",
+      "installs_one": "{{installed, number}} of {{count, number}} harness · {{source}}",
+      "installs_other": "{{installed, number}} of {{count, number}} harnesses · {{source}}",
+      "toggle": "{{skill}} for {{harness}}",
+      "noDirectory": "{{harness}} has no skill directory on this host",
+      "version": "{{harness}} · {{version}}",
+      "notInstalled": "not installed",
+      "missingCopy": "Enabled in the registry but no managed copy was found"
+    },
+    "directories": {
+      "title": "Harness directories",
+      "aside": "Where h4rn installs managed copies on this machine",
+      "noUserRoot": "No user skill directory",
+      "detected": "Detected",
+      "notInstalled": "Not installed"
+    }
+  }
+}
