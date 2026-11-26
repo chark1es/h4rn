@@ -5,8 +5,10 @@
  * The daemon publishes transitions; Connect decides and sends them; this module
  * only makes the phone reachable. The chosen state is this device's own, so it
  * lives in `localStorage`; the authoritative registration is the relay row it
- * creates, and the push token (FCM on Android, APNs on iOS) is rotated by
- * re-registering on every launch.
+ * creates. The shell asks APNs or FCM for a fresh token on every launch, and
+ * this module re-registers with that token on launch and whenever the app
+ * returns to the foreground, so a token either provider replaced reaches the
+ * relay instead of a cached one staying there forever.
  */
 
 import { remoteStore } from "@/features/remote/remoteStore";

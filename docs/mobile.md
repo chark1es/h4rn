@@ -218,7 +218,10 @@ bun run --cwd apps/mobile tauri ios build --debug --ci --target aarch64-sim
 ```
 
 The simulator build is unsigned, which is all CI can do without the owner's Apple credentials.
-The first `ios init` generates `src-tauri/gen/apple`; it is ignored like `gen/android`.
+The first `ios init` generates `src-tauri/gen/apple`; it is ignored like `gen/android`. CI does
+not run the local Swift package's XCTest target (`apps/mobile/native/ios/Tests/H4rnPushTests`),
+so those tests are unverified until a macOS job runs them; the simulator build only proves the
+Swift and Rust compile.
 
 ### What TestFlight needs from the owner
 

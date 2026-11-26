@@ -2,7 +2,9 @@
 
 Your phone can alert you when an agent finishes, fails, waits for an approval,
 asks a question or stops at a limit. Tap the alert to open that thread. Android
-and iOS behave the same way and carry the same record. Delivery goes through
+and iOS carry the same record and alert on the same transitions. Their
+lock-screen behaviour differs where iOS cannot run app code; the limits below
+say exactly where. Delivery goes through
 Connect only: a direct or Tailscale pairing is not enough, because the daemon
 does not hold a phone's push token and a push provider cannot reach a LAN
 address.
@@ -34,21 +36,24 @@ thread.
 Turning **Device notifications** off removes this phone's registration from
 Connect. If that request cannot reach Connect (the phone is offline, or the
 relay errors), the app remembers the removal and retries it the next time it is
-signed in and opened, so the row does not linger and the phone does not keep
-alerting. While the switch is off the phone also drops or clears alerts locally,
-as a second line of defence: Android's notification service ignores data
-messages, and iOS clears everything already in Notification Centre and keeps a
-foreground alert quiet.
+signed in and opened, so the row does not linger. On Android the phone also
+stays silent meanwhile: its notification service ignores data messages while
+the switch is off. iOS clears everything already in Notification Centre and
+keeps a foreground alert quiet, but for a suspended app that is not a
+lock-screen guarantee; see the iOS limits below.
 
 Signing out does two things. The phone's local "signed in and switch on" flag
-goes off at once, whatever the relay can be reached for, so the signed-out phone
-never shows the old account's thread titles on the lock screen. A pending
-removal is kept as well and retried the next time this phone signs in, because
-the relay row belongs to the account that signed out. After the credentials are
-gone the app cannot retry on its own; the local flag is the guarantee until
-then, and signing out through `POST /v1/auth/logout` also deletes the
-token-scoped row on the relay. Turning the switch on again after signing in
-re-registers the phone.
+goes off at once, whatever the relay can be reached for. On Android that is
+what keeps the signed-out phone from showing the old account's thread titles on
+the lock screen, because its notification service checks the flag before
+showing a data message. A pending removal is kept as well and retried the next
+time this phone signs in, because the relay row belongs to the account that
+signed out. After the credentials are gone the app cannot retry on its own, and
+signing out through `POST /v1/auth/logout` also deletes the token-scoped row on
+the relay. Turning the switch on again after signing in re-registers the phone.
+On iOS the system, not the app, shows a suspended app's alert, so a signed-out
+iPhone that cannot reach Connect may still show alerts until the pending
+removal succeeds at the next sign-in. That case is listed under iOS limits.
 
 ## What leaves the daemon
 
@@ -150,8 +155,10 @@ to APNs itself with the operator's own auth key.
    H4RN_CONNECT_APNS_TEAM_ID=TEAM123456
    ```
 
-   Any of the three missing leaves iOS push off and logs why; it never stops the
-   relay from starting. `H4RN_CONNECT_APNS_TOPIC` defaults to `dev.h4rn.app`,
+   When none of the three is set, iOS push is off and the relay starts normally.
+   A partial set logs a warning naming all three variables, and a key that
+   cannot be parsed logs an error; either way the relay still starts.
+   `H4RN_CONNECT_APNS_TOPIC` defaults to `dev.h4rn.app`,
    and `H4RN_CONNECT_APNS_URL` defaults to `https://api.push.apple.com`; a
    development build of the app must use
    `H4RN_CONNECT_APNS_URL=https://api.sandbox.push.apple.com` because Apple
@@ -200,11 +207,15 @@ on the relay, never in the APK or an EAS/build environment for the app.
 
 The iOS app needs no plist and no Firebase project. `apps/mobile/native/ios`
 holds a `H4rnPush` Swift target, linked from `apps/mobile/src-tauri/build.rs`,
-that registers for remote notifications and exposes the same five commands as
+that registers for remote notifications and exposes the same commands as
 Android (`push_status`, `push_request_permission`, `push_token`,
-`push_set_foreground_thread`, `push_set_enabled`). The APNs token is captured
-from the app delegate and cached on the device; Settings re-registers it with
-Connect on every launch, which is how a rotated token reaches the relay.
+`push_set_foreground_thread`, `push_set_enabled`, plus
+`push_take_pending_link` for a tap that cold-started the app). Every launch
+asks APNs for a fresh token when permission is granted and waits for that
+answer; the cached token is only a fallback after a few seconds. That is what
+replaces a token Apple retired, for example after a phone was restored from a
+backup. The app puts the current token on Connect when it signs in and whenever
+it returns to the foreground, so a changed token reaches the relay.
 
 What the build still needs from the owner is Apple's usual signing material:
 
@@ -213,23 +224,35 @@ What the build still needs from the owner is Apple's usual signing material:
    `aps-environment` entitlement. `Release` builds use `production`; a debug
    build installed from Xcode uses `development` and must talk to the sandbox
    APNs host above.
-2. A device, not the simulator: the simulator cannot receive a remote push
+2. `tauri ios init` generates the Xcode project and its entitlements file under
+   the git-ignored `apps/mobile/src-tauri/gen/apple` tree. The target's
+   `.entitlements` file there must also carry `aps-environment`; the generated
+   tree is recreated by `ios init`, so add it in your own build setup rather
+   than expecting a source change here to survive. Without it, registration
+   fails and Settings reports that no APNs token arrived.
+3. A device, not the simulator: the simulator cannot receive a remote push
    notification, so Settings on a simulator accepts the switch and then reports
    that no APNs token arrived. This is a limitation of the simulator, not of the
    relay.
 
 CI compiles the simulator build with no Apple credentials at all; it only
-verifies the Swift and Rust compile.
+verifies the Swift and Rust compile. The Swift package's XCTest target
+(`Tests/H4rnPushTests`) is checked in but no workflow runs it yet, so treat
+those tests as unverified until a macOS job runs `swift test` or an
+`xcodebuild test` against a simulator.
 
 **No Notification Service Extension ships yet.** iOS cannot run app code for an
 alert while the app is suspended, so the extension that would re-check the
 local switch before showing a suspended app's alert is not part of this
 release: adding one needs its own Xcode target, and the generated iOS project
 is not something this repository can add a target to. The switch-off removal
-from Connect is therefore the guarantee while the app is suspended, and the
-in-app delegate enforces the same rule (switch off, exact thread open, grouped
-alert) whenever the app is running. Do not rely on the local flag alone to
-silence a phone whose removal never reached Connect.
+from Connect is therefore the guarantee while the app is suspended, and it
+holds only once the removal reaches Connect: a switched-off or signed-out
+iPhone that cannot reach the relay may still show alerts until the pending
+removal succeeds at the next sign-in. The in-app delegate enforces the same
+rule (switch off, exact thread open, grouped alert) whenever the app is
+running. Do not rely on the local flag alone to silence a phone whose removal
+never reached Connect.
 
 ## Limits
 
@@ -240,14 +263,20 @@ silence a phone whose removal never reached Connect.
 - If the app is force-stopped in Android Settings, delivery stops until it is
   opened again. Android's battery modes can also delay a message.
 - Turning the app switch off removes the registration; if Connect cannot be
-  reached, the app retries until it confirms the row is gone, and the phone
-  stays silent meanwhile. Turning off the daemon switch stops publishing for
-  every phone at once. Revoking the phone from the desktop removes its
-  registration too.
+  reached, the app retries until it confirms the row is gone. On Android the
+  phone stays silent meanwhile; on iOS see the next two bullets. Turning off
+  the daemon switch stops publishing for every phone at once. Revoking the
+  phone from the desktop removes its registration too.
 - On iOS, an alert delivered while the app is suspended is shown by the system
   before any h4rn code runs. Without a Notification Service Extension the local
   switch cannot suppress it; removal from Connect, and the in-app delegate, are
-  what keep a switched-off phone quiet.
+  what keep a switched-off phone quiet. So a signed-out or switched-off iPhone
+  that cannot reach Connect may still show alerts while suspended, until the
+  pending removal succeeds at the next sign-in. There is no lock-screen
+  guarantee for that case on iOS; the equivalent guarantee is Android-only.
+- On iOS, a tap that launches the app is buffered by the native delegate and
+  read once by the app during boot, so it opens its thread after a cold start
+  as well as while the app is running.
 - A thread moved to Done by hand is a placement, not a finished turn, so it
   does not alert. A turn you stopped yourself does not alert either.
 - A turn stopped by a usage, token or turn limit asks for you only when

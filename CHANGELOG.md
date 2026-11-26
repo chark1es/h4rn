@@ -73,7 +73,9 @@ All notable changes to h4rn are recorded here. The format follows
   phone's platform and sends the Android data message or the iOS alert block from the same fixed
   record; an iPhone payload carries only the documented fields, with nothing for a prompt, reply,
   tool output, path or credential. Turning the switch off removes the registration and the phone
-  clears any alert still in Notification Centre; signing out turns the local flag off at once. The
+  clears any alert still in Notification Centre; signing out turns the local flag off at once. A
+  tap that cold-starts the app still opens its thread, and every launch asks APNs for a fresh
+  token, so a phone restored from a backup does not keep registering a dead one. The
   iOS build needs no Firebase project: Connect sends to APNs with the operator's own `.p8` key, so
   the app and CI compile without any credential. See
   [docs/mobile-notifications.md](docs/mobile-notifications.md) and

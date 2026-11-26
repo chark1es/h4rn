@@ -17,14 +17,30 @@ public final class H4rnPushCenter: NSObject, UNUserNotificationCenterDelegate {
     static let enabled = "h4rn.push.alertsEnabled"
   }
 
+  /// How long `token()` waits for APNs before falling back to the cache.
+  ///
+  /// A fresh answer is what rotates a token that Apple replaced, so the cache
+  /// is a fallback for an offline launch, not the normal answer.
+  private static let tokenTimeout: TimeInterval = 5
+
   /// The exact thread on screen, as reported by the shared UI.
   public var openThread: String?
 
+  private struct TokenWaiter {
+    let id: UUID
+    let completion: (Result<String, Error>) -> Void
+  }
+
   private let defaults = UserDefaults.standard
   private weak var webView: WKWebView?
-  private var pendingLinks: [String] = []
-  private var tokenWaiters: [(Result<String, Error>) -> Void] = []
+  private var tokenWaiters: [TokenWaiter] = []
   private var installed = false
+  /// Whether the page has installed its deep-link listener and run boot.
+  ///
+  /// A tap that arrives before this point has nowhere to land, so it is held
+  /// for {@link takePendingLink} instead of being evaluated into the page.
+  private var pageReady = false
+  private var pendingLink: String?
 
   /// The person's local switch.
   ///
@@ -57,23 +73,62 @@ public final class H4rnPushCenter: NSObject, UNUserNotificationCenterDelegate {
     }
   }
 
-  /// Installs the delegate and the APNs registration capture once.
+  /// Installs the delegate, the APNs capture and this launch's registration.
   public func install() {
     DispatchQueue.main.async {
       guard !self.installed else { return }
       self.installed = true
       UNUserNotificationCenter.current().delegate = self
       h4rnInstallRemoteNotificationCapture()
+      self.rearmRegistration()
+    }
+  }
+
+  /// Asks APNs for the current token on every launch.
+  ///
+  /// A phone restored from a backup can carry a token Apple already retired in
+  /// the cache. Registering again is what asks for the live one; the cached
+  /// value is only used when APNs does not answer.
+  private func rearmRegistration() {
+    UNUserNotificationCenter.current().getNotificationSettings { settings in
+      guard Self.permissionGranted(settings.authorizationStatus) else { return }
+      DispatchQueue.main.async {
+        UIApplication.shared.registerForRemoteNotifications()
+      }
+    }
+  }
+
+  private static func permissionGranted(_ status: UNAuthorizationStatus) -> Bool {
+    switch status {
+    case .authorized, .provisional, .ephemeral:
+      return true
+    default:
+      return false
     }
   }
 
   /// Keeps the WebView that receives a tap's deep link.
+  ///
+  /// A link buffered before the page existed is not evaluated here: the page
+  /// has not installed its listener yet. The UI reads it with
+  /// {@link takePendingLink} once it has.
   public func attach(webView: WKWebView) {
     DispatchQueue.main.async {
       self.webView = webView
-      let links = self.pendingLinks
-      self.pendingLinks.removeAll()
-      for link in links { self.evaluate(link, in: webView) }
+      self.pageReady = false
+    }
+  }
+
+  /// Returns the link a tap buffered before the page was ready, once.
+  ///
+  /// The UI calls this during boot, after installing its deep-link listener.
+  /// Calling it also marks the page ready, so later taps dispatch normally.
+  public func takePendingLink(completion: @escaping (String?) -> Void) {
+    DispatchQueue.main.async {
+      self.pageReady = true
+      let link = self.pendingLink
+      self.pendingLink = nil
+      completion(link)
     }
   }
 
@@ -122,18 +177,29 @@ public final class H4rnPushCenter: NSObject, UNUserNotificationCenterDelegate {
     }
   }
 
-  /// Returns the APNs device token, waiting for registration when needed.
+  /// Returns the APNs device token, waiting for this launch's registration.
+  ///
+  /// The cache is only a fallback after {@link tokenTimeout}: a token that a
+  /// backup restored can name a device Apple has already retired, and handing
+  /// it back forever means Connect deletes the row and the phone registers the
+  /// same dead token again. Each call owns its timeout, so one slow waiter
+  /// cannot fail the others.
   public func token(completion: @escaping (Result<String, Error>) -> Void) {
     DispatchQueue.main.async {
-      if let token = self.deviceToken, !token.isEmpty {
-        completion(.success(token))
-        return
-      }
-      self.tokenWaiters.append(completion)
+      let id = UUID()
+      self.tokenWaiters.append(TokenWaiter(id: id, completion: completion))
       UIApplication.shared.registerForRemoteNotifications()
       // Registration answers quickly or not at all; a command must not hang.
-      DispatchQueue.main.asyncAfter(deadline: .now() + 10) {
-        self.failWaiters(H4rnPushError.noToken)
+      DispatchQueue.main.asyncAfter(deadline: .now() + Self.tokenTimeout) {
+        guard let index = self.tokenWaiters.firstIndex(where: { $0.id == id }) else {
+          return
+        }
+        let waiter = self.tokenWaiters.remove(at: index)
+        if let cached = self.deviceToken, !cached.isEmpty {
+          waiter.completion(.success(cached))
+        } else {
+          waiter.completion(.failure(H4rnPushError.noToken))
+        }
       }
     }
   }
@@ -145,21 +211,17 @@ public final class H4rnPushCenter: NSObject, UNUserNotificationCenterDelegate {
       self.deviceToken = hex
       let waiters = self.tokenWaiters
       self.tokenWaiters.removeAll()
-      for waiter in waiters { waiter(.success(hex)) }
+      for waiter in waiters { waiter.completion(.success(hex)) }
     }
   }
 
   /// Reports a registration failure instead of leaving a command hanging.
   public func registrationFailed(_ error: Error) {
     DispatchQueue.main.async {
-      self.failWaiters(error)
+      let waiters = self.tokenWaiters
+      self.tokenWaiters.removeAll()
+      for waiter in waiters { waiter.completion(.failure(error)) }
     }
-  }
-
-  private func failWaiters(_ error: Error) {
-    let waiters = tokenWaiters
-    tokenWaiters.removeAll()
-    for waiter in waiters { waiter(.failure(error)) }
   }
 
   // MARK: - UNUserNotificationCenterDelegate
@@ -196,10 +258,10 @@ public final class H4rnPushCenter: NSObject, UNUserNotificationCenterDelegate {
 
   private func open(deepLink: String) {
     DispatchQueue.main.async {
-      guard let webView = self.webView else {
-        // A cold start: the webview does not exist yet. Keep the link until
-        // the shell attaches it.
-        self.pendingLinks.append(deepLink)
+      guard let webView = self.webView, self.pageReady else {
+        // A cold start, or a page still loading: there is no listener yet.
+        // Keep the link for the one-shot command the UI reads during boot.
+        self.pendingLink = deepLink
         return
       }
       self.evaluate(deepLink, in: webView)

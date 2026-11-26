@@ -24,8 +24,12 @@ private let h4rnDidRegisterToken:
 
 private let h4rnDidFailToRegister:
   @convention(c) (AnyObject, Selector, UIApplication, Error) -> Void = {
-    _, _, _, error in
+    target, selector, application, error in
     H4rnPushCenter.shared.registrationFailed(error)
+    if let original = h4rnOriginalDidFail {
+      typealias FailToRegister = @convention(c) (AnyObject, Selector, UIApplication, Error) -> Void
+      unsafeBitCast(original, to: FailToRegister.self)(target, selector, application, error)
+    }
   }
 
 func h4rnInstallRemoteNotificationCapture() {

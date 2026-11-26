@@ -93,7 +93,7 @@ export async function nativeRequestPushPermission(): Promise<void> {
   await api.invoke<null>("push_request_permission");
 }
 
-/** Reads the current FCM token, failing with a readable message. */
+/** Reads the current push token (FCM on Android, APNs on iOS). */
 export async function nativePushToken(): Promise<string> {
   const api = internals();
   if (!api || !deviceAlertsShell()) {
@@ -103,6 +103,28 @@ export async function nativePushToken(): Promise<string> {
     return await api.invoke<string>("push_token");
   } catch (error) {
     throw new Error(describe(error));
+  }
+}
+
+/**
+ * Reads the thread link from a notification tap that cold-started the app.
+ *
+ * iOS has no page to dispatch `h4rn-deep-link` to while the app is launching,
+ * so its delegate holds the tap until the shared UI asks here, once, after the
+ * deep-link listener exists. Resolves null for an ordinary launch, a warm tap
+ * (which is dispatched as an event) and a shell without the plugin.
+ */
+export async function nativeTakePendingPushLink(): Promise<string | null> {
+  const api = internals();
+  if (!api || !deviceAlertsShell()) return null;
+  try {
+    const payload = await api.invoke<{ url?: string | null }>("push_take_pending_link");
+    const url = payload?.url;
+    return typeof url === "string" && url.length > 0 ? url : null;
+  } catch {
+    // An older shell has no buffered tap; the deep-link plugin still handles
+    // links that arrive while the page is running.
+    return null;
   }
 }
 

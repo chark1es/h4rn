@@ -2372,11 +2372,25 @@ own Xcode target that the generated project cannot gain here, the local
 "signed in and switched on" flag cannot suppress a suspended app's alert. The
 guarantee stays the one ADR-051 already chose for a failed removal: taking the
 switch off removes the registration from Connect, and the phone clears what is
-already in Notification Centre. While the app is running, its notification
-delegate enforces the same rule as Android — quiet only for the exact thread on
-screen, never for a group — and a tap follows the existing `h4rn://thread/<id>`
-route, or opens h4rn for a grouped alert. A missing extension is documented as a
-limit rather than replaced by a weaker claim.
+already in Notification Centre. That is not a lock-screen promise: a signed-out
+or switched-off iPhone that cannot reach Connect may still show alerts while it
+is suspended, until the pending removal succeeds at the next sign-in. Android's
+local flag gives it the stronger guarantee; iOS documents the weaker one rather
+than claiming it. While the app is running, its notification delegate enforces
+the same rule as Android — quiet only for the exact thread on screen, never for
+a group — and a tap follows the existing `h4rn://thread/<id>` route, or opens
+h4rn for a grouped alert. A missing extension is documented as a limit rather
+than replaced by a weaker claim.
+
+The phone asks APNs for a fresh token on every launch when permission is
+granted, and waits for that callback; the cached token is only a fallback after
+a short timeout. A phone restored from a backup can otherwise keep offering a
+token Apple already retired: Connect would delete the row on a 410 and the phone
+would register the same dead value again forever. The UI re-registers on launch
+and when the app returns to the foreground, so a changed token replaces the old
+row. A tap that launches the app is buffered by the delegate and exposed as a
+one-shot command the UI reads during boot, because there is no page listener
+yet to receive the warm `h4rn-deep-link` event.
 
 `BadDeviceToken` and a bare 403 do not delete a registration. Apple answers
 `BadDeviceToken` when a development build talks to the production host (or the

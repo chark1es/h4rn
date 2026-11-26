@@ -71,6 +71,13 @@ struct PushTokenValue {
     token: String,
 }
 
+/// The one-shot answer for a notification tap that cold-started the app.
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+struct PendingPushLink {
+    #[serde(default)]
+    url: Option<String>,
+}
+
 #[cfg(any(target_os = "android", target_os = "ios"))]
 #[derive(serde::Serialize)]
 struct SecretArgs<'a> {
@@ -298,6 +305,29 @@ fn push_set_enabled(app: tauri::AppHandle, enabled: bool) -> Result<(), String> 
     }
 }
 
+/// Returns the thread link from a notification tap that cold-started the app.
+///
+/// iOS buffers the tap natively because the page did not exist when it arrived;
+/// the UI reads it once during boot. Android has no such buffer: its intents
+/// arrive through `deep_link_current`.
+#[tauri::command]
+fn push_take_pending_link(app: tauri::AppHandle) -> Result<PendingPushLink, String> {
+    #[cfg(target_os = "ios")]
+    {
+        let bridge = app.state::<PushBridge>();
+        bridge
+            .0
+            .run_mobile_plugin::<PendingPushLink>("pushTakePendingLink", ())
+            .map_err(|error| error.to_string())
+    }
+
+    #[cfg(not(target_os = "ios"))]
+    {
+        let _ = app;
+        Ok(PendingPushLink::default())
+    }
+}
+
 /// Returns the `h4rn://` URLs that launched this process, if any.
 ///
 /// Android delivers a cold-start deep link through the launching intent rather
@@ -390,6 +420,7 @@ pub fn run() {
             push_token,
             push_set_foreground_thread,
             push_set_enabled,
+            push_take_pending_link,
             deep_link_current,
             preview::preview_capabilities,
             preview::preview_prepare,
@@ -431,7 +462,18 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::PushStatusValue;
+    use super::{PendingPushLink, PushStatusValue};
+
+    #[test]
+    fn a_pending_push_link_serialises_as_url_or_null() {
+        let none = serde_json::to_value(PendingPushLink::default()).expect("serialise");
+        assert_eq!(none["url"], serde_json::Value::Null);
+        let link = serde_json::to_value(PendingPushLink {
+            url: Some("h4rn://thread/th_1".to_string()),
+        })
+        .expect("serialise");
+        assert_eq!(link["url"], "h4rn://thread/th_1");
+    }
 
     #[test]
     fn the_push_status_uses_the_key_the_ui_reads() {

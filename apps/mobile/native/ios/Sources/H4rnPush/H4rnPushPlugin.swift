@@ -62,6 +62,19 @@ class H4rnPushPlugin: Plugin {
     }
   }
 
+  /// Returns the link a tap buffered before the page was ready, once.
+  ///
+  /// iOS has no page to dispatch an event to while the app is cold-starting,
+  /// so the delegate keeps the tap until the shared UI reads it here after
+  /// installing its deep-link listener.
+  @objc public func pushTakePendingLink(_ invoke: Invoke) {
+    H4rnPushCenter.shared.takePendingLink { link in
+      var payload: JsonObject = [:]
+      payload["url"] = link.map { $0 as Any } ?? NSNull()
+      invoke.resolve(payload)
+    }
+  }
+
   /// Mirrors the shared UI's switch so the delegate can drop alerts while off.
   @objc public func pushSetEnabled(_ invoke: Invoke) throws {
     let args = try invoke.parseArgs(PushEnabledArgs.self)
