@@ -3,6 +3,7 @@ import "i18next";
 import type enCommands from "./locales/en/commands.json";
 import type enCommon from "./locales/en/common.json";
 import type enComposer from "./locales/en/composer.json";
+import type enDialogs from "./locales/en/dialogs.json";
 import type enIssues from "./locales/en/issues.json";
 import type enPairing from "./locales/en/pairing.json";
 import type enPullRequests from "./locales/en/pullRequests.json";
@@ -19,6 +20,7 @@ declare module "i18next" {
       common: typeof enCommon;
       commands: typeof enCommands;
       composer: typeof enComposer;
+      dialogs: typeof enDialogs;
       issues: typeof enIssues;
       pairing: typeof enPairing;
       pullRequests: typeof enPullRequests;

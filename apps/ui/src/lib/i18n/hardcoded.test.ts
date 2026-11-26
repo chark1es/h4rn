@@ -117,6 +117,19 @@ const CONVERTED = [
   "src/lib/settings.ts",
   "src/lib/threadControls.ts",
   "src/lib/turn.ts",
+  "src/components/common/ConfirmDialog.tsx",
+  "src/components/dialogs/NewThreadDialog.tsx",
+  "src/components/thread/GitActionsDialog.tsx",
+  "src/components/thread/RenameThreadDialog.tsx",
+  "src/components/thread/RewindDialog.tsx",
+  "src/components/ui/dialog.tsx",
+  "src/components/ui/sheet.tsx",
+  "src/features/guest/GuestShareDialog.tsx",
+  "src/features/mcp/McpDialogs.tsx",
+  "src/features/projects/AddProjectDialog.tsx",
+  "src/features/projects/ImportPanel.tsx",
+  "src/features/skills/SkillDialogs.tsx",
+  "src/features/subagents/DelegateDialog.tsx",
 ];
 
 /** Names that read the same in every language. */
