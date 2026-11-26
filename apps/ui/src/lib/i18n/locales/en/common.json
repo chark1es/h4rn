@@ -29,5 +29,10 @@
     "auto_accept_edits": "Auto-accept edits",
     "plan": "Plan",
     "full_access": "Full access"
+  },
+  "states": {
+    "working": "Working",
+    "done": "Done",
+    "settled": "Settled"
   }
 }

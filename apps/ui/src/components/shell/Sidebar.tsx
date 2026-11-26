@@ -1,3 +1,4 @@
+import type { TFunction } from "i18next";
 import type { LucideIcon } from "lucide-react";
 import {
   BlocksIcon,
@@ -24,11 +25,12 @@ import {
   WifiOffIcon,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import { useTranslation } from "react-i18next";
+import { Trans, useTranslation } from "react-i18next";
 
 import { AgentGlyph } from "@/components/agent/AgentGlyph";
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
 import { ShortcutCaps } from "@/components/common/Kbd";
+import { StateTabs } from "@/components/inbox/StateTabs";
 import {
   harnessUpdateCount,
   useHarnesses,
@@ -54,17 +56,9 @@ import { loadSkills, useSkills } from "@/features/skills/store";
 import type { ThreadSummary, ThreadTab } from "@/gen";
 import { useNow } from "@/hooks/use-now";
 import { harnessLabel, machineSeed } from "@/lib/entities";
-import { absoluteTime, relativeAge } from "@/lib/format";
-
-import {
-  isSnoozed,
-  needsAttention,
-  snoozedThreads,
-  TAB_LABELS,
-  TAB_ORDER,
-  tabCounts,
-  threadsForTab,
-} from "@/lib/inbox";
+import { absoluteTime } from "@/lib/format";
+import { formatAge, formatDateTime, formatList, formatNumber } from "@/lib/i18n";
+import { isSnoozed, needsAttention, snoozedThreads, tabCounts, threadsForTab } from "@/lib/inbox";
 import { type CommandId, titleWithShortcut } from "@/lib/keybindings";
 import { SETTINGS_SECTIONS, type SettingsGroup, settingsPath } from "@/lib/settings";
 import {
@@ -111,8 +105,9 @@ function ThreadRowSkeleton({ index = 0 }: { index?: number }) {
 }
 
 function FilterGroupSkeleton() {
+  const { t } = useTranslation("sidebar");
   return (
-    <div role="status" aria-busy="true" aria-label="Loading projects" className="q-side-skel">
+    <div role="status" aria-busy="true" aria-label={t("loadingProjects")} className="q-side-skel">
       {[64, 48, 72].map((width, group) => (
         <section className="q-pg" key={width}>
           <div className="q-pg-h" style={{ pointerEvents: "none" }}>
@@ -142,25 +137,33 @@ function parentHostId(hostId: string, wsl: boolean): string | null {
   return prefix && prefix !== hostId ? prefix : null;
 }
 
+type PathKind = "tailscale" | "relay" | "direct";
+
 type HostRow = {
   id: string;
   name: string;
   online: boolean;
+  /** When an offline host was last seen, as the daemon or Connect reported it. */
   lastSeen: string | null;
   sub: boolean;
-  harnesses: string;
-  latency: string | null;
+  harnesses: string[];
+  latencyMs: number | null;
   /** Path the session uses, when this row is the active machine. */
-  path: string | null;
+  path: PathKind | null;
   /** Connect machine id, when this row can be switched to. */
   machineId: string | null;
   active: boolean;
 };
 
-function pathLabel(transport: string): string {
-  if (transport === "tailscale") return "Tailscale";
-  if (transport === "relay") return "Relay";
-  return "Direct";
+function pathKind(transport: string): PathKind {
+  if (transport === "tailscale") return "tailscale";
+  if (transport === "relay") return "relay";
+  return "direct";
+}
+
+/** A round trip in milliseconds; "ms" reads the same in every language. */
+function latencyText(ms: number): string {
+  return `${formatNumber(Math.round(ms))} ms`;
 }
 
 function useHostRows(): HostRow[] {
@@ -169,7 +172,6 @@ function useHostRows(): HostRow[] {
   const machines = useRemote((state) => state.machines);
   const activeMachineId = useRemote((state) => state.activeMachineId);
   const signedIn = useRemote((state) => state.user !== null);
-  const now = useNow();
   return useMemo(() => {
     if (signedIn && machines.length > 0) {
       // A connect machine is addressable per host: a Windows box and each of
@@ -196,18 +198,11 @@ function useHostRows(): HostRow[] {
             id: host.id,
             name: host.name,
             online,
-            lastSeen: online
-              ? null
-              : machine.last_seen
-                ? relativeAge(machine.last_seen, now)
-                : null,
+            lastSeen: online ? null : (machine.last_seen ?? null),
             sub: host.kind === "wsl",
-            harnesses: (local?.harnesses ?? []).map(harnessLabel).join(", "),
-            latency:
-              online && latency !== null && latency !== undefined
-                ? `${Math.round(latency)} ms`
-                : null,
-            path: path ? pathLabel(path) : null,
+            harnesses: (local?.harnesses ?? []).map(harnessLabel),
+            latencyMs: online && latency !== null && latency !== undefined ? latency : null,
+            path: path ? pathKind(path) : null,
             machineId: machine.id,
             active,
           });
@@ -226,19 +221,19 @@ function useHostRows(): HostRow[] {
         id: host.host_id,
         name: host.name,
         online: host.online,
-        lastSeen: host.online ? null : relativeAge(host.last_seen ?? "", now),
+        lastSeen: host.online ? null : (host.last_seen ?? ""),
         sub,
-        harnesses: host.harnesses.map(harnessLabel).join(", "),
-        latency:
+        harnesses: host.harnesses.map(harnessLabel),
+        latencyMs:
           host.latency_ms !== null && host.latency_ms !== undefined
-            ? `${Math.round(host.latency_ms)} ms`
+            ? host.latency_ms
             : connection.status === "online" && connection.latencyMs !== null && rows.length === 0
-              ? `${Math.round(connection.latencyMs)} ms`
+              ? connection.latencyMs
               : null,
         path: host.online
           ? host.path
-            ? pathLabel(host.path)
-            : pathLabel(connection.transport)
+            ? pathKind(host.path)
+            : pathKind(connection.transport)
           : null,
         machineId: null,
         active: rows.length === 0 && host.online && connection.status === "online",
@@ -254,7 +249,7 @@ function useHostRows(): HostRow[] {
       if (!rows.some((row) => row.id === child.host_id)) push(child, true);
     }
     return rows;
-  }, [hosts, machines, activeMachineId, signedIn, connection, now]);
+  }, [hosts, machines, activeMachineId, signedIn, connection]);
 }
 
 function HostsPopover({
@@ -266,9 +261,11 @@ function HostsPopover({
   connection: { status: string; latencyMs: number | null; transport: string };
   onClose: () => void;
 }) {
+  const { t } = useTranslation("sidebar");
   const user = useRemote((state) => state.user);
   const busy = useRemote((state) => state.busy);
   const stored = useRemote((state) => state.active);
+  const now = useNow();
   const mobile = shellKind() === "mobile";
   const online = rows.filter((row) => row.online).length;
   const active = rows.find((row) => row.active) ?? rows.find((row) => row.online);
@@ -277,50 +274,55 @@ function HostsPopover({
   const reachableLink = connection.status === "online";
   const dots = (row: HostRow) =>
     row.online ? (
-      <span className="q-dot on" role="img" aria-label="online" />
+      <span className="q-dot on" role="img" aria-label={t("hosts.dot.online")} />
     ) : (
       <span
         className={cn("q-dot off", reachableLink && "bad")}
         role="img"
-        aria-label={reachableLink ? "unreachable" : "offline"}
+        aria-label={reachableLink ? t("hosts.dot.unreachable") : t("hosts.dot.offline")}
       />
     );
   const connectionLine =
     connection.status === "online"
-      ? `${pathLabel(connection.transport)} to ${active?.name ?? "local"}${
-          connection.latencyMs !== null ? ` · ${Math.round(connection.latencyMs)} ms` : ""
-        } · encrypted`
+      ? connection.latencyMs !== null
+        ? t("hosts.connectionLatency", {
+            path: t(`hosts.path.${pathKind(connection.transport)}`),
+            host: active?.name ?? t("hosts.local"),
+            latency: latencyText(connection.latencyMs),
+          })
+        : t("hosts.connection", {
+            path: t(`hosts.path.${pathKind(connection.transport)}`),
+            host: active?.name ?? t("hosts.local"),
+          })
       : connection.status === "connecting"
-        ? "Connecting…"
-        : "Offline";
+        ? t("hosts.connecting")
+        : t("hosts.offline");
+  const emptyKey =
+    stored && connection.status === "online"
+      ? "hosts.empty.connected"
+      : stored && connection.status === "connecting"
+        ? "hosts.empty.connecting"
+        : stored
+          ? mobile
+            ? "hosts.empty.unreachableMobile"
+            : "hosts.empty.unreachable"
+          : "hosts.empty.none";
   return (
-    <div className="q-hostpop" role="menu" aria-label="Hosts">
+    <div className="q-hostpop" role="menu" aria-label={t("hosts.title")}>
       <div className="q-hp-h">
-        <span>Hosts</span>
+        <span>{t("hosts.title")}</span>
         <span className="q-faint q-num">
-          {online} of {rows.length} online
+          {t("hosts.onlineCount", { online: formatNumber(online), count: rows.length })}
         </span>
       </div>
       {rows.length === 0 ? (
         <div className="q-hp-empty">
-          {stored && connection.status === "online" ? (
-            <>
-              Connected to <b>{stored.machineName}</b>. Its host list isn’t available right now.
-            </>
-          ) : stored && connection.status === "connecting" ? (
-            <>
-              Connecting to <b>{stored.machineName}</b>…
-            </>
-          ) : stored ? (
-            <>
-              <b>{stored.machineName}</b> is unreachable.{" "}
-              {mobile ? "Disconnect to stop using it." : "Use this machine to keep working."}
-            </>
-          ) : (
-            <>
-              No hosts yet. Run <span className="q-mono">h4rn host</span> on a machine.
-            </>
-          )}
+          <Trans
+            t={t}
+            i18nKey={emptyKey}
+            values={{ name: stored?.machineName ?? "", command: "h4rn host" }}
+            components={{ b: <b />, code: <span className="q-mono" /> }}
+          />
         </div>
       ) : (
         rows.map((row) => (
@@ -329,7 +331,7 @@ function HostsPopover({
             type="button"
             className={cn("q-host", row.sub && "sub")}
             role="menuitem"
-            title={row.harnesses}
+            title={formatList(row.harnesses, "conjunction", "narrow")}
             aria-current={row.active ? "true" : undefined}
             disabled={row.machineId !== null && busy !== null}
             onClick={() => {
@@ -360,7 +362,11 @@ function HostsPopover({
             </span>
             {row.online ? (
               <span className="meta q-num">
-                {row.path ? `${row.path}${row.latency ? ` · ${row.latency}` : ""}` : "Online"}
+                {row.path
+                  ? `${t(`hosts.path.${row.path}`)}${
+                      row.latencyMs !== null ? ` · ${latencyText(row.latencyMs)}` : ""
+                    }`
+                  : t("hosts.online")}
               </span>
             ) : (
               <span
@@ -373,12 +379,16 @@ function HostsPopover({
                 }}
               >
                 <WifiOffIcon className="q-icon s12" aria-hidden />
-                {row.lastSeen}
+                {row.lastSeen === null ? null : formatAge(row.lastSeen, now)}
               </span>
             )}
             {dots(row)}
             {row.active && !row.sub ? (
-              <CheckIcon className="q-icon s12 q-host-on" strokeWidth={2} aria-label="Active" />
+              <CheckIcon
+                className="q-icon s12 q-host-on"
+                strokeWidth={2}
+                aria-label={t("hosts.active")}
+              />
             ) : null}
           </button>
         ))
@@ -395,7 +405,7 @@ function HostsPopover({
           }}
         >
           <WifiOffIcon className="q-icon" strokeWidth={1.5} aria-hidden />
-          <span className="lbl">Disconnect from {stored.machineName}</span>
+          <span className="lbl">{t("hosts.disconnect", { name: stored.machineName })}</span>
         </button>
       ) : null}
       <div className="q-hp-sep" />
@@ -410,7 +420,7 @@ function HostsPopover({
           }}
         >
           <ServerIcon className="q-icon" strokeWidth={1.5} aria-hidden />
-          <span className="lbl">Sign in to h4rn-connect…</span>
+          <span className="lbl">{t("hosts.signIn")}</span>
         </button>
       )}
       <button
@@ -427,7 +437,7 @@ function HostsPopover({
         }}
       >
         <QrCodeIcon className="q-icon" strokeWidth={1.5} aria-hidden />
-        <span className="lbl">Pair a device…</span>
+        <span className="lbl">{t("hosts.pair")}</span>
       </button>
       <button
         type="button"
@@ -439,7 +449,7 @@ function HostsPopover({
         }}
       >
         <ServerIcon className="q-icon" strokeWidth={1.5} aria-hidden />
-        <span className="lbl">Manage hosts</span>
+        <span className="lbl">{t("hosts.manage")}</span>
       </button>
     </div>
   );
@@ -450,37 +460,33 @@ const NO_SKILLS: never[] = [];
 /** MCP servers and skills live under Settings, so the library has no button of its own. */
 type Destination = "pr" | "issues" | "usage" | "settings";
 
+/** Each destination's name is `sidebar:footer.<key>`. */
 const DESTINATIONS: Array<{
   key: Destination;
-  label: string;
   icon: LucideIcon;
   path: string;
   command: CommandId;
 }> = [
   {
     key: "pr",
-    label: "Pull requests",
     icon: GitPullRequestIcon,
     path: "/pulls",
     command: "nav.pulls",
   },
   {
     key: "issues",
-    label: "Issues",
     icon: CircleDotIcon,
     path: "/issues",
     command: "nav.issues",
   },
   {
     key: "usage",
-    label: "Usage",
     icon: ChartNoAxesColumnIcon,
     path: "/usage",
     command: "nav.usage",
   },
   {
     key: "settings",
-    label: "Settings",
     icon: SettingsIcon,
     path: settingsPath("general"),
     command: "settings.open",
@@ -500,6 +506,7 @@ function SidebarFooter({
   rows: HostRow[];
   connection: { status: string; latencyMs: number | null; transport: string };
 }) {
+  const { t } = useTranslation("sidebar");
   const [popoverOpen, setPopoverOpen] = useState(false);
   const hostLine = hostStatus({ loading, offline, rows });
 
@@ -511,12 +518,17 @@ function SidebarFooter({
           className={cn("q-hostbtn", popoverOpen && "on")}
           aria-haspopup="menu"
           aria-expanded={popoverOpen}
-          title="Hosts and connection"
+          title={t("footer.hostsButton")}
           onClick={() => setPopoverOpen((value) => !value)}
         >
           {hostLine.icon === "orb" ? (
             <AgentGlyph
-              glyph={{ kind: "orb", state: "breathing", speed: 0.35, label: "Connecting" }}
+              glyph={{
+                kind: "orb",
+                state: "breathing",
+                speed: 0.35,
+                label: t("footer.connecting"),
+              }}
               size={14}
             />
           ) : hostLine.icon === "off" ? (
@@ -535,8 +547,8 @@ function SidebarFooter({
             type="button"
             className={cn("q-ibtn q-side-dest", destination === item.key && "on")}
             aria-current={destination === item.key ? "page" : undefined}
-            aria-label={item.label}
-            title={titleWithShortcut(item.label, item.command)}
+            aria-label={t(`footer.${item.key}`)}
+            title={titleWithShortcut(t(`footer.${item.key}`), item.command)}
             onClick={() =>
               navigate({
                 kind: "placeholder",
@@ -572,6 +584,7 @@ function OfflineNotice({
   remoteName: string | null;
   onReconnect: () => void;
 }) {
+  const { t } = useTranslation("sidebar");
   return (
     <div className="q-banner q-side-banner">
       <span className="ic">
@@ -579,12 +592,14 @@ function OfflineNotice({
       </span>
       <span className="grow">
         {remoteName ? (
-          <b>Can’t reach {remoteName}.</b>
+          <b>{t("offline.cantReach", { name: remoteName })}</b>
         ) : (
           <>
-            <b>Offline</b>
+            <b>{t("offline.title")}</b>
             {connection.lastConnectedAt
-              ? ` · as of ${absoluteTime(new Date(connection.lastConnectedAt).toISOString())}`
+              ? ` · ${t("offline.asOf", {
+                  time: absoluteTime(new Date(connection.lastConnectedAt).toISOString()),
+                })}`
               : null}
           </>
         )}
@@ -593,7 +608,7 @@ function OfflineNotice({
         <UseThisMachineButton compact />
       ) : (
         <button type="button" className="q-btn ghost" style={{ height: 24 }} onClick={onReconnect}>
-          Reconnect
+          {t("offline.reconnect")}
         </button>
       )}
     </div>
@@ -614,6 +629,7 @@ function useNeedsYouCount(): number {
 }
 
 function ThreadsSidebar() {
+  const { t } = useTranslation(["sidebar", "common"]);
   const route = useApp((state) => state.ui.route);
   const threads = useApp((state) => state.threads);
   const hosts = useApp((state) => state.hosts);
@@ -660,7 +676,7 @@ function ThreadsSidebar() {
   const activate = (value: ThreadTab) => setTab(value);
 
   return (
-    <nav className="q-side" aria-label="Threads" style={{ width: layout.sidebarWidth }}>
+    <nav className="q-side" aria-label={t("label")} style={{ width: layout.sidebarWidth }}>
       <div className="q-side-hd">
         <div className="q-side-top">
           <span className="q-word">h4rn</span>
@@ -668,8 +684,8 @@ function ThreadsSidebar() {
           <button
             type="button"
             className="q-ibtn"
-            aria-label="Hide sidebar"
-            title={titleWithShortcut("Hide sidebar", "sidebar.toggle")}
+            aria-label={t("hide")}
+            title={titleWithShortcut(t("hide"), "sidebar.toggle")}
             onClick={toggleSidebar}
           >
             <PanelLeftIcon className="q-icon" strokeWidth={1.5} aria-hidden />
@@ -677,8 +693,8 @@ function ThreadsSidebar() {
           <button
             type="button"
             className="q-ibtn"
-            aria-label="New thread"
-            title={titleWithShortcut("New thread", "thread.new")}
+            aria-label={t("newThread")}
+            title={titleWithShortcut(t("newThread"), "thread.new")}
             onClick={() => openNewThread()}
           >
             <SquarePenIcon className="q-icon" strokeWidth={1.5} aria-hidden />
@@ -690,23 +706,11 @@ function ThreadsSidebar() {
           onClick={() => setUi({ paletteOpen: true })}
         >
           <SearchIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-          <span>Search or run</span>
+          <span>{t("search")}</span>
           <ShortcutCaps command="palette.toggle" />
         </button>
         {allEmpty ? null : (
-          <div className="q-seg" role="tablist" aria-label="Thread state">
-            {TAB_ORDER.map((value) => (
-              <button
-                key={value}
-                type="button"
-                role="tab"
-                aria-selected={tab === value}
-                onClick={() => activate(value)}
-              >
-                {TAB_LABELS[value]} <span className="c q-num">{loading ? "—" : counts[value]}</span>
-              </button>
-            ))}
-          </div>
+          <StateTabs tab={tab} counts={counts} loading={loading} onSelect={activate} />
         )}
       </div>
 
@@ -724,8 +728,7 @@ function ThreadsSidebar() {
             <CircleAlertIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
           </span>
           <span className="grow">
-            <b>Couldn’t reach {unreachableHostLabel(hosts)}.</b>{" "}
-            {error.hint ?? "Showing cached threads."}
+            <b>{unreachableHostLine(hosts, t)}</b> {error.hint ?? t("unreachable.cached")}
           </span>
           {connection.status === "offline" && stored ? (
             <UseThisMachineButton compact />
@@ -736,7 +739,7 @@ function ThreadsSidebar() {
               style={{ height: 24 }}
               onClick={() => void loadThreads()}
             >
-              Retry
+              {t("common:retry")}
             </button>
           )}
         </div>
@@ -747,31 +750,22 @@ function ThreadsSidebar() {
           <FilterGroupSkeleton />
         ) : allEmpty ? (
           <div className="q-empty q-side-empty">
-            <h3>No projects yet</h3>
-            <p>
-              A project is a folder on one of your hosts. Every thread you start there is listed
-              under it.
-            </p>
+            <h3>{t("empty.noProjects")}</h3>
+            <p>{t("empty.noProjectsBody")}</p>
             <button type="button" className="q-btn secondary" onClick={openAddProject}>
               <FolderPlusIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-              Add a project…
+              {t("empty.addProject")}
             </button>
           </div>
         ) : visible.length === 0 && groups.length === 0 ? (
           <div className="q-empty q-side-empty">
-            <h3>
-              {query
-                ? "No threads match"
-                : tab === "working"
-                  ? "Working is clear"
-                  : `${TAB_LABELS[tab]} is empty`}
-            </h3>
+            <h3>{query ? t("empty.noMatch") : t(`empty.${tab}`)}</h3>
             <p>
               {query
-                ? "Clear the search to see every thread again."
+                ? t("empty.noMatchBody")
                 : tab === "working"
-                  ? "Threads with a running turn, a pending approval or a failed step appear here."
-                  : "Nothing is waiting in this state right now."}
+                  ? t("empty.workingBody")
+                  : t("empty.stateBody")}
             </p>
             {query ? (
               <button
@@ -779,11 +773,11 @@ function ThreadsSidebar() {
                 className="q-btn secondary"
                 onClick={() => setUi({ query: "" })}
               >
-                Clear search
+                {t("empty.clearSearch")}
               </button>
             ) : tab === "working" ? (
               <button type="button" className="q-btn secondary" onClick={() => openNewThread()}>
-                New thread
+                {t("newThread")}
               </button>
             ) : null}
           </div>
@@ -824,7 +818,7 @@ function ThreadsSidebar() {
         width={layout.sidebarWidth}
         min={240}
         max={420}
-        label="Resize sidebar"
+        label={t("sidebar:resize")}
         onChange={setSidebarWidth}
       />
     </nav>
@@ -840,6 +834,7 @@ function SnoozedSection({
   now: number;
   open: boolean;
 }) {
+  const { t } = useTranslation("sidebar");
   const hosts = useApp((state) => state.hosts);
   return (
     <>
@@ -850,8 +845,8 @@ function SnoozedSection({
         onClick={() => setUi({ snoozedOpen: !open })}
       >
         <ClockIcon className="q-icon s14 q-faint" strokeWidth={1.5} aria-hidden />
-        <span>Snoozed</span>
-        <span className="q-faint q-num">{threads.length}</span>
+        <span>{t("snoozed.title")}</span>
+        <span className="q-faint q-num">{formatNumber(threads.length)}</span>
         {open ? (
           <ChevronDownIcon className="q-icon s14 q-faint" strokeWidth={1.5} aria-hidden />
         ) : (
@@ -880,16 +875,13 @@ function SnoozedSection({
                   <span className="q-row-title">{thread.title}</span>
                   <span className="q-row-time q-num">
                     {thread.snoozed_until
-                      ? new Date(thread.snoozed_until).toLocaleTimeString([], {
-                          hour: "2-digit",
-                          minute: "2-digit",
-                        })
+                      ? formatDateTime(thread.snoozed_until, { hour: "2-digit", minute: "2-digit" })
                       : ""}
                   </span>
                 </span>
                 <span className="q-row-l2">
                   <span className="q-row-meta">
-                    wakes in {relativeAge(thread.snoozed_until ?? "", now)} ·{" "}
+                    {t("snoozed.wakesIn", { age: formatAge(thread.snoozed_until ?? "", now) })} ·{" "}
                     {harnessLabel(thread.harness)}
                   </span>
                 </span>
@@ -903,7 +895,7 @@ function SnoozedSection({
 }
 
 function SettingsSidebar() {
-  const { t } = useTranslation(["settings", "common"]);
+  const { t } = useTranslation(["settings", "common", "sidebar"]);
   const route = useApp((state) => state.ui.route);
   const layout = useApp((state) => state.ui.layout);
   const connection = useApp((state) => state.connection);
@@ -1096,7 +1088,7 @@ function SettingsSidebar() {
         width={layout.sidebarWidth}
         min={240}
         max={420}
-        label="Resize sidebar"
+        label={t("sidebar:resize")}
         onChange={setSidebarWidth}
       />
     </nav>
@@ -1120,12 +1112,18 @@ function McpHealthGlyph({ status }: { status: ReturnType<typeof serverStatus> })
   return <CircleIcon {...common} aria-label={label} style={{ color: "var(--fg-3)" }} />;
 }
 
-/** Names the host that is actually down; several (or none known) read as "a host". */
-function unreachableHostLabel(hosts: Record<string, { name: string; online: boolean }>): string {
+/** Names the host that is actually down; several read as a count, none known as the daemon. */
+function unreachableHostLine(
+  hosts: Record<string, { name: string; online: boolean }>,
+  t: TFunction<["sidebar", "common"]>,
+): string {
   const down = Object.values(hosts).filter((host) => !host.online);
-  if (down.length === 1) return down[0]?.name ?? "a host";
-  if (down.length > 1) return `${down.length} hosts`;
-  return "the daemon";
+  if (down.length === 1) {
+    const name = down[0]?.name;
+    return name ? t("unreachable.host", { name }) : t("unreachable.aHost");
+  }
+  if (down.length > 1) return t("unreachable.hosts", { count: down.length });
+  return t("unreachable.daemon");
 }
 
 export function Sidebar() {
@@ -1136,6 +1134,7 @@ export function Sidebar() {
 }
 
 export function SidebarReveal() {
+  const { t } = useTranslation("sidebar");
   const layout = useApp((state) => state.ui.layout);
   const needsYou = useNeedsYouCount();
   if (layout.sidebarOpen) return null;
@@ -1144,8 +1143,8 @@ export function SidebarReveal() {
       <button
         type="button"
         className="q-ibtn"
-        aria-label={needsYou > 0 ? "Show sidebar. 1 thread needs you" : "Show sidebar"}
-        title={titleWithShortcut("Show sidebar", "sidebar.toggle")}
+        aria-label={needsYou > 0 ? t("showNeedsYou", { count: needsYou }) : t("show")}
+        title={titleWithShortcut(t("show"), "sidebar.toggle")}
         onClick={toggleSidebar}
       >
         <PanelLeftIcon className="q-icon" strokeWidth={1.5} aria-hidden />
@@ -1154,8 +1153,8 @@ export function SidebarReveal() {
       <button
         type="button"
         className="q-ibtn"
-        aria-label="New thread"
-        title={titleWithShortcut("New thread", "thread.new")}
+        aria-label={t("newThread")}
+        title={titleWithShortcut(t("newThread"), "thread.new")}
         onClick={() => openNewThread()}
       >
         <SquarePenIcon className="q-icon" strokeWidth={1.5} aria-hidden />

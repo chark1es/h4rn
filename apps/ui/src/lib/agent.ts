@@ -17,37 +17,6 @@ export type AgentGlyphSpec =
   | { kind: "you"; label: string }
   | { kind: "offline"; label: string };
 
-export function agentStateLabel(state: AgentState): string {
-  switch (state) {
-    case "idle":
-      return "Idle";
-    case "queued":
-      return "Queued";
-    case "scheduled":
-      return "Auto-resume scheduled";
-    case "unreachable":
-      return "Host unreachable";
-    case "thinking":
-      return "Thinking";
-    case "searching":
-      return "Searching";
-    case "reading":
-      return "Reading";
-    case "editing":
-      return "Editing";
-    case "running_tool":
-      return "Running tool";
-    case "awaiting_approval":
-      return "Waiting for approval";
-    case "rate_limited":
-      return "Limited";
-    case "error":
-      return "Failed";
-    case "done":
-      return "Done";
-  }
-}
-
 /**
  * Whether the agent is doing something right now.
  *

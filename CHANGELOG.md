@@ -12,6 +12,12 @@ All notable changes to h4rn are recorded here. The format follows
   applies at once. Every Settings page is translated, including shortcut
   names, Connect sign-in progress and lists of names; other areas follow one
   at a time (see `docs/i18n.md`, which also holds the shared glossary).
+- **The sidebar and thread list in Chinese, Spanish and Japanese.** The
+  Working / Done / Settled tabs, project folders and their menus, thread rows,
+  Snoozed, the hosts menu, the footer and their empty states, toasts and
+  screen-reader labels follow the Language choice. Ages ("5m"), counts and
+  times use the language's own formats, and a snoozed thread now says how long
+  until it wakes instead of "now". The phone's thread list is translated too.
 - **Android Live Updates show a running agent.** A separate switch under
   Settings → Notifications → Phone alerts shows each running thread as an
   ongoing notification with its project and whether it is working, waiting for

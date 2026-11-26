@@ -112,7 +112,7 @@
       },
       "finishedTurns": {
         "title": "Turnos terminados",
-        "subtitle": "Un hilo pasa a Terminado",
+        "subtitle": "Un hilo pasa a «Terminado»",
         "label": "Notificaciones de turnos terminados"
       },
       "hostOffline": {
@@ -200,7 +200,7 @@
         "settle": "Resolver el hilo",
         "acknowledge": "Confirmar (Terminado)",
         "snooze": "Posponer una hora",
-        "pin": "Mantener en En curso",
+        "pin": "Mantener en «En curso»",
         "reopen": "Reabrir un hilo resuelto",
         "steerQueuedMessage": "Dirigir el mensaje en cola más antiguo",
         "editQueuedMessage": "Editar el mensaje en cola más reciente"
@@ -215,13 +215,13 @@
         "inbox": "Ir a los hilos",
         "pulls": "Ir a los pull requests",
         "issues": "Ir a los issues",
-        "usage": "Ir al uso",
-        "tools": "Ir a servidores MCP y skills"
+        "usage": "Ir a Uso",
+        "tools": "Ir a los servidores MCP y skills"
       },
       "tab": {
-        "working": "Mostrar En curso",
-        "done": "Mostrar Terminado",
-        "settled": "Mostrar Resueltos"
+        "working": "Mostrar «En curso»",
+        "done": "Mostrar «Terminado»",
+        "settled": "Mostrar «Resuelto»"
       },
       "approval": {
         "approve": "Aprobar la acción pendiente",
@@ -640,6 +640,12 @@
       "preparing": "Preparando un código…",
       "noCode": "Aún no hay código",
       "generate": "Generar un código de vinculación"
+    },
+    "toasts": {
+      "pairingFailed": "No se pudo crear el emparejamiento.",
+      "renameFailed": "No se pudo cambiar el nombre del dispositivo.",
+      "revoked": "Dispositivo revocado. Su próxima solicitud fallará.",
+      "revokeFailed": "No se pudo revocar el dispositivo."
     }
   },
   "account": {

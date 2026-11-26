@@ -198,8 +198,8 @@
         "snooze": "1 時間スヌーズ",
         "pin": "「作業中」に残す",
         "reopen": "整理済みのスレッドを再開",
-        "steerQueuedMessage": "最も古いキューのメッセージをステア",
-        "editQueuedMessage": "最新のキューのメッセージを編集"
+        "steerQueuedMessage": "キュー内で最も古いメッセージをステア",
+        "editQueuedMessage": "キュー内で最新のメッセージを編集"
       },
       "settings": {
         "open": "設定"
@@ -632,6 +632,12 @@
       "preparing": "コードを準備中…",
       "noCode": "コードはまだありません",
       "generate": "ペアリングコードを生成"
+    },
+    "toasts": {
+      "pairingFailed": "ペアリングを作成できませんでした。",
+      "renameFailed": "デバイスの名前を変更できませんでした。",
+      "revoked": "デバイスを取り消しました。次のリクエストから失敗します。",
+      "revokeFailed": "デバイスを取り消せませんでした。"
     }
   },
   "account": {

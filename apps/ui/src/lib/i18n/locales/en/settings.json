@@ -636,6 +636,12 @@
       "preparing": "Preparing a code…",
       "noCode": "No code yet",
       "generate": "Generate a pairing code"
+    },
+    "toasts": {
+      "pairingFailed": "Could not create a pairing.",
+      "renameFailed": "Could not rename the device.",
+      "revoked": "Device revoked. Its next request fails.",
+      "revokeFailed": "Could not revoke the device."
     }
   },
   "account": {

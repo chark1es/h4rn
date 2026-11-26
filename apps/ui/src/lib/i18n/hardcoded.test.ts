@@ -21,17 +21,28 @@ import { describe, expect, it } from "vitest";
  *     text) is let through;
  *   - lists joined with a hard-coded `", "`: use `formatList`, which joins
  *     the way the active language does ("a、b、c" in Chinese and Japanese).
+ *     A join that feeds data rather than display (an editable field's value,
+ *     a request body) opts out with `// i18n-ignore-next-line: <why>` on the
+ *     line above it. The reason is required, and the escape covers only that
+ *     one join, never other text.
  * Values that are not prose are let through: URLs, paths, e-mail addresses,
  * identifiers such as `NAME` or `gpt-5.4-mini`, and the product names below.
  */
 const CONVERTED = [
+  "src/components/inbox/PhoneInbox.tsx",
+  "src/components/inbox/StateTabs.tsx",
+  "src/components/inbox/ThreadRow.tsx",
   "src/components/pages/SettingsPage.tsx",
+  "src/components/shell/Sidebar.tsx",
+  "src/components/shell/hostStatus.ts",
   "src/features/access/AccessSettings.tsx",
   "src/features/forge/ForgeSettings.tsx",
   "src/features/guest/GuestSettings.tsx",
   "src/features/harnesses/HarnessSettings.tsx",
   "src/features/harnesses/acpForm.ts",
   "src/features/issues/LinearSettings.tsx",
+  "src/features/projects/SidebarProjects.tsx",
+  "src/features/projects/store.ts",
   "src/features/proxy/ProxySettings.tsx",
   "src/features/remote/ConnectSignIn.tsx",
   "src/features/remote/LocalMachineAction.tsx",
@@ -104,6 +115,9 @@ function isProse(text: string): boolean {
 
 type Finding = { file: string; line: number; text: string };
 
+/** `// i18n-ignore-next-line: <why>`; the reason after the colon is required. */
+const IGNORE_NEXT_LINE = /\/\/\s*i18n-ignore-next-line:\s*\S/;
+
 function literalText(node: ts.Node): string | null {
   if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) return node.text;
   if (ts.isTemplateExpression(node)) {
@@ -165,9 +179,15 @@ function findHardcoded(file: string, source: string): Finding[] {
   );
   const findings: Finding[] = [];
   const selections = storeSelections(sourceFile);
+  const lines = source.split("\n");
   const report = (node: ts.Node, text: string) => {
     const { line } = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile));
     findings.push({ file, line: line + 1, text: text.trim() });
+  };
+  /** True when the line above the node opts it out, with a reason. */
+  const ignored = (node: ts.Node) => {
+    const { line } = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile));
+    return line > 0 && IGNORE_NEXT_LINE.test(lines[line - 1] ?? "");
   };
 
   const visit = (node: ts.Node) => {
@@ -177,7 +197,8 @@ function findHardcoded(file: string, source: string): Finding[] {
       node.expression.name.text === "join" &&
       node.arguments.length === 1 &&
       ts.isStringLiteralLike(node.arguments[0] as ts.Expression) &&
-      /^\s*,\s+$/.test((node.arguments[0] as ts.StringLiteralLike).text)
+      /^\s*,\s+$/.test((node.arguments[0] as ts.StringLiteralLike).text) &&
+      !ignored(node)
     ) {
       report(node, node.getText(sourceFile));
     }
@@ -295,6 +316,20 @@ export function A({ label }: { label: string }) {
     ].join("\n");
     const texts = findHardcoded("sample.ts", sample).map((finding) => finding.text);
     expect(texts).toEqual(["names.join(', ')"]);
+  });
+
+  it("lets a data join opt out with a reasoned i18n-ignore-next-line", () => {
+    const sample = [
+      "// i18n-ignore-next-line: the field's value, edited as text",
+      "const labels = names.join(', ');",
+      "const shown = names.join(', ');",
+      "// i18n-ignore-next-line",
+      "const noReason = names.join(', ');",
+      "// i18n-ignore-next-line: only the join is exempt",
+      "pushToast({ title: 'Saved the labels.', body: tags.join(', ') });",
+    ].join("\n");
+    const texts = findHardcoded("sample.ts", sample).map((finding) => finding.text);
+    expect(texts).toEqual(["names.join(', ')", "names.join(', ')", "Saved the labels."]);
   });
 
   for (const file of CONVERTED) {

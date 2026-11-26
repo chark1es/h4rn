@@ -11,6 +11,7 @@ import {
   XIcon,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { ThreadRow } from "@/components/inbox/ThreadRow";
 import {
@@ -23,6 +24,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import type { HostSummary } from "@/gen";
 import { monogram } from "@/lib/grouping";
+import { formatNumber } from "@/lib/i18n";
 import { needsAttention } from "@/lib/inbox";
 import {
   acknowledgeThread,
@@ -40,15 +42,13 @@ import { cn } from "@/lib/utils";
 import {
   addProject,
   moveProject,
-  PROJECT_SORT_LABELS,
-  type ProjectSort,
+  PROJECT_SORTS,
   removeProject,
   renameProject,
   type SidebarProject,
   setProjectSort,
   setThreadSort,
-  THREAD_SORT_LABELS,
-  type ThreadSort,
+  THREAD_SORTS,
   useProjects,
 } from "./store";
 
@@ -58,45 +58,48 @@ function folderOf(group: SidebarProject): string {
 
 /** "Projects" heading with the sort menu and Add project. */
 export function ProjectsHeader() {
+  const { t } = useTranslation("sidebar");
   const projectSort = useProjects((state) => state.prefs.projectSort);
   const threadSort = useProjects((state) => state.prefs.threadSort);
   return (
     <div className="q-side-h q-proj-h">
-      <span>Projects</span>
+      <span>{t("projects.title")}</span>
       <span className="q-proj-acts">
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <button
               type="button"
               className="q-ibtn s22"
-              aria-label={`Sort projects: ${PROJECT_SORT_LABELS[projectSort]}`}
-              title="Sort projects and threads"
+              aria-label={t("projects.sortLabel", {
+                sort: t(`projects.projectSort.${projectSort}`),
+              })}
+              title={t("projects.sortTitle")}
             >
               <ArrowUpDownIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
             </button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end" className="w-56">
-            <DropdownMenuLabel>Sort projects</DropdownMenuLabel>
-            {(Object.keys(PROJECT_SORT_LABELS) as ProjectSort[]).map((value) => (
+            <DropdownMenuLabel>{t("projects.sortProjects")}</DropdownMenuLabel>
+            {PROJECT_SORTS.map((value) => (
               <DropdownMenuItem key={value} onSelect={() => setProjectSort(value)}>
                 <span className="inline-flex w-4 justify-center">
                   {projectSort === value ? (
                     <CheckIcon className="q-icon s14" strokeWidth={2} aria-hidden />
                   ) : null}
                 </span>
-                {PROJECT_SORT_LABELS[value]}
+                {t(`projects.projectSort.${value}`)}
               </DropdownMenuItem>
             ))}
             <DropdownMenuSeparator />
-            <DropdownMenuLabel>Sort threads</DropdownMenuLabel>
-            {(Object.keys(THREAD_SORT_LABELS) as ThreadSort[]).map((value) => (
+            <DropdownMenuLabel>{t("projects.sortThreads")}</DropdownMenuLabel>
+            {THREAD_SORTS.map((value) => (
               <DropdownMenuItem key={value} onSelect={() => setThreadSort(value)}>
                 <span className="inline-flex w-4 justify-center">
                   {threadSort === value ? (
                     <CheckIcon className="q-icon s14" strokeWidth={2} aria-hidden />
                   ) : null}
                 </span>
-                {THREAD_SORT_LABELS[value]}
+                {t(`projects.threadSort.${value}`)}
               </DropdownMenuItem>
             ))}
           </DropdownMenuContent>
@@ -104,8 +107,8 @@ export function ProjectsHeader() {
         <button
           type="button"
           className="q-ibtn s22"
-          aria-label="Add project"
-          title="Add project"
+          aria-label={t("projects.add")}
+          title={t("projects.add")}
           onClick={openAddProject}
         >
           <FolderPlusIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
@@ -136,6 +139,7 @@ export function ProjectGroupSection({
   closed: boolean;
   now: number;
 }) {
+  const { t } = useTranslation("sidebar");
   const [renaming, setRenaming] = useState(false);
   const [dropBefore, setDropBefore] = useState(false);
   const you = group.threads.some((thread) => needsAttention(thread, now));
@@ -149,7 +153,7 @@ export function ProjectGroupSection({
   return (
     <section
       className={cn("q-pg", dropBefore && dragging && dragging !== group.key && "q-pg-drop")}
-      aria-label={`${group.name} on ${hostName}`}
+      aria-label={t("projects.groupLabel", { name: group.name, host: hostName })}
       onDragOver={(event) => {
         if (!dragging || dragging === group.key) return;
         event.preventDefault();
@@ -204,8 +208,10 @@ export function ProjectGroupSection({
             <span className="grow" />
             {closed ? (
               <>
-                {you ? <span className="q-dot you" role="img" aria-label="needs you" /> : null}
-                <span className="ct q-num">{group.threads.length}</span>
+                {you ? (
+                  <span className="q-dot you" role="img" aria-label={t("projects.needsYou")} />
+                ) : null}
+                <span className="ct q-num">{formatNumber(group.threads.length)}</span>
               </>
             ) : null}
             <ChevronDownIcon className="q-icon s12 chev" strokeWidth={1.5} aria-hidden />
@@ -218,8 +224,8 @@ export function ProjectGroupSection({
                 <button
                   type="button"
                   className="q-ibtn q-pg-more"
-                  aria-label={`${group.name} actions`}
-                  title="Project actions"
+                  aria-label={t("projects.actionsLabel", { name: group.name })}
+                  title={t("projects.actionsTitle")}
                 >
                   <EllipsisIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
                 </button>
@@ -227,12 +233,12 @@ export function ProjectGroupSection({
               <DropdownMenuContent align="end" className="w-56">
                 <DropdownMenuItem onSelect={newThreadHere}>
                   <SquarePenIcon aria-hidden />
-                  New thread here
+                  {t("projects.newThreadHere")}
                 </DropdownMenuItem>
                 {group.project ? (
                   <DropdownMenuItem onSelect={() => setRenaming(true)}>
                     <PencilIcon aria-hidden />
-                    Rename…
+                    {t("projects.rename")}
                   </DropdownMenuItem>
                 ) : !localHost ? null : (
                   <DropdownMenuItem
@@ -240,7 +246,7 @@ export function ProjectGroupSection({
                       void addProject({ type: "existing", path: folder }).then((result) => {
                         if ("error" in result) {
                           pushToast({
-                            title: "Couldn't keep the project.",
+                            title: t("projects.toasts.keepFailed"),
                             description: result.error,
                             variant: "error",
                           });
@@ -249,17 +255,21 @@ export function ProjectGroupSection({
                     }
                   >
                     <PinIcon aria-hidden />
-                    Keep in the sidebar
+                    {t("projects.keep")}
                   </DropdownMenuItem>
                 )}
                 <DropdownMenuItem
                   onSelect={() => {
                     void navigator.clipboard?.writeText(folder);
-                    pushToast({ title: "Path copied.", description: folder, variant: "info" });
+                    pushToast({
+                      title: t("projects.toasts.pathCopied"),
+                      description: folder,
+                      variant: "info",
+                    });
                   }}
                 >
                   <CopyIcon aria-hidden />
-                  Copy path
+                  {t("projects.copyPath")}
                 </DropdownMenuItem>
                 {group.project ? (
                   <>
@@ -271,11 +281,11 @@ export function ProjectGroupSection({
                         void removeProject(project.id).then((ok) => {
                           if (ok) {
                             pushToast({
-                              title: `Removed ${project.name} from the sidebar.`,
+                              title: t("projects.toasts.removed", { name: project.name }),
                               description:
                                 group.threads.length > 0
-                                  ? "The folder is untouched, and its threads still list here."
-                                  : "The folder on the host is untouched.",
+                                  ? t("projects.toasts.removedWithThreads")
+                                  : t("projects.toasts.removedEmpty"),
                               variant: "info",
                             });
                           }
@@ -283,7 +293,7 @@ export function ProjectGroupSection({
                       }}
                     >
                       <XIcon aria-hidden />
-                      Remove from sidebar
+                      {t("projects.remove")}
                     </DropdownMenuItem>
                   </>
                 ) : null}
@@ -292,8 +302,8 @@ export function ProjectGroupSection({
             <button
               type="button"
               className="q-ibtn q-pg-add"
-              aria-label={`New thread in ${group.name} on ${hostName}`}
-              title={`New thread in ${group.name}`}
+              aria-label={t("projects.newThreadInLabel", { name: group.name, host: hostName })}
+              title={t("projects.newThreadInTitle", { name: group.name })}
               onClick={newThreadHere}
             >
               <SquarePenIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
@@ -304,7 +314,7 @@ export function ProjectGroupSection({
       {closed ? null : group.threads.length === 0 ? (
         <div className="q-rows">
           <button type="button" className="q-pg-empty" onClick={newThreadHere}>
-            No threads yet. Start one
+            {t("projects.empty")}
           </button>
         </div>
       ) : (
@@ -372,6 +382,7 @@ function RenameField({
   initial: string;
   onDone: (name: string | null) => void | Promise<void>;
 }) {
+  const { t } = useTranslation("sidebar");
   const [value, setValue] = useState(initial);
   const ref = useRef<HTMLInputElement | null>(null);
   useEffect(() => {
@@ -382,7 +393,7 @@ function RenameField({
     <input
       ref={ref}
       className="q-input q-pg-rename"
-      aria-label="Project name"
+      aria-label={t("projects.nameLabel")}
       value={value}
       onChange={(event) => setValue(event.target.value)}
       onBlur={() => void onDone(value.trim() || null)}

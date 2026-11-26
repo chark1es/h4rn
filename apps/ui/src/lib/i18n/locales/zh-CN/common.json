@@ -29,5 +29,10 @@
     "auto_accept_edits": "自动接受编辑",
     "plan": "计划",
     "full_access": "完全访问"
+  },
+  "states": {
+    "working": "进行中",
+    "done": "已完成",
+    "settled": "已了结"
   }
 }
