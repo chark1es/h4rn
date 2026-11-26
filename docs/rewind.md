@@ -149,12 +149,13 @@ The checkpoint still records which ignored paths (or ignored folders) were
 present when it was taken. That listing is how the restore recognises a path
 that was ignored then and is visible now — the turn emptied `.gitignore` or ran
 `git add -f` — and leaves it exactly as the turn left it. A recorded folder
-entry is checked with `git check-ignore`: the turn may remove the rule that
-ignored the folder and create its own file inside it, and a folder entry alone
-cannot say that new path was ignored then. Such a path is visible now and was
-not there at the checkpoint, so it is restored like any other. Ignoring more
-than 10,000 paths makes the listing incomplete, so the checkpoint is
-incomplete and **Revert files too** refuses with that reason.
+entry covers everything beneath it. The listing cannot say which of those files
+already existed, and the turn may remove the rule and create its own file
+there, so nothing under a recorded folder is written, recreated or removed, and
+every path the turn touched there is named. Leaving a file the turn created is
+safer than deleting one that was already there. Ignoring more than 10,000 paths
+makes the listing incomplete, so the checkpoint is incomplete and **Revert
+files too** refuses with that reason.
 
 The dialog and the answer name the ignored paths the turn touched (from the
 tool calls and captures that named them, and from recorded ignored files that
@@ -163,15 +164,16 @@ rewound. This is a plain note, not an error.
 
 ### Exact bytes
 
-A checkpoint is taken without conversion: `git add -A` runs with
-`core.autocrlf=false`, `core.safecrlf=false` and `--attr-source` pointing at an
-empty tree, so no `text`, `eol` or filter attribute changes what is stored. The
-index's stat cache is cleared first, so an unchanged CRLF or filtered file is
-read from disk rather than kept as the clean blob the real index holds. Restore
-reads the raw blob back, so a CRLF file comes back with its CRLF and a filtered
-file comes back with its working-tree bytes, whatever the rules say now.
-`--attr-source` needs git 2.40 or newer; on an older git the checkpoint is
-incomplete and the restore refuses with a message naming the version.
+A checkpoint is taken without conversion: every path is hashed with
+`git hash-object --no-filters` and written to a fresh scratch index with
+`update-index --cacheinfo`, so no attribute source can convert or filter what is
+stored — not `.gitattributes`, not `.git/info/attributes`, and not the global
+`core.attributesFile` — and `core.autocrlf` never runs. Restore reads the raw
+blob back, so a CRLF file comes back with its CRLF and a filtered file comes
+back with its working-tree bytes, whatever the rules say now. The plan's diff
+reads attributes from an empty tree, which needs git 2.40 or newer; on an older
+git the checkpoint is incomplete and the restore refuses with a message naming
+the version.
 
 The permission bits on disk are kept — only the executable bit is set or
 cleared, and it comes from the checkpoint. A file the restore has to recreate
@@ -211,7 +213,11 @@ in-memory state. If the commit fails, the files are put back from the journal
 and the conversation is unchanged; the journal is removed only once that
 rollback is on disk, so a failed one is retried at the next startup. If the
 daemon stops between the apply and the commit, the next startup rolls the
-restore back; a committed cut is kept and its journal removed. A missing blob, a
+restore back; a committed cut is kept and its journal removed. Both a live
+rollback and startup recovery walk every recorded parent without following a
+link and prove the nearest real folder is still inside the journal's root; a
+folder that has become a symlink refuses the rollback, which then keeps its
+journal. A missing blob, a
 file too large to capture, a failed `git` read, a path that now escapes the
 worktree, a target that is now a folder, a failed unlink and a failed write
 refuse or roll back the whole rewind. A failed `git` read is never read as a

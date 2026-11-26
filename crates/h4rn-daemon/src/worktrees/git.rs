@@ -1174,20 +1174,20 @@ const ATTR_SOURCE_GIT: (u32, u32) = (2, 40);
 
 /// The whole worktree at this instant, as a checkpoint.
 ///
-/// The tree is built in a scratch copy of the checkout's index with
-/// `git add -A`, so it covers every tracked file and every untracked file git
-/// does not ignore, keeps git's modes (the executable bit, a symlink's target)
-/// and already records a rename as the old path restored plus the new path
-/// removed. The real index and its lock are never touched. `Ok(None)` when the
-/// repository has no commit yet or git fails: such a turn has no complete
-/// checkpoint to rewind to.
+/// The tree is built with plumbing in a fresh scratch index, so it covers every
+/// tracked file and every untracked file git does not ignore, keeps git's modes
+/// (the executable bit, a symlink's target) and already records a rename as the
+/// old path restored plus the new path removed. The real index and its lock are
+/// never touched. `Ok(None)` when the repository has no commit yet or git
+/// fails: such a turn has no complete checkpoint to rewind to.
 ///
-/// The add runs with end-of-line conversion and attributes switched off, so the
-/// tree holds the exact bytes that were on disk: an `eol` rule, `text=auto`, a
-/// clean filter or `core.autocrlf` never rewrites them. `Err` names why a
-/// checkpoint cannot be complete — an older git without `--attr-source`, or
-/// more ignored paths than [`MAX_CHECKPOINT_IGNORED`] — and the caller records
-/// that reason so a restore refuses with it.
+/// Each path is hashed with `hash-object --no-filters` and entered with
+/// `update-index --cacheinfo`, so no attribute source can convert the stored
+/// bytes: not `.gitattributes`, not `.git/info/attributes`, and not the global
+/// `core.attributesFile`. A clean filter and `core.autocrlf` never run either.
+/// `Err` names why a checkpoint cannot be complete — an older git without
+/// `--attr-source`, or more ignored paths than [`MAX_CHECKPOINT_IGNORED`] — and
+/// the caller records that reason so a restore refuses with it.
 ///
 /// Ignored files are outside the tree by design (they are build output, not
 /// work), so the checkpoint records which ignored paths were present (see
@@ -1200,8 +1200,10 @@ pub fn checkpoint_commit(workspace: &Path) -> Result<Option<Checkpoint>, String>
     {
         return Ok(None);
     }
-    let attr_source = checkpoint_attr_source(workspace)?;
-    let Some(index) = git_path(workspace, "index") else {
+    // The plan's diff reads attributes from an empty tree too, so the version
+    // that understands `--attr-source` is still required.
+    checkpoint_attr_source(workspace)?;
+    let Some(repo) = toplevel(workspace) else {
         return Ok(None);
     };
     let Ok(scratch) = tempfile::Builder::new()
@@ -1211,53 +1213,58 @@ pub fn checkpoint_commit(workspace: &Path) -> Result<Option<Checkpoint>, String>
         return Ok(None);
     };
     let staged = scratch.path().join("index");
-    match std::fs::copy(&index, &staged) {
-        Ok(_) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(_) => return Ok(None),
-    }
-    // The copy carries the real index's stat cache. `git add -A` would trust
-    // it and keep the converted blob the index already holds for an unchanged
-    // CRLF or filtered file, so its entries are rewritten without stat data
-    // first: every path is then read from disk exactly as it is.
-    let recorded = match run_bytes_with_index(
-        workspace,
-        &staged,
-        &["ls-files", "-s", "-z"],
-        OBSERVATION_GIT_TIMEOUT,
-    ) {
-        Ok(recorded) => recorded,
-        Err(_) => return Ok(None),
-    };
-    let cleared = run_bytes_with_index_input(
-        workspace,
-        &staged,
-        &["update-index", "-z", "--index-info"],
-        Some(&recorded),
-        OBSERVATION_GIT_TIMEOUT,
-    );
-    if cleared.is_err() {
-        return Ok(None);
-    }
-    let added = run_bytes_with_index(
-        workspace,
-        &staged,
-        &[
-            "-c",
-            "core.autocrlf=false",
-            "-c",
-            "core.safecrlf=false",
-            &format!("--attr-source={attr_source}"),
-            "add",
-            "-A",
+    let Ok(listed) = run_bytes_with_timeout(
+        &repo,
+        [
+            "ls-files",
+            "-z",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "--full-name",
         ],
         OBSERVATION_GIT_TIMEOUT,
+    ) else {
+        return Ok(None);
+    };
+    let Ok(paths) = nul_paths(&listed) else {
+        return Ok(None);
+    };
+    // `core.filemode=false` makes git ignore the executable bit; the tree must
+    // record what git would have recorded.
+    let filemode = run_with_timeout(
+        &repo,
+        ["config", "--bool", "core.filemode"],
+        OBSERVATION_GIT_TIMEOUT,
+    )
+    .map_or(true, |value| value != "false");
+    let unique: std::collections::BTreeSet<&str> = paths.iter().map(String::as_str).collect();
+    let mut index_info = Vec::new();
+    for path in unique {
+        let Some((mode, object)) = checkpoint_entry(&repo, path, filemode) else {
+            continue;
+        };
+        // `ls-files` names an untracked nested repository with a trailing
+        // slash; the tree entry is the repository itself.
+        let tree_path = path.strip_suffix('/').unwrap_or(path);
+        if tree_path.is_empty() {
+            continue;
+        }
+        index_info.extend_from_slice(format!("{mode:o} {object}\t").as_bytes());
+        index_info.extend_from_slice(tree_path.as_bytes());
+        index_info.push(0);
+    }
+    let staged_ok = run_bytes_with_index_input(
+        &repo,
+        &staged,
+        &["update-index", "-z", "--index-info"],
+        Some(&index_info),
+        OBSERVATION_GIT_TIMEOUT,
     );
-    if added.is_err() {
+    if staged_ok.is_err() {
         return Ok(None);
     }
-    let Ok(tree) =
-        run_bytes_with_index(workspace, &staged, &["write-tree"], OBSERVATION_GIT_TIMEOUT)
+    let Ok(tree) = run_bytes_with_index(&repo, &staged, &["write-tree"], OBSERVATION_GIT_TIMEOUT)
     else {
         return Ok(None);
     };
@@ -1268,6 +1275,71 @@ pub fn checkpoint_commit(workspace: &Path) -> Result<Option<Checkpoint>, String>
     let ignored = ignored_paths(workspace)
         .map_err(|error| format!("git could not list this checkout's ignored paths: {error}"))?;
     Ok((!tree.is_empty()).then_some(Checkpoint { tree, ignored }))
+}
+
+/// One worktree path's tree mode and object, hashed without any filter.
+///
+/// `None` skips a path that is not a file, link or nested repository, or one
+/// that disappeared while the checkpoint was being taken: `git add -A` would
+/// have recorded it as removed.
+fn checkpoint_entry(repo: &Path, path: &str, filemode: bool) -> Option<(u32, String)> {
+    let absolute = repo.join(path);
+    let meta = absolute.symlink_metadata().ok()?;
+    if meta.file_type().is_symlink() {
+        let target = std::fs::read_link(&absolute).ok()?;
+        let object = hash_bytes(repo, &path_to_bytes(&target)).ok()?;
+        return Some((MODE_SYMLINK, object));
+    }
+    if meta.is_file() {
+        let object = run_with_timeout(
+            repo,
+            ["hash-object", "-w", "--no-filters", "--", path],
+            OBSERVATION_GIT_TIMEOUT,
+        )
+        .ok()?;
+        let mode = if filemode && is_executable(&meta) {
+            MODE_EXECUTABLE
+        } else {
+            0o100644
+        };
+        return Some((mode, object));
+    }
+    if meta.is_dir() {
+        // An untracked nested repository is listed with a trailing slash and a
+        // tracked submodule without one; both are a gitlink pointing at the
+        // nested checkout's HEAD.
+        let object =
+            run_with_timeout(&absolute, ["rev-parse", "HEAD"], OBSERVATION_GIT_TIMEOUT).ok()?;
+        return Some((MODE_GITLINK, object));
+    }
+    None
+}
+
+/// A blob written from `bytes` with no conversion or filter.
+fn hash_bytes(repo: &Path, bytes: &[u8]) -> Result<String, String> {
+    let mut command = command(repo);
+    command.args(["hash-object", "-w", "--no-filters", "--stdin"]);
+    let (status, stdout, stderr) =
+        run_raw_command_with_input(&mut command, Some(bytes), OBSERVATION_GIT_TIMEOUT)?;
+    if !status.success() {
+        return Err(failure_message(status, &stderr));
+    }
+    String::from_utf8(stdout)
+        .map(|object| object.trim().to_owned())
+        .map_err(|_| "git printed an object id that is not valid UTF-8".to_owned())
+}
+
+/// A path's bytes, as git stores a symlink's target.
+fn path_to_bytes(path: &Path) -> Vec<u8> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        path.as_os_str().as_bytes().to_vec()
+    }
+    #[cfg(not(unix))]
+    {
+        path.to_string_lossy().into_owned().into_bytes()
+    }
 }
 
 /// The empty tree a checkpoint reads attributes from, after checking that this
@@ -1337,56 +1409,6 @@ fn ignored_paths(workspace: &Path) -> Result<Vec<String>, String> {
     }
     paths.sort();
     Ok(paths)
-}
-
-/// Which of `paths` the checkout's ignore rules still ignore, in one git call.
-///
-/// `--no-index` asks the rules themselves, not whether the path happens to be
-/// tracked: a file the turn force-added is still covered by the rule that
-/// ignored it at checkpoint time. Only paths inside a recorded ignored folder
-/// need this: the turn may remove the rule that ignored the folder, and a
-/// folder entry alone cannot say its new files were ignored then.
-pub fn ignored_paths_now(workspace: &Path, paths: &[String]) -> Result<HashSet<String>, String> {
-    if paths.is_empty() {
-        return Ok(HashSet::new());
-    }
-    let mut input = Vec::new();
-    for path in paths {
-        input.extend_from_slice(path.as_bytes());
-        input.push(0);
-    }
-    let mut command = command(workspace);
-    command.args(["check-ignore", "-z", "--no-index", "--stdin"]);
-    let (status, stdout, stderr) =
-        run_raw_command_with_input(&mut command, Some(&input), OBSERVATION_GIT_TIMEOUT)?;
-    match status.code() {
-        // 0: some paths are ignored, 1: none are. Both answered the question.
-        Some(0) | Some(1) => {}
-        _ => return Err(failure_message(status, &stderr)),
-    }
-    let mut ignored = HashSet::new();
-    for record in stdout.split(|byte| *byte == 0) {
-        if record.is_empty() {
-            continue;
-        }
-        ignored.insert(String::from_utf8_lossy(record).into_owned());
-    }
-    Ok(ignored)
-}
-
-/// One git path inside the checkout's git dir (`--git-path`).
-fn git_path(workspace: &Path, name: &str) -> Option<PathBuf> {
-    let path = run_path_with_timeout(
-        workspace,
-        ["rev-parse", "--git-path", name],
-        OBSERVATION_GIT_TIMEOUT,
-    )
-    .ok()?;
-    Some(if path.is_absolute() {
-        path
-    } else {
-        workspace.join(path)
-    })
 }
 
 /// How one path stood at a checkpoint.

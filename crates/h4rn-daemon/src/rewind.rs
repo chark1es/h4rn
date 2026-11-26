@@ -315,6 +315,9 @@ pub(crate) struct PreparedRestore {
     backups: Vec<(PathBuf, Backup)>,
     record_path: PathBuf,
     left_alone: Vec<String>,
+    /// The canonical root every backed-up path sits under, so a rollback can
+    /// prove a parent is still inside it before writing or removing.
+    root: PathBuf,
 }
 
 /// One restore journal on disk, before its contents are read.
@@ -474,26 +477,15 @@ pub(crate) fn prepare_restore(
             ));
         }
     }
-    // A path covered only by a recorded ignored folder is left alone only
-    // while the ignore rules still ignore it: the turn may remove the rule
-    // that ignored the folder, and a file it created there is then visible
-    // and was not at the checkpoint. Ask git once for all of them.
-    let mut candidates: Vec<String> = Vec::new();
-    for change in &changes {
-        if !index.covers_exactly(&change.path) && !index.folders_covering(&change.path).is_empty() {
-            candidates.push(change.path.clone());
-        }
-    }
-    for (path, _, _) in &captures {
-        if !index.covers_exactly(path) && !index.folders_covering(path).is_empty() {
-            candidates.push(path.clone());
-        }
-    }
-    candidates.sort();
-    candidates.dedup();
-    let still_ignored = crate::worktrees::git::ignored_paths_now(&repo, &candidates)
-        .map_err(|error| format!("could not ask git which paths are ignored: {error}"))?;
-    let covered = |path: &str| index.covers_exactly(path) || still_ignored.contains(path);
+    // A recorded ignored folder entry stands for everything beneath it as it
+    // was when the checkpoint was taken. The listing cannot say which of those
+    // paths existed then — `--directory` collapses the whole folder to one
+    // entry — and the turn may remove the ignore rule and create its own file
+    // there. So every path under a recorded folder stays out of scope, and is
+    // named: leaving a file the turn created is safer than deleting one that
+    // was already there.
+    let covered =
+        |path: &str| index.covers_exactly(path) || !index.folders_covering(path).is_empty();
 
     let mut targets: BTreeMap<String, Option<crate::worktrees::git::CheckpointValue>> =
         BTreeMap::new();
@@ -610,6 +602,7 @@ pub(crate) fn prepare_restore(
         backups,
         record_path,
         left_alone: left_alone.into_iter().collect(),
+        root,
     })
 }
 
@@ -626,7 +619,7 @@ pub(crate) fn apply_restore(prepared: &PreparedRestore) -> Result<FileRestore, S
             continue;
         }
         if let Err(error) = apply_op(op) {
-            let rollback_error = rollback(&prepared.backups[..=index]).err();
+            let rollback_error = rollback(&prepared.backups[..=index], &prepared.root).err();
             return match rollback_error {
                 // The record is this restore's only way back; keep it until
                 // the rollback itself is on disk, so the next startup can
@@ -756,7 +749,7 @@ pub(crate) fn finish_restore(prepared: &PreparedRestore) {
 /// The journal is kept when a file cannot be put back, so the next startup
 /// tries the rollback again instead of accepting a half-restored worktree.
 pub(crate) fn abort_restore(prepared: &PreparedRestore) -> Result<(), String> {
-    rollback(&prepared.backups)?;
+    rollback(&prepared.backups, &prepared.root)?;
     remove_record(&prepared.record_path);
     Ok(())
 }
@@ -929,6 +922,9 @@ fn rollback_record(store: &SnapshotStore, record: &RestoreRecord) -> Result<(), 
         let relative = normalize_relative(&entry.path)
             .map_err(|error| format!("{} cannot be put back: {error}", entry.path))?;
         let absolute = base.join(relative);
+        // The folder the journal recorded may be a symlink by now: recovery
+        // must not write or remove through it.
+        preflight_recorded_target(base, &absolute, &entry.path)?;
         match &entry.backup {
             BackupRecord::Absent => match absolute.symlink_metadata() {
                 Ok(_) => remove_file_durable(&absolute)
@@ -974,7 +970,9 @@ fn rollback_record(store: &SnapshotStore, record: &RestoreRecord) -> Result<(), 
 /// Refuses a target whose parents are not a plain directory chain.
 ///
 /// `create_dir_all` would otherwise follow a symlinked parent out of the
-/// worktree, or fail after earlier files had already changed.
+/// worktree, or fail after earlier files had already changed. With no link on
+/// the way, the nearest folder the write or remove goes through must still
+/// canonicalise inside the root.
 fn preflight_target(root: &Path, relative: &Path, label: &str) -> Result<(), String> {
     let mut current = root.to_path_buf();
     let components: Vec<Component<'_>> = relative.components().collect();
@@ -986,10 +984,8 @@ fn preflight_target(root: &Path, relative: &Path, label: &str) -> Result<(), Str
                 if meta.is_dir() {
                     return Err(format!("{label} is now a folder, so it cannot be restored"));
                 }
-                if meta.file_type().is_symlink() {
-                    // The leaf link is removed itself, never followed.
-                    return Ok(());
-                }
+                // A link (or any other non-file) at the leaf is replaced
+                // itself, never followed; only its parents matter below.
             }
             Ok(meta) if meta.file_type().is_symlink() => {
                 return Err(format!(
@@ -1004,18 +1000,57 @@ fn preflight_target(root: &Path, relative: &Path, label: &str) -> Result<(), Str
             }
             Ok(_) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                // The rest of the chain is created fresh; nothing can be a
-                // symlink until it exists.
-                if !is_leaf {
-                    return Ok(());
-                }
+                // The rest of the chain will be created fresh; nothing can be
+                // a symlink until it exists.
+                break;
             }
             Err(error) => {
                 return Err(format!("could not inspect {label}: {error}"));
             }
         }
     }
-    Ok(())
+    let real_root = root.canonicalize().map_err(|error| {
+        format!(
+            "could not open the worktree root {}: {error}",
+            root.display()
+        )
+    })?;
+    let mut existing = root.join(relative);
+    existing.pop();
+    loop {
+        match existing.canonicalize() {
+            Ok(real) => {
+                return if real.starts_with(&real_root) {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "{label} is outside the worktree root; refusing to restore through it"
+                    ))
+                };
+            }
+            Err(_) if existing.pop() => {}
+            Err(_) => break,
+        }
+    }
+    Err(format!(
+        "{label} has no folder inside the worktree root to be restored through"
+    ))
+}
+
+/// Refuses a journal target whose path now leads outside the recorded root.
+///
+/// Journal paths are relative to the root saved beside them, and recovery
+/// writes them long after the fact: any folder on the way may have become a
+/// symlink. [`preflight_target`] walks every parent without following a link
+/// and proves the nearest real folder is still inside the root.
+fn preflight_recorded_target(root: &Path, absolute: &Path, label: &str) -> Result<(), String> {
+    let relative = absolute.strip_prefix(root).map_err(|_| {
+        format!("{label} is outside the restore journal's root, so it cannot be put back")
+    })?;
+    if relative.as_os_str().is_empty() {
+        return Err(format!("{label} names the restore journal's root itself"));
+    }
+    preflight_target(root, relative, label)
 }
 
 #[cfg(unix)]
@@ -1269,30 +1304,37 @@ fn remove_record(path: &Path) {
 ///
 /// Every path is attempted, and the first failure is returned: the caller keeps
 /// the journal until the whole rollback is on disk.
-fn rollback(backups: &[(PathBuf, Backup)]) -> Result<(), String> {
+fn rollback(backups: &[(PathBuf, Backup)], root: &Path) -> Result<(), String> {
     let mut first_error = None;
     for (path, backup) in backups {
-        let restored = match backup {
-            Backup::File { bytes, mode } => write_replacing(path, bytes, *mode),
-            Backup::Absent => match path.symlink_metadata() {
-                Ok(_) => remove_file_durable(path),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-                Err(error) => Err(format!("could not inspect {}: {error}", path.display())),
-            },
-            Backup::Symlink(target) => {
-                let removed = match path.symlink_metadata() {
+        let label = path.display().to_string();
+        // A folder on the way may have become a symlink since the journal was
+        // written. Nothing is put back through one: the bytes would land
+        // outside the worktree.
+        let restored = match preflight_recorded_target(root, path, &label) {
+            Err(error) => Err(error),
+            Ok(()) => match backup {
+                Backup::File { bytes, mode } => write_replacing(path, bytes, *mode),
+                Backup::Absent => match path.symlink_metadata() {
                     Ok(_) => remove_file_durable(path),
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
                     Err(error) => Err(format!("could not inspect {}: {error}", path.display())),
-                };
-                removed.and_then(|()| {
-                    make_symlink(target, path)?;
-                    if let Some(parent) = path.parent() {
-                        sync_dir(parent)?;
-                    }
-                    Ok(())
-                })
-            }
+                },
+                Backup::Symlink(target) => {
+                    let removed = match path.symlink_metadata() {
+                        Ok(_) => remove_file_durable(path),
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                        Err(error) => Err(format!("could not inspect {}: {error}", path.display())),
+                    };
+                    removed.and_then(|()| {
+                        make_symlink(target, path)?;
+                        if let Some(parent) = path.parent() {
+                            sync_dir(parent)?;
+                        }
+                        Ok(())
+                    })
+                }
+            },
         };
         if let Err(error) = restored
             && first_error.is_none()
@@ -1415,7 +1457,6 @@ pub(crate) fn ignored_paths_touched(
     let ignored = store.ignored(thread_id, first);
     let index = IgnoredIndex::new(&ignored);
     let mut touched: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    let mut candidates: Vec<String> = Vec::new();
     let mut captures: Vec<(String, String)> = Vec::new();
     for turn in turns {
         for entry in store.entries(thread_id, turn) {
@@ -1429,18 +1470,14 @@ pub(crate) fn ignored_paths_touched(
             let Ok(path) = path_string(repo_relative) else {
                 continue;
             };
-            if !index.covers_exactly(&path) && !index.folders_covering(&path).is_empty() {
-                candidates.push(path.clone());
-            }
             captures.push((path, display_path(&root, &absolute)));
         }
     }
-    candidates.sort();
-    candidates.dedup();
-    let still_ignored =
-        crate::worktrees::git::ignored_paths_now(&repo, &candidates).unwrap_or_default();
     for (path, display) in &captures {
-        if index.covers_exactly(path) || still_ignored.contains(path) {
+        // A recorded ignored folder covers everything beneath it as it stood
+        // at checkpoint time, so a path there is named whether or not the
+        // rules still ignore it.
+        if index.covers_exactly(path) || !index.folders_covering(path).is_empty() {
             touched.insert(display.clone());
         }
     }
@@ -2399,6 +2436,84 @@ mod tests {
     }
 
     #[test]
+    fn info_attributes_never_convert_the_checkpoint() {
+        let fixture = Fixture::new(&[("README.md", "hi\n")]);
+        // `.git/info/attributes` outranks the empty `--attr-source` tree, so
+        // it used to convert what `git add -A` stored.
+        write(
+            &fixture.repo,
+            ".git/info/attributes",
+            "*.txt text eol=crlf\n",
+        );
+        write(&fixture.repo, "notes.txt", "one\r\ntwo\r\n");
+        fixture.checkpoint("turn_1");
+        write(&fixture.repo, "notes.txt", "one\ntwo\nthree\n");
+
+        let prepared = fixture.prepare(&["turn_1"]).expect("prepare");
+        run_restore(&prepared);
+        assert_eq!(
+            fs::read(fixture.repo.join("notes.txt")).unwrap(),
+            b"one\r\ntwo\r\n",
+            "a local attributes file never converts the stored bytes"
+        );
+    }
+
+    /// The daemon's git calls drop an inherited `GIT_CONFIG_GLOBAL`, so the
+    /// child also gets `XDG_CONFIG_HOME` (and `HOME`) pointing at the same
+    /// temporary global config. Nothing outside the temp dir is read or
+    /// written.
+    #[test]
+    fn a_global_attributes_file_never_converts_the_checkpoint() {
+        let scratch = tempfile::tempdir().unwrap();
+        let config_home = scratch.path().join("xdg");
+        fs::create_dir_all(config_home.join("git")).unwrap();
+        let attributes = scratch.path().join("global-attributes");
+        fs::write(&attributes, "*.txt text eol=crlf\n").unwrap();
+        let global = config_home.join("git/config");
+        fs::write(
+            &global,
+            format!("[core]\n\tattributesFile = {}\n", attributes.display()),
+        )
+        .unwrap();
+
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command.args([
+            "--exact",
+            "rewind::tests::a_global_attributes_file_is_never_applied_to_the_checkpoint",
+            "--ignored",
+            "--test-threads=1",
+        ]);
+        command.env("GIT_CONFIG_GLOBAL", &global);
+        command.env("GIT_CONFIG_NOSYSTEM", "1");
+        command.env("XDG_CONFIG_HOME", &config_home);
+        command.env("HOME", scratch.path());
+        let output = command.output().expect("run the child test");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("1 passed"),
+            "{stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    #[ignore = "run by a_global_attributes_file_never_converts_the_checkpoint with a temporary global config"]
+    fn a_global_attributes_file_is_never_applied_to_the_checkpoint() {
+        let fixture = Fixture::new(&[("README.md", "hi\n")]);
+        write(&fixture.repo, "notes.txt", "one\r\ntwo\r\n");
+        fixture.checkpoint("turn_1");
+        write(&fixture.repo, "notes.txt", "one\ntwo\nthree\n");
+
+        let prepared = fixture.prepare(&["turn_1"]).expect("prepare");
+        run_restore(&prepared);
+        assert_eq!(
+            fs::read(fixture.repo.join("notes.txt")).unwrap(),
+            b"one\r\ntwo\r\n",
+            "a global attributes file never converts the checkpoint's bytes"
+        );
+    }
+
+    #[test]
     fn core_autocrlf_input_keeps_an_untracked_crlf_file() {
         let fixture = Fixture::new(&[("README.md", "hi\n")]);
         git(&fixture.repo, &["config", "core.autocrlf", "input"]);
@@ -2704,7 +2819,33 @@ mod tests {
     }
 
     #[test]
-    fn an_ignored_folder_entry_does_not_swallow_a_new_unignored_file() {
+    fn a_file_already_in_a_recorded_ignored_folder_survives_the_restore() {
+        let fixture = Fixture::new(&[(".gitignore", "build/\n"), ("README.md", "hi\n")]);
+        write(&fixture.repo, "build/old.log", "old\n");
+        // `--directory` collapses the ignored folder to one entry, so the
+        // listing cannot say which files were already inside it.
+        fixture.checkpoint("turn_1");
+        // The turn removes the rule, making the folder's old file visible.
+        write(&fixture.repo, ".gitignore", "");
+
+        let prepared = fixture.prepare(&["turn_1"]).expect("prepare");
+        let outcome = run_restore(&prepared);
+        assert_eq!(
+            read(&fixture.repo, "build/old.log"),
+            "old\n",
+            "a file that was already in the folder is never deleted"
+        );
+        assert_eq!(read(&fixture.repo, ".gitignore"), "build/\n");
+        assert_eq!(
+            outcome.files + outcome.deleted,
+            1,
+            "only .gitignore is put back"
+        );
+        assert_eq!(outcome.left_alone, vec!["build/old.log".to_owned()]);
+    }
+
+    #[test]
+    fn a_file_the_turn_created_inside_a_recorded_ignored_folder_is_left_alone() {
         let fixture = Fixture::new(&[(".gitignore", "build/\n"), ("README.md", "hi\n")]);
         write(&fixture.repo, "build/old.log", "old\n");
         // `--directory` collapses the ignored folder to one entry.
@@ -2716,16 +2857,46 @@ mod tests {
             "build/notes.txt",
             "the turn's own new file\n",
         );
+        fixture
+            .store
+            .capture(
+                &fixture.repo,
+                &fixture.thread,
+                &TurnId::new("turn_1"),
+                &["build/old.log".into()],
+            )
+            .unwrap();
+        assert_eq!(
+            ignored_paths_touched(
+                &fixture.store,
+                &fixture.repo,
+                &fixture.thread,
+                &[TurnId::new("turn_1")]
+            ),
+            vec!["build/old.log".to_owned()],
+            "the dialog names a captured path under a recorded folder"
+        );
 
         let prepared = fixture.prepare(&["turn_1"]).expect("prepare");
         let outcome = run_restore(&prepared);
         assert!(
-            !fixture.repo.join("build/notes.txt").exists(),
-            "a file the turn created inside a recorded folder is removed when the rules no longer ignore it"
+            fixture.repo.join("build/notes.txt").exists(),
+            "a path under a recorded folder is left exactly as the turn left it"
         );
         assert_eq!(
-            outcome.deleted, 2,
-            "both visible paths were absent from the tree"
+            read(&fixture.repo, "build/notes.txt"),
+            "the turn's own new file\n"
+        );
+        assert_eq!(
+            read(&fixture.repo, "build/old.log"),
+            "old\n",
+            "and so is the file that was already there"
+        );
+        assert_eq!(outcome.deleted, 0);
+        assert_eq!(
+            outcome.left_alone,
+            vec!["build/notes.txt".to_owned(), "build/old.log".to_owned()],
+            "both paths are named in the note"
         );
     }
 
@@ -2763,7 +2934,8 @@ mod tests {
     #[test]
     fn an_untracked_nested_repository_is_left_out_of_the_plan() {
         let fixture = Fixture::new(&[("README.md", "hi\n")]);
-        fixture.checkpoint("turn_1");
+        // The nested repository is part of the checkpoint, so only the
+        // gitlink skip keeps it out of the plan.
         let nested = fixture.repo.join("nested");
         fs::create_dir_all(&nested).unwrap();
         git(&nested, &["init", "-q", "-b", "main"]);
@@ -2772,6 +2944,7 @@ mod tests {
         write(&nested, "keep.txt", "nested\n");
         git(&nested, &["add", "-A"]);
         git(&nested, &["commit", "-q", "-m", "nested"]);
+        fixture.checkpoint("turn_1");
 
         let prepared = fixture.prepare(&["turn_1"]).expect("prepare");
         let outcome = run_restore(&prepared);
@@ -2845,6 +3018,104 @@ mod tests {
         );
         assert_eq!(read(&fixture.repo, "a_link"), "turn wrote this\n");
         assert!(pending_restore_ids(&fixture.store).is_empty());
+    }
+
+    /// Replaces `deep` in `repo` with a link to `outside`, as a crash and a
+    /// later move could leave it before recovery runs.
+    #[cfg(unix)]
+    fn swap_deep_for_a_link(fixture: &Fixture, outside: &Path) {
+        use std::os::unix::fs::symlink;
+
+        fs::rename(
+            fixture.repo.join("deep"),
+            fixture.dir.path().join("deep-moved"),
+        )
+        .unwrap();
+        symlink(outside, fixture.repo.join("deep")).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn startup_recovery_never_writes_through_a_symlinked_parent() {
+        let fixture = Fixture::new(&[("deep/a/a.txt", "before\n")]);
+        fixture.checkpoint("turn_1");
+        write(&fixture.repo, "deep/a/a.txt", "after\n");
+        let prepared = fixture.prepare(&["turn_1"]).expect("prepare");
+        let restore_id = prepared.restore_id().to_owned();
+
+        let outside = tempfile::tempdir().unwrap();
+        fs::create_dir_all(outside.path().join("a")).unwrap();
+        swap_deep_for_a_link(&fixture, outside.path());
+
+        let pending = read_pending_restore(&fixture.store, &restore_id).expect("read");
+        let error = recover_restore(&fixture.store, &pending, false).unwrap_err();
+        assert!(error.contains("symlinked folder"), "{error}");
+        assert!(
+            !outside.path().join("a/a.txt").exists(),
+            "recovery never writes the backup outside the worktree"
+        );
+        assert_eq!(
+            pending_restore_ids(&fixture.store),
+            vec![restore_id],
+            "the journal is kept"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn startup_recovery_never_removes_through_a_symlinked_parent() {
+        let fixture = Fixture::new(&[("README.md", "hi\n")]);
+        fixture.checkpoint("turn_1");
+        // The turn created the file, so its backup is Absent and recovery
+        // would remove it.
+        write(&fixture.repo, "deep/a/new.txt", "the turn's file\n");
+        let prepared = fixture.prepare(&["turn_1"]).expect("prepare");
+        let restore_id = prepared.restore_id().to_owned();
+
+        let outside = tempfile::tempdir().unwrap();
+        fs::create_dir_all(outside.path().join("a")).unwrap();
+        fs::write(outside.path().join("a/new.txt"), "outside\n").unwrap();
+        swap_deep_for_a_link(&fixture, outside.path());
+
+        let pending = read_pending_restore(&fixture.store, &restore_id).expect("read");
+        let error = recover_restore(&fixture.store, &pending, false).unwrap_err();
+        assert!(error.contains("symlinked folder"), "{error}");
+        assert_eq!(
+            read(outside.path(), "a/new.txt"),
+            "outside\n",
+            "recovery never removes a file outside the worktree"
+        );
+        assert_eq!(
+            pending_restore_ids(&fixture.store),
+            vec![restore_id],
+            "the journal is kept"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_live_rollback_never_writes_through_a_symlinked_parent() {
+        let fixture = Fixture::new(&[("deep/a/a.txt", "before\n")]);
+        fixture.checkpoint("turn_1");
+        write(&fixture.repo, "deep/a/a.txt", "after\n");
+        let prepared = fixture.prepare(&["turn_1"]).expect("prepare");
+        let restore_id = prepared.restore_id().to_owned();
+
+        let outside = tempfile::tempdir().unwrap();
+        fs::create_dir_all(outside.path().join("a")).unwrap();
+        swap_deep_for_a_link(&fixture, outside.path());
+
+        let error = abort_restore(&prepared).unwrap_err();
+        assert!(error.contains("symlinked folder"), "{error}");
+        assert!(
+            !outside.path().join("a/a.txt").exists(),
+            "a live rollback never writes outside the worktree"
+        );
+        assert_eq!(
+            pending_restore_ids(&fixture.store),
+            vec![restore_id],
+            "the journal stays until the rollback can be done"
+        );
     }
 
     #[test]

@@ -2339,9 +2339,10 @@ pre-turn byte — `cp -p`, `rsync -t`, `tar x` and `mv` keep old mtimes, clocks
 skew, and a file deleted before a tool named it looks absent — so the ignored
 listing only recognises a path ignored then and visible now (the turn emptied
 `.gitignore` or force-added it), which is left exactly as it is and named in the
-dialog and the answer. A path covered only by a removed folder entry is
-checked with `git check-ignore`, so a file the turn created there after
-removing the rule is visible now and is restored like any other. It is refused when another live
+dialog and the answer. A recorded folder entry covers everything beneath it, so
+nothing under one is written, recreated or removed: the listing cannot say which
+files already existed there, and leaving a file the turn created is safer than
+deleting one that existed. It is refused when another live
 thread or agent session shares the directory (finished, fully idle subagents of
 the same thread excepted), and requires the same worktree registration the
 thread was created with. The selected message's own checkpoint decides the
@@ -2351,12 +2352,13 @@ tree is the earlier whole-worktree evidence; captures never decide restored
 bytes, so a rename keeps its old path and a file that existed is never deleted
 on the tree's word. Git paths resolve from the repository root, and a change
 outside the thread's worktree refuses the restore. A checkpoint is taken
-without conversion — `core.autocrlf=false`, `core.safecrlf=false` and
-`--attr-source` at an empty tree, with the copied index's stat cache cleared —
-and its blobs are read back raw, so a CRLF file or one under a filter attribute
-returns exactly the bytes it had rather than a converted form. `--attr-source`
-needs git 2.40 or newer; an older git makes the checkpoint incomplete and the
-refusal names the version. The file's existing permission bits are kept and
+without conversion: each path is hashed with `hash-object --no-filters` into a
+fresh scratch index, so no attribute source (including `.git/info/attributes`
+and the global `core.attributesFile`) or filter converts it, and its blobs are
+read back raw, so a CRLF file or one under a filter attribute returns exactly
+the bytes it had rather than a converted form. The plan's `--attr-source` needs
+git 2.40 or newer; an older git makes the checkpoint incomplete and the refusal
+names the version. The file's existing permission bits are kept and
 only the executable bit is set or cleared; a recreated file gets the bits a
 capture recorded before the turn, never a blanket 0644, and an untracked nested
 repository is left out of the plan while a submodule the real index names still
@@ -2370,7 +2372,9 @@ rolls the files back, and the journal stays until that rollback is on disk; a
 crash between apply and commit is rolled back at the next startup, while a
 committed cut keeps its files. Startup recovery re-checks the worktree identity
 and that the journal's root is still the workspace's repository root before
-touching anything; a journal that cannot be read is not an uncommitted restore:
+touching anything, and both it and a live rollback refuse an entry whose parent
+is now a symlink or leads outside that root, keeping the journal; a journal that
+cannot be read is not an uncommitted restore:
 it is kept, nothing is rolled back, the error is shown on its thread and the
 daemon keeps booting. The workspace is reserved through the commit so nothing
 starts inside it mid-restore. A symlink is restored as a directory entry and

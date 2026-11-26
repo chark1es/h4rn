@@ -2376,22 +2376,6 @@ async fn file_restore_is_off_until_the_labs_switch_is_turned_on() {
         "the summary must not offer file restore while the Labs switch is off"
     );
 
-    for entry in std::fs::read_dir(
-        fixture
-            .data
-            .path()
-            .join("snapshots")
-            .join(created.thread_id.as_str()),
-    )
-    .unwrap()
-    {
-        let entry = entry.unwrap();
-        eprintln!("turn dir: {:?}", entry.file_name());
-        let manifest = entry.path().join("manifest.json");
-        if let Ok(text) = std::fs::read_to_string(&manifest) {
-            eprintln!("manifest: {text}");
-        }
-    }
     let plan = fixture
         .manager
         .rewind_plan(&created.thread_id, &b_item)
