@@ -68,17 +68,108 @@ pub enum SendError {
     Failed(String),
 }
 
-/// One data message.
+/// Which phone platform an alert is for.
+///
+/// A device row records this, because the two platforms need different
+/// transports: FCM data messages for Android, an APNs alert for iOS
+/// (ADR-051, ADR-052).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PushPlatform {
+    /// Android through FCM.
+    Android,
+    /// iOS through APNs.
+    Ios,
+}
+
+impl PushPlatform {
+    /// Parses a stored registration platform.
+    ///
+    /// Rows written before iOS existed carry no value and are Android
+    /// installs, so an unknown value is Android rather than an error: a relay
+    /// must keep alerting an existing phone through a bad label, not go silent.
+    pub fn parse(value: Option<&str>) -> Self {
+        match value.map(str::trim) {
+            Some(value) if value.eq_ignore_ascii_case("ios") => Self::Ios,
+            _ => Self::Android,
+        }
+    }
+
+    /// The value stored on a device row.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Android => "android",
+            Self::Ios => "ios",
+        }
+    }
+}
+
+/// One alert for one phone.
 #[derive(Clone, Debug)]
 pub struct PushMessage<'a> {
-    /// Installation token.
+    /// Push token: an FCM registration token on Android, an APNs device token
+    /// on iOS.
     pub token: &'a str,
-    /// Restrict delivery to this package.
+    /// Which transport carries it.
+    pub platform: PushPlatform,
+    /// Restrict delivery to this package (Android only).
     pub package_name: Option<&'a str>,
-    /// String-only data payload. Android renders it itself; Connect stores no
-    /// copy.
+    /// The fixed alert fields. Android renders them itself; iOS gets the
+    /// title and body in its alert block and the rest as custom data. Connect
+    /// stores no copy.
     pub data: BTreeMap<String, String>,
 }
+
+impl PushMessage<'_> {
+    /// The FCM HTTP v1 message body (ADR-051).
+    fn fcm_body(&self) -> serde_json::Value {
+        let mut body = serde_json::json!({
+            "message": {
+                "token": self.token,
+                "data": self.data,
+                "android": {
+                    "priority": "HIGH",
+                    "ttl": "300s",
+                }
+            }
+        });
+        if let Some(package) = self.package_name {
+            body["message"]["android"]["restricted_package_name"] = package.into();
+        }
+        body
+    }
+
+    /// The APNs payload (ADR-052).
+    ///
+    /// The alert block carries the same title and body Android composes
+    /// locally, and the custom keys are the documented record fields only:
+    /// no prompt, reply, tool output, path or credential can ride along.
+    /// `mutable-content` lets a Notification Service Extension re-check the
+    /// phone's flag before the alert is shown.
+    pub fn apns_payload(&self) -> serde_json::Value {
+        let mut payload = serde_json::json!({
+            "aps": {
+                "alert": {
+                    "title": self.data.get("title").cloned().unwrap_or_default(),
+                    "body": self.data.get("body").cloned().unwrap_or_default(),
+                },
+                "sound": "default",
+                "mutable-content": 1,
+            }
+        });
+        for key in IOS_CUSTOM_FIELDS {
+            if let Some(value) = self.data.get(*key) {
+                payload[*key] = value.clone().into();
+            }
+        }
+        payload
+    }
+}
+
+/// The only custom keys an iOS payload may carry (ADR-052).
+///
+/// `title` and `body` are not repeated: they are the alert itself. Everything
+/// else in [`PushMessage::data`] exists for Android's local rendering.
+pub const IOS_CUSTOM_FIELDS: &[&str] = &["h4rn_alert", "state", "thread_id", "count"];
 
 /// The FCM sender and its cached OAuth2 token.
 pub struct FcmClient {
@@ -149,9 +240,14 @@ impl FcmClient {
         let Some(account) = &self.account else {
             return Err(SendError::Disabled);
         };
-        let data = serde_json::to_string(&message.data)
-            .map_err(|error| SendError::Failed(format!("serialise push data: {error}")))?;
-        if data.len() > 4096 {
+        if message.platform != PushPlatform::Android {
+            return Err(SendError::Failed(
+                "FCM only carries Android alerts; iOS goes through APNs".to_string(),
+            ));
+        }
+        let body = message.fcm_body();
+        let encoded = body.to_string();
+        if encoded.len() > 4096 {
             return Err(SendError::Failed(
                 "push data is larger than FCM's 4096-byte limit".to_string(),
             ));
@@ -168,19 +264,6 @@ impl FcmClient {
                 Ok(token) => token,
                 Err(error) => return Err(error),
             };
-            let mut body = serde_json::json!({
-                "message": {
-                    "token": message.token,
-                    "data": message.data,
-                    "android": {
-                        "priority": "HIGH",
-                        "ttl": "300s",
-                    }
-                }
-            });
-            if let Some(package) = message.package_name {
-                body["message"]["android"]["restricted_package_name"] = package.into();
-            }
             let response = self
                 .http
                 .post(&url)
@@ -196,7 +279,10 @@ impl FcmClient {
                         retry_sleep(attempt).await;
                         continue;
                     }
-                    return Err(SendError::Failed(format!("FCM request failed: {error}")));
+                    return Err(SendError::Failed(format!(
+                        "FCM request failed: {}",
+                        error.without_url()
+                    )));
                 }
             };
             let status = response.status();
@@ -246,7 +332,9 @@ impl FcmClient {
             ])
             .send()
             .await
-            .map_err(|error| SendError::Failed(format!("token request failed: {error}")))?;
+            .map_err(|error| {
+                SendError::Failed(format!("token request failed: {}", error.without_url()))
+            })?;
         let status = response.status();
         let text = response.text().await.unwrap_or_default();
         if !status.is_success() {
@@ -271,7 +359,7 @@ impl FcmClient {
     }
 }
 
-async fn retry_sleep(attempt: u32) {
+pub(crate) async fn retry_sleep(attempt: u32) {
     let millis = 100u64.saturating_mul(2u64.saturating_pow(attempt.saturating_sub(1)));
     tokio::time::sleep(Duration::from_millis(millis.min(1_000))).await;
 }
@@ -360,6 +448,101 @@ mod tests {
     fn a_missing_account_is_off() {
         let client = FcmClient::disabled(reqwest::Client::new());
         assert!(!client.configured());
+    }
+
+    #[test]
+    fn a_device_row_without_a_platform_is_android() {
+        // Every row written before iOS existed was an Android install.
+        assert_eq!(PushPlatform::parse(None), PushPlatform::Android);
+        assert_eq!(PushPlatform::parse(Some("")), PushPlatform::Android);
+        assert_eq!(PushPlatform::parse(Some("android")), PushPlatform::Android);
+        assert_eq!(PushPlatform::parse(Some(" iOS ")), PushPlatform::Ios);
+        assert_eq!(PushPlatform::parse(Some("ios")), PushPlatform::Ios);
+        // A bad label must not silence an existing phone.
+        assert_eq!(PushPlatform::parse(Some("watchos")), PushPlatform::Android);
+    }
+
+    fn message(platform: PushPlatform) -> PushMessage<'static> {
+        PushMessage {
+            token: "device-token",
+            platform,
+            package_name: Some("dev.h4rn.app"),
+            data: BTreeMap::from([
+                ("h4rn_alert".to_string(), "agent".to_string()),
+                ("state".to_string(), "approval".to_string()),
+                ("thread_id".to_string(), "th_one".to_string()),
+                ("title".to_string(), "Fix the thing".to_string()),
+                ("body".to_string(), "h4rn · Needs approval".to_string()),
+                ("count".to_string(), "1".to_string()),
+            ]),
+        }
+    }
+
+    #[test]
+    fn the_android_shape_is_a_string_only_data_message() {
+        let body = message(PushPlatform::Android).fcm_body();
+        assert_eq!(body["message"]["token"], "device-token");
+        assert_eq!(body["message"]["data"]["title"], "Fix the thing");
+        assert_eq!(body["message"]["data"]["thread_id"], "th_one");
+        assert_eq!(
+            body["message"]["android"]["restricted_package_name"],
+            "dev.h4rn.app"
+        );
+        assert!(body["message"].get("apns").is_none());
+        // The display text is composed by the phone, not the server: a data
+        // message has no notification block.
+        assert!(body["message"].get("notification").is_none());
+    }
+
+    #[test]
+    fn the_ios_shape_is_an_apns_alert_with_documented_fields_only() {
+        let payload = message(PushPlatform::Ios).apns_payload();
+        assert_eq!(payload["aps"]["alert"]["title"], "Fix the thing");
+        assert_eq!(payload["aps"]["alert"]["body"], "h4rn · Needs approval");
+        assert_eq!(payload["aps"]["sound"], "default");
+        assert_eq!(payload["aps"]["mutable-content"], 1);
+
+        // The custom keys are exactly the documented record plus the marker.
+        let mut keys: Vec<&str> = payload
+            .as_object()
+            .expect("payload object")
+            .keys()
+            .map(String::as_str)
+            .filter(|key| *key != "aps")
+            .collect();
+        keys.sort_unstable();
+        let mut expected = IOS_CUSTOM_FIELDS.to_vec();
+        expected.sort_unstable();
+        assert_eq!(keys, expected, "an undocumented field reached the payload");
+        assert_eq!(payload["thread_id"], "th_one");
+        assert_eq!(payload["count"], "1");
+        assert_eq!(payload["state"], "approval");
+        assert_eq!(payload["h4rn_alert"], "agent");
+        // The title and body are not duplicated as custom data.
+        assert!(payload.get("title").is_none());
+        assert!(payload.get("body").is_none());
+    }
+
+    #[tokio::test]
+    async fn fcm_refuses_an_ios_message_without_making_a_request() {
+        // A mislabelled device row must fail loudly, not send an APNs token to
+        // FCM and have Google reject it as a bad registration token.
+        let client = FcmClient {
+            http: reqwest::Client::new(),
+            account: Some(ServiceAccount {
+                project_id: "demo".to_string(),
+                client_email: "relay@demo.iam.gserviceaccount.test".to_string(),
+                private_key: String::new(),
+            }),
+            token_url: "http://127.0.0.1:1/token".to_string(),
+            endpoint: "http://127.0.0.1:1".to_string(),
+            token: Mutex::new(None),
+        };
+        let error = client
+            .send(&message(PushPlatform::Ios))
+            .await
+            .expect_err("iOS is not an FCM target");
+        assert!(matches!(error, SendError::Failed(ref reason) if reason.contains("APNs")));
     }
 
     #[test]

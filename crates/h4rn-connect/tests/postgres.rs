@@ -1472,7 +1472,19 @@ async fn a_relay_guest_link_keeps_its_cookie_and_carries_a_large_upload() {
 #[tokio::test]
 #[ignore = "requires H4RN_TEST_DATABASE_URL (use ./scripts/test-connect.sh)"]
 async fn push_devices_register_rotate_and_leave_with_the_session() {
-    let state = test_state().await;
+    // FCM configured but no APNs key: `configured` (any platform) and
+    // `platform_configured` (this phone's platform) must be able to disagree.
+    let state = test_state_with(|config| {
+        config.fcm_service_account = Some(
+            serde_json::json!({
+                "project_id": "demo",
+                "client_email": "relay@demo.iam.gserviceaccount.example",
+                "private_key": "test-key-material",
+            })
+            .to_string(),
+        );
+    })
+    .await;
     let phone = actor(&state, ConnectDeviceKind::Mobile, None).await;
     let other = actor(&state, ConnectDeviceKind::Mobile, None).await;
     let token_one = random_b64(32);
@@ -1488,6 +1500,10 @@ async fn push_devices_register_rotate_and_leave_with_the_session() {
     assert_eq!(
         body["registered"], false,
         "an unregistered phone must not claim a registration"
+    );
+    assert_eq!(
+        body["configured"], true,
+        "this relay has an FCM account, so Android alerts are on"
     );
 
     let (status, body) = send(
@@ -1512,7 +1528,11 @@ async fn push_devices_register_rotate_and_leave_with_the_session() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["configured"], false);
+    assert_eq!(body["configured"], true);
+    assert_eq!(
+        body["platform_configured"], true,
+        "an Android phone is served by the configured FCM sender"
+    );
     assert_eq!(body["devices"], 1);
     assert_eq!(
         body["registered"], true,
@@ -1546,6 +1566,88 @@ async fn push_devices_register_rotate_and_leave_with_the_session() {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].0, token_two);
     assert_eq!(rows[0].1, "1.0.2");
+
+    // The row records the platform so Connect can choose the right sender.
+    // An iOS token has to look like an APNs one, so a stray FCM token is
+    // refused instead of stored and retried forever.
+    let token_three = apns_device_token();
+    let (status, body) = send(
+        &state,
+        request(
+            Method::PUT,
+            "/v1/push/devices",
+            Some(&phone),
+            Some(serde_json::json!({
+                "device_id": phone.device.id.to_string(),
+                "token": "not-an-apns-token",
+                "platform": "ios",
+            })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["code"], "push_token_invalid");
+    let (status, body) = send(
+        &state,
+        request(
+            Method::PUT,
+            "/v1/push/devices",
+            Some(&phone),
+            Some(serde_json::json!({
+                "device_id": phone.device.id.to_string(),
+                "token": token_three,
+                "platform": "ios",
+            })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let platform: String =
+        sqlx::query_scalar("SELECT platform FROM push_devices WHERE user_id = $1")
+            .bind(phone.user.id)
+            .fetch_one(state.store.pool())
+            .await
+            .unwrap();
+    assert_eq!(platform, "ios");
+    let (status, body) = send(
+        &state,
+        request(Method::GET, "/v1/push/status", Some(&phone), None),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["configured"], true,
+        "the relay still has an FCM account for other phones"
+    );
+    assert_eq!(
+        body["platform_configured"], false,
+        "this relay has no APNs key, so an iPhone must not be told alerts will arrive"
+    );
+
+    // A platform Connect does not know is refused rather than stored.
+    let (status, body) = send(
+        &state,
+        request(
+            Method::PUT,
+            "/v1/push/devices",
+            Some(&phone),
+            Some(serde_json::json!({
+                "device_id": phone.device.id.to_string(),
+                "token": token_three,
+                "platform": "watchos",
+            })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["code"], "push_platform_invalid");
+    let platform: String =
+        sqlx::query_scalar("SELECT platform FROM push_devices WHERE user_id = $1")
+            .bind(phone.user.id)
+            .fetch_one(state.store.pool())
+            .await
+            .unwrap();
+    assert_eq!(platform, "ios", "a refused registration changed the row");
 
     // A device can only register itself, and only remove itself.
     let (status, body) = send(
@@ -1721,6 +1823,7 @@ async fn a_revoked_phone_loses_its_push_rows() {
             phone.user.id,
             &phone.device.id.to_string(),
             "revoked-phone-token",
+            "android",
             Some("dev.h4rn.app"),
             Some("1.0.1"),
         )
@@ -1775,6 +1878,14 @@ async fn a_revoked_phone_loses_its_push_rows() {
 
 /// A service account generated for one test; it is never written to disk or
 /// committed.
+/// A 64-character hex APNs device token, generated for each test.
+fn apns_device_token() -> String {
+    random_bytes(32)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
 fn service_account(server: &MockServer, project: &str) -> String {
     let key = RsaPrivateKey::new(&mut rand_core::OsRng, 2048).expect("generate RSA key");
     let pem = key.to_pkcs8_pem(LineEnding::LF).expect("encode PKCS#8 PEM");
@@ -1849,6 +1960,7 @@ async fn alert_service_drops_stale_completions_groups_and_deletes_a_dead_token()
             kept.user.id,
             &kept.device.id.to_string(),
             "kept-token",
+            "android",
             None,
             None,
         )
@@ -1860,6 +1972,7 @@ async fn alert_service_drops_stale_completions_groups_and_deletes_a_dead_token()
             kept.user.id,
             &gone.device.id.to_string(),
             "gone-token",
+            "android",
             None,
             None,
         )
@@ -1873,9 +1986,13 @@ async fn alert_service_drops_stale_completions_groups_and_deletes_a_dead_token()
         ..Config::default()
     };
     let fcm = Arc::new(FcmClient::new(&config, reqwest::Client::new()));
+    let apns = Arc::new(h4rn_connect::apns::ApnsClient::disabled(
+        reqwest::Client::new(),
+    ));
     let service = Arc::new(AlertService::new(
         state.store.clone(),
         fcm,
+        apns,
         Duration::from_millis(100),
         Duration::from_secs(120),
     ));
@@ -1948,6 +2065,140 @@ async fn alert_service_drops_stale_completions_groups_and_deletes_a_dead_token()
             .unwrap()
             .is_some()
     );
+}
+
+#[tokio::test]
+#[ignore = "requires H4RN_TEST_DATABASE_URL (use ./scripts/test-connect.sh)"]
+async fn an_alert_goes_to_each_phones_own_transport() {
+    use h4rn_protocol::{AgentAlertState, ThreadId};
+    use p256::ecdsa::SigningKey;
+    use p256::pkcs8::{EncodePrivateKey, LineEnding};
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "access_token": "test-access-token",
+            "expires_in": 3600,
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/projects/demo/messages:send"))
+        .and(body_string_contains("android-fcm-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"name": "x"})))
+        .mount(&server)
+        .await;
+    let ios_token = apns_device_token();
+    Mock::given(method("POST"))
+        .and(path(format!("/3/device/{ios_token}")))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+
+    let key = SigningKey::random(&mut rand_core::OsRng);
+    let pem = key
+        .to_pkcs8_pem(LineEnding::LF)
+        .expect("encode PKCS#8 PEM")
+        .to_string();
+    let config = Config {
+        fcm_service_account: Some(service_account(&server, "demo")),
+        fcm_token_url: format!("{}/token", server.uri()),
+        fcm_url: server.uri(),
+        apns_key: Some(pem),
+        apns_key_id: Some("KEYID12345".to_string()),
+        apns_team_id: Some("TEAM123456".to_string()),
+        apns_url: server.uri(),
+        apns_topic: "dev.h4rn.app".to_string(),
+        ..Config::default()
+    };
+    let state = test_state().await;
+    let subject = Uuid::now_v7().to_string();
+    let android = actor_with_subject(&state, ConnectDeviceKind::Mobile, None, &subject).await;
+    let iphone = actor_with_subject(&state, ConnectDeviceKind::Mobile, None, &subject).await;
+    assert_eq!(android.user.id, iphone.user.id, "one account, two phones");
+    state
+        .store
+        .register_push_device(
+            android.user.id,
+            &android.device.id.to_string(),
+            "android-fcm-token",
+            "android",
+            Some("dev.h4rn.app"),
+            None,
+        )
+        .await
+        .expect("register the Android phone");
+    state
+        .store
+        .register_push_device(
+            iphone.user.id,
+            &iphone.device.id.to_string(),
+            &ios_token,
+            "ios",
+            None,
+            None,
+        )
+        .await
+        .expect("register the iPhone");
+
+    let service = Arc::new(AlertService::new(
+        state.store.clone(),
+        Arc::new(FcmClient::new(&config, reqwest::Client::new())),
+        Arc::new(h4rn_connect::apns::ApnsClient::new(
+            &config,
+            reqwest::Client::new(),
+        )),
+        Duration::from_millis(100),
+        Duration::from_secs(120),
+    ));
+    let thread = ThreadId::new_uuid_v7();
+    service
+        .ingest(
+            android.user.id,
+            alert_activity(&thread, AgentAlertState::Approval, Utc::now(), "one"),
+        )
+        .await;
+    service.flush(android.user.id).await;
+
+    let requests = server.received_requests().await.expect("requests");
+    let fcm: Vec<&wiremock::Request> = requests
+        .iter()
+        .filter(|request| request.url.path().ends_with("messages:send"))
+        .collect();
+    let apns: Vec<&wiremock::Request> = requests
+        .iter()
+        .filter(|request| request.url.path().starts_with("/3/device/"))
+        .collect();
+    assert_eq!(fcm.len(), 1, "the Android row must go to FCM once");
+    assert_eq!(apns.len(), 1, "the iOS row must go to APNs once");
+    assert_eq!(
+        apns[0].url.path(),
+        format!("/3/device/{ios_token}"),
+        "the APNs request must address the iOS row's token"
+    );
+
+    // Each token crossed only its own transport: the APNs token never reached
+    // Google, and the FCM token never reached Apple.
+    let fcm_body = String::from_utf8_lossy(&fcm[0].body).to_string();
+    assert!(fcm_body.contains("android-fcm-token"));
+    assert!(
+        !fcm_body.contains(&ios_token),
+        "the iPhone's APNs token was sent to FCM"
+    );
+    assert!(
+        !String::from_utf8_lossy(&apns[0].body).contains("android-fcm-token"),
+        "the Android token was sent to APNs"
+    );
+
+    // Both shapes come from the same record.
+    let apns_body: serde_json::Value = serde_json::from_slice(&apns[0].body).expect("APNs payload");
+    assert_eq!(apns_body["thread_id"], thread.to_string());
+    assert_eq!(apns_body["state"], "approval");
+    assert_eq!(apns_body["aps"]["alert"]["title"], "Thread one");
+    let fcm_body: serde_json::Value = serde_json::from_str(&fcm_body).expect("FCM payload");
+    assert_eq!(fcm_body["message"]["data"]["thread_id"], thread.to_string());
+    assert_eq!(fcm_body["message"]["data"]["state"], "approval");
 }
 
 #[tokio::test]

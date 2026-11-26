@@ -1,17 +1,21 @@
 /**
- * Android device alerts: registration with Connect and the foreground route
- * (ADR-051).
+ * Phone alerts: registration with Connect and the foreground route
+ * (ADR-051, ADR-052).
  *
  * The daemon publishes transitions; Connect decides and sends them; this module
  * only makes the phone reachable. The chosen state is this device's own, so it
  * lives in `localStorage`; the authoritative registration is the relay row it
- * creates, and the FCM token is rotated by re-registering on every launch.
+ * creates. The shell asks APNs or FCM for a fresh token on every launch, and
+ * this module re-registers with that token on launch and whenever the app
+ * returns to the foreground, so a token either provider replaced reaches the
+ * relay instead of a cached one staying there forever.
  */
 
 import { remoteStore } from "@/features/remote/remoteStore";
 import { currentConnectClient } from "@/features/remote/session";
 import {
   type DevicePushPermission,
+  deviceAlertsPlatform,
   deviceAlertsShell,
   nativePushStatus,
   nativePushToken,
@@ -26,16 +30,16 @@ const DEREGISTER_PENDING_KEY = "h4rn.push.deregisterPending";
 const PACKAGE_NAME = "dev.h4rn.app";
 
 export type DeviceAlertsState = {
-  /** This is the Android shell, so the row belongs on Settings. */
+  /** This is a phone shell, so the row belongs on Settings. */
   supported: boolean;
-  /** The build has a Firebase project; `null` when the shell did not answer. */
+  /** The build can receive alerts; `null` when the shell did not answer. */
   available: boolean | null;
   permission: DevicePushPermission;
   /** This device's switch; only meaningful while signed in. */
   enabled: boolean;
   /** A successful registration is known to exist for this install. */
   registered: boolean;
-  /** The signed-in relay has an FCM service account configured. */
+  /** The signed-in relay has a sender for this phone's platform. */
   configured: boolean | null;
   token: string | null;
   error: string | null;
@@ -52,7 +56,7 @@ export function deviceStatusLine(device: DeviceAlertsState | null, signedIn: boo
   if (device.available === null) return "Could not check this phone's notifications. Try again.";
   if (device.permission === "denied") return "Blocked in system settings.";
   if (device.permission === "default")
-    return "Android will ask for permission when you turn this on.";
+    return "This phone will ask for permission when you turn this on.";
   if (device.enabled && device.registered) return "Registered with this phone.";
   if (device.enabled) return "Registered, but Connect has not confirmed this phone yet.";
   return "Off.";
@@ -68,7 +72,7 @@ export function deviceStatusLine(device: DeviceAlertsState | null, signedIn: boo
 export function deviceAvailabilityNote(device: DeviceAlertsState | null): string | null {
   if (device === null) return null;
   if (device.configured === false) {
-    return "This Connect server has no push sender configured. An operator has to add a Firebase service account before alerts can arrive.";
+    return "This Connect server has no push sender configured for this phone. An operator has to add one before alerts can arrive.";
   }
   if (device.configured === null && device.error !== null) {
     return "Could not check whether this Connect server can send alerts.";
@@ -79,7 +83,7 @@ export function deviceAvailabilityNote(device: DeviceAlertsState | null): string
 /**
  * Whether the device switch can be flipped right now.
  *
- * An unknown answer (`available === null`) is not a build without Firebase, so
+ * An unknown answer (`available === null`) is not a build without push, so
  * the switch stays usable and the person can try again.
  */
 export function deviceToggleUsable(
@@ -105,7 +109,7 @@ function signedIn(): boolean {
 }
 
 /**
- * Mirrors "signed in and switched on" to the Android notification service.
+ * Mirrors "signed in and switched on" to the phone's notification service.
  *
  * The service runs without the WebView, so it reads this persisted flag before
  * showing a data message. Signing out must drop it even when the switch is
@@ -175,7 +179,7 @@ export async function readDeviceAlerts(): Promise<DeviceAlertsState> {
   }
   const result = await nativePushStatus();
   const status = result.kind === "checked" ? result.status : null;
-  // A failed command says nothing about whether this build has Firebase.
+  // A failed command says nothing about whether this build can push.
   const available =
     result.kind === "checked" ? result.status.available : result.kind === "failed" ? null : false;
   let error = result.kind === "failed" ? result.error : null;
@@ -185,7 +189,10 @@ export async function readDeviceAlerts(): Promise<DeviceAlertsState> {
   if (client) {
     try {
       const relay = await client.pushStatus();
-      configured = relay.configured;
+      // A relay with only one platform's sender configured must not tell the
+      // other platform that alerts will arrive. Older relays have no per-
+      // platform answer, so their account-wide flag is the best there is.
+      configured = relay.platform_configured ?? relay.configured;
       // The relay answers about this device's own row. The account's other
       // phones say nothing about whether this one can receive an alert.
       registered = relay.registered === true;
@@ -215,14 +222,18 @@ export async function registerDeviceAlerts(): Promise<void> {
   const result = await nativePushStatus();
   if (result.kind === "failed") throw new Error(result.error);
   if (result.kind !== "checked" || !result.status.available) {
-    throw new Error("This build has no Firebase configuration, so alerts cannot be delivered.");
+    throw new Error("This build cannot receive alerts.");
   }
   const token = await nativePushToken();
+  const platform = deviceAlertsPlatform();
   await client.registerPushDevice({
     deviceId: client.device.id,
     token,
-    packageName: PACKAGE_NAME,
+    platform: platform ?? "android",
     appVersion: result.status.appVersion,
+    // Only Android has a package name; iOS delivery is addressed by the APNs
+    // topic on the relay.
+    ...(platform === "ios" ? {} : { packageName: PACKAGE_NAME }),
   });
   // The switch, or the whole session, may have been turned off while the PUT
   // was in flight. A fresh registration must not revive a phone the person

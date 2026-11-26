@@ -1,11 +1,12 @@
 // swift-tools-version:5.9
 //
-// Local Swift package for h4rn's iOS Keychain secret store.
+// Local Swift package for h4rn's iOS native code.
 //
 // `src-tauri/build.rs` copies Tauri's iOS API package into `.tauri/tauri-api`
-// and calls `link_apple_library("h4rn-secret-store", "native/ios")`, so this
-// package is compiled into the app's Rust static library exactly like a Tauri
-// plugin's native code.
+// and calls `link_apple_library` once per product, so these packages are
+// compiled into the app's Rust static library exactly like a Tauri plugin's
+// native code. Both targets are static libraries with their own `init_plugin_*`
+// entry point.
 
 import PackageDescription
 
@@ -19,7 +20,12 @@ let package = Package(
       name: "h4rn-secret-store",
       type: .static,
       targets: ["H4rnSecretStore"]
-    )
+    ),
+    .library(
+      name: "h4rn-push",
+      type: .static,
+      targets: ["H4rnPush"]
+    ),
   ],
   dependencies: [
     .package(name: "Tauri", path: "../.tauri/tauri-api")
@@ -30,7 +36,19 @@ let package = Package(
       dependencies: [
         .byName(name: "Tauri")
       ],
-      path: "Sources"
-    )
+      path: "Sources/H4rnSecretStore"
+    ),
+    .target(
+      name: "H4rnPush",
+      dependencies: [
+        .byName(name: "Tauri")
+      ],
+      path: "Sources/H4rnPush"
+    ),
+    .testTarget(
+      name: "H4rnPushTests",
+      dependencies: ["H4rnPush"],
+      path: "Tests/H4rnPushTests"
+    ),
   ]
 )

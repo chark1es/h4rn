@@ -1,5 +1,9 @@
-//! Alert selection and delivery for Android push (ADR-051).
+//! Alert selection and delivery for both phone platforms (ADR-051, ADR-052).
 //!
+//! Selection is platform-neutral: the same record, dedupe, cutoff and grouping
+//! rules decide what to send. Delivery reads each registration's platform and
+//! hands an Android row to FCM and an iOS row to APNs, each with its own
+//! message shape.
 //! Connect may see the same transition many times (a reconnect, a retry, a
 //! daemon restart), so the delivered baseline is stored per `(user, thread)`
 //! and keyed by the transition id: a replayed frame is dropped before it can
@@ -22,8 +26,9 @@ use h4rn_protocol::{AgentActivity, AgentAlertState};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
-use crate::push::{FcmClient, PushMessage, SendError};
-use crate::store::Store;
+use crate::apns::ApnsClient;
+use crate::push::{FcmClient, PushMessage, PushPlatform, SendError};
+use crate::store::{PushDeviceRow, Store};
 
 /// The most title text one notification line carries.
 const MAX_LINE_CHARS: usize = 120;
@@ -230,10 +235,27 @@ struct PendingGroup {
     scheduled: bool,
 }
 
+/// The platform a stored device row is for (ADR-052).
+pub fn device_platform(device: &PushDeviceRow) -> PushPlatform {
+    PushPlatform::parse(Some(device.platform.as_str()))
+}
+
+/// Whether this relay has a sender for that platform.
+///
+/// A relay with only FCM configured must not try to send an iPhone's APNs
+/// token to Google, and the reverse: each platform has its own sender.
+pub fn platform_has_sender(platform: PushPlatform, fcm: bool, apns: bool) -> bool {
+    match platform {
+        PushPlatform::Android => fcm,
+        PushPlatform::Ios => apns,
+    }
+}
+
 /// The relay-side alert service.
 pub struct AlertService {
     store: Store,
     fcm: Arc<FcmClient>,
+    apns: Arc<ApnsClient>,
     group_window: Duration,
     max_age: Duration,
     pending: Mutex<HashMap<Uuid, PendingGroup>>,
@@ -244,16 +266,18 @@ pub struct AlertService {
 }
 
 impl AlertService {
-    /// Builds the service around the store and the FCM sender.
+    /// Builds the service around the store and the two platform senders.
     pub fn new(
         store: Store,
         fcm: Arc<FcmClient>,
+        apns: Arc<ApnsClient>,
         group_window: Duration,
         max_age: Duration,
     ) -> Self {
         Self {
             store,
             fcm,
+            apns,
             group_window,
             max_age,
             pending: Mutex::new(HashMap::new()),
@@ -291,7 +315,7 @@ impl AlertService {
         if completion_is_stale(&activity, Utc::now(), self.max_age) {
             return;
         }
-        if !self.fcm.configured() {
+        if !self.fcm.configured() && !self.apns.configured() {
             return;
         }
         let schedule = {
@@ -340,12 +364,25 @@ impl AlertService {
         for alert in alerts {
             let data = alert.data();
             for device in &devices {
+                let platform = device_platform(device);
+                if !platform_has_sender(platform, self.fcm.configured(), self.apns.configured()) {
+                    // This phone's platform has no sender on this relay. The
+                    // other platform's phones still get their alert.
+                    continue;
+                }
                 let message = PushMessage {
                     token: &device.token,
+                    platform,
                     package_name: device.package_name.as_deref(),
                     data: data.clone(),
                 };
-                match self.fcm.send(&message).await {
+                let result = match platform {
+                    PushPlatform::Android => self.fcm.send(&message).await,
+                    PushPlatform::Ios => {
+                        self.apns.send(message.token, &message.apns_payload()).await
+                    }
+                };
+                match result {
                     Ok(()) => {}
                     Err(SendError::Unregistered) => {
                         if let Err(error) =
@@ -354,9 +391,14 @@ impl AlertService {
                             tracing::warn!(%error, "could not delete an unregistered token");
                         }
                     }
-                    Err(SendError::Disabled) => return,
+                    Err(SendError::Disabled) => continue,
                     Err(SendError::Failed(error)) => {
-                        tracing::warn!(%error, device = %device.id, "push delivery failed");
+                        tracing::warn!(
+                            %error,
+                            device = %device.id,
+                            platform = platform.as_str(),
+                            "push delivery failed"
+                        );
                     }
                 }
             }
@@ -383,6 +425,34 @@ mod tests {
     fn a_replayed_frame_is_the_same_transition() {
         let activity = activity(AgentAlertState::Completed, "one");
         assert_eq!(activity.transition_id(), activity.clone().transition_id());
+    }
+
+    fn device(platform: &str) -> PushDeviceRow {
+        PushDeviceRow {
+            id: Uuid::now_v7(),
+            user_id: Uuid::now_v7(),
+            device_id: "device-1".to_string(),
+            token: "token".to_string(),
+            platform: platform.to_string(),
+            package_name: None,
+            app_version: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn each_phone_gets_the_sender_for_its_own_platform() {
+        assert_eq!(device_platform(&device("android")), PushPlatform::Android);
+        assert_eq!(device_platform(&device("ios")), PushPlatform::Ios);
+        // A row written before the column existed is an Android install.
+        assert_eq!(device_platform(&device("")), PushPlatform::Android);
+
+        assert!(platform_has_sender(PushPlatform::Android, true, false));
+        assert!(!platform_has_sender(PushPlatform::Ios, true, false));
+        assert!(platform_has_sender(PushPlatform::Ios, false, true));
+        assert!(!platform_has_sender(PushPlatform::Android, false, true));
+        assert!(!platform_has_sender(PushPlatform::Ios, false, false));
     }
 
     #[test]

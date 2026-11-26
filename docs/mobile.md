@@ -195,11 +195,15 @@ trusted differently from a typed one.
 
 ## Agent alerts
 
-Android alerts when an agent finishes, fails, needs approval or asks a question
-are documented in [mobile-notifications.md](mobile-notifications.md), including
-the exact metadata that leaves the daemon and the Firebase setup for users and
-operators. They go through Connect and are off until both the machine switch
-and the phone's own switch are on.
+Phone alerts when an agent finishes, fails, needs approval, asks a question or
+stops at a limit are documented in
+[mobile-notifications.md](mobile-notifications.md), on Android and iOS alike,
+including the exact metadata that leaves the daemon, the Firebase setup for
+Android and the APNs key an iOS relay needs. They go through Connect and are
+off until both the machine switch and the phone's own switch are on. The iOS
+shell's native push plugin (`H4rnPush`) lives in the same local Swift package as
+the Keychain store and exposes the same commands as the Android `PushPlugin`, so
+the shared UI has no platform branch beyond detecting the phone.
 
 ## iOS
 
@@ -214,7 +218,10 @@ bun run --cwd apps/mobile tauri ios build --debug --ci --target aarch64-sim
 ```
 
 The simulator build is unsigned, which is all CI can do without the owner's Apple credentials.
-The first `ios init` generates `src-tauri/gen/apple`; it is ignored like `gen/android`.
+The first `ios init` generates `src-tauri/gen/apple`; it is ignored like `gen/android`. CI does
+not run the local Swift package's XCTest target (`apps/mobile/native/ios/Tests/H4rnPushTests`),
+so those tests are unverified until a macOS job runs them; the simulator build only proves the
+Swift and Rust compile.
 
 ### What TestFlight needs from the owner
 
