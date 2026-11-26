@@ -1798,8 +1798,9 @@ export async function sendMessage(
     if (proto.code === "delivery_unclear") {
       // The daemon wrote the steer before the connection failed, so the turn
       // may already hold it. The composer keeps the draft (it is the person's
-      // only other copy until the recovered row appears), and the row stays
-      // sent here so the transcript never invites a resend automatically.
+      // only other copy until the recovered row appears, and clears it when
+      // that row does), and the row stays sent here so the transcript never
+      // invites a resend automatically.
       const current = getState();
       const currentLog = current.logs[threadId];
       if (currentLog) {
@@ -1819,7 +1820,7 @@ export async function sendMessage(
       pushToast({
         variant: "info",
         title: "Delivered, or maybe not.",
-        description: `${proto.message} Your draft is still in the composer until the queue row appears.`,
+        description: `${proto.message} Your draft stays in the composer until its queue row appears, then clears.`,
       });
       return "unclear";
     }
