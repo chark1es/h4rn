@@ -1,5 +1,6 @@
 import "i18next";
 
+import type enCommands from "./locales/en/commands.json";
 import type enCommon from "./locales/en/common.json";
 import type enComposer from "./locales/en/composer.json";
 import type enSettings from "./locales/en/settings.json";
@@ -12,6 +13,7 @@ declare module "i18next" {
     defaultNS: "common";
     resources: {
       common: typeof enCommon;
+      commands: typeof enCommands;
       composer: typeof enComposer;
       settings: typeof enSettings;
       sidebar: typeof enSidebar;

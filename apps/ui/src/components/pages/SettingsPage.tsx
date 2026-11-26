@@ -76,6 +76,8 @@ import {
   type CommandSpec,
   chordFromEvent,
   chordText,
+  commandGroupName,
+  commandName,
   formatChord,
   isApplePlatform,
   isCustomized,
@@ -751,7 +753,7 @@ function ShortcutRow({
   const { t } = useTranslation(["settings", "common"]);
   const [error, setError] = useState<string | null>(null);
   const customized = isCustomized(command.id);
-  const name = t(`shortcuts.commands.${command.id}`);
+  const name = commandName(command.id);
 
   useEffect(() => {
     if (!recording) return;
@@ -864,7 +866,7 @@ function ShortcutsForm() {
       </div>
       {COMMAND_GROUPS.map((group) => (
         <div className="q-group" key={group}>
-          <h2>{t(`shortcuts.groups.${group}`)}</h2>
+          <h2>{commandGroupName(group)}</h2>
           {COMMANDS.filter((command) => command.group === group).map((command) => (
             <ShortcutRow
               key={command.id}

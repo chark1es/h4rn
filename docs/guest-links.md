@@ -12,8 +12,8 @@ not revive them. Share again to make a new link.
 
 ## Share a thread
 
-1. Right-click the thread in the sidebar, use the thread's ⋯ menu, or open the
-   command palette and choose **Share with guest…**.
+1. Right-click the thread in the sidebar or use the thread's ⋯ menu and choose
+   **Share with guest…**, or run **Share with guest** from the command palette.
 2. Choose **Create link** and copy it. Send it to one person.
 3. When they write a message, it appears above your composer as a **Request**,
    and the sidebar row says **Request**. Choose **Send** to run it as a normal
@@ -23,7 +23,8 @@ not revive them. Share again to make a new link.
 Choose **Stop sharing** to end the link at once. Creating a new link, settling
 (archiving) the thread, turning the Labs setting off, or the 24 hours passing
 also ends it. A settled thread cannot be shared again until it is reopened: the
-menu, the command palette and the header hide **Share with guest…**, and the
+menu and the header hide **Share with guest…**, the command palette hides
+**Share with guest**, and the
 daemon refuses a new link, a submission or a Send on it. An expired link and its
 waiting files are swept at daemon startup and every ten minutes after that; the
 sweep also ends a link left on a thread that settled while the daemon was off.

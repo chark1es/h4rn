@@ -1,3 +1,4 @@
+import { Trans, useTranslation } from "react-i18next";
 import { ENTER, ESC, KeyCaps, SHIFT, ShortcutCaps } from "@/components/common/Kbd";
 import {
   Dialog,
@@ -6,25 +7,39 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { COMMAND_GROUPS, COMMANDS } from "@/lib/keybindings";
+
+import { COMMAND_GROUPS, COMMANDS, commandGroupName, commandName } from "@/lib/keybindings";
 import { closeShortcuts, navigate, useApp } from "@/lib/store/appStore";
 
-/** Keys that edit text rather than run commands. */
-const TYPING: Array<[string, string[]]> = [
-  ["Send", [ENTER]],
-  ["New line", [SHIFT, ENTER]],
-  ["Recall an earlier prompt", ["↑"]],
-  ["Walk prompts forward", ["↓"]],
-  ["Mention a file", ["@"]],
-  ["Run a command", ["/"]],
-  ["Move in the @ or / menu", ["↑", "↓"]],
-  ["Insert the highlighted item", [ENTER, "Tab"]],
-  ["Close the @ or / menu", [ESC]],
-  ["Close a dialog or go back", [ESC]],
+type TypingKey =
+  | "send"
+  | "newLine"
+  | "recall"
+  | "forward"
+  | "mention"
+  | "command"
+  | "moveMenu"
+  | "insert"
+  | "closeMenu"
+  | "closeDialog";
+
+/** Keys that edit text rather than run commands. Keycaps read the same in every language. */
+const TYPING: Array<[TypingKey, string[]]> = [
+  ["send", [ENTER]],
+  ["newLine", [SHIFT, ENTER]],
+  ["recall", ["↑"]],
+  ["forward", ["↓"]],
+  ["mention", ["@"]],
+  ["command", ["/"]],
+  ["moveMenu", ["↑", "↓"]],
+  ["insert", [ENTER, "Tab"]],
+  ["closeMenu", [ESC]],
+  ["closeDialog", [ESC]],
 ];
 
 export function ShortcutsDialog() {
   const open = useApp((state) => state.ui.shortcutsOpen);
+  const { t } = useTranslation("commands");
 
   return (
     <Dialog open={open} onOpenChange={(value) => (value ? undefined : closeShortcuts())}>
@@ -33,36 +48,41 @@ export function ShortcutsDialog() {
         onOpenAutoFocus={(event) => event.preventDefault()}
       >
         <DialogHeader>
-          <DialogTitle>Keyboard shortcuts</DialogTitle>
+          <DialogTitle>{commandName("shortcuts.open")}</DialogTitle>
           <DialogDescription>
-            Every command is Cmd or Ctrl plus a key, so typing never triggers one. Change any of
-            them in{" "}
-            <button
-              type="button"
-              className="q-link"
-              onClick={() => {
-                closeShortcuts();
-                navigate({
-                  kind: "placeholder",
-                  surface: "settings",
-                  path: "/settings/shortcuts",
-                });
+            <Trans
+              t={t}
+              i18nKey="shortcutsDialog.description"
+              components={{
+                settings: (
+                  <button
+                    type="button"
+                    className="q-link"
+                    onClick={() => {
+                      closeShortcuts();
+                      navigate({
+                        kind: "placeholder",
+                        surface: "settings",
+                        path: "/settings/shortcuts",
+                      });
+                    }}
+                  />
+                ),
               }}
-            >
-              Settings → Shortcuts
-            </button>
-            .
+            />
           </DialogDescription>
         </DialogHeader>
 
         <div className="grid gap-x-6 gap-y-4 sm:grid-cols-2">
           {COMMAND_GROUPS.map((group) => (
             <section key={group} className="space-y-1">
-              <h3 className="text-[12px] font-medium text-[var(--fg-3)]">{group}</h3>
+              <h3 className="text-[12px] font-medium text-[var(--fg-3)]">
+                {commandGroupName(group)}
+              </h3>
               <dl className="divide-y divide-line/70">
                 {COMMANDS.filter((command) => command.group === group).map((command) => (
                   <div key={command.id} className="flex items-center justify-between gap-2 py-1">
-                    <dt className="text-[12.5px] text-[var(--fg-2)]">{command.label}</dt>
+                    <dt className="text-[12.5px] text-[var(--fg-2)]">{commandName(command.id)}</dt>
                     <dd className="q-pal-kbd shrink-0">
                       <ShortcutCaps command={command.id} />
                     </dd>
@@ -72,11 +92,15 @@ export function ShortcutsDialog() {
             </section>
           ))}
           <section className="space-y-1">
-            <h3 className="text-[12px] font-medium text-[var(--fg-3)]">While typing</h3>
+            <h3 className="text-[12px] font-medium text-[var(--fg-3)]">
+              {t("shortcutsDialog.whileTyping")}
+            </h3>
             <dl className="divide-y divide-line/70">
-              {TYPING.map(([label, keys]) => (
-                <div key={label} className="flex items-center justify-between gap-2 py-1">
-                  <dt className="text-[12.5px] text-[var(--fg-2)]">{label}</dt>
+              {TYPING.map(([key, keys]) => (
+                <div key={key} className="flex items-center justify-between gap-2 py-1">
+                  <dt className="text-[12.5px] text-[var(--fg-2)]">
+                    {t(`shortcutsDialog.typing.${key}`)}
+                  </dt>
                   <dd className="q-pal-kbd shrink-0">
                     <KeyCaps value={keys.join(" ")} />
                   </dd>
