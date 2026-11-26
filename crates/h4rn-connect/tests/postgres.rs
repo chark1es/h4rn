@@ -1989,13 +1989,16 @@ async fn alert_service_drops_stale_completions_groups_and_deletes_a_dead_token()
     let apns = Arc::new(h4rn_connect::apns::ApnsClient::disabled(
         reqwest::Client::new(),
     ));
-    let service = Arc::new(AlertService::new(
-        state.store.clone(),
-        fcm,
-        apns,
-        Duration::from_millis(100),
-        Duration::from_secs(120),
-    ));
+    let service = Arc::new(
+        AlertService::new(
+            state.store.clone(),
+            fcm,
+            apns,
+            Duration::from_millis(100),
+            Duration::from_secs(120),
+        )
+        .manual_flush(),
+    );
 
     // A completion older than the cutoff is recorded but never sent.
     let stale = ThreadId::new_uuid_v7();
@@ -2012,7 +2015,9 @@ async fn alert_service_drops_stale_completions_groups_and_deletes_a_dead_token()
         .await;
     service.flush(kept.user.id).await;
 
-    // Two completions inside the window become one grouped alert.
+    // Two completions inside the window become one grouped alert. The window
+    // is drained by hand: with a timer, a slow database write could let it
+    // expire between the two ingests and send two single alerts instead.
     let first = ThreadId::new_uuid_v7();
     let second = ThreadId::new_uuid_v7();
     service
@@ -2027,7 +2032,7 @@ async fn alert_service_drops_stale_completions_groups_and_deletes_a_dead_token()
             alert_activity(&second, AgentAlertState::Completed, Utc::now(), "second"),
         )
         .await;
-    tokio::time::sleep(Duration::from_millis(400)).await;
+    service.flush(kept.user.id).await;
 
     let sends: Vec<wiremock::Request> = server
         .received_requests()
@@ -2142,16 +2147,22 @@ async fn an_alert_goes_to_each_phones_own_transport() {
         .await
         .expect("register the iPhone");
 
-    let service = Arc::new(AlertService::new(
-        state.store.clone(),
-        Arc::new(FcmClient::new(&config, reqwest::Client::new())),
-        Arc::new(h4rn_connect::apns::ApnsClient::new(
-            &config,
-            reqwest::Client::new(),
-        )),
-        Duration::from_millis(100),
-        Duration::from_secs(120),
-    ));
+    // Drained by hand: a window timer could fire between the ingest and the
+    // flush below, leaving the flush nothing to send and the assertion no
+    // requests yet.
+    let service = Arc::new(
+        AlertService::new(
+            state.store.clone(),
+            Arc::new(FcmClient::new(&config, reqwest::Client::new())),
+            Arc::new(h4rn_connect::apns::ApnsClient::new(
+                &config,
+                reqwest::Client::new(),
+            )),
+            Duration::from_millis(100),
+            Duration::from_secs(120),
+        )
+        .manual_flush(),
+    );
     let thread = ThreadId::new_uuid_v7();
     service
         .ingest(
