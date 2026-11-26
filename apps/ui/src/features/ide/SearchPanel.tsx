@@ -1,7 +1,9 @@
 import { CaseSensitiveIcon, Loader2Icon, RegexIcon, SearchIcon } from "lucide-react";
 import { useEffect, useMemo, useRef } from "react";
+import { useTranslation } from "react-i18next";
 
 import type { FsSearchMatch } from "@/gen";
+import { formatNumber } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 import type { SearchState } from "./useIdeSession";
 
@@ -24,6 +26,7 @@ function group(matches: FsSearchMatch[]): Array<{ path: string; matches: FsSearc
 }
 
 export function SearchPanel({ search, onQuery, onOption, onRun, onOpen }: SearchPanelProps) {
+  const { t } = useTranslation("ide");
   const input = useRef<HTMLInputElement | null>(null);
   const groups = useMemo(() => group(search.results), [search.results]);
 
@@ -33,7 +36,7 @@ export function SearchPanel({ search, onQuery, onOption, onRun, onOpen }: Search
 
   return (
     <section
-      aria-label="Search files"
+      aria-label={t("search.label")}
       style={{
         display: "flex",
         flexDirection: "column",
@@ -55,8 +58,8 @@ export function SearchPanel({ search, onQuery, onOption, onRun, onOpen }: Search
               if (event.key === "Enter") onRun();
               if (event.key === "Escape") onQuery("");
             }}
-            placeholder="Find in workspace"
-            aria-label="Find in workspace"
+            placeholder={t("search.find")}
+            aria-label={t("search.find")}
             spellCheck={false}
             className="q-mono"
             style={{
@@ -78,29 +81,29 @@ export function SearchPanel({ search, onQuery, onOption, onRun, onOpen }: Search
             type="button"
             aria-pressed={search.caseSensitive}
             onClick={() => onOption({ caseSensitive: !search.caseSensitive })}
-            title="Match case"
+            title={t("search.matchCase")}
             className={cn("q-ibtn", search.caseSensitive && "on")}
             style={{ width: 24, height: 24 }}
           >
             <CaseSensitiveIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-            <span className="sr-only">Match case</span>
+            <span className="sr-only">{t("search.matchCase")}</span>
           </button>
           <button
             type="button"
             aria-pressed={search.regex}
             onClick={() => onOption({ regex: !search.regex })}
-            title="Regular expression"
+            title={t("search.regex")}
             className={cn("q-ibtn", search.regex && "on")}
             style={{ width: 24, height: 24 }}
           >
             <RegexIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-            <span className="sr-only">Regular expression</span>
+            <span className="sr-only">{t("search.regex")}</span>
           </button>
           <input
             value={search.glob ?? ""}
             onChange={(event) => onOption({ glob: event.target.value || null })}
             placeholder="*.ts"
-            aria-label="File glob"
+            aria-label={t("search.glob")}
             spellCheck={false}
             className="q-mono"
             style={{
@@ -121,14 +124,14 @@ export function SearchPanel({ search, onQuery, onOption, onRun, onOpen }: Search
             className="q-btn secondary"
             style={{ marginLeft: "auto", height: 24 }}
           >
-            Search
+            {t("search.run")}
           </button>
         </div>
       </div>
 
       {search.error ? (
         <div style={{ margin: 12, fontSize: 12, color: "var(--fg-2)" }}>
-          <p style={{ margin: 0, fontWeight: 500, color: "var(--fg)" }}>Search failed.</p>
+          <p style={{ margin: 0, fontWeight: 500, color: "var(--fg)" }}>{t("search.failed")}</p>
           <p style={{ margin: "4px 0 0" }}>{search.error.message}</p>
         </div>
       ) : null}
@@ -139,9 +142,7 @@ export function SearchPanel({ search, onQuery, onOption, onRun, onOpen }: Search
             className="q-faint"
             style={{ margin: 0, padding: 16, fontSize: 12, lineHeight: "18px" }}
           >
-            {search.searchId
-              ? "No matches in this workspace."
-              : "Type a pattern, then Enter. Results stream in as the daemon walks the tree."}
+            {search.searchId ? t("search.noMatches") : t("search.intro")}
           </p>
         ) : null}
         {groups.map((group) => (
@@ -171,7 +172,7 @@ export function SearchPanel({ search, onQuery, onOption, onRun, onOpen }: Search
                 {group.path}
               </span>
               <span className="q-num q-faint" style={{ fontSize: 11 }}>
-                {group.matches.length}
+                {formatNumber(group.matches.length)}
               </span>
             </div>
             <ul style={{ listStyle: "none", margin: 0, padding: 0 }}>
@@ -194,7 +195,7 @@ export function SearchPanel({ search, onQuery, onOption, onRun, onOpen }: Search
                       className="q-mono q-faint"
                       style={{ width: 32, flex: "none", textAlign: "right", fontSize: 11 }}
                     >
-                      {match.line_number}
+                      {formatNumber(match.line_number, { useGrouping: false })}
                     </span>
                     <span
                       className="q-mono"
@@ -222,10 +223,10 @@ export function SearchPanel({ search, onQuery, onOption, onRun, onOpen }: Search
         className="q-statusbar"
         style={{ justifyContent: "space-between", fontFamily: "var(--mono)" }}
       >
-        <span>
-          {search.results.length} {search.results.length === 1 ? "match" : "matches"}
-        </span>
-        {search.truncated ? <span style={{ color: "var(--warn)" }}>Result cap reached</span> : null}
+        <span>{t("search.matches", { count: search.results.length })}</span>
+        {search.truncated ? (
+          <span style={{ color: "var(--warn)" }}>{t("search.capped")}</span>
+        ) : null}
       </div>
     </section>
   );

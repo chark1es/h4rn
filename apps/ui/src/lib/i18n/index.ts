@@ -6,8 +6,10 @@ import enCommands from "./locales/en/commands.json";
 import enCommon from "./locales/en/common.json";
 import enComposer from "./locales/en/composer.json";
 import enDialogs from "./locales/en/dialogs.json";
+import enIde from "./locales/en/ide.json";
 import enIssues from "./locales/en/issues.json";
 import enPairing from "./locales/en/pairing.json";
+import enPreview from "./locales/en/preview.json";
 import enPullRequests from "./locales/en/pullRequests.json";
 import enSettings from "./locales/en/settings.json";
 import enShell from "./locales/en/shell.json";
@@ -36,8 +38,10 @@ export const NAMESPACES = [
   "commands",
   "composer",
   "dialogs",
+  "ide",
   "issues",
   "pairing",
+  "preview",
   "pullRequests",
   "settings",
   "shell",
@@ -62,8 +66,10 @@ export const englishResources = {
   commands: enCommands,
   composer: enComposer,
   dialogs: enDialogs,
+  ide: enIde,
   issues: enIssues,
   pairing: enPairing,
+  preview: enPreview,
   pullRequests: enPullRequests,
   settings: enSettings,
   shell: enShell,

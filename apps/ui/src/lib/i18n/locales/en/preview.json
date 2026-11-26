@@ -1,0 +1,45 @@
+{
+  "preview": "Preview",
+  "reload": "Reload",
+  "reloadPreview": "Reload preview",
+  "openFullWidth": "Open full width",
+  "openFullWidthLabel": "Open preview full width",
+  "close": "Close preview",
+  "backToThread": "Back to thread",
+  "returnToPanel": "Return to panel",
+  "returnToPanelLabel": "Return the preview to the panel",
+  "loading": "Loading preview",
+  "frameTitle": "Preview of {{name}}",
+  "empty": {
+    "title": "No preview open",
+    "body": "Choose an HTML file in Files and open its preview. The page runs sandboxed and can’t touch h4rn, its cookies or its storage.",
+    "showFiles": "Show files"
+  },
+  "missing_one": "{{count, number}} file wasn’t loaded: it is missing, outside the workspace, or over the size limit.",
+  "missing_other": "{{count, number}} files weren’t loaded: they are missing, outside the workspace, or over the size limit.",
+  "link": {
+    "ask": "Open <host>{{host}}</host> in your browser?",
+    "open": "Open"
+  },
+  "scripts": {
+    "deviceTitle": "This device can’t run scripts in a preview.",
+    "deviceBody": "Its WebView blocks a sandboxed page’s own scripts, so the preview was turned off instead of showing the page without them. Update Android System WebView, then reload.",
+    "blockedTitle": "Preview scripts didn’t start.",
+    "unknownBody": "The app couldn’t read this WebView’s capability report, so it can’t confirm the page’s scripts will run. Reload to check again.",
+    "blockedBody": "The page loaded, but the script that keeps its links safe never ran. Reload the preview; a comment that is never closed, or a policy that blocks scripts, can cause this."
+  },
+  "failure": {
+    "goneTitle": "This file is no longer in the workspace.",
+    "documentTooLargeTitle": "This file is too large to preview.",
+    "documentTooLarge": "The preview reads at most {{limit}} of text so one response fits a transport frame. This file is {{size}}, or needs more than that once its text is escaped for the wire. Open it in a terminal or split the report.",
+    "pageTooLargeTitle": "This page is too large to preview.",
+    "pageTooLarge": "The prepared page is {{size}}; the preview embeds up to {{limit}} from the workspace.",
+    "notTextTitle": "This file isn’t UTF-8 text.",
+    "binary": "Only text HTML files can be previewed.",
+    "undecodable": "The daemon could not decode it as text.",
+    "loadFailedTitle": "The preview didn’t load.",
+    "noFile": "The daemon returned no file.",
+    "kib": "{{size}} KiB",
+    "mib": "{{size}} MiB"
+  }
+}

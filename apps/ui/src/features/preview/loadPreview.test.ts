@@ -7,7 +7,13 @@ import {
   PREVIEW_MAX_TEXT_BYTES,
   PREVIEW_MAX_TOTAL_BYTES,
 } from "./htmlPreview";
-import { loadPreview, type PreviewReader } from "./loadPreview";
+import { loadPreview, type PreviewLoad, type PreviewReader } from "./loadPreview";
+import { describePreviewFailure } from "./PreviewPanel";
+
+/** The failure as the panel words it, in English. */
+function words(load: PreviewLoad): { title: string; detail: string } | null {
+  return load.failure ? describePreviewFailure(load.failure) : null;
+}
 
 function textFile(path: string, content: string): FsFileContent {
   return {
@@ -59,7 +65,7 @@ describe("loadPreview errors", () => {
       read: reader({}),
     });
     expect(load.document).toBeNull();
-    expect(load.failure?.title).toContain("no longer in the workspace");
+    expect(words(load)?.title).toContain("no longer in the workspace");
   });
 
   it("reports the frame-sized text limit, not the 10 MB budget", async () => {
@@ -72,11 +78,11 @@ describe("loadPreview errors", () => {
     };
     const load = await loadPreview({ path: "big.html", read: reader({ "big.html": big }) });
     expect(load.document).toBeNull();
-    expect(load.failure?.title).toBe("This file is too large to preview.");
-    expect(load.failure?.detail).toContain("400 KiB");
-    expect(load.failure?.detail).toContain("401 KiB");
+    expect(words(load)?.title).toBe("This file is too large to preview.");
+    expect(words(load)?.detail).toContain("400 KiB");
+    expect(words(load)?.detail).toContain("401 KiB");
     // One unit, so the file size and the limit can be compared at a glance.
-    expect(load.failure?.detail).not.toContain("MiB");
+    expect(words(load)?.detail).not.toContain("MiB");
     expect(load.watched).toEqual(["big.html"]);
   });
 
@@ -90,9 +96,9 @@ describe("loadPreview errors", () => {
     };
     const load = await loadPreview({ path: "dense.html", read: reader({ "dense.html": dense }) });
     expect(load.document).toBeNull();
-    expect(load.failure?.detail).toContain("390 KiB");
-    expect(load.failure?.detail).toContain("escaped");
-    expect(load.failure?.detail).not.toContain("MiB");
+    expect(words(load)?.detail).toContain("390 KiB");
+    expect(words(load)?.detail).toContain("escaped");
+    expect(words(load)?.detail).not.toContain("MiB");
   });
 
   it("keeps watching the selected file when the load fails", async () => {
@@ -116,7 +122,7 @@ describe("loadPreview errors", () => {
     for (const testCase of cases) {
       const load = await loadPreview({ path: testCase.path, read: reader(testCase.files) });
       expect(load.document).toBeNull();
-      expect(load.failure?.title).toContain(testCase.expected);
+      expect(words(load)?.title).toContain(testCase.expected);
       expect(load.watched).toEqual([testCase.path]);
     }
   });
@@ -147,7 +153,7 @@ describe("loadPreview errors", () => {
       read: reader({ "binary.html": binary }),
     });
     expect(load.document).toBeNull();
-    expect(load.failure?.title).toBe("This file isn’t UTF-8 text.");
+    expect(words(load)?.title).toBe("This file isn’t UTF-8 text.");
   });
 });
 

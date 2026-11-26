@@ -6,6 +6,7 @@ import type {
   ThreadId,
   TurnId,
 } from "@/gen";
+import { i18n } from "@/lib/i18n";
 
 /**
  * What a diff pane is comparing.
@@ -17,12 +18,18 @@ import type {
  */
 export type DiffSource = "head" | "agent" | "branch" | "commit";
 
-export const DIFF_SOURCES: Array<{ value: DiffSource; label: string; hint: string }> = [
-  { value: "head", label: "Uncommitted", hint: "against HEAD" },
-  { value: "agent", label: "Turn", hint: "this turn's changes" },
-  { value: "branch", label: "Branch", hint: "against the merge base" },
-  { value: "commit", label: "Commits", hint: "one commit at a time" },
-];
+/** The source picker's choices, in the order it lists them. */
+export const DIFF_SOURCES: readonly DiffSource[] = ["head", "agent", "branch", "commit"];
+
+/** The picker's name for a source ("Uncommitted", "Turn"), in the active language. */
+export function diffSourceName(source: DiffSource): string {
+  return i18n.t(`ide:sources.${source}`);
+}
+
+/** The picker's second line for a source ("against HEAD"), in the active language. */
+export function diffSourceHint(source: DiffSource): string {
+  return i18n.t(`ide:sources.${source}Hint`);
+}
 
 export type DiffScope = {
   source: DiffSource;
@@ -94,10 +101,13 @@ export function resolvedAgainst(
 }
 
 /**
- * The phrase a review comment carries: "branch vs main", "commit 1a2b3c4".
+ * The phrase a review comment carries into the composer draft: "branch vs
+ * main", "commit 1a2b3c4".
  *
- * This is display text only; `diffScopeKey` decides which diff a comment
- * belongs to.
+ * The draft block is written for the agent, so this stays English in every
+ * language; `describeSource` is the same phrase for the person to read.
+ * Either way it is display text only; `diffScopeKey` decides which diff a
+ * comment belongs to.
  */
 export function sourceDescription(source: DiffSource, label: string | null): string {
   switch (source) {
@@ -109,6 +119,24 @@ export function sourceDescription(source: DiffSource, label: string | null): str
       return label ? `branch ${label}` : "branch vs base";
     case "commit":
       return label ? label.toLowerCase() : "commit";
+  }
+}
+
+/**
+ * `sourceDescription` in the active language, for the comment notes on
+ * screen. The label is the daemon's own ("vs main", "Turn 4f2a") and is
+ * shown as sent.
+ */
+export function describeSource(source: DiffSource, label: string | null): string {
+  switch (source) {
+    case "head":
+      return i18n.t("ide:scope.head");
+    case "agent":
+      return label ? label.toLowerCase() : i18n.t("ide:scope.agent");
+    case "branch":
+      return label ? i18n.t("ide:scope.branch", { label }) : i18n.t("ide:scope.branchDefault");
+    case "commit":
+      return label ? label.toLowerCase() : i18n.t("ide:scope.commit");
   }
 }
 
@@ -135,17 +163,21 @@ export function chooseCommit(
   return commits?.commits[0]?.sha ?? null;
 }
 
-/** The base a branch scope should request; an empty list means the default. */
+/**
+ * The base a branch scope should request; an empty list means the default.
+ * `current` marks a base that is in use but not in the branch list, which
+ * the picker labels "current base".
+ */
 export function baseOptions(
   branches: string[],
   current: string | null,
-): Array<{ value: string; label: string; hint?: string }> {
-  const options: Array<{ value: string; label: string; hint?: string }> = branches.map((name) => ({
+): Array<{ value: string; label: string; current?: true }> {
+  const options: Array<{ value: string; label: string; current?: true }> = branches.map((name) => ({
     value: name,
     label: name,
   }));
   if (current && !branches.includes(current)) {
-    options.unshift({ value: current, label: current, hint: "current base" });
+    options.unshift({ value: current, label: current, current: true });
   }
   return options;
 }

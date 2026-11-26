@@ -1,6 +1,7 @@
 import { useSyncExternalStore } from "react";
 
 import type { ThreadId } from "@/gen";
+import { type DiffSource, sourceDescription } from "./sources";
 
 /**
  * Review comments live with a thread, not with the file or scope that was open
@@ -37,8 +38,14 @@ export type ReviewComment = {
    * comparison keeps one key whichever way its base was chosen.
    */
   scope: string;
-  /** Display text only: "branch vs main", "commit 1a2b3c4". */
-  source: string;
+  /** The diff source the comment was written in. */
+  source: DiffSource;
+  /**
+   * The daemon's label for that diff ("vs main", "Commit 1a2b3c4"), or null.
+   * With `source` it names the diff for people: `describeSource` on screen,
+   * `sourceDescription` in the draft block.
+   */
+  sourceLabel: string | null;
   createdAt: number;
 };
 
@@ -165,9 +172,15 @@ function lineLabel(comment: Pick<ReviewComment, "startLine" | "endLine">): strin
     : `lines ${comment.startLine}–${comment.endLine}`;
 }
 
-/** One context block for the composer: path, side, range, quoted lines, text. */
+/**
+ * One context block for the composer: path, side, range, quoted lines, text.
+ *
+ * The block is addressed to the agent, so its framing stays English in every
+ * language; the person's own comment text is quoted as written.
+ */
 export function reviewCommentBlock(comment: ReviewComment): string {
-  const header = `Review comment · ${comment.path} · ${comment.side} side, ${lineLabel(comment)} · ${comment.source}`;
+  const source = sourceDescription(comment.source, comment.sourceLabel);
+  const header = `Review comment · ${comment.path} · ${comment.side} side, ${lineLabel(comment)} · ${source}`;
   const quoted = comment.lines
     .map((line) => `> ${line.number ?? ""} ${line.sign} ${line.text}`.trimEnd())
     .join("\n");

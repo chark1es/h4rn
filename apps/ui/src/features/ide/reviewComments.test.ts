@@ -31,7 +31,8 @@ function comment(overrides: Partial<ReviewComment> = {}): ReviewComment {
     ],
     text: "Use the injected clock here.",
     scope: "base:main",
-    source: "branch vs main",
+    source: "branch",
+    sourceLabel: "vs main",
     createdAt: 1,
     ...overrides,
   };
@@ -52,7 +53,8 @@ describe("review comments", () => {
       lines: [{ number: 3, sign: " ", text: "let x = 1;" }],
       text: "  keep it const  ",
       scope: "head",
-      source: "uncommitted (HEAD)",
+      source: "head",
+      sourceLabel: "HEAD",
     });
     expect(added.text).toBe("keep it const");
     expect(listReviewComments(thread)).toHaveLength(1);
@@ -74,7 +76,8 @@ describe("review comments", () => {
       lines: [],
       text: "one",
       scope: "head",
-      source: "uncommitted (HEAD)",
+      source: "head",
+      sourceLabel: "HEAD",
     });
     expect(listReviewComments("th_2" as ThreadId)).toHaveLength(0);
   });
