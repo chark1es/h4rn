@@ -2,6 +2,7 @@ import "i18next";
 
 import type enCommon from "./locales/en/common.json";
 import type enSettings from "./locales/en/settings.json";
+import type enSidebar from "./locales/en/sidebar.json";
 
 // Message keys are checked against the English catalogue: a missing or
 // misspelled key is a type error.
@@ -11,6 +12,7 @@ declare module "i18next" {
     resources: {
       common: typeof enCommon;
       settings: typeof enSettings;
+      sidebar: typeof enSidebar;
     };
     returnNull: false;
   }

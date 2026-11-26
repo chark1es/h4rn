@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import {
   activeLocale,
+  formatAge,
   formatDuration,
   formatNumber,
   formatRelativeTime,
@@ -137,5 +138,31 @@ describe("plurals and formatting", () => {
     expect(formatRelativeTime(now - 5 * 60_000, now)).toBe("5 分前");
     await setLocalePreference("es");
     expect(formatNumber(12345.5)).toBe("12.345,5");
+  });
+
+  it("formats a compact age in one unit, past or ahead", async () => {
+    const now = Date.parse("2026-11-25T12:00:00Z");
+    expect(formatAge(now - 20_000, now)).toBe("now");
+    expect(formatAge(new Date(now - 5 * 60_000).toISOString(), now)).toBe("5m");
+    expect(formatAge(now - 3 * 3_600_000, now)).toBe("3h");
+    expect(formatAge(now - 2 * 86_400_000, now)).toBe("2d");
+    // A snooze wakes in the future; the age is the distance either way.
+    expect(formatAge(now + 2 * 3_600_000, now)).toBe("2h");
+    expect(formatAge("not a date", now)).toBe("—");
+
+    await setLocalePreference("zh-CN");
+    expect(formatAge(now - 5 * 60_000, now)).toBe("5分钟");
+    expect(formatAge(now, now)).toBe("现在");
+    await setLocalePreference("es");
+    expect(formatAge(now - 5 * 60_000, now)).toBe("5min");
+    expect(formatAge(now, now)).toBe("ahora");
+  });
+
+  it("says how many threads need you in each language's plural", () => {
+    expect(i18n.t("sidebar:showNeedsYou", { count: 1 })).toBe("Show sidebar. 1 thread needs you");
+    expect(i18n.t("sidebar:showNeedsYou", { count: 3 })).toBe("Show sidebar. 3 threads need you");
+    expect(i18n.t("sidebar:showNeedsYou", { count: 1, lng: "es" })).toBe(
+      "Mostrar barra lateral. 1 hilo te necesita",
+    );
   });
 });

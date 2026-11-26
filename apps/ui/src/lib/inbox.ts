@@ -4,12 +4,6 @@ import type { AppState, ThreadFilterState } from "@/lib/store/appStore";
 
 export const TAB_ORDER: ThreadTab[] = ["working", "done", "settled"];
 
-export const TAB_LABELS: Record<ThreadTab, string> = {
-  working: "Working",
-  done: "Done",
-  settled: "Settled",
-};
-
 export function isSnoozed(thread: ThreadSummary, now: number): boolean {
   if (!thread.snoozed_until) return false;
   const until = Date.parse(thread.snoozed_until);

@@ -316,6 +316,7 @@
   box-shadow: none;
 }
 .q-seg .c {
+  flex: none;
   color: var(--fg-3);
   font-weight: 400;
 }
@@ -7052,4 +7053,17 @@ fieldset.q-seg-fs {
 }
 .q-rot180 {
   transform: rotate(180deg);
+}
+
+/* Labels too long for the width (a longer language in a narrow sidebar):
+   tabs shrink with an ellipsis and keep their counts (`.q-seg .c` never
+   shrinks), never wrapping. */
+.q-seg.fit > button {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.q-seg.fit > button > .l {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }

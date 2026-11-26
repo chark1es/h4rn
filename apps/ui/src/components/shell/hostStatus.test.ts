@@ -1,4 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
+
+import { setLocalePreference } from "@/lib/i18n";
 
 import { type HostStatusRow, hostStatus } from "./hostStatus";
 
@@ -54,4 +56,21 @@ describe("hostStatus", () => {
       icon: "off",
     });
   });
+
+  it("speaks the active language", async () => {
+    const rows = [
+      row("atlas", { machineId: "m1" }),
+      row("Ubuntu-24.04", { sub: true, machineId: "m1" }),
+      row("orion", { online: false, machineId: "m2" }),
+    ];
+    await setLocalePreference("zh-CN");
+    expect(hostStatus({ loading: false, offline: false, rows }).text).toBe("2/3 台主机");
+    await setLocalePreference("es");
+    expect(hostStatus({ loading: false, offline: false, rows }).text).toBe("2 de 3 hosts");
+    expect(hostStatus({ loading: false, offline: true, rows }).text).toBe("Sin conexión");
+  });
+});
+
+afterEach(async () => {
+  await setLocalePreference("en");
 });

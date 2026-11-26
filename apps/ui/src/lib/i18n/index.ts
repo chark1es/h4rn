@@ -4,6 +4,7 @@ import { initReactI18next } from "react-i18next";
 
 import enCommon from "./locales/en/common.json";
 import enSettings from "./locales/en/settings.json";
+import enSidebar from "./locales/en/sidebar.json";
 
 /**
  * UI translations.
@@ -21,7 +22,7 @@ export type Locale = (typeof LOCALES)[number];
 export type LocalePreference = "system" | Locale;
 
 /** Every namespace, one per UI area plus `common` for shared words. */
-export const NAMESPACES = ["common", "settings"] as const;
+export const NAMESPACES = ["common", "settings", "sidebar"] as const;
 export type Namespace = (typeof NAMESPACES)[number];
 
 export const DEFAULT_LOCALE: Locale = "en";
@@ -34,7 +35,11 @@ export const LOCALE_NAMES: Record<Locale, string> = {
   ja: "日本語",
 };
 
-export const englishResources = { common: enCommon, settings: enSettings } as const;
+export const englishResources = {
+  common: enCommon,
+  settings: enSettings,
+  sidebar: enSidebar,
+} as const;
 
 const STORAGE_KEY = "h4rn.locale";
 
@@ -271,6 +276,34 @@ export function formatRelativeTime(
     delta /= size;
   }
   return format.format(Math.round(delta), "year");
+}
+
+const AGE_STEPS: Array<[number, "minute" | "hour" | "day"]> = [
+  [86_400_000, "day"],
+  [3_600_000, "hour"],
+  [60_000, "minute"],
+];
+
+/**
+ * How long ago (or how far ahead) a moment is, as one compact unit for a
+ * narrow column: "now", "5m", "3h", "2d" in English, "5分钟" in Chinese.
+ * The caller words the direction ("wakes in {{age}}"). An unknown time is "—".
+ */
+export function formatAge(value: Date | number | string, now: number = Date.now()): string {
+  const time =
+    value instanceof Date ? value.getTime() : typeof value === "number" ? value : Date.parse(value);
+  if (!Number.isFinite(time)) return "—";
+  const delta = Math.abs(now - time);
+  for (const [size, unit] of AGE_STEPS) {
+    if (delta >= size) {
+      return formatNumber(Math.floor(delta / size), {
+        style: "unit",
+        unit,
+        unitDisplay: "narrow",
+      });
+    }
+  }
+  return new Intl.RelativeTimeFormat(activeLocale(), { numeric: "auto" }).format(0, "second");
 }
 
 /**

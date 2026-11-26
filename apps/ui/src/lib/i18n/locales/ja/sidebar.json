@@ -1,0 +1,171 @@
+{
+  "label": "スレッド",
+  "inbox": "受信トレイ",
+  "hide": "サイドバーを隠す",
+  "show": "サイドバーを表示",
+  "showNeedsYou_other": "サイドバーを表示。{{count}} 件のスレッドが対応待ちです",
+  "newThread": "新しいスレッド",
+  "search": "検索または実行",
+  "resize": "サイドバーの幅を変更",
+  "stateTabs": "スレッドの状態",
+  "loadingProjects": "プロジェクトを読み込み中",
+  "loadingThreads": "スレッドを読み込み中",
+  "empty": {
+    "noProjects": "プロジェクトはまだありません",
+    "noProjectsBody": "プロジェクトはホスト上のフォルダーです。そこで始めたスレッドはすべてその下に表示されます。",
+    "noProjectsBodyPhone": "プロジェクトはホスト上のフォルダーです。スレッドを始めると追加されます。",
+    "addProject": "プロジェクトを追加…",
+    "noMatch": "一致するスレッドはありません",
+    "noMatchBody": "検索をクリアすると、すべてのスレッドが再び表示されます。",
+    "clearSearch": "検索をクリア",
+    "working": "「作業中」は空です",
+    "done": "「完了」は空です",
+    "settled": "「整理済み」は空です",
+    "workingBody": "実行中のターン、保留中の承認、失敗したステップがあるスレッドがここに表示されます。",
+    "stateBody": "この状態で待っているものは今はありません。"
+  },
+  "offline": {
+    "title": "オフライン",
+    "asOf": "{{time}} 時点",
+    "cantReach": "{{name}} に接続できません。",
+    "reconnect": "再接続"
+  },
+  "unreachable": {
+    "host": "{{name}} に接続できませんでした。",
+    "aHost": "ホストに接続できませんでした。",
+    "hosts_other": "{{count}} 台のホストに接続できませんでした。",
+    "daemon": "デーモンに接続できませんでした。",
+    "cached": "キャッシュされたスレッドを表示しています。"
+  },
+  "footer": {
+    "hostsButton": "ホストと接続",
+    "connecting": "接続中",
+    "pr": "プルリクエスト",
+    "issues": "Issue",
+    "usage": "使用量",
+    "settings": "設定"
+  },
+  "status": {
+    "connecting": "接続中…",
+    "offline": "オフライン",
+    "none": "ホストなし",
+    "hosts_other": "{{online}}/{{count}} ホスト",
+    "machines_other": "{{online}}/{{count}} マシン"
+  },
+  "hosts": {
+    "title": "ホスト",
+    "onlineCount_other": "{{online}}/{{count}} オンライン",
+    "online": "オンライン",
+    "active": "使用中",
+    "dot": {
+      "online": "オンライン",
+      "unreachable": "到達不能",
+      "offline": "オフライン"
+    },
+    "path": {
+      "tailscale": "Tailscale",
+      "relay": "リレー",
+      "direct": "直接"
+    },
+    "local": "ローカル",
+    "connection": "{{path}}で {{host}} に接続 · 暗号化",
+    "connectionLatency": "{{path}}で {{host}} に接続 · {{latency}} · 暗号化",
+    "connecting": "接続中…",
+    "offline": "オフライン",
+    "empty": {
+      "connected": "<b>{{name}}</b> に接続しました。そのホスト一覧は今は利用できません。",
+      "connecting": "<b>{{name}}</b> に接続中…",
+      "unreachable": "<b>{{name}}</b> に到達できません。このマシンを使って作業を続けてください。",
+      "unreachableMobile": "<b>{{name}}</b> に到達できません。使うのをやめるには切断してください。",
+      "none": "ホストはまだありません。マシンで <code>{{command}}</code> を実行してください。"
+    },
+    "disconnect": "{{name}} から切断",
+    "signIn": "h4rn-connect にサインイン…",
+    "pair": "デバイスをペアリング…",
+    "manage": "ホストを管理",
+    "toasts": {
+      "machineGone": "そのマシンはもう利用できません。",
+      "selectFailed": "そのマシンを選択できませんでした。"
+    }
+  },
+  "snoozed": {
+    "title": "スヌーズ中",
+    "wakesIn": "{{age}}後に再表示"
+  },
+  "projects": {
+    "title": "プロジェクト",
+    "sortLabel": "プロジェクトの並べ替え：{{sort}}",
+    "sortTitle": "プロジェクトとスレッドを並べ替え",
+    "sortProjects": "プロジェクトの並べ替え",
+    "sortThreads": "スレッドの並べ替え",
+    "projectSort": {
+      "activity": "最近のアクティビティ",
+      "added": "追加日",
+      "name": "名前",
+      "manual": "手動（ドラッグで並べ替え）"
+    },
+    "threadSort": {
+      "activity": "最近のアクティビティ",
+      "name": "名前"
+    },
+    "add": "プロジェクトを追加",
+    "groupLabel": "{{host}} の {{name}}",
+    "needsYou": "対応待ち",
+    "actionsLabel": "{{name}} の操作",
+    "actionsTitle": "プロジェクトの操作",
+    "newThreadHere": "ここで新しいスレッド",
+    "rename": "名前を変更…",
+    "keep": "サイドバーに残す",
+    "copyPath": "パスをコピー",
+    "remove": "サイドバーから削除",
+    "newThreadInLabel": "{{host}} の {{name}} で新しいスレッド",
+    "newThreadInTitle": "{{name}} で新しいスレッド",
+    "empty": "まだスレッドなし。始める",
+    "nameLabel": "プロジェクト名",
+    "toasts": {
+      "keepFailed": "プロジェクトを残せませんでした。",
+      "pathCopied": "パスをコピーしました。",
+      "removed": "{{name}} をサイドバーから削除しました。",
+      "removedWithThreads": "フォルダーはそのままで、スレッドは引き続きここに表示されます。",
+      "removedEmpty": "ホスト上のフォルダーはそのままです。",
+      "renameFailed": "プロジェクトの名前を変更できませんでした。",
+      "removeFailed": "プロジェクトを削除できませんでした。",
+      "tryAgain": "もう一度お試しください。"
+    },
+    "noHost": "デーモンがまだホストを報告していません。"
+  },
+  "row": {
+    "actionsFor": "{{title}} の操作",
+    "harnessOn": "{{host}} の {{harness}}",
+    "resumeNow": "今すぐ再開",
+    "acknowledge": "確認",
+    "reopen": "再開",
+    "settleNow": "今すぐ整理",
+    "share": "ゲストと共有…",
+    "unpin": "「作業中」から外す",
+    "keep": "「作業中」に残す",
+    "snoozeHours_other": "{{count}} 時間スヌーズ",
+    "snoozeTomorrow": "明日までスヌーズ",
+    "resumes": "{{time}} に再開",
+    "status": {
+      "request": "リクエスト",
+      "needsApproval": "承認が必要",
+      "failed": "失敗",
+      "unreachable": "ホストに到達不能",
+      "queued": "キュー待ち",
+      "scheduled": "自動再開を予定",
+      "limited": "制限中",
+      "limitedNeedsYou": "制限中 · 対応待ち",
+      "settled": "整理済み",
+      "unread": "未読",
+      "done": "完了",
+      "idle": "待機中",
+      "running": "実行中",
+      "runningRate": "実行中 · {{rate}} tok/s",
+      "thinking": "思考中",
+      "searching": "検索中",
+      "reading": "読み取り中",
+      "editing": "編集中"
+    }
+  }
+}

@@ -29,5 +29,10 @@
     "auto_accept_edits": "Aceptar ediciones automáticamente",
     "plan": "Plan",
     "full_access": "Acceso completo"
+  },
+  "states": {
+    "working": "En curso",
+    "done": "Terminado",
+    "settled": "Resuelto"
   }
 }

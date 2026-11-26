@@ -1,5 +1,6 @@
 import { GitBranchIcon, MoreHorizontalIcon, PlayIcon } from "lucide-react";
 import type { MouseEvent } from "react";
+import { useTranslation } from "react-i18next";
 
 import { AgentGlyph } from "@/components/agent/AgentGlyph";
 import {
@@ -12,9 +13,11 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { openGuestShare } from "@/features/guest/guestStore";
 import type { HostSummary, ThreadSummary } from "@/gen";
-import { agentStateLabel, glyphForThread } from "@/lib/agent";
+import { glyphForThread } from "@/lib/agent";
 import { harnessLabel } from "@/lib/entities";
-import { absoluteTime, relativeAge, tokensPerSecond } from "@/lib/format";
+import { absoluteTime, tokensPerSecond } from "@/lib/format";
+import { formatAge, formatNumber } from "@/lib/i18n";
+import type enSidebar from "@/lib/i18n/locales/en/sidebar.json";
 import { cn } from "@/lib/utils";
 
 type ThreadRowProps = {
@@ -46,40 +49,51 @@ function tomorrowMorning(): string {
   return date.toISOString();
 }
 
-function statusFor(thread: ThreadSummary): { text: string; tone: string } {
+type StatusKey = keyof typeof enSidebar.row.status;
+
+/** The row's status as a catalogue key and tone; the row words it. */
+function statusFor(thread: ThreadSummary): { key: StatusKey; tone: string; rate?: string } {
   const critical =
     thread.agent_state === "awaiting_approval" ||
     thread.agent_state === "error" ||
     thread.agent_state === "unreachable";
   if ((thread.pending_guest_requests ?? 0) > 0 && !critical) {
-    return { text: "Request", tone: "you" };
+    return { key: "request", tone: "you" };
   }
   switch (thread.agent_state) {
     case "awaiting_approval":
-      return { text: "Needs approval", tone: "you" };
+      return { key: "needsApproval", tone: "you" };
     case "error":
-      return { text: "Failed", tone: "danger" };
+      return { key: "failed", tone: "danger" };
     case "unreachable":
-      return { text: "Host unreachable", tone: "danger" };
+      return { key: "unreachable", tone: "danger" };
     case "queued":
-      return { text: "Queued", tone: "" };
+      return { key: "queued", tone: "" };
     case "scheduled":
-      return { text: "Auto-resume scheduled", tone: "warn" };
+      return { key: "scheduled", tone: "warn" };
     case "rate_limited":
       return thread.needs_attention
-        ? { text: "Limited · needs you", tone: "warn" }
-        : { text: "Limited", tone: "warn" };
+        ? { key: "limitedNeedsYou", tone: "warn" }
+        : { key: "limited", tone: "warn" };
     case "done":
-      if (thread.tab === "settled") return { text: "Settled", tone: "" };
-      return thread.unread ? { text: "Unread", tone: "" } : { text: "Done", tone: "" };
+      if (thread.tab === "settled") return { key: "settled", tone: "" };
+      return thread.unread ? { key: "unread", tone: "" } : { key: "done", tone: "" };
     case "idle":
-      return { text: thread.tab === "settled" ? "Settled" : "Idle", tone: "" };
+      return { key: thread.tab === "settled" ? "settled" : "idle", tone: "" };
     case "running_tool": {
       const rate = tokensPerSecond(thread.usage.tps);
-      return { text: rate === "—" ? "Running" : `Running · ${rate} tok/s`, tone: "" };
+      return rate === "—"
+        ? { key: "running", tone: "" }
+        : { key: "runningRate", tone: "", rate: formatNumber(Number(rate)) };
     }
-    default:
-      return { text: agentStateLabel(thread.agent_state), tone: "" };
+    case "thinking":
+      return { key: "thinking", tone: "" };
+    case "searching":
+      return { key: "searching", tone: "" };
+    case "reading":
+      return { key: "reading", tone: "" };
+    case "editing":
+      return { key: "editing", tone: "" };
   }
 }
 
@@ -99,11 +113,15 @@ export function ThreadRow({
   onSnooze,
   onFocus,
 }: ThreadRowProps) {
+  const { t } = useTranslation("sidebar");
   const hostOnline = host?.online ?? false;
   const glyph = glyphForThread(thread, hostOnline);
   const status = statusFor(thread);
   const limited = thread.agent_state === "scheduled" || thread.agent_state === "rate_limited";
-  const statusText = resumeAt && limited ? `Resumes ${absoluteTime(resumeAt)}` : status.text;
+  const statusText =
+    resumeAt && limited
+      ? t("row.resumes", { time: absoluteTime(resumeAt) })
+      : t(`row.status.${status.key}`, { rate: status.rate });
   const isDone = thread.tab === "done";
   const isSettled = thread.tab === "settled";
   const needsResume = isDone && thread.needs_attention;
@@ -132,7 +150,7 @@ export function ThreadRow({
       <span className="q-row-main">
         <span className="q-row-l1">
           <span className="q-row-title">{thread.title}</span>
-          <span className="q-row-time q-num">{relativeAge(thread.last_activity, now)}</span>
+          <span className="q-row-time q-num">{formatAge(thread.last_activity, now)}</span>
         </span>
         <span className="q-row-l2">
           <span className="q-row-meta">
@@ -161,7 +179,7 @@ export function ThreadRow({
                   }}
                 >
                   <PlayIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
-                  Resume now
+                  {t("row.resumeNow")}
                 </button>
                 <button
                   type="button"
@@ -171,7 +189,7 @@ export function ThreadRow({
                     onAcknowledge();
                   }}
                 >
-                  Acknowledge
+                  {t("row.acknowledge")}
                 </button>
               </>
             ) : (
@@ -183,7 +201,7 @@ export function ThreadRow({
                   onAcknowledge();
                 }}
               >
-                Acknowledge <span className="q-kbd">A</span>
+                {t("row.acknowledge")} <span className="q-kbd">A</span>
               </button>
             )}
           </span>
@@ -194,7 +212,7 @@ export function ThreadRow({
         <DropdownMenuTrigger asChild>
           <button
             type="button"
-            aria-label={`Actions for ${thread.title}`}
+            aria-label={t("row.actionsFor", { title: thread.title })}
             className="q-ibtn q-row-more"
             tabIndex={-1}
             onClick={stop}
@@ -204,35 +222,42 @@ export function ThreadRow({
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end" className="w-52" onClick={stop}>
           <DropdownMenuLabel>
-            {harnessLabel(thread.harness)} on {host?.name ?? thread.host}
+            {t("row.harnessOn", {
+              harness: harnessLabel(thread.harness),
+              host: host?.name ?? thread.host,
+            })}
           </DropdownMenuLabel>
           <DropdownMenuSeparator />
           {isDone ? (
             <DropdownMenuItem onSelect={onAcknowledge}>
-              Acknowledge
+              {t("row.acknowledge")}
               <span className="ml-auto text-small text-fg-3">A</span>
             </DropdownMenuItem>
           ) : null}
-          {isSettled ? <DropdownMenuItem onSelect={onReopen}>Reopen</DropdownMenuItem> : null}
-          {!isSettled ? <DropdownMenuItem onSelect={onSettle}>Settle now</DropdownMenuItem> : null}
+          {isSettled ? (
+            <DropdownMenuItem onSelect={onReopen}>{t("row.reopen")}</DropdownMenuItem>
+          ) : null}
+          {!isSettled ? (
+            <DropdownMenuItem onSelect={onSettle}>{t("row.settleNow")}</DropdownMenuItem>
+          ) : null}
           {!isSettled ? (
             <DropdownMenuItem onSelect={() => openGuestShare(thread.thread_id)}>
-              Share with guest…
+              {t("row.share")}
             </DropdownMenuItem>
           ) : null}
           <DropdownMenuItem onSelect={onPin}>
-            {thread.pinned ? "Unpin from Working" : "Keep in Working"}
+            {thread.pinned ? t("row.unpin") : t("row.keep")}
             <span className="ml-auto text-small text-fg-3">P</span>
           </DropdownMenuItem>
           <DropdownMenuSeparator />
           <DropdownMenuItem onSelect={() => onSnooze(snoozeUntil(1))}>
-            Snooze for 1 h
+            {t("row.snoozeHours", { count: 1 })}
           </DropdownMenuItem>
           <DropdownMenuItem onSelect={() => onSnooze(snoozeUntil(3))}>
-            Snooze for 3 h
+            {t("row.snoozeHours", { count: 3 })}
           </DropdownMenuItem>
           <DropdownMenuItem onSelect={() => onSnooze(tomorrowMorning())}>
-            Snooze until tomorrow
+            {t("row.snoozeTomorrow")}
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>

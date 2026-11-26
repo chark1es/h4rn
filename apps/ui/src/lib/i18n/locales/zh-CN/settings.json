@@ -632,6 +632,12 @@
       "preparing": "正在准备代码…",
       "noCode": "还没有代码",
       "generate": "生成配对码"
+    },
+    "toasts": {
+      "pairingFailed": "无法创建配对。",
+      "renameFailed": "无法重命名设备。",
+      "revoked": "设备已撤销。它的下一个请求将失败。",
+      "revokeFailed": "无法撤销设备。"
     }
   },
   "account": {

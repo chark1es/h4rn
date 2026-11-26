@@ -1,0 +1,177 @@
+{
+  "label": "Threads",
+  "inbox": "Inbox",
+  "hide": "Hide sidebar",
+  "show": "Show sidebar",
+  "showNeedsYou_one": "Show sidebar. {{count}} thread needs you",
+  "showNeedsYou_other": "Show sidebar. {{count}} threads need you",
+  "newThread": "New thread",
+  "search": "Search or run",
+  "resize": "Resize sidebar",
+  "stateTabs": "Thread state",
+  "loadingProjects": "Loading projects",
+  "loadingThreads": "Loading threads",
+  "empty": {
+    "noProjects": "No projects yet",
+    "noProjectsBody": "A project is a folder on one of your hosts. Every thread you start there is listed under it.",
+    "noProjectsBodyPhone": "A project is a folder on one of your hosts. Start a thread to add one.",
+    "addProject": "Add a project…",
+    "noMatch": "No threads match",
+    "noMatchBody": "Clear the search to see every thread again.",
+    "clearSearch": "Clear search",
+    "working": "Working is clear",
+    "done": "Done is empty",
+    "settled": "Settled is empty",
+    "workingBody": "Threads with a running turn, a pending approval or a failed step appear here.",
+    "stateBody": "Nothing is waiting in this state right now."
+  },
+  "offline": {
+    "title": "Offline",
+    "asOf": "as of {{time}}",
+    "cantReach": "Can’t reach {{name}}.",
+    "reconnect": "Reconnect"
+  },
+  "unreachable": {
+    "host": "Couldn’t reach {{name}}.",
+    "aHost": "Couldn’t reach a host.",
+    "hosts_one": "Couldn’t reach {{count}} host.",
+    "hosts_other": "Couldn’t reach {{count}} hosts.",
+    "daemon": "Couldn’t reach the daemon.",
+    "cached": "Showing cached threads."
+  },
+  "footer": {
+    "hostsButton": "Hosts and connection",
+    "connecting": "Connecting",
+    "pr": "Pull requests",
+    "issues": "Issues",
+    "usage": "Usage",
+    "settings": "Settings"
+  },
+  "status": {
+    "connecting": "Connecting…",
+    "offline": "Offline",
+    "none": "No hosts",
+    "hosts_one": "{{online}} of {{count}} host",
+    "hosts_other": "{{online}} of {{count}} hosts",
+    "machines_one": "{{online}} of {{count}} machine",
+    "machines_other": "{{online}} of {{count}} machines"
+  },
+  "hosts": {
+    "title": "Hosts",
+    "onlineCount_one": "{{online}} of {{count}} online",
+    "onlineCount_other": "{{online}} of {{count}} online",
+    "online": "Online",
+    "active": "Active",
+    "dot": {
+      "online": "online",
+      "unreachable": "unreachable",
+      "offline": "offline"
+    },
+    "path": {
+      "tailscale": "Tailscale",
+      "relay": "Relay",
+      "direct": "Direct"
+    },
+    "local": "local",
+    "connection": "{{path}} to {{host}} · encrypted",
+    "connectionLatency": "{{path}} to {{host}} · {{latency}} · encrypted",
+    "connecting": "Connecting…",
+    "offline": "Offline",
+    "empty": {
+      "connected": "Connected to <b>{{name}}</b>. Its host list isn’t available right now.",
+      "connecting": "Connecting to <b>{{name}}</b>…",
+      "unreachable": "<b>{{name}}</b> is unreachable. Use this machine to keep working.",
+      "unreachableMobile": "<b>{{name}}</b> is unreachable. Disconnect to stop using it.",
+      "none": "No hosts yet. Run <code>{{command}}</code> on a machine."
+    },
+    "disconnect": "Disconnect from {{name}}",
+    "signIn": "Sign in to h4rn-connect…",
+    "pair": "Pair a device…",
+    "manage": "Manage hosts",
+    "toasts": {
+      "machineGone": "That machine is no longer available.",
+      "selectFailed": "Could not select that machine."
+    }
+  },
+  "snoozed": {
+    "title": "Snoozed",
+    "wakesIn": "wakes in {{age}}"
+  },
+  "projects": {
+    "title": "Projects",
+    "sortLabel": "Sort projects: {{sort}}",
+    "sortTitle": "Sort projects and threads",
+    "sortProjects": "Sort projects",
+    "sortThreads": "Sort threads",
+    "projectSort": {
+      "activity": "Recent activity",
+      "added": "Date added",
+      "name": "Name",
+      "manual": "Manual (drag to reorder)"
+    },
+    "threadSort": {
+      "activity": "Recent activity",
+      "name": "Name"
+    },
+    "add": "Add project",
+    "groupLabel": "{{name}} on {{host}}",
+    "needsYou": "needs you",
+    "actionsLabel": "{{name}} actions",
+    "actionsTitle": "Project actions",
+    "newThreadHere": "New thread here",
+    "rename": "Rename…",
+    "keep": "Keep in the sidebar",
+    "copyPath": "Copy path",
+    "remove": "Remove from sidebar",
+    "newThreadInLabel": "New thread in {{name}} on {{host}}",
+    "newThreadInTitle": "New thread in {{name}}",
+    "empty": "No threads yet. Start one",
+    "nameLabel": "Project name",
+    "toasts": {
+      "keepFailed": "Couldn't keep the project.",
+      "pathCopied": "Path copied.",
+      "removed": "Removed {{name}} from the sidebar.",
+      "removedWithThreads": "The folder is untouched, and its threads still list here.",
+      "removedEmpty": "The folder on the host is untouched.",
+      "renameFailed": "Couldn't rename the project.",
+      "removeFailed": "Couldn't remove the project.",
+      "tryAgain": "Try again."
+    },
+    "noHost": "The daemon has not reported its host yet."
+  },
+  "row": {
+    "actionsFor": "Actions for {{title}}",
+    "harnessOn": "{{harness}} on {{host}}",
+    "resumeNow": "Resume now",
+    "acknowledge": "Acknowledge",
+    "reopen": "Reopen",
+    "settleNow": "Settle now",
+    "share": "Share with guest…",
+    "unpin": "Unpin from Working",
+    "keep": "Keep in Working",
+    "snoozeHours_one": "Snooze for {{count}} h",
+    "snoozeHours_other": "Snooze for {{count}} h",
+    "snoozeTomorrow": "Snooze until tomorrow",
+    "resumes": "Resumes {{time}}",
+    "status": {
+      "request": "Request",
+      "needsApproval": "Needs approval",
+      "failed": "Failed",
+      "unreachable": "Host unreachable",
+      "queued": "Queued",
+      "scheduled": "Auto-resume scheduled",
+      "limited": "Limited",
+      "limitedNeedsYou": "Limited · needs you",
+      "settled": "Settled",
+      "unread": "Unread",
+      "done": "Done",
+      "idle": "Idle",
+      "running": "Running",
+      "runningRate": "Running · {{rate}} tok/s",
+      "thinking": "Thinking",
+      "searching": "Searching",
+      "reading": "Reading",
+      "editing": "Editing"
+    }
+  }
+}

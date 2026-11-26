@@ -19,22 +19,17 @@ import type {
 } from "@/gen";
 import { toProtoError } from "@/lib/client/errors";
 import { type ProjectGroup, projectKey, projectName } from "@/lib/grouping";
+import { i18n } from "@/lib/i18n";
 import { getClient, getState, pushToast } from "@/lib/store/appStore";
 
 export type ProjectSort = "activity" | "added" | "name" | "manual";
 export type ThreadSort = "activity" | "name";
 
-export const PROJECT_SORT_LABELS: Record<ProjectSort, string> = {
-  activity: "Recent activity",
-  added: "Date added",
-  name: "Name",
-  manual: "Manual (drag to reorder)",
-};
+/** Every project order, in menu order; the sidebar words them (`sidebar:projects.projectSort.*`). */
+export const PROJECT_SORTS: readonly ProjectSort[] = ["activity", "added", "name", "manual"];
 
-export const THREAD_SORT_LABELS: Record<ThreadSort, string> = {
-  activity: "Recent activity",
-  name: "Name",
-};
+/** Every thread order, in menu order (`sidebar:projects.threadSort.*`). */
+export const THREAD_SORTS: readonly ThreadSort[] = ["activity", "name"];
 
 export type Prefs = { projectSort: ProjectSort; threadSort: ThreadSort; order: string[] };
 
@@ -59,11 +54,11 @@ function loadPrefs(): Prefs {
     const parsed = JSON.parse(raw) as Partial<Prefs>;
     return {
       projectSort:
-        parsed.projectSort && parsed.projectSort in PROJECT_SORT_LABELS
+        parsed.projectSort && PROJECT_SORTS.includes(parsed.projectSort)
           ? parsed.projectSort
           : DEFAULT_PREFS.projectSort,
       threadSort:
-        parsed.threadSort && parsed.threadSort in THREAD_SORT_LABELS
+        parsed.threadSort && THREAD_SORTS.includes(parsed.threadSort)
           ? parsed.threadSort
           : DEFAULT_PREFS.threadSort,
       order: Array.isArray(parsed.order)
@@ -172,7 +167,7 @@ export async function addProject(
   name?: string,
 ): Promise<{ project: Project } | { error: string }> {
   const host = projectHost();
-  if (!host) return { error: "The daemon has not reported its host yet." };
+  if (!host) return { error: i18n.t("sidebar:projects.noHost") };
   try {
     const response = await send({
       type: "add_project",
@@ -202,7 +197,11 @@ export async function renameProject(projectId: string, name: string): Promise<bo
     set({ projects: state.projects.map((entry) => (entry.id === project.id ? project : entry)) });
     return true;
   } catch (error) {
-    toastError("Couldn't rename the project.", error, "Try again.");
+    toastError(
+      i18n.t("sidebar:projects.toasts.renameFailed"),
+      error,
+      i18n.t("sidebar:projects.toasts.tryAgain"),
+    );
     return false;
   }
 }
@@ -215,7 +214,11 @@ export async function removeProject(projectId: string): Promise<boolean> {
     set({ projects: state.projects.filter((entry) => entry.id !== projectId) });
     return true;
   } catch (error) {
-    toastError("Couldn't remove the project.", error, "Try again.");
+    toastError(
+      i18n.t("sidebar:projects.toasts.removeFailed"),
+      error,
+      i18n.t("sidebar:projects.toasts.tryAgain"),
+    );
     return false;
   }
 }
@@ -224,7 +227,7 @@ export async function browseDirectories(
   path: string | null,
 ): Promise<{ listing: DirectoryListing } | { error: string }> {
   const host = projectHost();
-  if (!host) return { error: "The daemon has not reported its host yet." };
+  if (!host) return { error: i18n.t("sidebar:projects.noHost") };
   try {
     const response = await send({ type: "browse_directories", host, path });
     if (response.type !== "directories") throw new Error(`Unexpected answer \`${response.type}\`.`);

@@ -825,7 +825,7 @@ export async function activateMachine(machineId: string): Promise<boolean> {
   const client = await loadConnectClient();
   const machine = remoteStore.getState().machines.find((candidate) => candidate.id === machineId);
   if (!client || !machine) {
-    pushToast({ variant: "error", title: "That machine is no longer available." });
+    pushToast({ variant: "error", title: i18n.t("sidebar:hosts.toasts.machineGone") });
     return false;
   }
   patch({ busy: { kind: "connecting", machineId, machineName: machine.name } });
@@ -840,7 +840,7 @@ export async function activateMachine(machineId: string): Promise<boolean> {
     patch({ busy: null, error: describe(error) });
     pushToast({
       variant: "error",
-      title: "Could not select that machine.",
+      title: i18n.t("sidebar:hosts.toasts.selectFailed"),
       description: describe(error),
     });
     return false;
@@ -1022,7 +1022,7 @@ export async function createPairing(
     patch({ busy: null, error: describe(error) });
     pushToast({
       variant: "error",
-      title: "Could not create a pairing.",
+      title: i18n.t("settings:devices.toasts.pairingFailed"),
       description: describe(error),
     });
   }
@@ -1226,7 +1226,7 @@ export async function renameDevice(id: string, name: string): Promise<boolean> {
     patch({ devices: before, error: describe(error) });
     pushToast({
       variant: "error",
-      title: "Could not rename the device.",
+      title: i18n.t("settings:devices.toasts.renameFailed"),
       description: describe(error),
     });
     return false;
@@ -1243,7 +1243,7 @@ export async function revokeDevice(id: string): Promise<boolean> {
   try {
     await client.revokeDevice(id);
     const revokedSelf = getRemoteState().device?.id === id;
-    pushToast({ variant: "success", title: "Device revoked. Its next request fails." });
+    pushToast({ variant: "success", title: i18n.t("settings:devices.toasts.revoked") });
     if (revokedSelf) {
       // These credentials are the device that was just revoked. Keeping them
       // would only produce endless 401s, so drop them and return to a local
@@ -1255,7 +1255,7 @@ export async function revokeDevice(id: string): Promise<boolean> {
     patch({ devices: before, error: describe(error) });
     pushToast({
       variant: "error",
-      title: "Could not revoke the device.",
+      title: i18n.t("settings:devices.toasts.revokeFailed"),
       description: describe(error),
     });
     return false;

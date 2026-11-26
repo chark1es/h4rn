@@ -1,0 +1,171 @@
+{
+  "label": "对话",
+  "inbox": "收件箱",
+  "hide": "隐藏侧边栏",
+  "show": "显示侧边栏",
+  "showNeedsYou_other": "显示侧边栏。{{count}} 个对话需要你处理",
+  "newThread": "新建对话",
+  "search": "搜索或运行",
+  "resize": "调整侧边栏宽度",
+  "stateTabs": "对话状态",
+  "loadingProjects": "正在加载项目",
+  "loadingThreads": "正在加载对话",
+  "empty": {
+    "noProjects": "还没有项目",
+    "noProjectsBody": "项目是你某台主机上的一个文件夹。你在那里开始的每个对话都会列在它下面。",
+    "noProjectsBodyPhone": "项目是你某台主机上的一个文件夹。开始一个对话即可添加。",
+    "addProject": "添加项目…",
+    "noMatch": "没有匹配的对话",
+    "noMatchBody": "清除搜索即可再次看到所有对话。",
+    "clearSearch": "清除搜索",
+    "working": "“进行中”已清空",
+    "done": "“已完成”为空",
+    "settled": "“已了结”为空",
+    "workingBody": "有正在运行的回合、待审批的操作或失败步骤的对话会显示在这里。",
+    "stateBody": "此状态下目前没有等待处理的内容。"
+  },
+  "offline": {
+    "title": "离线",
+    "asOf": "截至 {{time}}",
+    "cantReach": "无法连接 {{name}}。",
+    "reconnect": "重新连接"
+  },
+  "unreachable": {
+    "host": "无法连接 {{name}}。",
+    "aHost": "无法连接一台主机。",
+    "hosts_other": "无法连接 {{count}} 台主机。",
+    "daemon": "无法连接守护进程。",
+    "cached": "正在显示缓存的对话。"
+  },
+  "footer": {
+    "hostsButton": "主机和连接",
+    "connecting": "正在连接",
+    "pr": "拉取请求",
+    "issues": "议题",
+    "usage": "用量",
+    "settings": "设置"
+  },
+  "status": {
+    "connecting": "正在连接…",
+    "offline": "离线",
+    "none": "没有主机",
+    "hosts_other": "{{online}}/{{count}} 台主机",
+    "machines_other": "{{online}}/{{count}} 台机器"
+  },
+  "hosts": {
+    "title": "主机",
+    "onlineCount_other": "{{online}}/{{count}} 在线",
+    "online": "在线",
+    "active": "当前使用",
+    "dot": {
+      "online": "在线",
+      "unreachable": "无法连接",
+      "offline": "离线"
+    },
+    "path": {
+      "tailscale": "Tailscale",
+      "relay": "中继",
+      "direct": "直连"
+    },
+    "local": "本机",
+    "connection": "{{path}}到 {{host}} · 已加密",
+    "connectionLatency": "{{path}}到 {{host}} · {{latency}} · 已加密",
+    "connecting": "正在连接…",
+    "offline": "离线",
+    "empty": {
+      "connected": "已连接到 <b>{{name}}</b>。它的主机列表目前不可用。",
+      "connecting": "正在连接 <b>{{name}}</b>…",
+      "unreachable": "无法连接 <b>{{name}}</b>。使用本机以继续工作。",
+      "unreachableMobile": "无法连接 <b>{{name}}</b>。断开连接以停止使用它。",
+      "none": "还没有主机。在一台机器上运行 <code>{{command}}</code>。"
+    },
+    "disconnect": "断开与 {{name}} 的连接",
+    "signIn": "登录 h4rn-connect…",
+    "pair": "配对设备…",
+    "manage": "管理主机",
+    "toasts": {
+      "machineGone": "该机器已不可用。",
+      "selectFailed": "无法选择该机器。"
+    }
+  },
+  "snoozed": {
+    "title": "稍后提醒",
+    "wakesIn": "{{age}}后提醒"
+  },
+  "projects": {
+    "title": "项目",
+    "sortLabel": "项目排序：{{sort}}",
+    "sortTitle": "项目和对话排序",
+    "sortProjects": "项目排序",
+    "sortThreads": "对话排序",
+    "projectSort": {
+      "activity": "最近活动",
+      "added": "添加日期",
+      "name": "名称",
+      "manual": "手动（拖动排序）"
+    },
+    "threadSort": {
+      "activity": "最近活动",
+      "name": "名称"
+    },
+    "add": "添加项目",
+    "groupLabel": "{{host}} 上的 {{name}}",
+    "needsYou": "需要你处理",
+    "actionsLabel": "{{name}} 的操作",
+    "actionsTitle": "项目操作",
+    "newThreadHere": "在此新建对话",
+    "rename": "重命名…",
+    "keep": "保留在侧边栏",
+    "copyPath": "复制路径",
+    "remove": "从侧边栏移除",
+    "newThreadInLabel": "在 {{host}} 上的 {{name}} 中新建对话",
+    "newThreadInTitle": "在 {{name}} 中新建对话",
+    "empty": "还没有对话。开始一个",
+    "nameLabel": "项目名称",
+    "toasts": {
+      "keepFailed": "无法保留该项目。",
+      "pathCopied": "路径已复制。",
+      "removed": "已从侧边栏移除 {{name}}。",
+      "removedWithThreads": "文件夹未受影响，它的对话仍会列在这里。",
+      "removedEmpty": "主机上的文件夹未受影响。",
+      "renameFailed": "无法重命名该项目。",
+      "removeFailed": "无法移除该项目。",
+      "tryAgain": "请重试。"
+    },
+    "noHost": "守护进程尚未报告它的主机。"
+  },
+  "row": {
+    "actionsFor": "{{title}} 的操作",
+    "harnessOn": "{{host}} 上的 {{harness}}",
+    "resumeNow": "立即继续",
+    "acknowledge": "确认",
+    "reopen": "重新打开",
+    "settleNow": "立即了结",
+    "share": "与访客共享…",
+    "unpin": "不再保留在“进行中”",
+    "keep": "保留在“进行中”",
+    "snoozeHours_other": "{{count}} 小时后提醒",
+    "snoozeTomorrow": "明天再提醒",
+    "resumes": "{{time}} 继续",
+    "status": {
+      "request": "请求",
+      "needsApproval": "需要审批",
+      "failed": "失败",
+      "unreachable": "主机无法连接",
+      "queued": "排队中",
+      "scheduled": "已安排自动继续",
+      "limited": "受限",
+      "limitedNeedsYou": "受限 · 需要你处理",
+      "settled": "已了结",
+      "unread": "未读",
+      "done": "已完成",
+      "idle": "空闲",
+      "running": "运行中",
+      "runningRate": "运行中 · {{rate}} tok/s",
+      "thinking": "思考中",
+      "searching": "搜索中",
+      "reading": "读取中",
+      "editing": "编辑中"
+    }
+  }
+}

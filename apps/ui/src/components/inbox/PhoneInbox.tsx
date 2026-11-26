@@ -1,18 +1,14 @@
 import { ChevronDownIcon, ClockIcon, FolderPlusIcon, SquarePenIcon } from "lucide-react";
 import { useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
 
+import { StateTabs } from "@/components/inbox/StateTabs";
 import { ThreadRow } from "@/components/inbox/ThreadRow";
 import { PhoneLargeTitle } from "@/components/shell/PhoneNav";
 import { useNow } from "@/hooks/use-now";
 import { groupThreads, monogram } from "@/lib/grouping";
-import {
-  needsAttention,
-  snoozedThreads,
-  TAB_LABELS,
-  TAB_ORDER,
-  tabCounts,
-  threadsForTab,
-} from "@/lib/inbox";
+import { formatNumber } from "@/lib/i18n";
+import { needsAttention, snoozedThreads, tabCounts, threadsForTab } from "@/lib/inbox";
 import {
   acknowledgeThread,
   openNewThread,
@@ -32,6 +28,7 @@ import { cn } from "@/lib/utils";
  * footer destinations live in the tab bar.
  */
 export function PhoneInbox() {
+  const { t } = useTranslation(["sidebar", "common"]);
   const state = useApp((s) => s);
   const now = useNow();
   const [snoozedOpen, setSnoozedOpen] = useState(false);
@@ -46,12 +43,12 @@ export function PhoneInbox() {
   return (
     <>
       <PhoneLargeTitle
-        title="Inbox"
+        title={t("inbox")}
         actions={
           <button
             type="button"
             className="navbtn"
-            aria-label="New thread"
+            aria-label={t("newThread")}
             onClick={() => openNewThread()}
           >
             <SquarePenIcon className="q-icon s22" strokeWidth={1.5} aria-hidden />
@@ -60,24 +57,12 @@ export function PhoneInbox() {
       />
       {allEmpty ? null : (
         <div className="q-ph-seg">
-          <div className="q-seg" role="tablist" aria-label="Thread state">
-            {TAB_ORDER.map((value) => (
-              <button
-                key={value}
-                type="button"
-                role="tab"
-                aria-selected={tab === value}
-                onClick={() => setTab(value)}
-              >
-                {TAB_LABELS[value]} <span className="c q-num">{loading ? "—" : counts[value]}</span>
-              </button>
-            ))}
-          </div>
+          <StateTabs tab={tab} counts={counts} loading={loading} onSelect={setTab} />
         </div>
       )}
       <div className="q-ph-body">
         {loading && Object.keys(state.threads).length === 0 ? (
-          <div className="q-ph-pg" role="status" aria-busy="true" aria-label="Loading threads">
+          <div className="q-ph-pg" role="status" aria-busy="true" aria-label={t("loadingThreads")}>
             {[68, 52, 76, 60].map((width) => (
               <div key={width} className="q-row">
                 <span className="q-row-st">
@@ -92,17 +77,17 @@ export function PhoneInbox() {
           </div>
         ) : allEmpty ? (
           <div className="q-empty q-side-empty" style={{ paddingTop: 24 }}>
-            <h3>No projects yet</h3>
-            <p>A project is a folder on one of your hosts. Start a thread to add one.</p>
+            <h3>{t("empty.noProjects")}</h3>
+            <p>{t("empty.noProjectsBodyPhone")}</p>
             <button type="button" className="q-btn secondary" onClick={() => openNewThread()}>
               <FolderPlusIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-              Add a project…
+              {t("empty.addProject")}
             </button>
           </div>
         ) : groups.length === 0 ? (
           <div className="q-empty q-side-empty" style={{ paddingTop: 24 }}>
-            <h3>{tab === "working" ? "Working is clear" : `${TAB_LABELS[tab]} is empty`}</h3>
-            <p>Nothing is waiting in this state right now.</p>
+            <h3>{t(`empty.${tab}`)}</h3>
+            <p>{t("empty.stateBody")}</p>
           </div>
         ) : (
           groups.map((group) => {
@@ -112,7 +97,7 @@ export function PhoneInbox() {
               <section
                 key={group.key}
                 className="q-ph-pg"
-                aria-label={`${group.name} on ${group.host}`}
+                aria-label={t("projects.groupLabel", { name: group.name, host: group.host })}
               >
                 <button
                   type="button"
@@ -129,9 +114,13 @@ export function PhoneInbox() {
                   {closed ? (
                     <>
                       {you ? (
-                        <span className="q-dot you" role="img" aria-label="needs you" />
+                        <span
+                          className="q-dot you"
+                          role="img"
+                          aria-label={t("projects.needsYou")}
+                        />
                       ) : null}
-                      <span className="ct q-num">{group.threads.length}</span>
+                      <span className="ct q-num">{formatNumber(group.threads.length)}</span>
                     </>
                   ) : null}
                   <ChevronDownIcon
@@ -175,8 +164,8 @@ export function PhoneInbox() {
             onClick={() => setSnoozedOpen((value) => !value)}
           >
             <ClockIcon className="q-icon s16" strokeWidth={1.5} aria-hidden />
-            <span>Snoozed</span>
-            <span className="q-num q-faint">{snoozed.length}</span>
+            <span>{t("snoozed.title")}</span>
+            <span className="q-num q-faint">{formatNumber(snoozed.length)}</span>
           </button>
         ) : null}
         <div style={{ height: 16 }} />
