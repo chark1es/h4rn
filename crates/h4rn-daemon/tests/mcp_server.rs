@@ -439,6 +439,91 @@ async fn the_hub_lists_h4rn_tools_and_reports_unknown_tools() {
     daemon.stop().await;
 }
 
+/// The hub's own admission capture, driven through its real HTTP endpoint.
+///
+/// The watch and delegation tests above inject a `ToolAdmission` by hand, so a
+/// server that never captured the calling turn would still pass them. This
+/// starts a supervised turn, calls `spawn_subagent` through the hub URL with
+/// the session token the harness was handed, and checks the child carries the
+/// grant that turn ran under.
+#[tokio::test]
+async fn a_hub_tool_call_carries_the_calling_turns_grant() {
+    let (fake, completion) = FakeHarness::new().with_completion_gate();
+    let daemon = boot_with(fake, None, None).await;
+    let client = http();
+    let redirect = "http://localhost:1455/callback";
+    let (_, registered) = register(&client, &daemon.base(), redirect).await;
+    let client_id = registered["client_id"]
+        .as_str()
+        .expect("client id")
+        .to_owned();
+    let token = begin_and_approve(
+        &daemon,
+        &client,
+        &daemon.base(),
+        &client_id,
+        redirect,
+        "supervised",
+    )
+    .await;
+    let repo = git_repo_with_remote();
+    let started = call_tool(
+        &client,
+        &daemon.outside_url(),
+        &token,
+        "start_thread",
+        json!({
+            "harness": "claude_code",
+            "model": "default",
+            "prompt": "delegate the check",
+            "workspace_path": repo.path().display().to_string(),
+            "runtime_mode": "approval_required"
+        }),
+    )
+    .await;
+    assert!(started.get("error").is_none(), "{started}");
+    let thread_id = h4rn_protocol::ThreadId::new(
+        started["result"]["structuredContent"]["thread_id"]
+            .as_str()
+            .expect("thread id"),
+    );
+    let injections = wait_for_injection(&daemon.mcp, 1).await;
+    let harness_token = injections[0].token.clone().expect("harness token");
+    let grant = daemon
+        .manager
+        .active_turn_grant(&thread_id)
+        .await
+        .expect("the supervised turn is running under a grant");
+
+    let spawned = call_tool(
+        &client,
+        &daemon.mcp_url(),
+        &harness_token,
+        "h4rn__spawn_subagent",
+        json!({"task": "check the build"}),
+    )
+    .await;
+    assert!(spawned.get("error").is_none(), "{spawned}");
+    let child = h4rn_protocol::ThreadId::new(
+        spawned["result"]["structuredContent"]["subagent"]["child_thread_id"]
+            .as_str()
+            .expect("child thread id"),
+    );
+    let (_, child_grant) = daemon
+        .manager
+        .active_turn_admission(&child)
+        .await
+        .expect("the child's first turn is running");
+    assert_eq!(
+        child_grant,
+        Some(grant),
+        "the child did not inherit the calling turn's grant"
+    );
+
+    completion.release();
+    daemon.stop().await;
+}
+
 async fn register(client: &reqwest::Client, base: &str, redirect: &str) -> (StatusCode, Value) {
     let response = client
         .post(format!("{base}/oauth/register"))
@@ -2139,6 +2224,81 @@ async fn a_revoke_waits_for_an_admitted_rpc() {
     daemon.stop().await;
 }
 
+/// Both client-facing revokes are ordered like Settings' one.
+///
+/// `POST /oauth/revoke` and `DELETE /mcp` used to write the revocation straight
+/// to the store: they answered while a prompt under the family was still being
+/// written. Each must wait for that write, exactly as Revoke in Settings does.
+#[tokio::test]
+async fn both_client_facing_revokes_wait_for_an_admitted_write() {
+    let daemon = boot(None).await;
+    let client = http();
+    let redirect = "http://localhost:1455/callback";
+
+    for endpoint in ["oauth", "delete"] {
+        let (_, registered) = register(&client, &daemon.base(), redirect).await;
+        let client_id = registered["client_id"]
+            .as_str()
+            .expect("client id")
+            .to_owned();
+        let token = begin_and_approve(
+            &daemon,
+            &client,
+            &daemon.base(),
+            &client_id,
+            redirect,
+            "supervised",
+        )
+        .await;
+        let store = daemon.outside.store();
+        let audience = daemon.outside.mcp_url();
+        let grant = store
+            .verify_access(&token, Some(&audience))
+            .expect("the approved token is live");
+        let ticket = store
+            .begin_delivery(&grant.family)
+            .expect("the family is live");
+
+        let revoke = tokio::spawn({
+            let client = client.clone();
+            let base = daemon.base();
+            let url = daemon.mcp_url();
+            let token = token.clone();
+            async move {
+                let sent = if endpoint == "oauth" {
+                    client
+                        .post(format!("{base}/oauth/revoke"))
+                        .form(&[("token", token.as_str())])
+                        .send()
+                        .await
+                } else {
+                    client.delete(url).bearer_auth(&token).send().await
+                };
+                sent.expect("send the revoke").status()
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(
+            !revoke.is_finished(),
+            "the {endpoint} revoke answered while a prompt write under its family was in flight"
+        );
+
+        drop(ticket);
+        let status = revoke.await.expect("join the revoke");
+        assert_eq!(
+            status,
+            if endpoint == "oauth" {
+                StatusCode::OK
+            } else {
+                StatusCode::NO_CONTENT
+            },
+            "the {endpoint} revoke did not succeed"
+        );
+        assert!(!store.grant_is_live(&grant.family));
+    }
+    daemon.stop().await;
+}
+
 /// A revoke also waits for a prompt write it did not admit over HTTP.
 ///
 /// Queued messages, parked prompts and resumes write outside an MCP request;
@@ -2186,6 +2346,84 @@ async fn a_revoke_waits_for_an_in_flight_prompt_write() {
         .await
         .expect("join the revoke")
         .expect("the revocation is durable");
+    assert!(!store.grant_is_live(&grant.family));
+    daemon.stop().await;
+}
+
+/// A revoke waits for a real prompt write under a grant.
+///
+/// The test above mints its own ticket, so a delivery path that never
+/// registered one would still pass it. Here a real supervised thread's first
+/// prompt is held inside the fake adapter's `send`, with the delivery path's
+/// ticket already taken; the revoke must not return until that write lands.
+#[tokio::test]
+async fn a_revoke_waits_for_a_real_prompt_write() {
+    let (fake, send_gate) = FakeHarness::new().with_send_gate_after(0);
+    let (fake, sends) = fake.with_send_count();
+    let daemon = boot_with(fake, None, None).await;
+    let client = http();
+    let redirect = "http://localhost:1455/callback";
+    let (_, registered) = register(&client, &daemon.base(), redirect).await;
+    let client_id = registered["client_id"]
+        .as_str()
+        .expect("client id")
+        .to_owned();
+    let token = begin_and_approve(
+        &daemon,
+        &client,
+        &daemon.base(),
+        &client_id,
+        redirect,
+        "supervised",
+    )
+    .await;
+    let store = daemon.outside.store();
+    let audience = daemon.outside.mcp_url();
+    let grant = store
+        .verify_access(&token, Some(&audience))
+        .expect("the approved token is live");
+    let repo = git_repo_with_remote();
+    let ceiling = Some(RuntimeMode::ApprovalRequired);
+    daemon
+        .manager
+        .create_thread_for_work(
+            new_thread(&daemon.host, repo.path(), "hold the prompt open"),
+            ceiling,
+            Some(h4rn_protocol::WorkGrant {
+                client_id: client_id.clone(),
+                family: grant.family.clone(),
+                ceiling,
+            }),
+        )
+        .await
+        .expect("create the supervised thread");
+
+    // The fake counts the send before it waits on the gate, so a counted send
+    // means the delivery path is inside the adapter call with its ticket held.
+    let started = Instant::now();
+    while sends.get() == 0 {
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "the prompt never reached the harness"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let outside = Arc::clone(&daemon.outside);
+    let revoke_client = client_id.clone();
+    let revoke = tokio::spawn(async move { outside.revoke_client(&revoke_client).await });
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert!(
+        !revoke.is_finished(),
+        "the revoke returned while the prompt it admitted was still being written"
+    );
+
+    send_gate.release();
+    revoke
+        .await
+        .expect("join the revoke")
+        .expect("the revocation is durable");
+    assert_eq!(sends.get(), 1, "the held prompt did not land");
     assert!(!store.grant_is_live(&grant.family));
     daemon.stop().await;
 }

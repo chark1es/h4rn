@@ -1844,14 +1844,19 @@ Read-only and supervised grants keep the thirty-day refresh lifetime.
 **A revoke is ordered, not merely durable.** An MCP request holds a shared admission gate for its
 whole answer; a prompt write from a queued message, a parked prompt or a resume registers a ticket
 before the adapter call. A revoke takes the exclusive gate and then waits for the tickets, so when
-it returns no admitted call and no in-flight prompt under that family can still reach an agent. A
-turn that already delivered its prompt may finish — stopping the owner's work on someone else's
-revoke would be worse — but its harness session loses the tool token, so it cannot call h4rn's
-tools any more. For the same reason the outside surface has no tool that stops a turn.
+it returns no admitted call and no in-flight prompt under that family can still reach an agent. This
+is true of every path that revokes: Settings → Revoke, `POST /oauth/revoke` and `DELETE /mcp` all
+end up in the same ordered method, because a client that unsubscribes must not be told it is dead
+while a prompt it admitted is still being written. A turn that already delivered its prompt may
+finish — stopping the owner's work on someone else's revoke would be worse — but its harness session
+loses the tool token, so it cannot call h4rn's tools any more. For the same reason the outside
+surface has no tool that stops a turn.
 
 A PR watch is work that outlives the daemon, so it is stored in the journal with its exact triple
 and restored on startup; a restart neither drops the watch nor recreates it without its grant. Its
 first read after a restart is the new baseline, so changes while h4rn was closed are not replayed.
+The snapshot-and-write of the watch list is serialized: a persist that read the state before an
+unwatch cannot write after it, so a restart cannot resurrect a watch that was already removed.
 
 Tokens also carry the RFC 8707 `resource` they were issued for, when the client names one, and
 `/mcp` refuses a token bound to another resource. Tool results for `get_thread` redact the daemon's

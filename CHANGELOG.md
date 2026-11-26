@@ -796,12 +796,15 @@ All notable changes to h4rn are recorded here. The format follows
 ### Fixed
 
 - **Outside-agent access can no longer outlive or slip past a revocation.** A tool call binds the
-  turn that admitted it (so a slow delegation or PR watch cannot inherit a later, wider turn), a
-  revoke waits for admitted calls and in-flight prompt writes before it returns and drops the
-  affected sessions' tool tokens, a PR watch and its grant survive a restart, a resumed ACP session
-  with no mode catalogue is refused unless full access was asked for, and a replayed refresh token
-  stays recognisable for the family's whole life. The outside surface no longer offers `stop_thread`,
-  and a Full-access grant stops after 24 hours.
+  turn that admitted it (so a slow delegation or PR watch cannot inherit a later, wider turn), and
+  every revoke — Settings, `POST /oauth/revoke` and `DELETE /mcp` — waits for admitted calls and
+  in-flight prompt writes before it returns and drops the affected sessions' tool tokens. A PR watch
+  and its grant survive a restart, and its journal writes are ordered so a stale snapshot cannot
+  bring a removed watch back. A resumed ACP session with no mode catalogue is refused unless full
+  access was asked for, and the refused turn now starts a fresh session instead of failing every
+  later send on the same resume. A replayed refresh token stays recognisable for the family's whole
+  life. The outside surface no longer offers `stop_thread`, and a Full-access grant stops after 24
+  hours.
 - **Rewind and fork stay honest about messages still being delivered.** An edit
   now waits for a steer's write to return instead of cutting the turn it was
   about to join, a queued steer is marked in flight before its `sending` write

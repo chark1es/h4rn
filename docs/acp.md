@@ -103,8 +103,10 @@ agent already knows the thread's model and mode from the session it is continuin
 saved model and sends the prompt rather than rejecting it against an empty list. The mode is the
 exception: a resumed reply with no mode catalogue cannot prove which native permission level the
 agent restored, and it may be wider than the turn's ceiling (for example a supervised outside
-agent's). h4rn therefore refuses such a resume unless the turn asked for full access, which no native
-mode can exceed, and says the thread must start a new session instead. When the resumed session
+agent's). h4rn therefore refuses such a resumed session unless the turn asked for full access, which
+no native mode can exceed. The refusal does not fail the turn: the stored session id is dropped and
+the same turn starts a fresh session with the usual bounded handoff, and that session applies and
+checks the requested mode itself, so the grant still fails closed. When the resumed session
 reports the model it actually restored, the thread keeps that model: the summary, the stored thread
 and the next session all name it, instead of the `default` alias or an id the agent is no longer
 running. Typing `default` afterwards returns the thread to the agent's own choice. A load also

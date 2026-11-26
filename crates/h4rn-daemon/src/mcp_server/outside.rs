@@ -205,6 +205,20 @@ impl OutsideAgents {
         Ok(())
     }
 
+    /// Revokes the family a client presented a token for, ordered like Settings.
+    ///
+    /// `POST /oauth/revoke` and `DELETE /mcp` end access for an agent's token,
+    /// so they must mean the same thing as "Revoke" in Settings: after this
+    /// returns, no call admitted under that family and no prompt write it had
+    /// in flight can still reach an agent, and the live session lost its tool
+    /// token. An unknown token ends no family and still succeeds (RFC 7009).
+    pub async fn revoke_token(&self, token: &str) -> Result<(), OAuthError> {
+        let _gate = self.admission.write().await;
+        let families = self.store.revoke_token_families(token)?;
+        self.drain_families(families).await;
+        Ok(())
+    }
+
     /// Waits for in-flight prompt writes and drops the sessions' tool tokens.
     async fn drain_families(&self, families: Vec<String>) {
         if families.is_empty() {

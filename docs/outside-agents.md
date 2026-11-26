@@ -216,14 +216,16 @@ and the ceiling: every wake asks whether that family is still live (a revoked fa
 and ends the watch) and starts at most at the ceiling. The wake turn itself carries the same triple,
 so a watch it re-creates keeps the grant rather than clearing it. A watch is durable: its PR, thread
 and triple are stored with the journal, so a restart restores the watch and never recreates it
-without the grant. A live mode switch, a prompt dispatch and a resume's session selection share one
+without the grant. Those journal writes are serialized, so a snapshot taken before a watch ended
+cannot land after the newer one and bring that watch back on restart. A live mode switch, a prompt dispatch and a resume's session selection share one
 per-thread gate, so a switch that has already applied full access to the session cannot be read as
 the old setting by an incoming supervised message or an auto-resume.
 
 Revoking an agent is ordered against everything already admitted under its grant. An MCP request
 holds a shared admission gate for its whole answer, and a prompt write (from a queued message, a
 parked prompt or a resume) registers itself before the adapter call; the revoke takes the exclusive
-side and waits for both. When Revoke returns, no admitted call and no in-flight prompt under that
+side and waits for both. Every revoke path is the same one: Settings → Revoke, `POST /oauth/revoke`
+and `DELETE /mcp`. When any of them returns, no admitted call and no in-flight prompt under that
 family is still reaching an agent. A turn that already delivered its prompt may finish, but its
 harness session loses the tool token at revocation, so it cannot call h4rn's tools any more.
 

@@ -315,11 +315,9 @@ impl AcpSession {
             // than run a resumed agent at an unknown permission level. Full
             // access is the one request no native mode can exceed.
             if spec.runtime_mode != RuntimeMode::FullAccess {
-                return Err(HarnessError::Unsupported {
+                return Err(HarnessError::ResumeUnconfirmed {
                     harness: policy.harness,
-                    feature: format!(
-                        "resuming at mode `{wanted_mode}`; the resumed session advertised no mode catalogue, so h4rn cannot confirm its permission level — start a new session"
-                    ),
+                    mode: wanted_mode,
                 });
             }
             tracing::debug!(
@@ -2792,11 +2790,12 @@ mod tests {
             .expect("an unconfirmed resumed mode is refused");
         agent.await.expect("agent");
         match error {
-            HarnessError::Unsupported { feature, .. } => assert!(
-                feature.contains("no mode catalogue"),
-                "the refusal explains the missing catalogue: {feature}"
-            ),
-            other => panic!("expected Unsupported, got {other:?}"),
+            // The daemon turns this typed refusal into a fresh session for the
+            // same turn rather than failing it.
+            HarnessError::ResumeUnconfirmed { mode, .. } => {
+                assert_eq!(mode, "default", "the refusal names the requested mode")
+            }
+            other => panic!("expected ResumeUnconfirmed, got {other:?}"),
         }
     }
 

@@ -578,10 +578,28 @@ impl OAuthStore {
         // directory is synced. Without this a crash can leave the old file in
         // place even though the revocation reported success.
         if let Some(parent) = self.path.parent() {
-            sync_directory(parent)?;
-            #[cfg(test)]
-            self.hooks.dir_syncs.fetch_add(1, Ordering::SeqCst);
+            self.sync_directory(parent)?;
         }
+        Ok(())
+    }
+
+    /// Flushes a directory entry so a completed rename survives a crash.
+    ///
+    /// The counter lives in this function, not beside its call, so a test that
+    /// removes the sync cannot still see a sync it never performed.
+    fn sync_directory(&self, path: &Path) -> Result<(), OAuthError> {
+        #[cfg(unix)]
+        {
+            std::fs::File::open(path)
+                .and_then(|directory| directory.sync_all())
+                .map_err(|error| OAuthError::Storage(error.to_string()))?;
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = path;
+        }
+        #[cfg(test)]
+        self.hooks.dir_syncs.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 
@@ -1155,6 +1173,16 @@ impl OAuthStore {
     ///
     /// Returns only after the revocation is on disk.
     pub fn revoke_token(&self, token: &str) -> Result<(), OAuthError> {
+        self.revoke_token_families(token).map(|_| ())
+    }
+
+    /// [`Self::revoke_token`], returning the token family it ended.
+    ///
+    /// The caller takes the admission gate and waits for that family's in-flight
+    /// prompt writes after this returns, so a client-facing revoke means the
+    /// same thing as one from Settings. An unknown token ends no family and is
+    /// still not an error (RFC 7009).
+    pub fn revoke_token_families(&self, token: &str) -> Result<Vec<String>, OAuthError> {
         let now = Utc::now();
         let hash = digest(token);
         let mut guard = self.lock();
@@ -1166,13 +1194,13 @@ impl OAuthStore {
             .map(|entry| entry.family.clone())
         else {
             // RFC 7009: an unknown token is not an error.
-            return Ok(());
+            return Ok(Vec::new());
         };
         let mut next = guard.file.clone();
         revoke_family(&mut next, &family, now);
         self.persist_locked(&next)?;
         guard.file = next;
-        Ok(())
+        Ok(vec![family])
     }
 
     /// Turns outside-agent access on or off.
@@ -1764,21 +1792,6 @@ fn redirect_with(
 fn quarantine_path(path: &Path) -> PathBuf {
     let stamp = Utc::now().format("%Y%m%dT%H%M%S");
     path.with_extension(format!("corrupt-{stamp}.json"))
-}
-
-/// Flushes a directory entry so a completed rename survives a crash.
-fn sync_directory(path: &Path) -> Result<(), OAuthError> {
-    #[cfg(unix)]
-    {
-        std::fs::File::open(path)
-            .and_then(|directory| directory.sync_all())
-            .map_err(|error| OAuthError::Storage(error.to_string()))
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = path;
-        Ok(())
-    }
 }
 
 fn random_hex() -> String {

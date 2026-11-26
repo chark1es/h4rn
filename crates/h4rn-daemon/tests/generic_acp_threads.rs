@@ -710,25 +710,52 @@ async fn an_empty_resume_reply_cannot_confirm_a_non_full_access_mode() {
 
     // The reply names no mode, so h4rn cannot prove the resumed session is not
     // running wider than this approval-required thread (or an outside grant's
-    // ceiling). It refuses and starts nothing.
+    // ceiling). The resumed session is refused, the stored id is dropped, and
+    // the same turn is retried on a fresh session, which applies and checks the
+    // mode itself. The refusal must not strand the thread on the same resume.
     manager.restart_sessions(&[HarnessKind::Acp]).await;
     manager
         .send_message(&thread, "after the empty resume".into(), Vec::new())
         .await
         .expect("send");
-    let (status, _text, _) = next_turn(&mut events, |_| {}).await;
+    let (status, text, _) = next_turn(&mut events, |_| {}).await;
     assert_eq!(
         status,
-        TurnStatus::Failed,
-        "an unconfirmed resumed mode must fail the turn instead of running it"
+        TurnStatus::Completed,
+        "the refused resume must fall back to a fresh session instead of failing the turn"
+    );
+    assert!(
+        text.contains("after the empty resume"),
+        "the fresh session answered the same prompt: {text:?}"
+    );
+    assert!(
+        text.contains("echo: hello"),
+        "the fresh session's handoff carried the saved conversation: {text:?}"
     );
 
     let starts = std::fs::read_to_string(workspace.path().join(".agy-fixture-sessions"))
         .expect("the fixture recorded its sessions");
+    let resumed_at = starts
+        .lines()
+        .position(|line| line.starts_with("resume"))
+        .expect("the restart used session/resume");
     assert!(
-        starts.lines().any(|line| line.starts_with("resume")),
-        "the restart used session/resume: {starts:?}"
+        starts
+            .lines()
+            .skip(resumed_at + 1)
+            .any(|line| line.starts_with("new")),
+        "the refused resume did not start a fresh session: {starts:?}"
     );
+
+    // The fresh session is live, so the next send must not try the refused
+    // resume again.
+    manager
+        .send_message(&thread, "and again".into(), Vec::new())
+        .await
+        .expect("send");
+    let (status, text, _) = next_turn(&mut events, |_| {}).await;
+    assert_eq!(status, TurnStatus::Completed);
+    assert!(text.contains("echo: and again"), "got {text:?}");
 
     manager.shutdown().await;
 }
