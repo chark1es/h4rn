@@ -18,6 +18,14 @@ All notable changes to h4rn are recorded here. The format follows
   screen-reader labels follow the Language choice. Ages ("5m"), counts and
   times use the language's own formats, and a snoozed thread now says how long
   until it wakes instead of "now". The phone's thread list is translated too.
+- **The command palette in Chinese, Spanish and Japanese.** Every row, group,
+  the search field and the footer follow the Language choice, and a command
+  has one name everywhere: the palette, Settings → Shortcuts and the Keyboard
+  shortcuts dialog. Search matches the translated name and the English one, so
+  English muscle memory keeps working; Spanish search ignores accents. Keycaps
+  stay the same in every language. In English, palette rows that run a
+  shortcut now use that shortcut's name (for example "Show Working" instead of
+  "Go to Working", "Settle thread" instead of "Settle now").
 - **Android Live Updates show a running agent.** A separate switch under
   Settings → Notifications → Phone alerts shows each running thread as an
   ongoing notification with its project and whether it is working, waiting for

@@ -29,6 +29,8 @@ import { describe, expect, it } from "vitest";
  * identifiers such as `NAME` or `gpt-5.4-mini`, and the product names below.
  */
 const CONVERTED = [
+  "src/components/dialogs/CommandPalette.tsx",
+  "src/components/dialogs/ShortcutsDialog.tsx",
   "src/components/inbox/PhoneInbox.tsx",
   "src/components/inbox/StateTabs.tsx",
   "src/components/inbox/ThreadRow.tsx",
@@ -58,6 +60,7 @@ const CONVERTED = [
   "src/features/usage/AutoResumeSettings.tsx",
   "src/features/worktrees/WorktreeSettings.tsx",
   "src/features/worktrees/worktreeStore.ts",
+  "src/lib/keybindings.ts",
   "src/lib/settings.ts",
 ];
 

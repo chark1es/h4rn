@@ -12,8 +12,8 @@ not revive them. Share again to make a new link.
 
 ## Share a thread
 
-1. Right-click the thread in the sidebar, use the thread's ⋯ menu, or open the
-   command palette and choose **Share with guest…**.
+1. Right-click the thread in the sidebar or use the thread's ⋯ menu and choose
+   **Share with guest…**, or run **Share with guest** from the command palette.
 2. Choose **Create link** and copy it. Send it to one person.
 3. When they write a message, it appears above your composer as a **Request**,
    and the sidebar row says **Request**. Choose **Send** to run it as a normal

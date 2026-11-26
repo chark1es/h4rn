@@ -1,0 +1,132 @@
+{
+  "groups": {
+    "General": "General",
+    "Navigate": "Navegación",
+    "Thread": "Hilo",
+    "Panels": "Paneles"
+  },
+  "names": {
+    "palette": {
+      "toggle": "Buscar o ejecutar"
+    },
+    "shortcuts": {
+      "open": "Atajos de teclado"
+    },
+    "thread": {
+      "new": "Nuevo hilo",
+      "next": "Hilo siguiente",
+      "previous": "Hilo anterior",
+      "reply": "Ir al compositor",
+      "permissions": "Permisos del hilo",
+      "settle": "Resolver el hilo",
+      "acknowledge": "Confirmar (Terminado)",
+      "snooze": "Posponer una hora",
+      "pin": "Mantener en «En curso»",
+      "reopen": "Reabrir un hilo resuelto",
+      "steerQueuedMessage": "Dirigir el mensaje en cola más antiguo",
+      "editQueuedMessage": "Editar el mensaje en cola más reciente"
+    },
+    "settings": {
+      "open": "Ajustes"
+    },
+    "theme": {
+      "toggle": "Alternar claro y oscuro"
+    },
+    "nav": {
+      "inbox": "Ir a los hilos",
+      "pulls": "Ir a los pull requests",
+      "issues": "Ir a los issues",
+      "usage": "Ir a Uso",
+      "tools": "Ir a los servidores MCP y skills"
+    },
+    "tab": {
+      "working": "Mostrar «En curso»",
+      "done": "Mostrar «Terminado»",
+      "settled": "Mostrar «Resuelto»"
+    },
+    "approval": {
+      "approve": "Aprobar la acción pendiente",
+      "deny": "Denegar la acción pendiente"
+    },
+    "turn": {
+      "interrupt": "Interrumpir el turno",
+      "previous": "Mensaje anterior",
+      "next": "Mensaje siguiente"
+    },
+    "guest": {
+      "share": "Compartir con un invitado"
+    },
+    "composer": {
+      "attach": "Adjuntar archivos"
+    },
+    "sidebar": {
+      "toggle": "Alternar barra lateral"
+    },
+    "panel": {
+      "toggle": "Alternar panel derecho",
+      "changes": "Mostrar cambios",
+      "subagents": "Mostrar subagentes",
+      "files": "Buscar un archivo"
+    },
+    "view": {
+      "toggle": "Cambiar entre hilo e IDE"
+    },
+    "terminal": {
+      "toggle": "Alternar terminal"
+    }
+  },
+  "palette": {
+    "title": "Paleta de comandos",
+    "description": "Busca hilos, ejecuta un comando o muévete por h4rn.",
+    "placeholder": "Busca hilos, hosts, archivos o comandos",
+    "empty": "Ningún comando coincide. Prueba con el título de un hilo, el nombre de un host o un comando.",
+    "groups": {
+      "thisThread": "Este hilo",
+      "threads": "Hilos",
+      "goTo": "Ir a",
+      "view": "Vista"
+    },
+    "items": {
+      "switchHarness": "Cambiar de harness…",
+      "linkPullRequest": "Vincular un pull request…",
+      "fork": "Bifurcar desde el último turno",
+      "unpin": "Quitar de «En curso»",
+      "searchThreads": "Buscar hilos…",
+      "pairDevice": "Vincular un dispositivo…",
+      "hosts": "Hosts",
+      "ide": "IDE",
+      "openInIde": "Abrir {{project}} en el IDE",
+      "showRightPanel": "Mostrar panel derecho",
+      "hideRightPanel": "Ocultar panel derecho",
+      "showTerminal": "Mostrar terminal",
+      "hideTerminal": "Ocultar terminal",
+      "showSidebar": "Mostrar barra lateral",
+      "hideSidebar": "Ocultar barra lateral",
+      "copyLink": "Copiar enlace del hilo",
+      "reconnect": "Reconectar con el daemon"
+    },
+    "footer": {
+      "move": "Mover",
+      "run": "Ejecutar",
+      "close": "Cerrar",
+      "searchesHosts": "Busca en {{hosts}}",
+      "searchesThisMachine": "Busca en esta máquina"
+    }
+  },
+  "shortcutsDialog": {
+    "description": "Cada comando es Cmd o Ctrl más una tecla, así que escribir nunca lo activa. Cámbialos en <settings>Ajustes → Atajos</settings>.",
+    "whileTyping": "Mientras escribes",
+    "typing": {
+      "send": "Enviar",
+      "newLine": "Nueva línea",
+      "recall": "Recuperar un prompt anterior",
+      "forward": "Avanzar por los prompts",
+      "mention": "Mencionar un archivo",
+      "command": "Ejecutar un comando",
+      "moveMenu": "Moverse por el menú @ o /",
+      "insert": "Insertar el elemento resaltado",
+      "closeMenu": "Cerrar el menú @ o /",
+      "closeDialog": "Cerrar un diálogo o volver"
+    }
+  }
+}

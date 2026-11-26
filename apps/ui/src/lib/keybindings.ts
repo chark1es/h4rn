@@ -1,5 +1,5 @@
 import { useSyncExternalStore } from "react";
-import { i18n } from "@/lib/i18n";
+import { i18n, type Locale } from "@/lib/i18n";
 
 /**
  * Every app shortcut is a modifier chord: Cmd on Apple platforms, Ctrl
@@ -55,9 +55,14 @@ export type CommandId =
   | "thread.steerQueuedMessage"
   | "thread.editQueuedMessage";
 
+/**
+ * A command's name is not kept here: it lives once, per language, in the
+ * `commands` catalogue (`commands:names.<id>`), which the command palette,
+ * Settings → Shortcuts and the shortcuts dialog all read through
+ * `commandName`. A command without a name fails `bun run typecheck`.
+ */
 export type CommandSpec = {
   id: CommandId;
-  label: string;
   group: CommandGroup;
   binding: string;
   /** Fires while focus is in a text field or editor. */
@@ -75,187 +80,161 @@ export type CommandSpec = {
 export const COMMANDS: readonly CommandSpec[] = [
   {
     id: "palette.toggle",
-    label: "Search or run",
     group: "General",
     binding: "mod+k",
     inInputs: true,
   },
   {
     id: "shortcuts.open",
-    label: "Keyboard shortcuts",
     group: "General",
     binding: "mod+/",
     inInputs: false,
   },
   {
     id: "thread.new",
-    label: "New thread",
     group: "General",
     binding: "mod+shift+n",
     inInputs: true,
   },
-  { id: "settings.open", label: "Settings", group: "General", binding: "mod+,", inInputs: true },
+  { id: "settings.open", group: "General", binding: "mod+,", inInputs: true },
   {
     id: "theme.toggle",
-    label: "Toggle light and dark",
     group: "General",
     binding: "mod+shift+l",
     inInputs: true,
   },
   {
     id: "nav.inbox",
-    label: "Go to threads",
     group: "Navigate",
     binding: "mod+shift+h",
     inInputs: true,
   },
   {
     id: "nav.pulls",
-    label: "Go to pull requests",
     group: "Navigate",
     binding: "mod+shift+p",
     inInputs: true,
   },
   {
     id: "nav.issues",
-    label: "Go to issues",
     group: "Navigate",
     binding: "mod+shift+i",
     inInputs: true,
   },
   {
     id: "nav.usage",
-    label: "Go to usage",
     group: "Navigate",
     binding: "mod+shift+u",
     inInputs: true,
   },
   {
     id: "nav.tools",
-    label: "Go to MCP servers and skills",
     group: "Navigate",
     binding: "mod+shift+m",
     inInputs: true,
   },
-  { id: "tab.working", label: "Show Working", group: "Navigate", binding: "mod+1", inInputs: true },
-  { id: "tab.done", label: "Show Done", group: "Navigate", binding: "mod+2", inInputs: true },
-  { id: "tab.settled", label: "Show Settled", group: "Navigate", binding: "mod+3", inInputs: true },
+  { id: "tab.working", group: "Navigate", binding: "mod+1", inInputs: true },
+  { id: "tab.done", group: "Navigate", binding: "mod+2", inInputs: true },
+  { id: "tab.settled", group: "Navigate", binding: "mod+3", inInputs: true },
   {
     id: "thread.next",
-    label: "Next thread",
     group: "Navigate",
     binding: "mod+alt+arrowdown",
     inInputs: true,
   },
   {
     id: "thread.previous",
-    label: "Previous thread",
     group: "Navigate",
     binding: "mod+alt+arrowup",
     inInputs: true,
   },
   {
     id: "thread.reply",
-    label: "Focus the composer",
     group: "Thread",
     binding: "mod+l",
     inInputs: true,
   },
   {
     id: "thread.permissions",
-    label: "Thread permissions",
     group: "Thread",
     binding: "mod+shift+a",
     inInputs: true,
   },
   {
     id: "approval.approve",
-    label: "Approve pending action",
     group: "Thread",
     binding: "mod+enter",
     inInputs: true,
   },
   {
     id: "approval.deny",
-    label: "Deny pending action",
     group: "Thread",
     binding: "mod+backspace",
     inInputs: true,
   },
   {
     id: "turn.interrupt",
-    label: "Interrupt turn",
     group: "Thread",
     binding: "mod+.",
     inInputs: true,
   },
   {
     id: "turn.previous",
-    label: "Previous message",
     group: "Thread",
     binding: "mod+[",
     inInputs: false,
   },
-  { id: "turn.next", label: "Next message", group: "Thread", binding: "mod+]", inInputs: false },
+  { id: "turn.next", group: "Thread", binding: "mod+]", inInputs: false },
   {
     id: "thread.settle",
-    label: "Settle thread",
     group: "Thread",
     binding: "mod+shift+s",
     inInputs: true,
   },
   {
     id: "thread.acknowledge",
-    label: "Acknowledge (Done)",
     group: "Thread",
     binding: "mod+alt+a",
     inInputs: true,
   },
   {
     id: "thread.snooze",
-    label: "Snooze for an hour",
     group: "Thread",
     binding: "mod+alt+s",
     inInputs: true,
   },
   {
     id: "thread.pin",
-    label: "Keep in Working",
     group: "Thread",
     binding: "mod+alt+p",
     inInputs: true,
   },
   {
     id: "guest.share",
-    label: "Share with guest",
     group: "Thread",
     binding: "mod+alt+g",
     inInputs: true,
   },
   {
     id: "thread.reopen",
-    label: "Reopen a settled thread",
     group: "Thread",
     binding: "mod+alt+u",
     inInputs: true,
   },
   {
     id: "composer.attach",
-    label: "Attach files",
     group: "Thread",
     binding: "mod+u",
     inInputs: true,
   },
   {
     id: "thread.steerQueuedMessage",
-    label: "Steer the oldest queued message",
     group: "Thread",
     binding: "mod+shift+enter",
     inInputs: true,
   },
   {
     id: "thread.editQueuedMessage",
-    label: "Edit the newest queued message",
     group: "Thread",
     binding: "alt+arrowup",
     inInputs: true,
@@ -263,47 +242,41 @@ export const COMMANDS: readonly CommandSpec[] = [
   },
   {
     id: "sidebar.toggle",
-    label: "Toggle sidebar",
     group: "Panels",
     binding: "mod+b",
     inInputs: false,
   },
   {
     id: "panel.toggle",
-    label: "Toggle right panel",
     group: "Panels",
     binding: "mod+alt+b",
     inInputs: true,
   },
   {
     id: "view.toggle",
-    label: "Switch thread and IDE",
     group: "Panels",
     binding: "mod+e",
     inInputs: false,
   },
   {
     id: "terminal.toggle",
-    label: "Toggle terminal",
     group: "Panels",
     binding: "mod+`",
     inInputs: true,
   },
   {
     id: "panel.changes",
-    label: "Show changes",
     group: "Panels",
     binding: "mod+shift+d",
     inInputs: true,
   },
   {
     id: "panel.subagents",
-    label: "Show subagents",
     group: "Panels",
     binding: "mod+j",
     inInputs: false,
   },
-  { id: "panel.files", label: "Find a file", group: "Panels", binding: "mod+p", inInputs: false },
+  { id: "panel.files", group: "Panels", binding: "mod+p", inInputs: false },
 ];
 
 export const COMMAND_GROUPS: readonly CommandGroup[] = ["General", "Navigate", "Thread", "Panels"];
@@ -311,12 +284,17 @@ export const COMMAND_GROUPS: readonly CommandGroup[] = ["General", "Navigate", "
 const SPEC = new Map(COMMANDS.map((command) => [command.id, command]));
 
 /**
- * The command's name in the active language, as Settings → Shortcuts shows it.
- * The command palette still shows the English `label` until its own area is
- * translated.
+ * The command's name in the active language, or in `lng` when given. The
+ * command palette also searches the English name (`commandName(id, "en")`),
+ * so a shortcut found by its English name keeps working in any language.
  */
-export function commandName(id: CommandId): string {
-  return i18n.t(`settings:shortcuts.commands.${id}`);
+export function commandName(id: CommandId, lng?: Locale): string {
+  return i18n.t(`commands:names.${id}`, lng ? { lng } : {});
+}
+
+/** A command group's heading in the active language. */
+export function commandGroupName(group: CommandGroup): string {
+  return i18n.t(`commands:groups.${group}`);
 }
 
 export function commandSpec(id: CommandId): CommandSpec {
