@@ -1,5 +1,6 @@
 import { ChevronDownIcon, Code2Icon, FileIcon, RotateCcwIcon } from "lucide-react";
 import { useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
 import { ConfirmDialog } from "@/components/common/ConfirmDialog";
@@ -37,9 +38,10 @@ export function ChangesSection({
   ide: boolean;
   onFooterAction?: () => void;
 }) {
+  const { t } = useTranslation(["thread", "common"]);
   const { mode, setMode, turns, turnId, changes: turnChanges, diffs, loading, error } = changes;
   const files = turnChanges?.files ?? [];
-  const turnLabel = pickedLabel(turns, turnId);
+  const turnLabel = pickedLabel(turns, turnId, t("changes.noTurns"));
   const [confirm, setConfirm] = useState<
     { kind: "all" } | { kind: "file"; path: string; name: string } | null
   >(null);
@@ -47,14 +49,14 @@ export function ChangesSection({
   return (
     <>
       <div className="q-rp-bar">
-        <div className="q-seg inline" role="tablist" aria-label="Compare">
+        <div className="q-seg inline" role="tablist" aria-label={t("changes.compare")}>
           <button
             type="button"
             role="tab"
             aria-selected={mode === "agent"}
             onClick={() => setMode("agent")}
           >
-            vs agent
+            {t("changes.vsAgent")}
           </button>
           <button
             type="button"
@@ -62,7 +64,7 @@ export function ChangesSection({
             aria-selected={mode === "head"}
             onClick={() => setMode("head")}
           >
-            vs HEAD
+            {t("changes.vsHead")}
           </button>
         </div>
         <DropdownMenu>
@@ -72,7 +74,7 @@ export function ChangesSection({
             </button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="start" className="w-44">
-            <DropdownMenuLabel>Turn</DropdownMenuLabel>
+            <DropdownMenuLabel>{t("changes.turn")}</DropdownMenuLabel>
             {turns.map((turn) => (
               <DropdownMenuItem key={turn.id} onSelect={() => changes.selectTurn(turn.id)}>
                 {turn.label}
@@ -91,7 +93,7 @@ export function ChangesSection({
         {error ? (
           <div className="q-sub-empty">
             <p style={{ margin: 0, fontWeight: 500, color: "var(--fg)" }}>
-              The change list did not load.
+              {t("changes.loadFailed")}
             </p>
             <p style={{ margin: "4px 0 10px" }}>{error}</p>
             <button
@@ -100,14 +102,14 @@ export function ChangesSection({
               style={{ height: 26 }}
               onClick={changes.reload}
             >
-              Retry
+              {t("common:retry")}
             </button>
           </div>
         ) : loading && !turnChanges ? (
           <div
             role="status"
             aria-busy="true"
-            aria-label="Loading changes"
+            aria-label={t("changes.loading")}
             style={{ padding: "10px 12px" }}
           >
             <div className="q-skel" style={{ height: 14, width: "52%", marginBottom: 12 }} />
@@ -117,11 +119,8 @@ export function ChangesSection({
           </div>
         ) : files.length === 0 ? (
           <div className="q-empty q-rp-empty">
-            <h3>No changes yet</h3>
-            <p>
-              Files {harnessLabel(thread.harness)} edits in this thread show up here, grouped by
-              turn, with a diff against HEAD one click away.
-            </p>
+            <h3>{t("changes.emptyTitle")}</h3>
+            <p>{t("changes.emptyBody", { harness: harnessLabel(thread.harness) })}</p>
           </div>
         ) : (
           <>
@@ -133,8 +132,12 @@ export function ChangesSection({
                 size={14}
               />
               <span>
-                {harnessLabel(thread.harness)} on {thread.host} · {files.length}{" "}
-                {files.length === 1 ? "file" : "files"} since {absoluteTime(thread.last_activity)}
+                {t("changes.by", {
+                  harness: harnessLabel(thread.harness),
+                  host: thread.host,
+                  count: files.length,
+                  time: absoluteTime(thread.last_activity),
+                })}
               </span>
             </div>
             <div className="q-flist">
@@ -150,7 +153,7 @@ export function ChangesSection({
                       </span>
                       {file.before_etag === null ? (
                         <span className="q-badge ok" style={{ height: 18 }}>
-                          New
+                          {t("changes.new")}
                         </span>
                       ) : null}
                       <span className="q-num q-pm">
@@ -161,8 +164,8 @@ export function ChangesSection({
                     <button
                       type="button"
                       className="q-ibtn"
-                      aria-label={`Revert ${name}`}
-                      title={`Revert ${file.path}`}
+                      aria-label={t("changes.revertFile", { name })}
+                      title={t("changes.revertFile", { name: file.path })}
                       onClick={() => setConfirm({ kind: "file", path: file.path, name })}
                     >
                       <RotateCcwIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
@@ -172,10 +175,7 @@ export function ChangesSection({
               })}
             </div>
             {ide ? (
-              <p className="q-rp-note">
-                Files open in the editor, compared with the agent’s starting point. Pick a turn
-                above to narrow it.
-              </p>
+              <p className="q-rp-note">{t("changes.ideNote")}</p>
             ) : (
               files.map((file) => (
                 <FileDiff
@@ -200,12 +200,12 @@ export function ChangesSection({
           disabled={files.length === 0}
           onClick={() => setConfirm({ kind: "all" })}
         >
-          Revert all…
+          {t("changes.revertAll")}
         </button>
         <span className="grow" />
         {ide ? (
           <button type="button" className="q-btn secondary" onClick={() => setView("thread")}>
-            Back to thread <ShortcutCaps command="view.toggle" />
+            {t("changes.backToThread")} <ShortcutCaps command="view.toggle" />
           </button>
         ) : (
           <button
@@ -214,21 +214,23 @@ export function ChangesSection({
             onClick={onFooterAction ?? (() => setView("ide"))}
           >
             <Code2Icon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-            Open in IDE <ShortcutCaps command="view.toggle" />
+            {t("changes.openInIde")} <ShortcutCaps command="view.toggle" />
           </button>
         )}
       </div>
       <ConfirmDialog
         open={confirm !== null}
         title={
-          confirm?.kind === "file" ? `Revert ${confirm.name}?` : `Revert ${files.length} files?`
+          confirm?.kind === "file"
+            ? t("changes.confirm.fileTitle", { name: confirm.name })
+            : t("changes.confirm.allTitle", { count: files.length })
         }
         description={
           confirm?.kind === "file"
-            ? "The file goes back to the state it had before this turn. This cannot be undone from here."
-            : `All ${files.length} files in this scope go back to their pre-turn state. This cannot be undone from here.`
+            ? t("changes.confirm.fileBody")
+            : t("changes.confirm.allBody", { count: files.length })
         }
-        confirmLabel="Revert"
+        confirmLabel={t("changes.confirm.confirm")}
         onOpenChange={(open) => {
           if (!open) setConfirm(null);
         }}
@@ -241,8 +243,12 @@ export function ChangesSection({
   );
 }
 
-function pickedLabel(turns: Array<{ id: string; label: string }>, turnId: string | null): string {
-  if (turns.length === 0) return "No turns";
+function pickedLabel(
+  turns: Array<{ id: string; label: string }>,
+  turnId: string | null,
+  none: string,
+): string {
+  if (turns.length === 0) return none;
   const picked = turns.find((turn) => turn.id === turnId);
-  return picked?.label ?? turns.at(-1)?.label ?? "No turns";
+  return picked?.label ?? turns.at(-1)?.label ?? none;
 }

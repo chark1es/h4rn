@@ -1,18 +1,11 @@
 import { ShieldCheckIcon } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
-import type { ApprovalKind, ThreadSummary } from "@/gen";
+import type { ThreadSummary } from "@/gen";
 import { harnessLabel, harnessSeed } from "@/lib/entities";
 import { respondApproval } from "@/lib/store/appStore";
 import type { ApprovalItem } from "@/lib/store/projection";
-
-const SUMMARY_KIND_LABEL: Record<ApprovalKind, string> = {
-  command: "run",
-  file_change: "change a file",
-  permission: "use a permission",
-  plan: "review a plan",
-  question: "answer a question",
-};
 
 function shortPath(path: string): string {
   return path.replace(/^\/(?:home|Users)\/[^/]+/, "~");
@@ -30,22 +23,28 @@ export function PhoneApprovalSummary({
   approval: ApprovalItem;
   onReview: () => void;
 }) {
+  const { t } = useTranslation("thread");
   const harness = harnessLabel(thread.harness);
   return (
-    <section className="q-ph-ask" aria-label="Approval request">
+    <section className="q-ph-ask" aria-label={t("approval.label")}>
       <div className="q-ph-ask-h">
         <ShieldCheckIcon className="q-icon" strokeWidth={1.5} aria-hidden />
         <span className="t">
-          {harness} on {hostName} wants to {SUMMARY_KIND_LABEL[approval.approvalKind]}
+          {t(
+            approval.approvalKind === "command"
+              ? "approval.wants.commandShort"
+              : `approval.wants.${approval.approvalKind}`,
+            { harness, host: hostName },
+          )}
         </span>
       </div>
       <div className="q-ph-ask-cmd">{approval.prompt}</div>
       <div className="q-ph-ask-f">
         <button type="button" className="q-btn secondary sm" onClick={onReview}>
-          Details
+          {t("approval.phone.details")}
         </button>
         <button type="button" className="q-btn primary sm" onClick={onReview}>
-          Review
+          {t("approval.phone.review")}
         </button>
       </div>
     </section>
@@ -64,16 +63,22 @@ export function PhoneApprovalSheet({
   approval: ApprovalItem;
   onClose: () => void;
 }) {
+  const { t } = useTranslation("thread");
   const harness = harnessLabel(thread.harness);
   return (
     <>
       <button
         type="button"
         className="q-ph-scrim"
-        aria-label="Close approval review"
+        aria-label={t("approval.phone.close")}
         onClick={onClose}
       />
-      <div className="q-ph-sheet" role="dialog" aria-modal="true" aria-label="Approve command">
+      <div
+        className="q-ph-sheet"
+        role="dialog"
+        aria-modal="true"
+        aria-label={t("approval.phone.sheet")}
+      >
         <div className="q-grab" />
         <div className="q-ph-sheet-head">
           <EntityAvatar
@@ -84,8 +89,9 @@ export function PhoneApprovalSheet({
           />
           <div className="grow">
             <div className="t">
-              {approval.approvalKind === "command" ? "Run a command" : "Review a request"} on{" "}
-              {hostName}
+              {approval.approvalKind === "command"
+                ? t("approval.phone.runCommandOn", { host: hostName })
+                : t("approval.phone.reviewRequestOn", { host: hostName })}
             </div>
             <div className="s">
               {harness} · {thread.title}
@@ -95,23 +101,23 @@ export function PhoneApprovalSheet({
         <div className="q-cmd q-ph-sheet-cmd">{approval.prompt}</div>
         <div className="q-ph-group">
           <div className="q-ph-li">
-            <span className="grow q-muted">Folder</span>
+            <span className="grow q-muted">{t("approval.phone.folder")}</span>
             <span className="q-mono">{shortPath(thread.workspace_path)}</span>
           </div>
           <div className="q-ph-li">
-            <span className="grow q-muted">Asked</span>
-            <span>now</span>
+            <span className="grow q-muted">{t("approval.phone.asked")}</span>
+            <span>{t("approval.now")}</span>
           </div>
           <div className="q-ph-li">
-            <span className="grow">Always allow in this thread</span>
+            <span className="grow">{t("approval.phone.alwaysAllow")}</span>
             <button
               type="button"
               className="q-switch"
               role="switch"
               aria-checked={false}
               disabled
-              title="Not available yet"
-              aria-label="Always allow in this thread"
+              title={t("approval.notAvailable")}
+              aria-label={t("approval.phone.alwaysAllow")}
             />
           </div>
         </div>
@@ -124,7 +130,7 @@ export function PhoneApprovalSheet({
               onClose();
             }}
           >
-            Deny
+            {t("approval.deny")}
           </button>
           <button
             type="button"
@@ -134,7 +140,7 @@ export function PhoneApprovalSheet({
               onClose();
             }}
           >
-            Approve
+            {t("approval.approve")}
           </button>
         </div>
       </div>

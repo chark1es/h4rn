@@ -1,4 +1,5 @@
 import { GitForkIcon } from "lucide-react";
+import { Trans, useTranslation } from "react-i18next";
 
 import type { ThreadSummary } from "@/gen";
 import { openThread, useApp } from "@/lib/store/appStore";
@@ -10,6 +11,7 @@ import { openThread, useApp } from "@/lib/store/appStore";
  * rewriting the fork. A source that is gone keeps the fact but loses the link.
  */
 export function ThreadForkLine({ summary }: { summary: ThreadSummary }) {
+  const { t } = useTranslation("thread");
   const forkedFrom = summary.forked_from;
   const originId = forkedFrom?.thread_id ?? null;
   const origin = useApp((state) => (originId ? state.threads[originId] : undefined));
@@ -23,12 +25,17 @@ export function ThreadForkLine({ summary }: { summary: ThreadSummary }) {
           type="button"
           className="q-fork-link"
           onClick={() => openThread(origin.thread_id)}
-          title={`Open ${origin.title}`}
+          title={t("fork.open", { title: origin.title })}
         >
-          Forked from <span>{origin.title}</span>
+          <Trans
+            t={t}
+            i18nKey="fork.from"
+            values={{ title: origin.title }}
+            components={{ name: <span /> }}
+          />
         </button>
       ) : (
-        <span>Forked from a thread that is no longer in your list</span>
+        <span>{t("fork.gone")}</span>
       )}
     </div>
   );

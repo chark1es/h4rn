@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { FileDiff } from "@/components/panel/FileDiff";
 import { againstFor, loadFileDiff, requestChangesTurn, totalLines } from "@/features/changes/store";
@@ -22,6 +23,7 @@ function splitPath(path: string): { directory: string; name: string } {
  * loading every file's patch into the stream.
  */
 export function ChangeSetCard({ turn, summary }: { turn: StreamTurn; summary: ThreadSummary }) {
+  const { t } = useTranslation("thread");
   const changes = turn.changes;
   const first = changes?.files[0];
   const [diff, setDiff] = useState<FsDiff | null>(null);
@@ -54,9 +56,7 @@ export function ChangeSetCard({ turn, summary }: { turn: StreamTurn; summary: Th
   return (
     <div className="q-changes">
       <div className="q-ch-head">
-        <span className="t">
-          {changes.files.length} {changes.files.length === 1 ? "file" : "files"} changed
-        </span>
+        <span className="t">{t("changes.card.changed", { count: changes.files.length })}</span>
         <span className="q-num q-pm">
           <span className="q-add">+{totals.added}</span>{" "}
           <span className="q-del">−{totals.removed}</span>
@@ -65,9 +65,9 @@ export function ChangeSetCard({ turn, summary }: { turn: StreamTurn; summary: Th
           type="button"
           className="q-btn ghost"
           onClick={openChanges}
-          title={titleWithShortcut("Open in the Changes panel", "panel.changes")}
+          title={titleWithShortcut(t("changes.card.openPanel"), "panel.changes")}
         >
-          Review
+          {t("changes.card.review")}
         </button>
       </div>
       {changes.files.map((file) => {

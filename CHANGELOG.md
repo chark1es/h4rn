@@ -41,6 +41,13 @@ All notable changes to h4rn are recorded here. The format follows
   stay the same in every language. In English, palette rows that run a
   shortcut now use that shortcut's name (for example "Show Working" instead of
   "Go to Working", "Settle thread" instead of "Settle now").
+- **The thread view in Chinese, Spanish and Japanese.** The thread header and
+  its menu, the harness switch, messages' timestamps and actions, tool cards,
+  approval and guest request cards, plans, usage-limit and failure notices,
+  the Changes, Subagents and terminal panels, and the agent status orb's label
+  follow the Language choice; agent output, tool output, file names and diffs
+  stay as written. Token counts, costs and durations use the language's own
+  formats, and palette rows that open a dialog now end in "…".
 - **Android Live Updates show a running agent.** A separate switch under
   Settings → Notifications → Phone alerts shows each running thread as an
   ongoing notification with its project and whether it is working, waiting for

@@ -1,5 +1,6 @@
 import { CircleAlertIcon, CopyIcon, InboxIcon, RefreshCwIcon, ServerIcon } from "lucide-react";
 import { useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { AgentGlyph } from "@/components/agent/AgentGlyph";
 import { PhonePanelSheet } from "@/components/panel/PhonePanelSheet";
@@ -34,6 +35,7 @@ import { ThreadHeader } from "./ThreadHeader";
 import { ThreadStream, ThreadStreamSkeleton } from "./ThreadStream";
 
 function HeaderSkeleton({ hostName }: { hostName?: string | undefined }) {
+  const { t } = useTranslation("thread");
   return (
     <header className="q-th-head">
       <div className="q-th-titles">
@@ -41,7 +43,7 @@ function HeaderSkeleton({ hostName }: { hostName?: string | undefined }) {
         <div className="q-skel" style={{ width: 360, height: 9 }} />
       </div>
       <div className="q-th-state q-faint" style={{ fontWeight: 400 }}>
-        Connecting{hostName ? ` to ${hostName}` : ""}…
+        {hostName ? t("pane.connectingTo", { host: hostName }) : t("pane.connecting")}
       </div>
     </header>
   );
@@ -56,6 +58,7 @@ function WaitingForTurn({
   host: string;
   harness: string;
 }) {
+  const { t } = useTranslation(["thread", "common"]);
   const glyph = glyphForAgentState("thinking");
   return (
     <div className="q-stream">
@@ -63,7 +66,7 @@ function WaitingForTurn({
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <AgentGlyph glyph={glyph} size={14} />
           <p className="q-faint" style={{ margin: 0, fontSize: 12 }}>
-            Waiting for {harness} on {host}…
+            {t("pane.waitingFor", { harness, host })}
           </p>
           <button
             type="button"
@@ -71,7 +74,7 @@ function WaitingForTurn({
             style={{ height: 24, marginLeft: "auto" }}
             onClick={() => void interruptThread(threadId)}
           >
-            Cancel
+            {t("common:cancel")}
           </button>
         </div>
         <div style={{ marginTop: 16, display: "grid", gap: 8 }} aria-hidden>
@@ -80,8 +83,7 @@ function WaitingForTurn({
           <div className="q-skel" style={{ height: 10, width: "44%" }} />
         </div>
         <p className="q-faint" style={{ marginTop: 16, fontSize: 12 }}>
-          The thread exists on the daemon. Nothing has streamed yet; the first token will replace
-          this outline.
+          {t("pane.waitingNote")}
         </p>
       </div>
     </div>
@@ -89,6 +91,7 @@ function WaitingForTurn({
 }
 
 export function ThreadPane({ threadId }: { threadId: string }) {
+  const { t } = useTranslation(["thread", "common"]);
   const summary = useApp((state) => state.threads[threadId]);
   const hosts = useApp((state) => state.hosts);
   const host = useApp((state) => state.hosts[summary?.host ?? ""]);
@@ -159,7 +162,7 @@ export function ThreadPane({ threadId }: { threadId: string }) {
 
   if (!summary && !log && !threadError) {
     return (
-      <main className="q-main" aria-busy="true" aria-label="Loading thread">
+      <main className="q-main" aria-busy="true" aria-label={t("pane.loading")}>
         <HeaderSkeleton hostName={Object.values(hosts)[0]?.name} />
         <ThreadStreamSkeleton />
         <div className="q-dock">
@@ -173,24 +176,24 @@ export function ThreadPane({ threadId }: { threadId: string }) {
 
   if (!summary) {
     return (
-      <main className="q-main" aria-label="Thread">
+      <main className="q-main" aria-label={t("header.thread")}>
         <div className="q-center-empty">
           <div className="q-empty" style={{ width: 460, maxWidth: "100%", padding: 0 }}>
             <span className="q-danger">
               <CircleAlertIcon className="q-icon s22" strokeWidth={1.5} aria-hidden />
             </span>
             <h3 style={{ fontSize: 17, lineHeight: "24px", marginTop: 10 }}>
-              This thread couldn’t be loaded
+              {t("pane.loadFailed")}
             </h3>
             <p style={{ margin: 0 }}>
               {threadError
-                ? `${threadError.message} The run may still be active on its host.`
-                : "It may have been settled, or the daemon restarted. The run may still be active on its host."}
+                ? t("pane.stillActive", { message: threadError.message })
+                : t("pane.notFound")}
             </p>
             <div style={{ display: "flex", gap: 8 }}>
               <button type="button" className="q-btn primary" onClick={() => retryThread(threadId)}>
                 <RefreshCwIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-                Retry
+                {t("common:retry")}
               </button>
               <button
                 type="button"
@@ -198,7 +201,7 @@ export function ThreadPane({ threadId }: { threadId: string }) {
                 onClick={() => navigate({ kind: "hosts" })}
               >
                 <ServerIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-                Open host
+                {t("pane.openHost")}
               </button>
             </div>
           </div>
@@ -262,8 +265,8 @@ export function ThreadPane({ threadId }: { threadId: string }) {
             <CircleAlertIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
           </span>
           <span className="grow">
-            <b>{hostName} is unreachable from this device.</b> The turn may still be running there.
-            You’re reading the stream as of {seenAt}.
+            <b>{t("pane.unreachable", { host: hostName })}</b>{" "}
+            {t("pane.readingAsOf", { time: seenAt })}
           </span>
         </div>
       ) : null}
@@ -277,7 +280,7 @@ export function ThreadPane({ threadId }: { threadId: string }) {
             <CircleAlertIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
           </span>
           <span className="grow">
-            <b>The stream may be stale.</b> {threadError.message}
+            <b>{t("pane.stale")}</b> {threadError.message}
           </span>
           <button
             type="button"
@@ -285,7 +288,7 @@ export function ThreadPane({ threadId }: { threadId: string }) {
             style={{ height: 24 }}
             onClick={() => retryThread(threadId)}
           >
-            Retry
+            {t("common:retry")}
           </button>
         </div>
       ) : null}
@@ -297,17 +300,15 @@ export function ThreadPane({ threadId }: { threadId: string }) {
               <CircleAlertIcon className="q-icon s22" strokeWidth={1.5} aria-hidden />
             </span>
             <h3 style={{ fontSize: 17, lineHeight: "24px", marginTop: 10 }}>
-              This thread couldn’t be loaded
+              {t("pane.loadFailed")}
             </h3>
             <p style={{ margin: 0 }}>
-              {threadError.message}{" "}
-              {threadError.hint ??
-                "The run may still be active there; nothing on this device was lost."}
+              {threadError.message} {threadError.hint ?? t("pane.nothingLost")}
             </p>
             <div style={{ display: "flex", gap: 8 }}>
               <button type="button" className="q-btn primary" onClick={() => retryThread(threadId)}>
                 <RefreshCwIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-                Retry
+                {t("common:retry")}
               </button>
               <button
                 type="button"
@@ -315,22 +316,22 @@ export function ThreadPane({ threadId }: { threadId: string }) {
                 onClick={() => navigate({ kind: "hosts" })}
               >
                 <ServerIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-                Open host
+                {t("pane.openHost")}
               </button>
             </div>
             <details
               className="q-disclosure"
               style={{ fontSize: 12, color: "var(--fg-2)", alignSelf: "stretch" }}
             >
-              <summary style={{ cursor: "pointer" }}>Details</summary>
+              <summary style={{ cursor: "pointer" }}>{t("pane.details")}</summary>
               <dl className="q-kv" style={{ marginTop: 10, textAlign: "left" }}>
-                <dt>Host</dt>
+                <dt>{t("pane.host")}</dt>
                 <dd>{hostName}</dd>
-                <dt>Last seen</dt>
+                <dt>{t("pane.lastSeen")}</dt>
                 <dd className="q-num">{absoluteTime(host?.last_seen ?? summary.last_activity)}</dd>
-                <dt>Status</dt>
+                <dt>{t("pane.status")}</dt>
                 <dd>{threadError.code.replace(/_/g, " ")}</dd>
-                <dt>Last event</dt>
+                <dt>{t("pane.lastEvent")}</dt>
                 <dd className="q-num">{absoluteTime(summary.last_activity)}</dd>
               </dl>
               <button
@@ -349,7 +350,7 @@ export function ThreadPane({ threadId }: { threadId: string }) {
                 }}
               >
                 <CopyIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-                Copy diagnostics
+                {t("pane.copyDiagnostics")}
               </button>
             </details>
           </div>
@@ -366,10 +367,11 @@ export function ThreadPane({ threadId }: { threadId: string }) {
         <div className="q-center-empty">
           <div className="q-empty" style={{ width: 460, maxWidth: "100%", padding: 0 }}>
             <InboxIcon className="q-icon s22 q-faint" strokeWidth={1.5} aria-hidden />
-            <h3 style={{ fontSize: 17, lineHeight: "24px" }}>Nothing has streamed yet</h3>
+            <h3 style={{ fontSize: 17, lineHeight: "24px" }}>{t("pane.emptyTitle")}</h3>
             <p style={{ margin: 0 }}>
-              The thread is {summary.agent_state === "done" ? "finished" : "idle"} on{" "}
-              {host?.name ?? summary.host}. Reply below to start the next turn.
+              {summary.agent_state === "done"
+                ? t("pane.emptyFinished", { host: host?.name ?? summary.host })
+                : t("pane.emptyIdle", { host: host?.name ?? summary.host })}
             </p>
           </div>
         </div>

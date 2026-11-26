@@ -9,6 +9,7 @@ import enIssues from "./locales/en/issues.json";
 import enPullRequests from "./locales/en/pullRequests.json";
 import enSettings from "./locales/en/settings.json";
 import enSidebar from "./locales/en/sidebar.json";
+import enThread from "./locales/en/thread.json";
 
 /**
  * UI translations.
@@ -34,6 +35,7 @@ export const NAMESPACES = [
   "pullRequests",
   "settings",
   "sidebar",
+  "thread",
 ] as const;
 export type Namespace = (typeof NAMESPACES)[number];
 
@@ -55,6 +57,7 @@ export const englishResources = {
   pullRequests: enPullRequests,
   settings: enSettings,
   sidebar: enSidebar,
+  thread: enThread,
 } as const;
 
 const STORAGE_KEY = "h4rn.locale";

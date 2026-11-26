@@ -1,5 +1,6 @@
 import { ArrowLeftRightIcon, CheckIcon, ChevronDownIcon } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { Popover } from "@/components/common/Popover";
 import { useAcpAgents, useHarnesses, useHarnessVersions } from "@/features/harnesses/harnessStore";
@@ -7,6 +8,7 @@ import { proxyModelsFor, useProxyCatalog } from "@/features/proxy/proxyStore";
 import type { DroppedSetting, HarnessKind, RuntimeMode, ThreadSummary } from "@/gen";
 import { useIsPhone } from "@/hooks/use-media-query";
 import { harnessLabel, threadHarnessLabel } from "@/lib/entities";
+import { formatList, i18n } from "@/lib/i18n";
 import { pushToast, switchThreadHarness, useApp } from "@/lib/store/appStore";
 import { activeThread } from "@/lib/thread-selection";
 import { modeLabel, newThreadModel, threadModelChoices } from "@/lib/threadControls";
@@ -27,9 +29,9 @@ function droppedLabel(dropped: DroppedSetting): string {
       // "Plan" the person chose rather than a slug with a suffix.
       return modeLabel(dropped.value as RuntimeMode);
     case "reasoning_effort":
-      return `reasoning effort ${dropped.value}`;
+      return i18n.t("thread:harnessSwitch.droppedEffort", { value: dropped.value });
     case "fast":
-      return "fast mode";
+      return i18n.t("thread:harnessSwitch.droppedFast");
   }
 }
 
@@ -92,7 +94,7 @@ function targetsFor(
       key: `acp:${agent.id}`,
       harness: "acp",
       agentId: agent.id,
-      label: `ACP · ${agent.name || agent.id}`,
+      label: threadHarnessLabel("acp", agent.name || agent.id),
     });
   }
   return found;
@@ -105,6 +107,7 @@ function targetsFor(
  * the same targets, the same live model catalogue and the same refusal text.
  */
 function SwitchPanel({ summary, onClose }: { summary: ThreadSummary; onClose: () => void }) {
+  const { t } = useTranslation(["thread", "common"]);
   useProxyCatalog();
   useHarnessVersions();
   useAcpAgents();
@@ -167,8 +170,10 @@ function SwitchPanel({ summary, onClose }: { summary: ThreadSummary; onClose: ()
     if (result.dropped.length > 0) {
       pushToast({
         variant: "success",
-        title: `Switched to ${target.label}.`,
-        description: `Dropped ${result.dropped.map(droppedLabel).join(", ")}; the new harness has no such setting.`,
+        title: t("harnessSwitch.switched", { harness: target.label }),
+        description: t("harnessSwitch.dropped", {
+          settings: formatList(result.dropped.map(droppedLabel)),
+        }),
       });
     }
   };
@@ -176,22 +181,16 @@ function SwitchPanel({ summary, onClose }: { summary: ThreadSummary; onClose: ()
   if (targets.length === 0) {
     return (
       <div className="q-tctrl">
-        <p className="q-tctrl-note">
-          No other harness is installed on this host. Install one in Settings → Harnesses, then come
-          back.
-        </p>
+        <p className="q-tctrl-note">{t("harnessSwitch.noOther")}</p>
       </div>
     );
   }
 
   return (
     <div className="q-tctrl">
-      <p className="q-tctrl-note">
-        The thread keeps its history, workspace and every setting the new harness offers. It
-        continues from a handoff of the conversation.
-      </p>
+      <p className="q-tctrl-note">{t("harnessSwitch.note")}</p>
 
-      <div role="menu" aria-label="Harness" className="q-tctrl-list">
+      <div role="menu" aria-label={t("harnessSwitch.harness")} className="q-tctrl-list">
         {targets.map((choice) => (
           <button
             key={choice.key}
@@ -216,7 +215,7 @@ function SwitchPanel({ summary, onClose }: { summary: ThreadSummary; onClose: ()
         ))}
       </div>
 
-      <div className="q-tctrl-head">Model</div>
+      <div className="q-tctrl-head">{t("harnessSwitch.model")}</div>
       <form
         className="q-tctrl-model"
         onSubmit={(event) => {
@@ -225,7 +224,7 @@ function SwitchPanel({ summary, onClose }: { summary: ThreadSummary; onClose: ()
         }}
       >
         <input
-          aria-label="Model for the new harness"
+          aria-label={t("harnessSwitch.modelLabel")}
           list={`h4rn-switch-models-${summary.thread_id}`}
           value={modelDraft}
           onChange={(event) => setModelDraft(event.target.value)}
@@ -246,7 +245,7 @@ function SwitchPanel({ summary, onClose }: { summary: ThreadSummary; onClose: ()
 
       <div className="q-tctrl-actions">
         <button type="button" className="q-btn ghost" onClick={onClose}>
-          Cancel
+          {t("common:cancel")}
         </button>
         <button
           type="button"
@@ -255,7 +254,7 @@ function SwitchPanel({ summary, onClose }: { summary: ThreadSummary; onClose: ()
           onClick={() => void submit()}
         >
           <ArrowLeftRightIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
-          {busy ? "Switching…" : "Switch"}
+          {busy ? t("harnessSwitch.switching") : t("harnessSwitch.switch")}
         </button>
       </div>
     </div>
@@ -273,11 +272,12 @@ function SwitchPanel({ summary, onClose }: { summary: ThreadSummary; onClose: ()
  * an adapter it cannot start.
  */
 export function HarnessSwitch({ summary }: { summary: ThreadSummary }) {
+  const { t } = useTranslation("thread");
   const isPhone = useIsPhone();
   const [open, setOpen] = useState(false);
   const trigger = (
     <>
-      <span className="sr-only">Switch harness: </span>
+      <span className="sr-only">{t("harnessSwitch.trigger")}</span>
       <span>{threadHarnessLabel(summary.harness, summary.agent_id)}</span>
       <ChevronDownIcon
         className={cn("q-icon s12", open && "q-rot180")}
@@ -306,7 +306,7 @@ export function HarnessSwitch({ summary }: { summary: ThreadSummary }) {
 
   return (
     <Popover
-      label="Switch harness"
+      label={t("harnessSwitch.title")}
       align="start"
       width={320}
       open={open}
@@ -316,7 +316,7 @@ export function HarnessSwitch({ summary }: { summary: ThreadSummary }) {
     >
       {({ close }) => (
         <div className="q-tctrl">
-          <div className="q-tctrl-head">Switch harness</div>
+          <div className="q-tctrl-head">{t("harnessSwitch.title")}</div>
           <SwitchPanel summary={summary} onClose={close} />
         </div>
       )}
@@ -339,6 +339,7 @@ export function HarnessSwitchSheet({
   summary: ThreadSummary;
   onClose: () => void;
 }) {
+  const { t } = useTranslation(["thread", "common"]);
   const isPhone = useIsPhone();
   const sheet = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
@@ -362,7 +363,7 @@ export function HarnessSwitchSheet({
       <button
         type="button"
         className={isPhone ? "q-ph-scrim" : "q-switch-scrim"}
-        aria-label="Close switch harness"
+        aria-label={t("harnessSwitch.close")}
         onClick={onClose}
       />
       <div
@@ -370,14 +371,14 @@ export function HarnessSwitchSheet({
         className={isPhone ? "q-ph-sheet q-switch-sheet" : "q-switch-dialog"}
         role="dialog"
         aria-modal="true"
-        aria-label="Switch harness"
+        aria-label={t("harnessSwitch.title")}
         tabIndex={-1}
       >
         {isPhone ? <div className="q-grab" /> : null}
         <div className="q-switch-head">
-          <span className="q-tctrl-head">Switch harness</span>
+          <span className="q-tctrl-head">{t("harnessSwitch.title")}</span>
           <button type="button" className="q-btn ghost" onClick={onClose}>
-            Done
+            {t("common:done")}
           </button>
         </div>
         <SwitchPanel summary={summary} onClose={onClose} />

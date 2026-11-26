@@ -36,7 +36,7 @@
       "inbox": "Ir a los hilos",
       "pulls": "Ir a los pull requests",
       "issues": "Ir a los issues",
-      "usage": "Ir a Uso",
+      "usage": "Ir al uso",
       "tools": "Ir a los servidores MCP y skills"
     },
     "tab": {
@@ -114,13 +114,13 @@
     }
   },
   "shortcutsDialog": {
-    "description": "Cada comando es Cmd o Ctrl más una tecla, así que escribir nunca lo activa. Cámbialos en <settings>Ajustes → Atajos</settings>.",
+    "description": "Los comandos son Cmd o Ctrl más una tecla, así que escribir nunca activa uno. La excepción, editar el último mensaje en cola, solo actúa con el cursor al principio del compositor. Cámbialos en <settings>Ajustes → Atajos</settings>.",
     "whileTyping": "Mientras escribes",
     "typing": {
       "send": "Enviar",
       "newLine": "Nueva línea",
       "recall": "Recuperar un prompt anterior",
-      "forward": "Avanzar por los prompts",
+      "forward": "Recuperar un prompt más reciente",
       "mention": "Mencionar un archivo",
       "command": "Ejecutar un comando",
       "moveMenu": "Moverse por el menú @ o /",

@@ -1,10 +1,12 @@
 import { CheckIcon, ChevronRightIcon } from "lucide-react";
 import { useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { AgentGlyph } from "@/components/agent/AgentGlyph";
 import type { ToolCall } from "@/gen";
 import { glyphForToolStatus } from "@/lib/agent";
-import { duration, toolStatsLabel } from "@/lib/format";
+import { toolStatsLabel } from "@/lib/format";
+import { formatDuration } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 
 function stringify(value: unknown): string {
@@ -23,6 +25,7 @@ function verbOf(name: string): string {
 }
 
 export function ToolCard({ toolCall }: { toolCall: ToolCall }) {
+  const { t } = useTranslation("thread");
   const [open, setOpen] = useState(false);
   const glyph = glyphForToolStatus(toolCall.status);
   const elapsed = toolCall.completed_at
@@ -49,7 +52,11 @@ export function ToolCard({ toolCall }: { toolCall: ToolCall }) {
           {toolCall.status === "completed" ? (
             // A finished call is a quiet tick. The circled check is the
             // thread's "done" glyph and must not be read as one.
-            <CheckIcon className="q-icon s14 q-tool-ok" strokeWidth={1.5} aria-label="Completed" />
+            <CheckIcon
+              className="q-icon s14 q-tool-ok"
+              strokeWidth={1.5}
+              aria-label={t("glyph.completed")}
+            />
           ) : (
             <AgentGlyph glyph={glyph} size={14} />
           )}
@@ -67,11 +74,11 @@ export function ToolCard({ toolCall }: { toolCall: ToolCall }) {
           ) : null}
           {stats && slow ? " · " : null}
           {slow
-            ? duration(elapsed)
+            ? formatDuration(elapsed)
             : !stats && elapsed !== null && !failed
               ? ""
               : !stats
-                ? toolCall.status
+                ? t(`tool.status.${toolCall.status}`)
                 : null}
         </span>
         <ChevronRightIcon className="q-icon s14 chev" strokeWidth={1.5} aria-hidden />

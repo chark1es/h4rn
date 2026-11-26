@@ -164,6 +164,22 @@ describe("command palette in another language", () => {
     expect(rows()[0]).toContain("スレッドを整理");
   });
 
+  it("ends a row that opens a dialog in an ellipsis, not the shared command name", async () => {
+    await act(() => setLocalePreference("ja"));
+    renderPalette();
+
+    expect(screen.getByText("新しいスレッド…")).toBeTruthy();
+    expect(screen.getByText("ゲストと共有…")).toBeTruthy();
+    // Settings → Shortcuts lists the same name without it.
+    expect(commandName("thread.new")).toBe("新しいスレッド");
+
+    search("shortcuts");
+    expect(screen.getByText(`${commandName("shortcuts.open")}…`)).toBeTruthy();
+    // A row that acts at once has none.
+    search("settle");
+    expect(screen.getByText("スレッドを整理")).toBeTruthy();
+  });
+
   it("keeps keyboard hints the same in every language", async () => {
     await act(() => setLocalePreference("ja"));
     renderPalette();

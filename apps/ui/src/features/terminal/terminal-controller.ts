@@ -16,6 +16,7 @@ import {
 } from "@/lib/client/binary";
 import type { H4rnClient } from "@/lib/client/client";
 import { H4rnRequestError } from "@/lib/client/errors";
+import { i18n } from "@/lib/i18n";
 import type { TerminalQueryReply } from "./terminal-reply";
 import { registerTerminalQueryHooks, TerminalQueryTracker } from "./terminal-reply";
 import { isDarkTheme, terminalTheme } from "./theme";
@@ -86,8 +87,8 @@ export class TerminalController {
     if (options.client.getSnapshot().status !== "online") {
       this.emit({
         phase: "offline",
-        message: "The daemon is offline.",
-        hint: "Reconnect in the status bar; this terminal opens when the daemon is back.",
+        message: i18n.t("thread:terminal.daemonOffline"),
+        hint: i18n.t("thread:terminal.offlineHint"),
       });
       return;
     }
@@ -326,7 +327,9 @@ export class TerminalController {
         this.term?.write(`\r\n\u001b[38;5;244m[process exited with ${suffix}]\u001b[0m\r\n`);
         this.emit({
           phase: "exited",
-          message: exit.signal ? `Exited on ${exit.signal}.` : `Exited with status ${exit.status}.`,
+          message: exit.signal
+            ? i18n.t("thread:terminal.exitedSignal", { signal: exit.signal })
+            : i18n.t("thread:terminal.exitedStatus", { status: exit.status }),
           exit,
         });
       }),
@@ -467,16 +470,16 @@ export class TerminalController {
       this.emit({
         phase: "error",
         message:
-          proto?.message ?? (error instanceof Error ? error.message : "The terminal failed."),
-        hint:
-          proto?.hint ?? "Check that the working directory exists and the daemon is still running.",
+          proto?.message ??
+          (error instanceof Error ? error.message : i18n.t("thread:terminal.failed")),
+        hint: proto?.hint ?? i18n.t("thread:terminal.failedHint"),
       });
       return;
     }
     this.emit({
       phase: "error",
-      message: proto?.message ?? "The terminal stream failed.",
-      hint: proto?.hint ?? "Close this tab and open a new terminal.",
+      message: proto?.message ?? i18n.t("thread:terminal.streamFailed"),
+      hint: proto?.hint ?? i18n.t("thread:terminal.closeHint"),
     });
   }
 

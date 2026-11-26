@@ -23,7 +23,7 @@ describe("Keyboard shortcuts dialog", () => {
     renderDialog();
     const link = screen.getByRole("button", { name: "Settings → Shortcuts" });
     expect(link.closest("[data-slot='dialog-description']")?.textContent).toBe(
-      "Every command is Cmd or Ctrl plus a key, so typing never triggers one. Change any of them in Settings → Shortcuts.",
+      "Commands are Cmd or Ctrl plus a key, so typing never triggers one. The exception, editing the newest queued message, acts only at the very start of the composer. Change any of them in Settings → Shortcuts.",
     );
     fireEvent.click(link);
     expect(getState().ui.shortcutsOpen).toBe(false);

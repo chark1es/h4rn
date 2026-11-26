@@ -69,8 +69,8 @@
       "hint": "编辑 {{project}}"
     },
     "newThread": {
-      "label": "新对话",
-      "hint": "在 {{project}} 中开始一个"
+      "label": "新建对话",
+      "hint": "在 {{project}} 中开始新对话"
     }
   },
   "controls": {

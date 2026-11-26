@@ -1654,20 +1654,20 @@ export function rewindRefusal(
   log: ThreadLog | undefined,
   queued?: QueuedMessage[] | undefined,
 ): string | null {
-  if (!summary) return "The thread is not loaded yet.";
+  if (!summary) return i18n.t("thread:rewind.notLoaded");
   if (summary.rewind === "unsupported") {
-    return `${harnessName(summary.harness)} cannot drop turns from its own history.`;
+    return i18n.t("thread:rewind.unsupported", { harness: harnessName(summary.harness) });
   }
   if (summary.agent_state === "awaiting_approval" || pendingApprovalIn(log)) {
-    return "Answer the pending approval first.";
+    return i18n.t("thread:rewind.approval");
   }
   // A message the daemon is unsure it delivered may already be in the
   // provider conversation, and the rewind would remove the turn that holds it.
   if (queued?.some((message) => message.delivery_unknown)) {
-    return "A message may have reached the agent. Resend or discard it first.";
+    return i18n.t("thread:rewind.delivery");
   }
   if (summary.agent_state === "queued") {
-    return "A message is waiting to run. Let it finish first.";
+    return i18n.t("thread:rewind.queued");
   }
   if (
     summary.agent_state === "thinking" ||
@@ -1676,12 +1676,12 @@ export function rewindRefusal(
     summary.agent_state === "editing" ||
     summary.agent_state === "running_tool"
   ) {
-    return "Wait for the current turn to finish, or stop it first.";
+    return i18n.t("thread:rewind.running");
   }
   // Only a real armed resume blocks the edit. A cancelled resume can leave the
   // thread's last state saying "rate_limited" with nothing scheduled.
   if (summary.resume_at != null || summary.agent_state === "scheduled") {
-    return "Cancel the automatic resume first.";
+    return i18n.t("thread:rewind.resume");
   }
   return null;
 }
