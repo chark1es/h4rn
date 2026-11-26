@@ -1429,6 +1429,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use h4rn_protocol::AttachmentId;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::*;
 
@@ -1501,6 +1502,166 @@ mod tests {
         assert_eq!(
             config_content_for(&spec),
             "{\"model\":\"cliproxy/x\"}".to_string()
+        );
+    }
+
+    /// One HTTP request the adapter sent to the fake OpenCode server.
+    struct CapturedRequest {
+        method: String,
+        path: String,
+        authorization: Option<String>,
+        body: Value,
+    }
+
+    /// Stands in for `opencode serve`: answers one request and returns it.
+    async fn one_request_server() -> (String, tokio::task::JoinHandle<CapturedRequest>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind a loopback port");
+        let address = listener.local_addr().expect("the bound address");
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept a request");
+            let mut buffer = Vec::new();
+            let mut chunk = [0u8; 4096];
+            loop {
+                let read = socket.read(&mut chunk).await.expect("read the request");
+                assert!(read > 0, "the request ended before its headers");
+                buffer.extend_from_slice(&chunk[..read]);
+                let Some(end) = buffer.windows(4).position(|window| window == b"\r\n\r\n") else {
+                    continue;
+                };
+                let headers = String::from_utf8_lossy(&buffer[..end]).to_string();
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().ok())?
+                    })
+                    .unwrap_or(0);
+                while buffer.len() < end + 4 + content_length {
+                    let read = socket.read(&mut chunk).await.expect("read the body");
+                    assert!(read > 0, "the request ended before its body");
+                    buffer.extend_from_slice(&chunk[..read]);
+                }
+                let mut lines = headers.lines();
+                let request_line = lines.next().unwrap_or_default().to_string();
+                let mut parts = request_line.split_whitespace();
+                let method = parts.next().unwrap_or_default().to_string();
+                let path = parts.next().unwrap_or_default().to_string();
+                let authorization = lines.find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("authorization")
+                        .then(|| value.trim().to_string())
+                });
+                socket
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}",
+                    )
+                    .await
+                    .expect("answer the request");
+                let body = String::from_utf8_lossy(&buffer[end + 4..]).to_string();
+                return CapturedRequest {
+                    method,
+                    path,
+                    authorization,
+                    body: serde_json::from_str(&body).unwrap_or(Value::Null),
+                };
+            }
+        });
+        (format!("http://{address}"), server)
+    }
+
+    /// A live session pointed at a fake server, already on a session id.
+    fn test_session(base_url: String) -> OpenCodeSession {
+        let parser = Arc::new(Mutex::new(OpenCodeParser::new()));
+        assert!(lock(&parser).adopt_session("ses_test"));
+        OpenCodeSession {
+            kind: HarnessKind::Opencode,
+            http: reqwest::Client::new(),
+            base_url,
+            password: "test-password".into(),
+            pid: 0,
+            parser,
+            events_rx: None,
+            sse_task: None,
+            supervisor: None,
+            stderr: StderrRing::new(),
+            shutting_down: Arc::new(AtomicBool::new(false)),
+            first_attachments: Vec::new(),
+            first_send: true,
+            closed: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn the_permission_switch_patches_the_sessions_ruleset() {
+        let (base_url, server) = one_request_server().await;
+        let mut session = test_session(base_url);
+        session
+            .set_runtime_mode(RuntimeMode::AutoAcceptEdits)
+            .await
+            .expect("switch the permission mode");
+        let request = server.await.expect("the fake server");
+
+        assert_eq!(request.method, "PATCH");
+        assert_eq!(request.path, "/api/session/ses_test");
+        let expected = format!(
+            "Basic {}",
+            base64::engine::general_purpose::STANDARD
+                .encode(format!("{}:{}", "opencode", "test-password"))
+        );
+        assert_eq!(request.authorization.as_deref(), Some(expected.as_str()));
+        assert_eq!(
+            request.body,
+            json!({ "permissions": permissions_for(RuntimeMode::AutoAcceptEdits) }),
+            "the switch sends the new ruleset for this mode, nothing else"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_model_switch_posts_the_provider_and_model() {
+        let (base_url, server) = one_request_server().await;
+        let mut session = test_session(base_url);
+        session
+            .set_model("cliproxy/deepseek-v4.1-flash")
+            .await
+            .expect("switch the model");
+        let request = server.await.expect("the fake server");
+
+        assert_eq!(request.method, "POST");
+        assert_eq!(request.path, "/api/session/ses_test/model");
+        assert_eq!(
+            request.body,
+            json!({
+                "model": {
+                    "id": "deepseek-v4.1-flash",
+                    "providerID": "cliproxy",
+                },
+            }),
+            "OpenCode takes the provider and the model id, split at the first slash"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_model_switch_keeps_a_slash_inside_the_model_id() {
+        let (base_url, server) = one_request_server().await;
+        let mut session = test_session(base_url);
+        session
+            .set_model("synthetic/hf:deepseek-ai/DeepSeek-V4.1-Flash")
+            .await
+            .expect("switch the model");
+        let request = server.await.expect("the fake server");
+
+        assert_eq!(request.path, "/api/session/ses_test/model");
+        assert_eq!(
+            request.body,
+            json!({
+                "model": {
+                    "id": "hf:deepseek-ai/DeepSeek-V4.1-Flash",
+                    "providerID": "synthetic",
+                },
+            })
         );
     }
 

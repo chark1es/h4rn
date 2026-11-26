@@ -7,6 +7,8 @@
 //! module is the one place that says which harness offers which control, so the
 //! daemon and the UI never offer a switch a harness cannot honour.
 
+use std::collections::BTreeMap;
+
 use h4rn_protocol::{HarnessKind, RuntimeMode};
 
 /// The effort values Claude Code's `--effort` flag accepts.
@@ -186,8 +188,21 @@ pub struct SessionControls {
     /// Reasoning-effort values the session advertised; empty when it has no
     /// real effort control.
     pub efforts: Vec<String>,
-    /// Whether the session advertised a fast tier.
-    pub fast: bool,
+    /// Whether the session's current model offers a fast tier, when known.
+    ///
+    /// `None` is the honest answer when the catalogue names no entry for the
+    /// model (a CLI that dropped it) or the adapter has no such catalogue: the
+    /// tier is unknown, so the row is not offered and a request is not refused
+    /// on a guess.
+    pub fast: Option<bool>,
+    /// Which advertised models the catalogue says offer a fast tier.
+    ///
+    /// A catalogue that names every model's options (Codex's `model/list`)
+    /// answers for each one, not only the model the session runs. The daemon
+    /// keeps these answers beside the model list, so a thread switched to
+    /// another model while no session is live still knows whether that model
+    /// has a tier instead of guessing from the harness.
+    pub fast_by_model: BTreeMap<String, bool>,
     /// Whether this session can switch its permission mode in place.
     pub switch_mode: bool,
     /// Whether this session can switch its model in place.
@@ -208,7 +223,8 @@ impl Default for SessionControls {
             current_model: None,
             default_models: Vec::new(),
             efforts: Vec::new(),
-            fast: false,
+            fast: None,
+            fast_by_model: BTreeMap::new(),
             switch_mode: false,
             switch_model: false,
             switch_effort: false,
