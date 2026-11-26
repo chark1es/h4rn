@@ -18,12 +18,14 @@
 //! are tested without a database or a network.
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::Arc;
+use std::panic::AssertUnwindSafe;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
+use futures::FutureExt as _;
 use h4rn_protocol::{AgentActivity, AgentAlertState};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, mpsc, oneshot};
 use uuid::Uuid;
 
 use crate::apns::ApnsClient;
@@ -48,6 +50,11 @@ pub struct PushAlert {
     /// instead of one thread, and the phone never treats the group as an alert
     /// for whichever thread happens to be on screen.
     pub thread_id: String,
+    /// Project name from the record, or empty for a grouped alert.
+    ///
+    /// Android composes a Live Update's text itself, so it needs the project
+    /// on its own rather than folded into the alert body (ADR-053).
+    pub project: String,
     /// Number of threads represented.
     pub count: usize,
 }
@@ -61,6 +68,7 @@ impl PushAlert {
             ("thread_id".to_string(), self.thread_id.clone()),
             ("title".to_string(), self.title.clone()),
             ("body".to_string(), self.body.clone()),
+            ("project".to_string(), self.project.clone()),
             ("count".to_string(), self.count.to_string()),
         ])
     }
@@ -94,6 +102,15 @@ fn clean(value: &str, fallback: &str) -> String {
 fn single(activity: &AgentActivity, project: &str) -> PushAlert {
     let title = clean(&activity.thread_title, "A thread");
     let body = match activity.state {
+        // Only Android shows this state, as the ongoing Live Update's first
+        // frame; the words are what the phone displays while the turn runs.
+        AgentAlertState::Working => {
+            if project.is_empty() {
+                "Working".to_string()
+            } else {
+                format!("{project} · Working")
+            }
+        }
         AgentAlertState::Completed => {
             if project.is_empty() {
                 "Finished".to_string()
@@ -117,6 +134,7 @@ fn single(activity: &AgentActivity, project: &str) -> PushAlert {
         body,
         state: activity.state,
         thread_id: activity.thread_id.to_string(),
+        project: project.to_string(),
         count: 1,
     }
 }
@@ -176,6 +194,7 @@ fn grouped(activities: &[AgentActivity]) -> PushAlert {
         // Naming the first thread would let a phone that has that thread open
         // drop the whole group, losing the other threads' alerts.
         thread_id: String::new(),
+        project: String::new(),
         count,
     }
 }
@@ -205,7 +224,12 @@ fn latest_per_thread(activities: &[AgentActivity]) -> Vec<AgentActivity> {
 /// window. A group of one keeps that thread's own title and link, and a thread
 /// that raised several transitions contributes only its latest one.
 pub fn group_activities(activities: &[AgentActivity]) -> Vec<PushAlert> {
-    let activities = latest_per_thread(activities);
+    // `working` is an ongoing update per thread, never part of an alert group:
+    // counting a turn that just started as "finished" would be wrong.
+    let activities: Vec<AgentActivity> = latest_per_thread(activities)
+        .into_iter()
+        .filter(|activity| activity.state != AgentAlertState::Working)
+        .collect();
     let mut attention: Vec<AgentActivity> = Vec::new();
     let mut finished: Vec<AgentActivity> = Vec::new();
     for activity in &activities {
@@ -251,9 +275,72 @@ impl PendingGroup {
     }
 }
 
+/// Takes the account's collecting group when it holds this thread.
+///
+/// The whole group goes out early rather than only the thread's entry, so an
+/// iPhone still gets the finish (it has no Live Update to protect) and the
+/// other threads in the group are not split into a second alert.
+fn take_group_with(
+    pending: &mut HashMap<Uuid, PendingGroup>,
+    user_id: Uuid,
+    activity: &AgentActivity,
+) -> Option<Vec<AgentActivity>> {
+    let holds_thread = pending.get(&user_id).is_some_and(|group| {
+        group
+            .activities
+            .iter()
+            .any(|queued| queued.thread_id == activity.thread_id)
+    });
+    if !holds_thread {
+        return None;
+    }
+    pending.remove(&user_id).map(|group| group.activities)
+}
+
 /// The platform a stored device row is for (ADR-052).
 pub fn device_platform(device: &PushDeviceRow) -> PushPlatform {
     PushPlatform::parse(Some(device.platform.as_str()))
+}
+
+/// The first phone app release that shows a `working` frame as a Live Update.
+///
+/// Older Android builds have no Live Update code and would show "Working" as an
+/// ordinary alert on every turn start, so a row registered by one is never sent
+/// that state. The comparison is on the numeric release only, so a pre-release
+/// of this version counts (ADR-053).
+pub const LIVE_UPDATES_MIN_APP_VERSION: (u64, u64, u64) = (1, 0, 2);
+
+/// The numeric `major.minor.patch` of a registered app version, if it has one.
+fn release_triple(version: &str) -> Option<(u64, u64, u64)> {
+    let core = version
+        .trim()
+        .trim_start_matches('v')
+        .split(['-', '+'])
+        .next()?;
+    let mut parts = core.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    let patch = parts.next()?.parse().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some((major, minor, patch))
+}
+
+/// Whether this phone may be sent a turn-start (`working`) frame.
+///
+/// Only an Android app new enough to render it as an ongoing Live Update gets
+/// one. A row with no version, or one that cannot be read, is treated as an
+/// older build: a missed Live Update is quiet, a stray alert is not.
+pub fn device_shows_live_updates(device: &PushDeviceRow) -> bool {
+    if device_platform(device) != PushPlatform::Android {
+        return false;
+    }
+    device
+        .app_version
+        .as_deref()
+        .and_then(release_triple)
+        .is_some_and(|version| version >= LIVE_UPDATES_MIN_APP_VERSION)
 }
 
 /// Whether this relay has a sender for that platform.
@@ -267,6 +354,34 @@ pub fn platform_has_sender(platform: PushPlatform, fcm: bool, apns: bool) -> boo
     }
 }
 
+/// One piece of work for an account's delivery worker.
+///
+/// Every job carries the transitions it sends, taken from the collecting group
+/// when the job was queued. A job never reads `pending` when it runs: a worker
+/// can be behind a slow push provider, and by then `pending` may hold
+/// transitions Connect saw after jobs still waiting in the queue. Sending one of
+/// those early would put a turn's finish ahead of its own turn-start update and
+/// leave a stale "Working" entry on the phone (ADR-053).
+enum DeliveryJob {
+    /// Send a group of transitions.
+    ///
+    /// `done` is signalled once the group (and every job queued before it) has
+    /// been delivered, so a caller can wait for the queue to drain.
+    Flush {
+        activities: Vec<AgentActivity>,
+        done: Option<oneshot::Sender<()>>,
+    },
+    /// Send one turn-start update, after the collecting group that held the
+    /// same thread when the update arrived.
+    Working {
+        activity: AgentActivity,
+        before: Option<Vec<AgentActivity>>,
+    },
+    /// A job that panics, so a test can prove the worker outlives it.
+    #[cfg(test)]
+    Panic,
+}
+
 /// The relay-side alert service.
 pub struct AlertService {
     store: Store,
@@ -278,6 +393,16 @@ pub struct AlertService {
     /// calls `flush` itself turns this off.
     auto_flush: bool,
     pending: Mutex<HashMap<Uuid, PendingGroup>>,
+    /// Each account's delivery worker, while it has work.
+    ///
+    /// A worker drains its queue in arrival order, so a deferred group and a
+    /// turn-start update for the same thread reach the phone in the order
+    /// Connect saw them: the finish of a turn sent after the next turn's
+    /// `working` frame would replace the ongoing entry while the agent is still
+    /// running (ADR-053). Senders only enqueue, so nothing on the relay loop
+    /// waits for FCM or APNs. A worker removes its own entry once its queue is
+    /// empty, so the map holds only accounts with deliveries in flight.
+    workers: StdMutex<HashMap<Uuid, mpsc::UnboundedSender<DeliveryJob>>>,
     /// How many transitions reached `ingest`, so a relay test can prove a
     /// gated frame never got this far.
     #[cfg(test)]
@@ -301,6 +426,7 @@ impl AlertService {
             max_age,
             auto_flush: true,
             pending: Mutex::new(HashMap::new()),
+            workers: StdMutex::new(HashMap::new()),
             #[cfg(test)]
             ingested: std::sync::atomic::AtomicUsize::new(0),
         }
@@ -317,11 +443,13 @@ impl AlertService {
         self
     }
 
-    /// Records one transition and schedules a grouped flush.
+    /// Records one transition and queues its delivery.
     ///
-    /// Runs after the sender is dropped as a fire-and-forget task; callers on
-    /// the relay loop never wait for FCM. The baseline is written first, so a
-    /// duplicate published while the group is still collecting is dropped.
+    /// The relay's read loop awaits this, so it only writes the baseline and
+    /// enqueues: FCM and APNs are called from the account's delivery worker,
+    /// and a slow push provider never stops Connect reading a machine's socket.
+    /// The baseline is written first, so a duplicate published while the group
+    /// is still collecting is dropped.
     pub async fn ingest(self: &Arc<Self>, user_id: Uuid, activity: AgentActivity) {
         #[cfg(test)]
         self.ingested
@@ -349,6 +477,23 @@ impl AlertService {
         if !self.fcm.configured() && !self.apns.configured() {
             return;
         }
+        // A turn that started is an ongoing Live Update for its own thread on
+        // Android, not an alert to group with finishing ones (ADR-053). The
+        // claimed transition above already makes a replay of this frame a
+        // no-op, so each state change updates the phone at most once.
+        if activity.state == AgentAlertState::Working {
+            // A queued message starts its turn the moment the previous one
+            // finishes, so that finish is usually still waiting out the group
+            // window. It goes out first, in the same job: delivered later, it
+            // would reuse the thread's notification and replace the new turn's
+            // Live Update. Only what is collecting now goes with it; a finish
+            // that arrives after this frame stays for its own flush. The job is
+            // queued under the same lock, so no flush can slip in between.
+            let mut pending = self.pending.lock().await;
+            let before = take_group_with(&mut pending, user_id, &activity);
+            self.enqueue(user_id, DeliveryJob::Working { activity, before });
+            return;
+        }
         let schedule = {
             let mut pending = self.pending.lock().await;
             pending
@@ -361,23 +506,135 @@ impl AlertService {
             let window = self.group_window;
             tokio::spawn(async move {
                 tokio::time::sleep(window).await;
-                service.flush(user_id).await;
+                service.queue_flush(user_id, None).await;
             });
         }
     }
 
-    /// Sends the alerts for everything collected for one user.
+    /// Takes the collecting group and queues it, under the `pending` lock.
+    ///
+    /// Queuing under the lock keeps the queue in the order Connect saw the
+    /// transitions: a turn-start that takes the group with it is queued under
+    /// the same lock.
+    async fn queue_flush(self: &Arc<Self>, user_id: Uuid, done: Option<oneshot::Sender<()>>) {
+        let mut pending = self.pending.lock().await;
+        let activities = pending
+            .remove(&user_id)
+            .map(|group| group.activities)
+            .unwrap_or_default();
+        if activities.is_empty() && done.is_none() {
+            // A turn-start already took this window's group with it.
+            return;
+        }
+        self.enqueue(user_id, DeliveryJob::Flush { activities, done });
+    }
+
+    /// Sends the collecting group now and waits until the account's queue,
+    /// including everything enqueued before this call, has been delivered.
     ///
     /// Public so tests can drain without waiting for the window.
-    pub async fn flush(&self, user_id: Uuid) {
-        let activities = {
-            let mut pending = self.pending.lock().await;
-            match pending.remove(&user_id) {
-                Some(group) => group.activities,
-                None => return,
-            }
+    pub async fn flush(self: &Arc<Self>, user_id: Uuid) {
+        let (done, finished) = oneshot::channel();
+        self.queue_flush(user_id, Some(done)).await;
+        let _ = finished.await;
+    }
+
+    /// Hands a job to the account's delivery worker, starting one if needed.
+    ///
+    /// The send happens under the map lock, and a worker only removes itself
+    /// under the same lock after finding its queue empty, so a job is never
+    /// left in a queue nobody drains.
+    fn enqueue(self: &Arc<Self>, user_id: Uuid, job: DeliveryJob) {
+        let mut workers = self
+            .workers
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let job = match workers.get(&user_id) {
+            Some(sender) => match sender.send(job) {
+                Ok(()) => return,
+                // The worker stopped without removing itself (its task was
+                // aborted); start a fresh one below.
+                Err(mpsc::error::SendError(job)) => job,
+            },
+            None => job,
         };
-        let alerts = group_activities(&activities);
+        let (sender, receiver) = mpsc::unbounded_channel();
+        // A new channel's receiver is alive, so this send cannot fail.
+        let _ = sender.send(job);
+        workers.insert(user_id, sender);
+        drop(workers);
+        let service = Arc::clone(self);
+        tokio::spawn(async move { service.run_worker(user_id, receiver).await });
+    }
+
+    /// Drains one account's queue in order, then removes its own entry.
+    ///
+    /// While this worker holds its receiver, a send to its entry cannot fail,
+    /// so no other worker can have replaced it: the entry it removes is its own.
+    async fn run_worker(&self, user_id: Uuid, mut queue: mpsc::UnboundedReceiver<DeliveryJob>) {
+        loop {
+            let job = {
+                let mut workers = self
+                    .workers
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner());
+                match queue.try_recv() {
+                    Ok(job) => job,
+                    Err(_) => {
+                        workers.remove(&user_id);
+                        return;
+                    }
+                }
+            };
+            // A panic in one delivery must not end the worker: the jobs
+            // queued behind it would sit in a channel nobody drains.
+            if let Err(panic) = AssertUnwindSafe(self.run_job(user_id, job))
+                .catch_unwind()
+                .await
+            {
+                let message = panic
+                    .downcast_ref::<&str>()
+                    .map(|text| (*text).to_string())
+                    .or_else(|| panic.downcast_ref::<String>().cloned())
+                    .unwrap_or_default();
+                tracing::error!(%user_id, panic = %message, "a push delivery panicked");
+            }
+        }
+    }
+
+    async fn run_job(&self, user_id: Uuid, job: DeliveryJob) {
+        match job {
+            DeliveryJob::Flush { activities, done } => {
+                if !activities.is_empty() {
+                    self.deliver_group(user_id, &activities).await;
+                }
+                if let Some(done) = done {
+                    let _ = done.send(());
+                }
+            }
+            DeliveryJob::Working { activity, before } => {
+                if let Some(activities) = before {
+                    self.deliver_group(user_id, &activities).await;
+                }
+                self.deliver_working(user_id, &activity).await;
+            }
+            #[cfg(test)]
+            DeliveryJob::Panic => panic!("a test delivery panicked"),
+        }
+    }
+
+    /// Whether the account has a delivery worker, that is, deliveries queued
+    /// or in flight. An idle account has no entry.
+    pub fn delivery_in_flight(&self, user_id: Uuid) -> bool {
+        self.workers
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .contains_key(&user_id)
+    }
+
+    /// Sends the alerts a batch of transitions deserves to every phone.
+    async fn deliver_group(&self, user_id: Uuid, activities: &[AgentActivity]) {
+        let alerts = group_activities(activities);
         if alerts.is_empty() {
             return;
         }
@@ -389,45 +646,72 @@ impl AlertService {
             }
         };
         for alert in alerts {
-            let data = alert.data();
             for device in &devices {
-                let platform = device_platform(device);
-                if !platform_has_sender(platform, self.fcm.configured(), self.apns.configured()) {
-                    // This phone's platform has no sender on this relay. The
-                    // other platform's phones still get their alert.
-                    continue;
+                self.send_to(device, &alert).await;
+            }
+        }
+    }
+
+    /// Sends one turn-start update to this account's Android phones.
+    ///
+    /// iOS has no Live Update equivalent here, so an iPhone is not sent this
+    /// record at all: its `working` state would otherwise become a visible
+    /// alert for a turn that has not finished. An Android build older than
+    /// [`LIVE_UPDATES_MIN_APP_VERSION`] is skipped for the same reason
+    /// (ADR-053).
+    async fn deliver_working(&self, user_id: Uuid, activity: &AgentActivity) {
+        if !self.fcm.configured() {
+            return;
+        }
+        let alert = single(activity, &activity.project_name);
+        let devices = match self.store.push_devices(user_id).await {
+            Ok(devices) => devices,
+            Err(error) => {
+                tracing::warn!(%error, "could not list push devices");
+                return;
+            }
+        };
+        for device in &devices {
+            if !device_shows_live_updates(device) {
+                continue;
+            }
+            self.send_to(device, &alert).await;
+        }
+    }
+
+    /// Delivers one alert to one phone over its own platform's transport.
+    async fn send_to(&self, device: &PushDeviceRow, alert: &PushAlert) {
+        let platform = device_platform(device);
+        if !platform_has_sender(platform, self.fcm.configured(), self.apns.configured()) {
+            // This phone's platform has no sender on this relay. The other
+            // platform's phones still get their alert.
+            return;
+        }
+        let message = PushMessage {
+            token: &device.token,
+            platform,
+            package_name: device.package_name.as_deref(),
+            data: alert.data(),
+        };
+        let result = match platform {
+            PushPlatform::Android => self.fcm.send(&message).await,
+            PushPlatform::Ios => self.apns.send(message.token, &message.apns_payload()).await,
+        };
+        match result {
+            Ok(()) => {}
+            Err(SendError::Unregistered) => {
+                if let Err(error) = self.store.delete_push_device_by_token(&device.token).await {
+                    tracing::warn!(%error, "could not delete an unregistered token");
                 }
-                let message = PushMessage {
-                    token: &device.token,
-                    platform,
-                    package_name: device.package_name.as_deref(),
-                    data: data.clone(),
-                };
-                let result = match platform {
-                    PushPlatform::Android => self.fcm.send(&message).await,
-                    PushPlatform::Ios => {
-                        self.apns.send(message.token, &message.apns_payload()).await
-                    }
-                };
-                match result {
-                    Ok(()) => {}
-                    Err(SendError::Unregistered) => {
-                        if let Err(error) =
-                            self.store.delete_push_device_by_token(&device.token).await
-                        {
-                            tracing::warn!(%error, "could not delete an unregistered token");
-                        }
-                    }
-                    Err(SendError::Disabled) => continue,
-                    Err(SendError::Failed(error)) => {
-                        tracing::warn!(
-                            %error,
-                            device = %device.id,
-                            platform = platform.as_str(),
-                            "push delivery failed"
-                        );
-                    }
-                }
+            }
+            Err(SendError::Disabled) => {}
+            Err(SendError::Failed(error)) => {
+                tracing::warn!(
+                    %error,
+                    device = %device.id,
+                    platform = platform.as_str(),
+                    "push delivery failed"
+                );
             }
         }
     }
@@ -480,6 +764,34 @@ mod tests {
         assert!(platform_has_sender(PushPlatform::Ios, false, true));
         assert!(!platform_has_sender(PushPlatform::Android, false, true));
         assert!(!platform_has_sender(PushPlatform::Ios, false, false));
+    }
+
+    fn device_at(platform: &str, version: Option<&str>) -> PushDeviceRow {
+        PushDeviceRow {
+            app_version: version.map(str::to_string),
+            ..device(platform)
+        }
+    }
+
+    #[test]
+    fn only_a_new_enough_android_app_is_sent_a_working_frame() {
+        let live = |platform: &str, version: Option<&str>| {
+            device_shows_live_updates(&device_at(platform, version))
+        };
+        assert!(live("android", Some("1.0.2")));
+        assert!(live("android", Some("1.1.0")));
+        assert!(live("android", Some("2.0.0")));
+        assert!(live("android", Some("1.0.2-rc.1")));
+        // Builds without Live Updates would show "Working" as an alert.
+        assert!(!live("android", Some("1.0.1")));
+        assert!(!live("android", Some("0.9.9")));
+        // No version, or an unreadable one, is an older build.
+        assert!(!live("android", None));
+        assert!(!live("android", Some("")));
+        assert!(!live("android", Some("dev")));
+        assert!(!live("android", Some("1.2")));
+        // An iPhone has no Live Update, whatever its version.
+        assert!(!live("ios", Some("9.9.9")));
     }
 
     #[test]
@@ -645,9 +957,80 @@ mod tests {
         let keys: Vec<&str> = data.keys().map(String::as_str).collect();
         assert_eq!(
             keys,
-            vec!["body", "count", "h4rn_alert", "state", "thread_id", "title"]
+            vec![
+                "body",
+                "count",
+                "h4rn_alert",
+                "project",
+                "state",
+                "thread_id",
+                "title"
+            ]
         );
         assert_eq!(data["h4rn_alert"], "agent");
         assert_eq!(data["state"], "completed");
+        assert_eq!(data["project"], "proj");
+    }
+
+    #[test]
+    fn a_turn_start_is_a_working_update_for_its_own_thread() {
+        let activity = activity(AgentAlertState::Working, "one");
+        let expected_thread = activity.thread_id.to_string();
+        let alert = single(&activity, "proj");
+        assert_eq!(alert.state, AgentAlertState::Working);
+        assert_eq!(alert.title, "one");
+        assert_eq!(alert.body, "proj · Working");
+        assert_eq!(alert.project, "proj");
+        assert_eq!(alert.thread_id, expected_thread);
+        assert_eq!(alert.data()["state"], "working");
+    }
+
+    #[test]
+    fn a_working_update_is_never_grouped_with_finishing_threads() {
+        let alerts = group_activities(&[
+            activity(AgentAlertState::Working, "one"),
+            activity(AgentAlertState::Completed, "two"),
+        ]);
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(alerts[0].title, "two");
+        assert_eq!(alerts[0].body, "proj · Finished");
+        assert_eq!(alerts[0].count, 1);
+    }
+
+    /// A service whose store never connects; enough for jobs that send nothing.
+    fn offline_service() -> Arc<AlertService> {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy("postgres://h4rn@127.0.0.1:1/h4rn")
+            .expect("a well-formed lazy pool URL");
+        let http = reqwest::Client::new();
+        Arc::new(AlertService::new(
+            Store::from_pool(pool),
+            Arc::new(FcmClient::disabled(http.clone())),
+            Arc::new(ApnsClient::disabled(http)),
+            Duration::from_millis(1),
+            Duration::from_secs(120),
+        ))
+    }
+
+    #[tokio::test]
+    async fn a_panicking_delivery_leaves_the_queue_draining() {
+        let service = offline_service();
+        let user_id = Uuid::now_v7();
+        let (done, finished) = oneshot::channel();
+        // Both land in the same worker's queue before it runs either.
+        service.enqueue(user_id, DeliveryJob::Panic);
+        service.enqueue(
+            user_id,
+            DeliveryJob::Flush {
+                activities: Vec::new(),
+                done: Some(done),
+            },
+        );
+        let delivered = tokio::time::timeout(Duration::from_secs(5), finished).await;
+        assert!(
+            matches!(delivered, Ok(Ok(()))),
+            "the job after a panic was never run"
+        );
     }
 }

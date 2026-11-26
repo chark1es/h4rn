@@ -48,6 +48,10 @@ class MainActivity : TauriActivity() {
     // updates the thread with `push_set_foreground_thread`; this flag says
     // whether the window is really in front.
     H4rnPushState.foreground = true
+    // A Live Update for the thread on screen may have been posted while the
+    // app was in the background; the route did not change, so nothing else
+    // would remove it now that the person is looking at the thread.
+    H4rnPushState.threadId?.let { H4rnLiveNotifications.cancel(this, it) }
   }
 
   override fun onStop() {

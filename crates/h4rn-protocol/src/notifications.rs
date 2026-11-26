@@ -3,11 +3,11 @@
 //! The daemon publishes a small, closed set of state transitions over its
 //! existing relay connection. Connect turns a new transition into an FCM data
 //! message; nothing else about a thread leaves the machine. The payload is
-//! deliberately fixed: a thread id, its title, the project name, one of five
-//! states (`completed`, `failed`, `approval`, `input`, `limit`) and the time,
-//! plus the transition id that tells a replay from a later event — six fields
-//! in all. Message text, tool output, file paths and credentials have no field
-//! to travel in.
+//! deliberately fixed: a thread id, its title, the project name, one of six
+//! states (`working`, `completed`, `failed`, `approval`, `input`, `limit`) and
+//! the time, plus the transition id that tells a replay from a later event —
+//! six fields in all. Message text, tool output, file paths and credentials
+//! have no field to travel in.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -15,10 +15,20 @@ use ts_rs::TS;
 
 use crate::ids::ThreadId;
 
-/// The transitions that are allowed to wake a phone.
+/// The transitions a phone may be told about.
+///
+/// All but `working` are alerts; `working` is Android's ongoing Live Update
+/// and is never sent to an iPhone (ADR-053).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentAlertState {
+    /// A turn started and the agent is working, or waiting for a person.
+    ///
+    /// This is the one state that is not an alert: Android shows it as an
+    /// ongoing Live Update for the thread, and the next finishing state
+    /// replaces that notification (ADR-053). Connect never sends it to iOS,
+    /// which has no Live Update equivalent here.
+    Working,
     /// The turn finished normally and the thread landed in Done.
     Completed,
     /// The turn ended with an error and the thread landed in Done.
@@ -36,6 +46,7 @@ impl AgentAlertState {
     /// Stable spelling used in push data and the delivered baseline.
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Working => "working",
             Self::Completed => "completed",
             Self::Failed => "failed",
             Self::Approval => "approval",
@@ -141,6 +152,15 @@ mod tests {
         // A later completion of the same state is a different one.
         activity.transition = "later".to_string();
         assert_ne!(activity.transition_id(), at.to_rfc3339());
+    }
+
+    #[test]
+    fn working_is_live_only_not_an_alert_or_a_finish() {
+        // Android renders it as an ongoing Live Update; it is neither a
+        // finishing state (no age cutoff) nor an attention hand to group.
+        assert_eq!(AgentAlertState::Working.as_str(), "working");
+        assert!(!AgentAlertState::Working.is_terminal());
+        assert!(!AgentAlertState::Working.needs_attention());
     }
 
     #[test]

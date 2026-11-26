@@ -17,15 +17,18 @@ import {
   type DevicePushPermission,
   deviceAlertsPlatform,
   deviceAlertsShell,
+  nativeCancelStoppedLiveThreads,
   nativePushStatus,
   nativePushToken,
   nativeRequestPushPermission,
+  nativeSetLiveUpdates,
   nativeSetPushEnabled,
   setForegroundThread,
 } from "@/lib/platform/push";
 import { store } from "@/lib/store/appStore";
 
 const ENABLED_KEY = "h4rn.push.deviceAlerts";
+const LIVE_UPDATES_KEY = "h4rn.push.liveUpdates";
 const DEREGISTER_PENDING_KEY = "h4rn.push.deregisterPending";
 const PACKAGE_NAME = "dev.h4rn.app";
 
@@ -102,6 +105,64 @@ export function devicePushEnabled(): boolean {
     return false;
   }
 }
+
+/** Whether this phone can show an ongoing Live Update (Android only). */
+export function deviceLiveUpdatesSupported(): boolean {
+  return deviceAlertsPlatform() === "android";
+}
+
+/**
+ * Whether the Live Updates switch does anything on this phone right now.
+ *
+ * A Live Update is one of this phone's own alerts, so it needs Device
+ * notifications on and allowed; until then the switch is shown but inert.
+ */
+export function deviceLiveUpdatesUsable(device: DeviceAlertsState | null): boolean {
+  return device?.enabled === true && device.permission === "granted";
+}
+
+/** The separate Live Updates switch; off by default. */
+export function deviceLiveUpdatesEnabled(): boolean {
+  try {
+    return window.localStorage.getItem(LIVE_UPDATES_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Saves the Live Updates switch and mirrors it to the notification service.
+ *
+ * The service runs without the WebView, so it reads the persisted flag before
+ * showing a running turn; turning it off also cancels what is showing.
+ */
+export async function setDeviceLiveUpdates(enabled: boolean): Promise<void> {
+  try {
+    if (enabled) window.localStorage.setItem(LIVE_UPDATES_KEY, "1");
+    else window.localStorage.removeItem(LIVE_UPDATES_KEY);
+  } catch {
+    // Without storage the setting applies to this session only.
+  }
+  await nativeSetLiveUpdates(enabled);
+}
+
+/**
+ * The threads one machine's snapshot lists with no turn running, sorted.
+ *
+ * A Live Update for one of these is stale: the turn ended by a Stop, a grouped
+ * finish that names no thread, or while the app was closed. A queued turn that
+ * keeps the thread Working is not listed. Neither is any thread this machine
+ * does not know: it may be another machine's agent, still running, and its
+ * `working` frame comes once per turn, so cancelling it would lose it for good.
+ */
+export function stoppedThreads(threads: Record<string, ThreadTurnState>): string[] {
+  return Object.entries(threads)
+    .filter(([, thread]) => thread.tab !== "working")
+    .map(([threadId]) => threadId)
+    .sort();
+}
+
+type ThreadTurnState = { tab: string };
 
 /** Whether this install is signed in to Connect right now. */
 function signedIn(): boolean {
@@ -355,15 +416,49 @@ export function startDevicePush(): void {
   started = true;
 
   let currentThread: string | null = null;
-  const syncRoute = (): void => {
+  const foregroundThread = (): string | null => {
     const route = store.getState().ui.route;
-    const thread = route.kind === "thread" ? route.threadId : null;
+    return route.kind === "thread" ? route.threadId : null;
+  };
+  const syncRoute = (): void => {
+    const thread = foregroundThread();
     if (thread === currentThread) return;
     currentThread = thread;
     void setForegroundThread(thread);
   };
   syncRoute();
   store.subscribe(syncRoute);
+
+  // The daemon publishes the finish, failure or limit itself, and that alert
+  // replaces a thread's ongoing entry. A turn with no alert (the person's own
+  // Stop, a grouped finish that names no thread, or one that ended while the
+  // app was closed) leaves its entry behind, so every thread list the daemon
+  // sends, the first one included, tells the phone which of its turns have
+  // ended and it cancels those. Entries for threads the list does not name
+  // stay: they may belong to another machine.
+  let lastThreads: unknown = null;
+  let lastSync: number | null = null;
+  let lastReconciled: string | null = null;
+  const syncTurns = (): void => {
+    if (deviceAlertsPlatform() !== "android") return;
+    const { threads, lastSyncAt, connection } = store.getState();
+    // Only a thread change matters; the store also notifies for route, theme
+    // and every other UI state.
+    if (threads === lastThreads && lastSyncAt === lastSync) return;
+    // Before the first list arrives, or while the daemon is out of reach, the
+    // snapshot says nothing about which turns run: a stale list could name a
+    // thread as stopped that has started a new turn since.
+    if (lastSyncAt === null || connection.status !== "online") return;
+    lastThreads = threads;
+    lastSync = lastSyncAt;
+    const stopped = stoppedThreads(threads);
+    const key = `${lastSyncAt}\n${stopped.join("\n")}`;
+    if (key === lastReconciled) return;
+    lastReconciled = key;
+    void nativeCancelStoppedLiveThreads(stopped);
+  };
+  syncTurns();
+  store.subscribe(syncTurns);
 
   let lastPhase = "";
   const syncAccount = (): void => {
@@ -401,6 +496,11 @@ export function startDevicePush(): void {
   // Reconcile and re-register when the app comes back.
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState !== "visible") return;
+    // A Live Update for the thread on screen may have been posted while the
+    // app was in the background. The route did not change, so name the thread
+    // again; the shell drops that thread's ongoing entry.
+    currentThread = foregroundThread();
+    void setForegroundThread(currentThread);
     if (remoteStore.getState().phase !== "signed_in") return;
     void (async () => {
       await reconcileDeviceDeregistration();
