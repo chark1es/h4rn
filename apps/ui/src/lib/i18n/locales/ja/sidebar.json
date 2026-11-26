@@ -168,5 +168,9 @@
       "reading": "読み取り中",
       "editing": "編集中"
     }
+  },
+  "phoneNav": {
+    "label": "メイン",
+    "pulls": "PR"
   }
 }

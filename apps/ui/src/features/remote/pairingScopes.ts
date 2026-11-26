@@ -8,7 +8,7 @@
  */
 
 import type { PairScope } from "@/gen";
-import { formatList, i18n } from "@/lib/i18n";
+import { DEFAULT_LOCALE, formatList, i18n } from "@/lib/i18n";
 
 /** A scope's words come from `scopeLabel` and `scopeSub`. */
 export type ScopeOption = {
@@ -32,9 +32,20 @@ export function scopeLabel(scope: PairScope): string {
   return i18n.t(`settings:devices.scopes.${scope}.label`);
 }
 
-/** A scope's second line in the active language, or "" when it has none. */
+/**
+ * A scope's second line in the active language, or "" when it has none.
+ *
+ * The catalogue keeps an empty value for a scope without one. i18next is set
+ * to treat an empty value as missing and would show the key instead (even
+ * with an empty `defaultValue`), so an empty value is read as "no second line"
+ * before asking it.
+ */
 export function scopeSub(scope: PairScope): string {
-  return i18n.t(`settings:devices.scopes.${scope}.sub`);
+  const path = `devices.scopes.${scope}.sub` as const;
+  const raw: unknown =
+    i18n.getResource(i18n.language, "settings", path) ??
+    i18n.getResource(DEFAULT_LOCALE, "settings", path);
+  return raw === "" ? "" : i18n.t(`settings:${path}`);
 }
 
 /** What the Settings checkboxes start as: view plus approve. */

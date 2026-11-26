@@ -180,5 +180,9 @@
       "reading": "Leyendo",
       "editing": "Editando"
     }
+  },
+  "phoneNav": {
+    "label": "Principal",
+    "pulls": "PRs"
   }
 }

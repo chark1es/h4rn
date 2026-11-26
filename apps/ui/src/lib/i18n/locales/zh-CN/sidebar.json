@@ -168,5 +168,9 @@
       "reading": "读取中",
       "editing": "编辑中"
     }
+  },
+  "phoneNav": {
+    "label": "主导航",
+    "pulls": "拉取请求"
   }
 }

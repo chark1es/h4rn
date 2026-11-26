@@ -6,40 +6,47 @@ import {
   SettingsIcon,
 } from "lucide-react";
 import type * as React from "react";
+import { useTranslation } from "react-i18next";
 
 import { pendingMcpApprovals, useMcp } from "@/features/mcp/store";
 import { useNow } from "@/hooks/use-now";
+import { formatNumber } from "@/lib/i18n";
 import { isSnoozed } from "@/lib/inbox";
 import type { Route } from "@/lib/router";
 import { navigate, useApp } from "@/lib/store/appStore";
 
+/**
+ * The phone's tab bar. Each tab uses the name its destination has in the
+ * sidebar, so a place is called the same everywhere; only pull requests get a
+ * shorter name here, to fit five tabs on a phone.
+ */
 const TABS = [
-  { key: "inbox", label: "Inbox", icon: InboxIcon, route: { kind: "inbox" } as Route },
+  { key: "inbox", labelKey: "inbox", icon: InboxIcon, route: { kind: "inbox" } as Route },
   {
     key: "pulls",
-    label: "PRs",
+    labelKey: "phoneNav.pulls",
     icon: GitPullRequestIcon,
     route: { kind: "placeholder", surface: "pulls", path: "/pulls" } as Route,
   },
   {
     key: "usage",
-    label: "Usage",
+    labelKey: "footer.usage",
     icon: ChartNoAxesColumnIcon,
     route: { kind: "placeholder", surface: "usage", path: "/usage" } as Route,
   },
   {
     key: "pairing",
-    label: "Hosts",
+    labelKey: "hosts.title",
     icon: ServerIcon,
     route: { kind: "placeholder", surface: "settings", path: "/settings/hosts" } as Route,
   },
   {
     key: "settings",
-    label: "Settings",
+    labelKey: "footer.settings",
     icon: SettingsIcon,
     route: { kind: "placeholder", surface: "settings", path: "/settings/hosts" } as Route,
   },
-];
+] as const;
 
 function active(route: Route, key: string): boolean {
   if (key === "inbox") return route.kind === "inbox" || route.kind === "thread";
@@ -57,6 +64,7 @@ function active(route: Route, key: string): boolean {
 }
 
 export function PhoneNav() {
+  const { t } = useTranslation("sidebar");
   const route = useApp((state) => state.ui.route);
   const threads = useApp((state) => state.threads);
   const approvals = useMcp((state) => state.approvals);
@@ -71,7 +79,7 @@ export function PhoneNav() {
     ).length + pendingMcpApprovals(approvals).length;
 
   return (
-    <nav className="q-ph-tabbar" aria-label="Main">
+    <nav className="q-ph-tabbar" aria-label={t("phoneNav.label")}>
       {TABS.map((tab) => (
         <button
           key={tab.key}
@@ -81,8 +89,10 @@ export function PhoneNav() {
           onClick={() => navigate(tab.route)}
         >
           <tab.icon className="q-icon s24" size={24} strokeWidth={1.5} aria-hidden />
-          {tab.key === "inbox" && needsYou > 0 ? <span className="bdg">{needsYou}</span> : null}
-          <span>{tab.label}</span>
+          {tab.key === "inbox" && needsYou > 0 ? (
+            <span className="bdg">{formatNumber(needsYou)}</span>
+          ) : null}
+          <span>{t(tab.labelKey)}</span>
         </button>
       ))}
     </nav>

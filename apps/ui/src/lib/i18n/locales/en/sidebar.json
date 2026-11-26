@@ -174,5 +174,9 @@
       "reading": "Reading",
       "editing": "Editing"
     }
+  },
+  "phoneNav": {
+    "label": "Main",
+    "pulls": "PRs"
   }
 }

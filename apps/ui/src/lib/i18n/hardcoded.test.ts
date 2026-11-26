@@ -29,6 +29,11 @@ import { describe, expect, it } from "vitest";
  * identifiers such as `NAME` or `gpt-5.4-mini`, and the product names below.
  */
 const CONVERTED = [
+  "src/features/remote/remoteStore.ts",
+  "src/features/remote/QrCode.tsx",
+  "src/components/shell/PhoneNav.tsx",
+  "src/components/pages/PairingPage.tsx",
+  "src/components/hosts/HostsPane.tsx",
   "src/components/dialogs/CommandPalette.tsx",
   "src/components/dialogs/ShortcutsDialog.tsx",
   "src/components/inbox/PhoneInbox.tsx",

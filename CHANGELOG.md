@@ -41,6 +41,12 @@ All notable changes to h4rn are recorded here. The format follows
   stay the same in every language. In English, palette rows that run a
   shortcut now use that shortcut's name (for example "Show Working" instead of
   "Go to Working", "Settle thread" instead of "Settle now").
+- **Phone pairing and the phone tab bar in Chinese, Spanish and Japanese.**
+  The pairing screen, its code check, the scopes it shows, pairing errors and
+  the "Paired with" toast follow the Language choice, and the tab bar uses the
+  sidebar's name for each place. Pairing codes, host names and URLs stay as
+  they are. Settings → Devices no longer shows a raw key such as
+  `devices.scopes.approve.sub` under a scope that has no second line.
 - **Android Live Updates show a running agent.** A separate switch under
   Settings → Notifications → Phone alerts shows each running thread as an
   ongoing notification with its project and whether it is working, waiting for
