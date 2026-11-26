@@ -2,6 +2,7 @@ import i18n, { type Resource, type ResourceLanguage } from "i18next";
 import { useSyncExternalStore } from "react";
 import { initReactI18next } from "react-i18next";
 
+import enCommands from "./locales/en/commands.json";
 import enCommon from "./locales/en/common.json";
 import enSettings from "./locales/en/settings.json";
 import enSidebar from "./locales/en/sidebar.json";
@@ -22,7 +23,7 @@ export type Locale = (typeof LOCALES)[number];
 export type LocalePreference = "system" | Locale;
 
 /** Every namespace, one per UI area plus `common` for shared words. */
-export const NAMESPACES = ["common", "settings", "sidebar"] as const;
+export const NAMESPACES = ["common", "commands", "settings", "sidebar"] as const;
 export type Namespace = (typeof NAMESPACES)[number];
 
 export const DEFAULT_LOCALE: Locale = "en";
@@ -37,6 +38,7 @@ export const LOCALE_NAMES: Record<Locale, string> = {
 
 export const englishResources = {
   common: enCommon,
+  commands: enCommands,
   settings: enSettings,
   sidebar: enSidebar,
 } as const;

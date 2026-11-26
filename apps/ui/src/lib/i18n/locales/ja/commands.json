@@ -1,0 +1,132 @@
+{
+  "groups": {
+    "General": "一般",
+    "Navigate": "ナビゲーション",
+    "Thread": "スレッド",
+    "Panels": "パネル"
+  },
+  "names": {
+    "palette": {
+      "toggle": "検索または実行"
+    },
+    "shortcuts": {
+      "open": "キーボードショートカット"
+    },
+    "thread": {
+      "new": "新しいスレッド",
+      "next": "次のスレッド",
+      "previous": "前のスレッド",
+      "reply": "コンポーザーにフォーカス",
+      "permissions": "スレッドの権限",
+      "settle": "スレッドを整理",
+      "acknowledge": "確認（完了）",
+      "snooze": "1 時間スヌーズ",
+      "pin": "「作業中」に残す",
+      "reopen": "整理済みのスレッドを再開",
+      "steerQueuedMessage": "キュー内で最も古いメッセージをステア",
+      "editQueuedMessage": "キュー内で最新のメッセージを編集"
+    },
+    "settings": {
+      "open": "設定"
+    },
+    "theme": {
+      "toggle": "ライトとダークを切り替え"
+    },
+    "nav": {
+      "inbox": "スレッドへ移動",
+      "pulls": "プルリクエストへ移動",
+      "issues": "Issue へ移動",
+      "usage": "使用量へ移動",
+      "tools": "MCP サーバーとスキルへ移動"
+    },
+    "tab": {
+      "working": "「作業中」を表示",
+      "done": "「完了」を表示",
+      "settled": "「整理済み」を表示"
+    },
+    "approval": {
+      "approve": "保留中の操作を承認",
+      "deny": "保留中の操作を拒否"
+    },
+    "turn": {
+      "interrupt": "ターンを中断",
+      "previous": "前のメッセージ",
+      "next": "次のメッセージ"
+    },
+    "guest": {
+      "share": "ゲストと共有"
+    },
+    "composer": {
+      "attach": "ファイルを添付"
+    },
+    "sidebar": {
+      "toggle": "サイドバーを切り替え"
+    },
+    "panel": {
+      "toggle": "右パネルを切り替え",
+      "changes": "変更を表示",
+      "subagents": "サブエージェントを表示",
+      "files": "ファイルを検索"
+    },
+    "view": {
+      "toggle": "スレッドと IDE を切り替え"
+    },
+    "terminal": {
+      "toggle": "ターミナルを切り替え"
+    }
+  },
+  "palette": {
+    "title": "コマンドパレット",
+    "description": "スレッドの検索、コマンドの実行、h4rn 内の移動ができます。",
+    "placeholder": "スレッド、ホスト、ファイル、コマンドを検索",
+    "empty": "一致するコマンドはありません。スレッドのタイトル、ホスト名、コマンドで試してください。",
+    "groups": {
+      "thisThread": "このスレッド",
+      "threads": "スレッド",
+      "goTo": "ナビゲーション",
+      "view": "表示"
+    },
+    "items": {
+      "switchHarness": "harness を切り替え…",
+      "linkPullRequest": "プルリクエストをリンク…",
+      "fork": "最新のターンからフォーク",
+      "unpin": "「作業中」から外す",
+      "searchThreads": "スレッドを検索…",
+      "pairDevice": "デバイスをペアリング…",
+      "hosts": "ホスト",
+      "ide": "IDE",
+      "openInIde": "{{project}} を IDE で開く",
+      "showRightPanel": "右パネルを表示",
+      "hideRightPanel": "右パネルを隠す",
+      "showTerminal": "ターミナルを表示",
+      "hideTerminal": "ターミナルを隠す",
+      "showSidebar": "サイドバーを表示",
+      "hideSidebar": "サイドバーを隠す",
+      "copyLink": "スレッドのリンクをコピー",
+      "reconnect": "デーモンに再接続"
+    },
+    "footer": {
+      "move": "選択",
+      "run": "実行",
+      "close": "閉じる",
+      "searchesHosts": "検索対象：{{hosts}}",
+      "searchesThisMachine": "検索対象：このマシン"
+    }
+  },
+  "shortcutsDialog": {
+    "description": "すべてのコマンドは Cmd または Ctrl とキーの組み合わせなので、入力中に誤って実行されることはありません。<settings>設定 → ショートカット</settings>でいつでも変更できます。",
+    "whileTyping": "入力中",
+    "typing": {
+      "send": "送信",
+      "newLine": "改行",
+      "recall": "以前のプロンプトを呼び出す",
+      "forward": "プロンプトを先に進む",
+      "mention": "ファイルをメンション",
+      "command": "コマンドを実行",
+      "moveMenu": "@ または / メニュー内を移動",
+      "insert": "ハイライトされた項目を挿入",
+      "closeMenu": "@ または / メニューを閉じる",
+      "closeDialog": "ダイアログを閉じる、または戻る"
+    }
+  }
+}

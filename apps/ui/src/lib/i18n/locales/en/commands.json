@@ -1,0 +1,132 @@
+{
+  "groups": {
+    "General": "General",
+    "Navigate": "Navigate",
+    "Thread": "Thread",
+    "Panels": "Panels"
+  },
+  "names": {
+    "palette": {
+      "toggle": "Search or run"
+    },
+    "shortcuts": {
+      "open": "Keyboard shortcuts"
+    },
+    "thread": {
+      "new": "New thread",
+      "next": "Next thread",
+      "previous": "Previous thread",
+      "reply": "Focus the composer",
+      "permissions": "Thread permissions",
+      "settle": "Settle thread",
+      "acknowledge": "Acknowledge (Done)",
+      "snooze": "Snooze for an hour",
+      "pin": "Keep in Working",
+      "reopen": "Reopen a settled thread",
+      "steerQueuedMessage": "Steer the oldest queued message",
+      "editQueuedMessage": "Edit the newest queued message"
+    },
+    "settings": {
+      "open": "Settings"
+    },
+    "theme": {
+      "toggle": "Toggle light and dark"
+    },
+    "nav": {
+      "inbox": "Go to threads",
+      "pulls": "Go to pull requests",
+      "issues": "Go to issues",
+      "usage": "Go to usage",
+      "tools": "Go to MCP servers and skills"
+    },
+    "tab": {
+      "working": "Show Working",
+      "done": "Show Done",
+      "settled": "Show Settled"
+    },
+    "approval": {
+      "approve": "Approve pending action",
+      "deny": "Deny pending action"
+    },
+    "turn": {
+      "interrupt": "Interrupt turn",
+      "previous": "Previous message",
+      "next": "Next message"
+    },
+    "guest": {
+      "share": "Share with guest"
+    },
+    "composer": {
+      "attach": "Attach files"
+    },
+    "sidebar": {
+      "toggle": "Toggle sidebar"
+    },
+    "panel": {
+      "toggle": "Toggle right panel",
+      "changes": "Show changes",
+      "subagents": "Show subagents",
+      "files": "Find a file"
+    },
+    "view": {
+      "toggle": "Switch thread and IDE"
+    },
+    "terminal": {
+      "toggle": "Toggle terminal"
+    }
+  },
+  "palette": {
+    "title": "Command palette",
+    "description": "Search threads, run a command, or move around h4rn.",
+    "placeholder": "Search threads, hosts, files, or commands",
+    "empty": "No commands match that. Try a thread title, a host name, or a command.",
+    "groups": {
+      "thisThread": "This thread",
+      "threads": "Threads",
+      "goTo": "Navigate",
+      "view": "View"
+    },
+    "items": {
+      "switchHarness": "Switch harness…",
+      "linkPullRequest": "Link pull request…",
+      "fork": "Fork from latest turn",
+      "unpin": "Unpin from Working",
+      "searchThreads": "Search threads…",
+      "pairDevice": "Pair a device…",
+      "hosts": "Hosts",
+      "ide": "IDE",
+      "openInIde": "Open {{project}} in the IDE",
+      "showRightPanel": "Show right panel",
+      "hideRightPanel": "Hide right panel",
+      "showTerminal": "Show terminal",
+      "hideTerminal": "Hide terminal",
+      "showSidebar": "Show sidebar",
+      "hideSidebar": "Hide sidebar",
+      "copyLink": "Copy thread link",
+      "reconnect": "Reconnect to the daemon"
+    },
+    "footer": {
+      "move": "Move",
+      "run": "Run",
+      "close": "Close",
+      "searchesHosts": "Searches {{hosts}}",
+      "searchesThisMachine": "Searches this machine"
+    }
+  },
+  "shortcutsDialog": {
+    "description": "Every command is Cmd or Ctrl plus a key, so typing never triggers one. Change any of them in <settings>Settings → Shortcuts</settings>.",
+    "whileTyping": "While typing",
+    "typing": {
+      "send": "Send",
+      "newLine": "New line",
+      "recall": "Recall an earlier prompt",
+      "forward": "Walk prompts forward",
+      "mention": "Mention a file",
+      "command": "Run a command",
+      "moveMenu": "Move in the @ or / menu",
+      "insert": "Insert the highlighted item",
+      "closeMenu": "Close the @ or / menu",
+      "closeDialog": "Close a dialog or go back"
+    }
+  }
+}
