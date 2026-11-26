@@ -1,0 +1,1251 @@
+{
+  "page": {
+    "label": "Settings"
+  },
+  "nav": {
+    "back": "Back to threads",
+    "backTitle": "Back to threads  Esc",
+    "search": "Search settings",
+    "tools": "Tools",
+    "harnessUpdates": "Harness updates available",
+    "hostsCount": "{{hosts}}, {{devices}}",
+    "hostCount_one": "{{count}} host",
+    "hostCount_other": "{{count}} hosts",
+    "deviceCount_one": "{{count}} device",
+    "deviceCount_other": "{{count}} devices",
+    "groups": {
+      "Machines": "Machines",
+      "Account": "Account"
+    },
+    "sections": {
+      "general": "General",
+      "appearance": "Appearance",
+      "notifications": "Notifications",
+      "chat": "Chat",
+      "shortcuts": "Shortcuts",
+      "threads": "Threads",
+      "schedules": "Scheduled tasks",
+      "source-control": "Source control",
+      "hosts": "Hosts & devices",
+      "harnesses": "Harnesses",
+      "worktrees": "Worktrees",
+      "providers": "Providers",
+      "resume": "Auto-resume",
+      "forges": "Forges",
+      "labs": "Labs",
+      "account": "Account & relay",
+      "access": "Sharing & access"
+    },
+    "addMcp": "Add MCP server",
+    "mcpServers": "MCP servers",
+    "skills": "Skills"
+  },
+  "errors": {
+    "didNotStick": "The change did not stick."
+  },
+  "general": {
+    "title": "General",
+    "lead": "How h4rn starts and where it keeps its local state.",
+    "daemon": "Daemon",
+    "dataDirectory": "Data directory"
+  },
+  "startup": {
+    "title": "Startup",
+    "openAtLogin": "Open at login",
+    "openAtLoginHint": "Start h4rn when you sign in to this computer",
+    "keepInTray": "Keep running in tray",
+    "trayMissing": "No tray icon was created, so closing the window quits h4rn",
+    "trayKeeps": "Closing the window keeps h4rn in the tray — open h4rn again to show it",
+    "trayQuits": "Closing the window quits h4rn"
+  },
+  "about": {
+    "title": "About",
+    "daemonVersion": "Daemon version",
+    "updates": "Updates",
+    "mobileUpdates": "Mobile updates come through the App Store and Google Play.",
+    "webUpdates": "The web build updates when its host serves a new version.",
+    "available": "h4rn {{version}} is available",
+    "upToDate": "You're up to date",
+    "notChecked": "Not checked yet",
+    "version": "Version",
+    "checkForUpdates": "Check for updates",
+    "lastChecked": "Last checked",
+    "justNow": "Just now",
+    "never": "Never",
+    "checkAutomatically": "Check automatically",
+    "checkAutomaticallyHint": "On launch, then every 6 hours",
+    "checkAutomaticallyLabel": "Check for updates automatically"
+  },
+  "appearance": {
+    "title": "Appearance",
+    "lead": "h4rn follows your system by default. The theme applies to this device.",
+    "theme": "Theme",
+    "colorScheme": "Color scheme",
+    "followsSystem": "Follows your system setting",
+    "alwaysLight": "Always light",
+    "alwaysDark": "Always dark",
+    "schemes": {
+      "system": "System",
+      "light": "Light",
+      "dark": "Dark"
+    },
+    "terminal": "Terminal",
+    "terminalMatches": "Matches the app theme",
+    "terminalToggle": "Terminal matches the app theme",
+    "language": "Language",
+    "interfaceLanguage": "Interface language",
+    "languageSystem": "System",
+    "languageFollowsSystem": "Follows your system: {{language}}",
+    "languageThisDevice": "Applies to this device"
+  },
+  "notifications": {
+    "title": "Notifications",
+    "lead": "Only things that need you interrupt you.",
+    "onThisDevice": "On this device",
+    "rows": {
+      "approvals": {
+        "title": "Approvals",
+        "subtitle": "A command or question is waiting to run",
+        "label": "Approval notifications"
+      },
+      "finishedTurns": {
+        "title": "Finished turns",
+        "subtitle": "A thread lands in Done",
+        "label": "Finished turn notifications"
+      },
+      "hostOffline": {
+        "title": "Host offline",
+        "subtitle": "A host becomes unreachable",
+        "label": "Host offline notifications"
+      }
+    },
+    "blocked": "Blocked in system settings",
+    "relayTooOld": "This relay does not report which machines this device is linked to. Update the relay to get host offline alerts.",
+    "noLinks": "Host offline alerts need a host linked through the relay. This device has none, so there is no other host to watch.",
+    "pageUnavailable": "Notifications stopped working on this page. Reload h4rn to try again.",
+    "mobileUnsupported": "This build does not send notifications yet. Use the desktop app or a browser.",
+    "browserUnsupported": "This browser does not support notifications.",
+    "phoneAlerts": "Phone alerts",
+    "agentAlerts": "Send agent alerts to my phone through Connect",
+    "agentAlertsHint": "Finished, failed, approval and question alerts for this machine.",
+    "agentAlertsPaired": "Each alert carries the thread id, its title, the project name, the state and the time. Never message text, tool output, file paths or credentials. Delivery goes through Connect, not a direct connection.",
+    "agentAlertsUnpaired": "Pair this machine with Connect to send alerts to a phone.",
+    "deviceNotifications": "Device notifications",
+    "liveUpdates": "Show running agents as live notifications",
+    "liveUpdatesHint": "An ongoing notification names the thread and project while an agent works, waits for an approval or asks you something. The finish, failure or limit alert replaces it.",
+    "liveUpdatesNeedDevice": "Turn on Device notifications to use live notifications.",
+    "deviceBlocked": "Blocked in system settings. Allow notifications for h4rn there, then reopen this page.",
+    "buildCannotReceive": "This build cannot receive alerts.",
+    "device": {
+      "signIn": "Sign in to Connect first.",
+      "unavailable": "Unavailable in this build.",
+      "checkFailed": "Could not check this phone's notifications. Try again.",
+      "blocked": "Blocked in system settings.",
+      "willAsk": "This phone will ask for permission when you turn this on.",
+      "registered": "Registered with this phone.",
+      "unconfirmed": "Registered, but Connect has not confirmed this phone yet.",
+      "off": "Off.",
+      "noSender": "This Connect server has no push sender configured for this phone. An operator has to add one before alerts can arrive.",
+      "senderUnknown": "Could not check whether this Connect server can send alerts."
+    },
+    "agentAlertsFailed": "Agent alerts could not be changed"
+  },
+  "chat": {
+    "title": "Chat",
+    "lead": "How a reply behaves while the agent is already working. These choices apply to this device.",
+    "followUp": "Follow-up behaviour",
+    "sendWhileWorking": "Send while the agent is working",
+    "sendWhileWorkingHint": "Queue waits for the next turn. Steer goes into the running turn when its agent can accept it.",
+    "queue": "Queue",
+    "steer": "Steer",
+    "enterNewLine": "Enter inserts a new line",
+    "enterNewLineOn": "Cmd/Ctrl+Enter sends; add Shift for the other follow-up action.",
+    "enterNewLineOff": "Enter sends; Cmd/Ctrl+Enter uses the other follow-up action."
+  },
+  "shortcuts": {
+    "title": "Shortcuts",
+    "leadCmd": "Every shortcut is Cmd plus a key, so typing never runs a command. Click a shortcut to change it. Changes apply to this device.",
+    "leadCtrl": "Every shortcut is Ctrl plus a key, so typing never runs a command. Click a shortcut to change it. Changes apply to this device.",
+    "holdCmd": "Hold Cmd with the key.",
+    "holdCtrl": "Hold Ctrl with the key.",
+    "needsModifier": "Shortcuts need Cmd or Ctrl plus a key.",
+    "alreadyUsed": "Already used by “{{command}}”.",
+    "pressNew": "Press the new shortcut. Esc cancels.",
+    "resetLabel": "Reset {{command}} to {{shortcut}}",
+    "resetTitle": "Reset to {{shortcut}}",
+    "recordingLabel": "Recording a shortcut for {{command}}",
+    "changeLabel": "Change shortcut for {{command}}, now {{shortcut}}",
+    "pressKeys": "Press keys…",
+    "groups": {
+      "General": "General",
+      "Navigate": "Navigate",
+      "Thread": "Thread",
+      "Panels": "Panels"
+    },
+    "commands": {
+      "palette": {
+        "toggle": "Search or run"
+      },
+      "shortcuts": {
+        "open": "Keyboard shortcuts"
+      },
+      "thread": {
+        "new": "New thread",
+        "next": "Next thread",
+        "previous": "Previous thread",
+        "reply": "Focus the composer",
+        "permissions": "Thread permissions",
+        "settle": "Settle thread",
+        "acknowledge": "Acknowledge (Done)",
+        "snooze": "Snooze for an hour",
+        "pin": "Keep in Working",
+        "reopen": "Reopen a settled thread",
+        "steerQueuedMessage": "Steer the oldest queued message",
+        "editQueuedMessage": "Edit the newest queued message"
+      },
+      "settings": {
+        "open": "Settings"
+      },
+      "theme": {
+        "toggle": "Toggle light and dark"
+      },
+      "nav": {
+        "inbox": "Go to threads",
+        "pulls": "Go to pull requests",
+        "issues": "Go to issues",
+        "usage": "Go to usage",
+        "tools": "Go to MCP servers and skills"
+      },
+      "tab": {
+        "working": "Show Working",
+        "done": "Show Done",
+        "settled": "Show Settled"
+      },
+      "approval": {
+        "approve": "Approve pending action",
+        "deny": "Deny pending action"
+      },
+      "turn": {
+        "interrupt": "Interrupt turn",
+        "previous": "Previous message",
+        "next": "Next message"
+      },
+      "guest": {
+        "share": "Share with guest"
+      },
+      "composer": {
+        "attach": "Attach files"
+      },
+      "sidebar": {
+        "toggle": "Toggle sidebar"
+      },
+      "panel": {
+        "toggle": "Toggle right panel",
+        "changes": "Show changes",
+        "subagents": "Show subagents",
+        "files": "Find a file"
+      },
+      "view": {
+        "toggle": "Switch thread and IDE"
+      },
+      "terminal": {
+        "toggle": "Toggle terminal"
+      }
+    }
+  },
+  "threads": {
+    "newThreads": "New threads",
+    "permissions": "Permissions",
+    "permissionsHint": "The mode a new thread starts in. Change it mid-thread from the composer.",
+    "defaultPermissions": "Default permissions",
+    "planNote": "Plan is offered only by harnesses with a real plan mode; a harness that cannot honour the mode refuses it when the thread starts.",
+    "title": "Threads",
+    "lead": "Defaults for threads started from this device: their permission mode, and how h4rn names them. A thread keeps its own settings once it exists.",
+    "titles": "Titles",
+    "connectForTitles": "Connect to the daemon to read the title model."
+  },
+  "schedules": {
+    "title": "Scheduled tasks",
+    "lead": "Run a prompt on a schedule or when a webhook is called. The daemon owns the timer, so closing this app does not stop a task. A run that is still working makes the next slot skip, and a missed slot runs once when the daemon comes back.",
+    "newTask": "New task",
+    "tasks": "Tasks",
+    "empty": "No scheduled tasks yet. Start one for a recurring review, a nightly check, or a webhook from another service.",
+    "historyTitle": "History · {{name}}",
+    "noRuns": "No runs yet.",
+    "kinds": {
+      "once": "Once",
+      "every": "Every…",
+      "daily": "Daily",
+      "weekly": "Weekly",
+      "cron": "Cron",
+      "webhook": "On webhook"
+    },
+    "units": {
+      "minutes": "minutes",
+      "hours": "hours"
+    },
+    "destinations": {
+      "new_thread": {
+        "label": "New thread each run",
+        "hint": "Every run is a separate thread."
+      },
+      "continue_thread": {
+        "label": "One thread, continuing",
+        "hint": "Later runs post into the same conversation."
+      },
+      "fresh_session": {
+        "label": "One thread, fresh session",
+        "hint": "The thread stays readable; each run starts without the old context."
+      }
+    },
+    "placeholders": {
+      "jsonField": "A JSON field, such as {{example}}",
+      "header": "A request header, such as {{example}}",
+      "query": "A query value, such as {{example}}",
+      "body": "The raw body",
+      "request": "The method, path, query, headers and body"
+    },
+    "editor": {
+      "when": "When",
+      "schedule": "Schedule",
+      "dateTime": "Date and time",
+      "date": "Date",
+      "time": "Time",
+      "interval": "Interval",
+      "intervalCount": "Interval count",
+      "intervalUnit": "Interval unit",
+      "dailyTime": "Daily time",
+      "days": "Days",
+      "weeklyTime": "Weekly time",
+      "cron": "Cron expression",
+      "cronHint": "minute hour day-of-month month day-of-week",
+      "editLabel": "Edit scheduled task",
+      "newLabel": "New scheduled task",
+      "editTitle": "Edit task",
+      "nameLabel": "Task name",
+      "timezone": "Time zone",
+      "timezoneHint": "Wall-clock schedules use this zone",
+      "destination": "Destination",
+      "workspace": "Workspace",
+      "workspaceLabel": "Workspace path",
+      "harness": "Harness",
+      "prompt": "Prompt",
+      "enabled": "Enabled",
+      "enabledHint": "A paused task keeps its history and URL.",
+      "enabledLabel": "Task enabled",
+      "fixFields": "Fix the highlighted fields to save.",
+      "save": "Save task"
+    },
+    "webhook": {
+      "title": "Webhook",
+      "path": "URL path",
+      "saveFirst": "Save the task to create its URL.",
+      "secret": "Anyone with this path can start a run. Rotate it if it leaks.",
+      "none": "No URL yet.",
+      "unavailable": "Unavailable",
+      "hidden": "Hidden",
+      "copyLabel": "Copy webhook path",
+      "copied": "Path copied",
+      "copyFailed": "Copy failed",
+      "rotate": "Rotate",
+      "rotating": "Rotating…",
+      "placeholders": "Prompt placeholders",
+      "placeholdersHint": "No value is left empty. A value is wrapped as untrusted request data.",
+      "tunnel": "A public URL needs a tunnel to this daemon (the Connect relay carries the typed socket, not plain HTTP). Point Tailscale Funnel, Cloudflare Tunnel or another reverse proxy at this daemon's loopback port and keep the path."
+    },
+    "task": {
+      "toggleFailed": "The task did not change.",
+      "runFailed": "The run did not start.",
+      "pause": "Pause {{name}}",
+      "resume": "Resume {{name}}",
+      "run": "Run now",
+      "runLabel": "Run {{name}} now",
+      "history": "History",
+      "historyLabel": "History for {{name}}",
+      "deleteLabel": "Delete {{name}}"
+    },
+    "run": {
+      "never": "Never run",
+      "ran": "Ran {{when}}",
+      "skipped": "Skipped {{when}}",
+      "failed": "Failed {{when}}",
+      "scheduled": "scheduled {{when}}",
+      "openThread": "Open thread"
+    },
+    "outcome": {
+      "started": "Started",
+      "skipped": "Skipped",
+      "failed": "Failed"
+    },
+    "next": {
+      "webhook": "Runs when its URL is called",
+      "paused": "Paused",
+      "none": "No further run",
+      "due": "Due now {{when}}",
+      "next": "Next {{when}}"
+    },
+    "describe": {
+      "once": "Once on {{date}} at {{time}}",
+      "everyMinutes_one": "Every {{count}} minute",
+      "everyMinutes_other": "Every {{count}} minutes",
+      "everyHours_one": "Every {{count}} hour",
+      "everyHours_other": "Every {{count}} hours",
+      "daily": "Daily at {{time}}",
+      "weekly": "Weekly on {{days}} at {{time}}",
+      "cron": "Cron {{expression}}",
+      "webhook": "On webhook"
+    },
+    "delete": {
+      "title": "Delete this scheduled task?",
+      "description": "\"{{name}}\" and its run history are deleted. Threads it already started stay."
+    },
+    "validate": {
+      "nameRequired": "Give the task a name.",
+      "nameTooLong": "Keep the name under 120 characters.",
+      "workspaceRequired": "Choose a workspace.",
+      "workspaceAbsolute": "Use an absolute path on this host.",
+      "modelRequired": "Choose a model.",
+      "promptRequired": "Write the prompt to send.",
+      "timezone": "Choose a known IANA time zone.",
+      "dateTime": "Choose a real date and time.",
+      "intervalRange": "Choose between 1 and 10080 units.",
+      "time": "Choose a real time of day.",
+      "weekday": "Choose at least one weekday."
+    },
+    "cron": {
+      "fiveFields": "Use five fields: minute hour day-of-month month day-of-week.",
+      "fields": {
+        "minute": "minute",
+        "hour": "hour",
+        "dayOfMonth": "day of month",
+        "month": "month",
+        "dayOfWeek": "day of week"
+      },
+      "step": "The {{name}} step in `{{part}}` is not a positive number.",
+      "invalid": "The {{name}} field `{{part}}` is not valid.",
+      "notNumeric": "The {{name}} field `{{part}}` is not numeric.",
+      "range": "The {{name}} {{value}} must be between {{minimum}} and {{maximum}}.",
+      "backwards": "The {{name}} range `{{part}}` runs backwards."
+    }
+  },
+  "sourceControl": {
+    "title": "Source control & issues",
+    "lead": "Commit messages and pull request text can be written by a model when you ask for them. A request you write yourself is never replaced, and Generate never commits or opens anything. Linear teams are chosen per project below.",
+    "readingSetting": "Reading the setting…",
+    "messages": "Commit & PR messages",
+    "modeLabel": "Commit and pull request model",
+    "modes": {
+      "off": "Off",
+      "coding_agent": "Coding agent",
+      "text_generator": "Text generator"
+    },
+    "whoWrites": "Who writes messages",
+    "whoWritesHint": "Off leaves the fields empty and starts nothing. A coding agent runs once with no tools; a text generator is the model you configured under Providers.",
+    "codingAgentHint": "Follow the thread's agent runs Claude Code for Claude Code threads. Other threads need a text generator; without one, Generate leaves the fields empty and nothing runs.",
+    "noClaudeCode": "No Claude Code is installed on this host yet.",
+    "codingAgentLabel": "Coding agent for messages",
+    "followThread": "Follow the thread's agent",
+    "followThreadHint": "Claude Code threads use their own",
+    "generatorHint": "The provider is configured under Providers.",
+    "model": "Model",
+    "modelHint": "Leave empty to use the generator's own model.",
+    "modelLabel": "Model for commit and pull request messages",
+    "modelPlaceholder": "model name",
+    "noGenerator": "No text generator is configured yet. Add one under Providers.",
+    "instructions": "Custom instructions",
+    "instructionsHint": "Optional. Appended to the trusted instruction for every commit message and pull request. Never spliced into the repository text.",
+    "instructionsLabel": "Custom instructions for commit and pull request messages",
+    "instructionsPlaceholder": "For example: use the imperative mood, and mention the user-visible change.",
+    "summary": {
+      "reading": "Reading the message model…",
+      "off": "Commit and pull request text is written by you.",
+      "claudeCode": "Messages are written by Claude Code.",
+      "codex": "Codex is not used for messages; pick Claude Code or a text generator.",
+      "otherHarness": "{{harness}} is not used for messages.",
+      "followThread": "Claude Code threads use Claude Code; other threads need a text generator, otherwise nothing is generated.",
+      "generatorModel": "Messages are written by a text generator with {{model}}.",
+      "generator": "Messages are written by the selected text generator."
+    }
+  },
+  "linear": {
+    "hint": "Connect with a personal API key. The key stays on this host, is never returned to a client, and is only used to read your team's issues and post comments.",
+    "table": {
+      "workspace": "Workspace",
+      "account": "Account",
+      "connected": "Connected"
+    },
+    "empty": "No Linear workspace connected yet.",
+    "keyLabel": "Linear API key",
+    "keyPlaceholder": "Linear personal API key",
+    "connect": "Connect and test",
+    "teams": "Teams per project",
+    "teamsHint": "A project's team appears beside its forge issues on the Issues page.",
+    "teamFor": "Linear team for {{project}}",
+    "noTeam": "No Linear team",
+    "toast": {
+      "connected": "Linear connected.",
+      "rejected": "Linear rejected the key.",
+      "removeFailed": "The Linear connection was not removed.",
+      "teamFailed": "The Linear team was not saved."
+    }
+  },
+  "hosts": {
+    "title": "Hosts & devices",
+    "lead": "Hosts are machines that run agents; WSL distros are separate hosts with their own harnesses and credentials. Devices are the phones and computers you supervise them from.",
+    "addHost": "Add host",
+    "addHostToast": "Add a machine with h4rnd login.",
+    "addHostToastHint": "Run `h4rnd login --connect <url>` on it, then refresh.",
+    "signInToPair": "Sign in to pair a device.",
+    "signInToPairHint": "Pairing goes through h4rn-connect. Sign in under Remote access.",
+    "pairThroughRelay": "Pair through relay",
+    "connectedMachine": "Connected machine",
+    "connectedTo": "Connected to {{machine}} through h4rn-connect",
+    "connectingTo": "Connecting to {{machine}}…",
+    "cantReach": "Can’t reach {{target}}.",
+    "onlineMobile": "This app can disconnect and keep working offline.",
+    "onlineDesktop": "The local daemon is always available as well.",
+    "downMobile": "The remote path is down. Pick another machine, or disconnect.",
+    "downDesktop": "The remote path is down. This machine can still run agents.",
+    "remoteAccess": "Remote access",
+    "remoteAccessHint": "Sign in to h4rn-connect to reach machines outside this network, or keep working with the local daemon.",
+    "machines": "Machines",
+    "noMachines": "No machine has logged in to this relay yet. Run <code>{{command}}</code> on a host.",
+    "noHosts": "No hosts",
+    "reachable": "Reachable",
+    "online": "Online",
+    "offline": "Offline",
+    "connecting": "Connecting…",
+    "disconnect": "Disconnect",
+    "connect": "Connect",
+    "loadingHosts": "Loading hosts…",
+    "noHostsYet": "No hosts answer yet. Start the daemon, or connect a remote machine above.",
+    "noneInstalled": "None installed",
+    "transport": "Transport",
+    "transportHint": "Chosen by the Rust transport; TypeScript only renders it.",
+    "encrypted": "encrypted",
+    "path": {
+      "direct": "Direct",
+      "relay": "Relay"
+    },
+    "table": {
+      "machine": "Machine",
+      "hosts": "Hosts",
+      "host": "Host",
+      "system": "System",
+      "connection": "Connection",
+      "presence": "Presence",
+      "harnesses": "Harnesses",
+      "latency": "Latency"
+    }
+  },
+  "network": {
+    "title": "This computer",
+    "allow": "Allow devices on this network",
+    "allowHint": "Other devices on your Wi-Fi or tailnet can connect after pairing. Traffic is end-to-end encrypted.",
+    "addresses": "Addresses",
+    "addressesHint": "What another device dials.",
+    "copyAddresses": "Copy addresses",
+    "pair": "Pair a device",
+    "pairHint": "Show a one-time code for a phone or computer on this network.",
+    "waitingListener": "Waiting for the listener to bind.",
+    "turnOnFirst": "Turn on network access first.",
+    "windowOpen": "Pairing window open",
+    "pairButton": "Pair on this network",
+    "arms": "The daemon arms a one-time secret for the code.",
+    "qrLabel": "Direct pairing QR code",
+    "qrLabelFor": "Direct pairing QR code for {{host}}",
+    "expired": "This code has expired.",
+    "scan": "Scan with the h4rn app on the other device, or copy the link.",
+    "generateNew": "Generate a new code to pair.",
+    "oneDevice": "One device, once. Expires in <countdown>{{time}}</countdown>.",
+    "adminNote": "Admin lets that device change hosts, devices and this setting on {{host}}.",
+    "thisComputerLower": "this computer",
+    "deviceName": "Device {{id}}",
+    "connected": "Connected",
+    "notConnected": "Not connected",
+    "paired": "Paired",
+    "empty": "No devices paired on this network yet."
+  },
+  "devices": {
+    "title": "Devices",
+    "hint": "Phones and computers that can reach your hosts. Each gets its own scopes, and you can revoke one without touching the others.",
+    "table": {
+      "device": "Device",
+      "kind": "Kind",
+      "scopes": "Scopes",
+      "lastSeen": "Last seen"
+    },
+    "empty": "No devices paired yet.",
+    "kind": {
+      "daemon": "Daemon",
+      "phone": "Phone",
+      "computer": "Computer"
+    },
+    "rename": "Rename {{name}}",
+    "saveName": "Save name",
+    "thisDevice": "this device",
+    "neverConnected": "Never connected",
+    "confirmSignOut": "Sign out of this device?",
+    "confirmDisconnect": "Disconnect this host?",
+    "confirmRevoke": "Revoke?",
+    "signOut": "Sign out",
+    "scopes": {
+      "all": "All",
+      "viewOnly": "View only",
+      "view": {
+        "label": "View threads",
+        "sub": "Always included"
+      },
+      "approve": {
+        "label": "Approve and reply",
+        "sub": ""
+      },
+      "terminal": {
+        "label": "Terminal",
+        "sub": "Type into shells"
+      },
+      "files": {
+        "label": "Files and edits",
+        "sub": ""
+      },
+      "admin": {
+        "label": "Manage hosts and devices",
+        "sub": "Admin"
+      }
+    },
+    "pairing": {
+      "approved": "Device approved.",
+      "rejected": "Device rejected.",
+      "approvedHint": "It can now reach this host with the scopes it was granted.",
+      "rejectedHint": "Its key was revoked and never reached this host.",
+      "decisionFailed": "Could not record the pairing decision.",
+      "wantsToConnect": "{{name}} wants to connect. Its screen shows",
+      "compare": "Approve only if both codes match. Until then the device cannot reach this host.",
+      "confirm": "Confirm device",
+      "reject": "Reject",
+      "expiresIn": "Expires in <countdown>{{time}}</countdown>",
+      "machineHint": "The paired device can reach this machine's hosts.",
+      "machineLabel": "Machine to pair with",
+      "noMachines": "No machines",
+      "qrLabel": "Pairing QR code for {{machine}}",
+      "thisMachine": "this machine",
+      "scan": "Scan with the h4rn app, or enter this code",
+      "worksOnce": "Works once, for one device. Pairs with {{machine}}.",
+      "copyLink": "Copy link",
+      "newCode": "New code",
+      "preparing": "Preparing a code…",
+      "noCode": "No code yet",
+      "generate": "Generate a pairing code"
+    }
+  },
+  "account": {
+    "title": "Account & relay",
+    "lead": "Relay reaches hosts that are not on your network. Nothing is routed until you allow it.",
+    "relay": "Relay",
+    "pathTo": "{{path}} to {{host}}",
+    "relayUrl": "Relay URL",
+    "pairedMachines": "Paired machines",
+    "pairedMachinesHint": "Reached through h4rn-connect",
+    "onlineOf_one": "{{online}} online of {{count}}",
+    "onlineOf_other": "{{online}} online of {{count}}",
+    "manageHosts": "Manage hosts",
+    "account": "Account",
+    "signedIn": "Signed in",
+    "thisDevice": "This device",
+    "unknownDevice": "Unknown device",
+    "manageDevices": "Manage devices"
+  },
+  "connect": {
+    "relayHint": "Self-hosted; only machines you pair are reachable.",
+    "urlLabel": "h4rn-connect URL",
+    "use": "Use",
+    "approvalCode": "Approval code",
+    "enterAt": "Enter it at {{host}}",
+    "openApproval": "Open approval page",
+    "copyCode": "Copy code",
+    "waiting": "Waiting for approval…",
+    "unreachable": "<b>Can’t reach h4rn-connect at {{host}}.</b> It may not be running.",
+    "retrying": "Retrying…",
+    "signIn": "Sign in",
+    "checkingProviders": "Checking providers…",
+    "providerAt": "{{provider}} at {{host}}",
+    "availableOnceReachable": "Available once the relay is reachable",
+    "noProvider": "The relay advertises no sign-in provider",
+    "signInWith": "Sign in with {{provider}}",
+    "otherDevice": "Sign in on another device",
+    "failed": "Sign-in failed",
+    "forgetDevice": "Forget this device?",
+    "busy": {
+      "openingSignIn": "Opening sign-in…",
+      "completingSignIn": "Completing sign-in…",
+      "requestingCode": "Requesting a code…",
+      "waitingForApproval": "Waiting for approval…",
+      "connecting": "Connecting to {{name}}…",
+      "claimingPairing": "Claiming pairing…",
+      "generatingCode": "Generating a code…"
+    },
+    "errors": {
+      "callbackState": "The sign-in callback is missing its state.",
+      "denied": "Sign-in was denied.",
+      "expired": "That code expired."
+    }
+  },
+  "localMachine": {
+    "disconnect": "Disconnect",
+    "disconnectFrom": "Disconnect from {{name}}",
+    "useLocal": "Use local",
+    "useThis": "Use this machine",
+    "useLocalLabel": "Use local — disconnect from {{name}}",
+    "useThisLabel": "Use this machine — disconnect from {{name}}",
+    "mobileTitle": "Disconnect from {{name}}. This app stays offline until you pick another machine.",
+    "desktopTitle": "Disconnect from {{name}} and use the daemon on this machine"
+  },
+  "harnesses": {
+    "title": "Harnesses",
+    "lead": "The agent CLIs h4rn runs on this host. Latest versions come from the npm registry and are checked every few hours.",
+    "cliVersions": "CLI versions",
+    "checkAgain": "Check again",
+    "status": {
+      "notInstalled": "Not installed",
+      "updateAvailable": "Update available",
+      "latestUnknown": "Latest version unknown",
+      "upToDate": "Up to date"
+    },
+    "update": "Update",
+    "updating": "Updating…",
+    "updateLabel": "Update {{harness}}",
+    "manual": "h4rn won't change this install. Run <code>{{command}}</code> in a terminal.",
+    "failed": "Failed",
+    "acp": {
+      "title": "Local ACP agents",
+      "addButton": "Add ACP agent",
+      "hint": "Any command that speaks the Agent Client Protocol over stdio. h4rn launches it with the arguments you write, literally, and no shell. It runs with this computer's privileges; install, sign in and update it yourself.",
+      "empty": "No local ACP agents yet.",
+      "probing": "Starting the agent once for its ACP handshake…",
+      "version": "version {{version}}",
+      "models_one": "{{count}} model",
+      "models_other": "{{count}} models",
+      "noModels": "no models advertised",
+      "notFound": "Not installed · command not found",
+      "notInstalledOption": "{{name}} · not installed",
+      "managedOutside": "Managed outside h4rn",
+      "check": "Check",
+      "editLabel": "Edit {{name}}",
+      "removeLabel": "Remove {{name}}",
+      "readFailed": "Could not read this agent.",
+      "editAgent": "Edit agent",
+      "reading": "Reading the agent's configuration…",
+      "addTitle": "Add a local ACP agent",
+      "formHint": "h4rn runs this command directly, with the arguments below and no shell expansion. It runs with this computer's privileges. The agent manages its own updates and sign-in.",
+      "displayName": "Display name",
+      "displayNameHint": "Shown in this list and the new-thread picker.",
+      "displayNameLabel": "ACP agent display name",
+      "instanceId": "Instance id",
+      "instanceIdHint": "Lowercase slug, unique on this host.",
+      "instanceIdLabel": "ACP agent instance id",
+      "command": "Command",
+      "commandHint": "An executable name on PATH, or an absolute path.",
+      "commandLabel": "ACP agent command",
+      "arguments": "Arguments",
+      "argumentsHint": "One literal argument per row. No quotes or shell syntax.",
+      "argumentLabel": "Argument {{row}}",
+      "removeArgument": "Remove argument {{row}}",
+      "addArgument": "Add argument",
+      "environment": "Environment",
+      "environmentHint": "Extra variables for this command only.",
+      "envNameLabel": "Environment name {{row}}",
+      "envValueLabel": "Environment value {{row}}",
+      "removeEnv": "Remove environment row {{row}}",
+      "addVariable": "Add variable",
+      "workingDir": "Working directory",
+      "workingDirHint": "Where the agent starts; the thread workspace by default.",
+      "threadWorkspace": "Thread workspace",
+      "fixedPath": "Fixed path",
+      "fixedPathLabel": "Fixed working directory",
+      "addAgent": "Add agent"
+    },
+    "validate": {
+      "idRequired": "An instance id is required.",
+      "idPattern": "Use lowercase letters, digits and single dashes; start and end with a letter or digit.",
+      "idTooLong": "Keep the instance id to 64 characters or fewer.",
+      "idLocked": "The instance id cannot be changed while editing.",
+      "idTaken": "That instance id is already in use.",
+      "nameRequired": "A display name is required.",
+      "nameTooLong": "Keep the display name to 80 characters or fewer.",
+      "nameOneLine": "The display name must be one line.",
+      "commandRequired": "A command is required.",
+      "commandOneLine": "The command must be one line.",
+      "commandPath": "Use an executable name on PATH, or an absolute path.",
+      "argNul": "Argument {{row}} contains a NUL byte.",
+      "envName": "Environment row {{row}} needs a name like NAME or NAME_2.",
+      "envNul": "Environment row {{row}} contains a NUL byte.",
+      "pathRequired": "Enter the fixed working directory.",
+      "pathAbsolute": "The working directory must be an absolute path."
+    }
+  },
+  "worktrees": {
+    "title": "Worktrees",
+    "lead": "Git worktrees h4rn created for threads and subagents, and the ones your threads and their subagents worked in. Clearing removes the checkout from disk.",
+    "newWorktrees": "New worktrees",
+    "newWorktreesHint": "Where this machine puts new worktree checkouts, and how it names their branches. Existing worktrees stay where they are.",
+    "location": "Location",
+    "locationHint": "An absolute path or one starting with <code>~/</code>. Empty uses the h4rn data folder.",
+    "branchPrefix": "Branch prefix",
+    "branchPrefixHint": "Starts daemon-generated branch names. Invalid characters become hyphens; the trailing slash is optional.",
+    "saved": "Saved on this machine.",
+    "inUse": "In use",
+    "settled": "Settled",
+    "offline": "Offline",
+    "removed_one": "Removed {{count}}.",
+    "removed_other": "Removed {{count}}.",
+    "empty": "No worktrees yet. Subagents that run with worktree isolation, and threads working in a worktree, show up here.",
+    "nothingSettled": "Nothing has settled.",
+    "removeLabel": "Remove {{name}}",
+    "sentenceSeparator": " ",
+    "origin": {
+      "subagent": "Subagent worktree",
+      "thread": "Thread workspace",
+      "harness": "Created by an agent"
+    },
+    "orphaned": "Left behind after a restart",
+    "removedBranchKept": "Directory removed, branch kept",
+    "removedRegistrationLeft": "Directory removed, registration left",
+    "uncommitted": "Uncommitted changes",
+    "remove": {
+      "title": "Remove this worktree?",
+      "checkoutDeleted": "The checkout at {{path}} is deleted from disk. Ignored files such as build output are deleted with it.",
+      "ownedBranchToo": "The {{branch}} branch h4rn created is deleted too.",
+      "goneBranchDeleted": "No checkout remains on disk. Its {{branch}} branch is deleted.",
+      "gone": "No checkout remains on disk.",
+      "goneRegistration": "No checkout remains on disk; its registration is removed.",
+      "skipsUnmerged": "Uncommitted changes or unmerged work are skipped.",
+      "skipsUncommitted": "Uncommitted changes are skipped.",
+      "threadResume": "Its thread may still be resumed there."
+    },
+    "force": {
+      "button": "Remove anyway",
+      "title_one": "Remove {{count}} worktree anyway?",
+      "title_other": "Remove {{count}} worktrees anyway?",
+      "description": "Uncommitted changes and unmerged commits in these worktrees are lost. Any rebase, merge, cherry-pick or bisect in progress — including its autostash — and staged changes are lost. Any checkout now at these paths is deleted. This can't be undone.",
+      "threadNote_one": "One of these is a thread workspace another tool or you created.",
+      "threadNote_other": "{{count}} of these are thread workspaces another tool or you created."
+    },
+    "clearAll": {
+      "button": "Clear all",
+      "title_one": "Remove {{count}} worktree?",
+      "title_other": "Remove up to {{count}} worktrees?",
+      "description": "Checkouts are deleted from disk and h4rn/sa-* branches h4rn created are deleted. Worktrees with uncommitted changes or unmerged work are skipped. Worktrees a thread is working in are kept. Ignored files such as build output are deleted with each checkout.",
+      "kept_one": "One thread workspace is kept; remove it one at a time.",
+      "kept_other": "{{count}} thread workspaces are kept; remove them one at a time."
+    },
+    "otherConnection": {
+      "list": "This list belongs to another connection. Refresh it first.",
+      "settings": "These settings belong to another connection. Reload them first."
+    }
+  },
+  "proxy": {
+    "lead": "Routes harnesses on {{host}} through one endpoint with several credentials. Keys stay on {{host}}; this app only sees whether they exist.",
+    "onHost": "on {{host}}",
+    "profile": "Profile",
+    "noProfile": "No profile yet",
+    "noProfileHint": "Add the base URL of the CLIProxyAPI instance and the keys it expects. h4rn probes it before routing anything.",
+    "startDaemon": "Start the daemon on a host that can reach the proxy.",
+    "connection": "Connection",
+    "managementKey": "Management key",
+    "accessKey": "Access key",
+    "accessKeyHint": "What harnesses send",
+    "storedOn": "Stored on {{host}}",
+    "noKeyStored": "No key stored",
+    "newKey": "New key",
+    "newKeyLabel": "New {{label}}",
+    "replace": "Replace",
+    "noTrouble": "No trouble found. h4rn can read models and usage from this profile.",
+    "build": {
+      "notTested": "Not tested",
+      "fork": "Fork build",
+      "upstream": "Upstream build",
+      "unknown": "Build not identified"
+    },
+    "management": {
+      "available": "Enabled",
+      "open": "Open, no key required",
+      "needsKey": "Key required",
+      "disabled": "Disabled",
+      "unknown": "Unknown"
+    },
+    "summary": {
+      "health": "Health",
+      "ok": "OK",
+      "unreachable": "Unreachable",
+      "management": "Management",
+      "needsKeyHint": "Add the management key so h4rn can read models and credentials.",
+      "disabledHint": "Enable the management API in CLIProxyAPI's config to read models.",
+      "modelShape": "Model shape",
+      "noneDetected": "None detected",
+      "usageHistory": "Usage history",
+      "usageFromProxy": "Read from the proxy",
+      "usageLocal": "Not available · h4rn counts usage itself"
+    },
+    "detail": {
+      "build": "Build",
+      "commit": "Commit",
+      "usageQueue": "Usage queue",
+      "legacyUsage": "Legacy usage",
+      "configV8": "Config v8",
+      "performance": "Performance",
+      "credentialsVerify": "Credentials verify",
+      "cooldowns": "Cooldowns",
+      "quotaProviders": "Quota providers",
+      "supported": "Supported",
+      "supportedLegacy": "Supported (≤ 6.9)",
+      "notAvailable": "Not available",
+      "routePresent": "Route present",
+      "reported": "Reported",
+      "notReported": "Not reported"
+    },
+    "cooldown": {
+      "plain": "Cooling down",
+      "left": "Cooling down · {{left}}"
+    },
+    "models": {
+      "title": "Models",
+      "empty": "No models read yet. Test the profile, or open its management API.",
+      "model": "Model",
+      "mapsTo": "Maps to",
+      "context": "Context",
+      "custom": "Custom",
+      "keepsId": "keeps original id",
+      "reading": "Reading…",
+      "fromResponses_one": "{{count}} from responses",
+      "fromResponses_other": "{{count}} from responses",
+      "fromAliases_one": "{{count}} from responses + aliases",
+      "fromAliases_other": "{{count}} from responses + aliases"
+    },
+    "add": {
+      "button": "Add profile",
+      "title": "Add a profile",
+      "hint": "Keys are written to the secret store on {{host}}. This app only learns whether one exists.",
+      "label": "Label",
+      "labelLabel": "Profile label",
+      "baseUrlLabel": "Proxy base URL",
+      "defaultLabel": "Make this the default profile",
+      "save": "Save profile"
+    },
+    "harness": {
+      "title": "Per-harness override",
+      "hint": "Off means the harness keeps its own credential. Nothing changes for a harness you don't turn on.",
+      "routed": "Routed",
+      "own": "Own credential",
+      "routeLabel": "Route {{harness}} through CLIProxyAPI",
+      "defaultModel": "Default model for {{harness}}",
+      "profileDefault": "Profile default",
+      "preview": "{{harness}} settings preview",
+      "storedOn": "stored on {{host}}"
+    },
+    "apply": {
+      "interruptsOne": "Interrupts <em>{{title}}</em> on {{host}}.",
+      "interruptsMany_one": "Interrupts {{count}} running turn on {{host}}.",
+      "interruptsMany_other": "Interrupts {{count}} running turns on {{host}}.",
+      "restarted_one": "Restarted {{count}} session.",
+      "restarted_other": "Restarted {{count}} sessions.",
+      "applied": "Applied. Sessions you start next use it.",
+      "keepOld": "Sessions already running keep their old routing until restarted.",
+      "button": "Apply and restart",
+      "restarting": "Restarting…"
+    },
+    "probe": {
+      "title": "Probe",
+      "when": "{{when}} from {{host}}",
+      "never": "not probed yet",
+      "probing": "Probing…",
+      "roundTrip": "{{latency}} round trip",
+      "details": "Details"
+    },
+    "health": {
+      "title": "Credential health",
+      "none": "No health snapshot yet.",
+      "unreadable": "The management API could not be read.",
+      "noCredentials": "No credentials reported.",
+      "credential": "Credential",
+      "provider": "Provider",
+      "status": "Status",
+      "failed": "Failed",
+      "cooldown": "Cooldown",
+      "ready": "Ready"
+    }
+  },
+  "textGeneration": {
+    "title": "Text generators",
+    "lead": "A model API that only writes text. h4rn can use one for thread titles instead of starting a coding agent. Keys stay on {{host}}; this app only sees whether one exists.",
+    "thisHost": "this host",
+    "kinds": {
+      "open_ai_compatible": {
+        "label": "OpenAI-compatible",
+        "hint": "OpenAI, OpenRouter, Ollama, LM Studio"
+      },
+      "anthropic": {
+        "label": "Anthropic",
+        "hint": "api.anthropic.com"
+      }
+    },
+    "sendingPrompt": "Sending a tiny prompt…",
+    "replied": "Replied in {{latency}}.",
+    "repliedWith": "Replied in {{latency}}: “{{reply}}”",
+    "noAnswer": "The generator did not answer.",
+    "keyStored": "Key stored on {{host}}",
+    "noKey": "No key",
+    "test": "Test",
+    "testing": "Testing…",
+    "addGenerator": "Add generator",
+    "newGenerator": "New generator",
+    "name": "Name",
+    "nameHint": "Shown in the title-model picker",
+    "nameLabel": "Generator name",
+    "kind": "Kind",
+    "kindLabel": "Generator kind",
+    "baseUrlHint": "https, or http on this machine only",
+    "baseUrlLabel": "Generator base URL",
+    "modelHint": "The model that writes titles",
+    "modelLabel": "Generator model",
+    "apiKey": "API key",
+    "apiKeyHint": "Stored on {{host}}; optional for a local server",
+    "apiKeyLabel": "Generator API key",
+    "writeOnly": "Write-only",
+    "saveGenerator": "Save generator",
+    "retryOnline": "Retry when the daemon is online.",
+    "empty": "None yet. Titles can still be written by an installed coding agent; add a generator for a faster, cheaper model.",
+    "titleModel": "Title model",
+    "titleModelHint": "A new thread shows the first line of your first prompt immediately. The model then writes a shorter title and replaces it. A title you rename yourself is never replaced.",
+    "titleModelLabel": "Title model",
+    "whoWrites": "Who writes titles",
+    "codingAgentHint": "Claude Code runs once in an empty folder with no tools, then exits. Follow the thread's agent uses Claude Code for Claude Code threads; Codex threads keep the first-line title or use a text generator.",
+    "codingAgentLabel": "Coding agent for titles",
+    "followThreadHint": "Claude Code threads use their own; others keep the first line",
+    "generator": "Generator",
+    "generatorLabel": "Text generator for titles",
+    "manageUnderProviders": "Add or remove generators under Providers.",
+    "addUnderProviders": "Add a generator under Providers first.",
+    "titleModelDefault": "Defaults to the generator's model",
+    "summary": {
+      "reading": "Reading the title model…",
+      "off": "Titles are the first line of the first prompt.",
+      "claudeCode": "Titles are written once by Claude Code.",
+      "codex": "Codex is not used for titles; Codex threads keep the first line or use a text generator.",
+      "otherHarness": "{{harness}} is not used for titles; threads keep the first line.",
+      "followThread": "Claude Code threads use their own agent for titles; other threads keep the first line or use a text generator.",
+      "generatorModel": "Titles are written by a text generator with {{model}}.",
+      "generator": "Titles are written by the selected text generator."
+    },
+    "validate": {
+      "baseUrlRequired": "Enter the API root, for example https://api.openai.com/v1.",
+      "notUrl": "That is not a URL.",
+      "keyInUrl": "Put the key in the key field, not the URL.",
+      "useHttps": "Use https, or http only for a local server.",
+      "httpLoopback": "Plain http only works on this machine (localhost or 127.0.0.1).",
+      "nameRequired": "Name this generator.",
+      "modelRequired": "Enter the model it should call."
+    }
+  },
+  "resume": {
+    "title": "Auto-resume",
+    "lead": "When a harness reports a limit, h4rn can keep the turn queued and try again when the provider resets. The daemon schedules this; closing the app does not cancel it.",
+    "policy": "Policy",
+    "automatically": "Resume automatically",
+    "failoverHint": "A proxy failover model is preferred when the reset fires.",
+    "sameModelHint": "Retry the same harness and model when the reset fires.",
+    "failoverLabel": "Try a failover model on resume",
+    "failoverFirst": "Failover first",
+    "sameModel": "Same model",
+    "longestWait": "Longest wait",
+    "longestWaitHint": "Unknown reset times are retried within this window",
+    "current": "Current: {{duration}}",
+    "jitter": "Jitter",
+    "jitterHint": "Stops many threads resuming on the same second",
+    "jitterLabel": "Jitter in seconds",
+    "seconds": "seconds",
+    "prompt": "Resume prompt",
+    "promptHint": "Sent to the session with its saved context",
+    "observed_one": "{{count}} limit observed",
+    "observed_other": "{{count}} limits observed",
+    "failoverOn": "failover on",
+    "failoverOff": "failover off",
+    "savePolicy": "Save policy"
+  },
+  "forges": {
+    "title": "Forges",
+    "lead": "GitHub, GitLab, Gitea, Forgejo, Bitbucket Cloud and Azure DevOps accounts used for pull requests, checks and reviews. Tokens stay on this host and every call goes through the daemon.",
+    "accounts": "Accounts",
+    "noAccounts": "No forge accounts yet. Add a token below, or import one your CLI already stores.",
+    "table": {
+      "account": "Account",
+      "host": "Host",
+      "scopes": "Scopes",
+      "added": "Added"
+    },
+    "notReported": "Not reported",
+    "broadScopesTitle": "Broad scopes: {{scopes}}",
+    "broaderThanNeeded": "broader than needed",
+    "removeLabel": "Remove {{name}}",
+    "asUser": " as @{{username}}",
+    "source": {
+      "pat": "Token",
+      "o_auth_device": "GitHub device flow",
+      "gh_cli": "Imported from gh",
+      "glab_cli": "Imported from glab",
+      "bitbucket_api_token": "API token (email + token)",
+      "bitbucket_access_token": "Workspace, project or repository access token"
+    },
+    "scopes": {
+      "github": "Use a fine-grained token with Contents: read, Pull requests: write and Checks: read.",
+      "gitlab": "Use a project access token with read_api and write to merge requests.",
+      "gitea": "Use a token with repo scope on the repositories you want to see.",
+      "forgejo": "Use a token with repo scope on the repositories you want to see.",
+      "bitbucket": "Use an Atlassian API token (Account: read, Repositories: read, Pull requests: read and write) with your Atlassian account email, or a workspace, project or repository access token (app passwords were retired in July 2026).",
+      "azure_devops": "Use a personal access token with Code: read & write."
+    },
+    "add": {
+      "title": "Add an account",
+      "forge": "Forge",
+      "bitbucketNote": "App passwords no longer work. Paste an API token with your Atlassian account email, or a workspace, project or repository access token with the email left empty.",
+      "baseUrl": "Base URL",
+      "baseUrlAzure": "Include the organization, e.g. https://dev.azure.com/acme",
+      "baseUrlBitbucket": "Bitbucket Cloud only, at bitbucket.org",
+      "baseUrlSelfHosted": "Point a self-hosted forge at its own host",
+      "baseUrlLabel": "Forge base URL",
+      "email": "Atlassian account email",
+      "emailHint": "Needed for an API token (email + token). Leave empty for a workspace, project or repository access token.",
+      "needsRepository": "An access token cannot read your account, so it is validated against a repository. Open the Pull requests page from a checkout of a Bitbucket repository first, then this form can detect it.",
+      "validateAgainst": "Validate against",
+      "validateAgainstHint": "Which detected Bitbucket repository proves this account. The first is used by default.",
+      "validateAgainstLabel": "Bitbucket repository to validate against",
+      "token": "Token",
+      "tokenHint": "Stored on this host, never shown again",
+      "tokenLabel": "Forge token",
+      "tokenPlaceholder": "Paste a token",
+      "button": "Add account",
+      "missingOrganization": "Add the organization to the base URL."
+    },
+    "device": {
+      "title": "GitHub device flow",
+      "enterCode_one": "Enter this code at <link>{{uri}}</link>. The code expires in {{count}} minute.",
+      "enterCode_other": "Enter this code at <link>{{uri}}</link>. The code expires in {{count}} minutes.",
+      "waiting": "Waiting for authorization…",
+      "stop": "Stop",
+      "hint": "Authorize once in the browser; the daemon keeps the resulting token. Needs H4RN_GITHUB_CLIENT_ID on the host.",
+      "start": "Start device flow",
+      "starting": "Starting…",
+      "startFailed": "The device flow did not start.",
+      "needsClientId": "Set H4RN_GITHUB_CLIENT_ID on the daemon to enable it.",
+      "slowDown": "GitHub asked us to slow down; still waiting…",
+      "expired": "The code expired. Start again."
+    },
+    "import": {
+      "title": "Import from a CLI",
+      "hint": "Reads the token <code>gh</code> or <code>glab</code> already stored for the current user. Nothing is imported until you confirm.",
+      "fromGh": "Import from gh",
+      "fromGlab": "Import from glab",
+      "confirmTitle": "Import the {{cli}} token?",
+      "confirmDescription": "h4rn reads the credential {{cli}} stores for the signed-in user and saves it on this host. Only do this if you trust this machine.",
+      "confirmButton": "Import token"
+    },
+    "leastPrivilege": "Least privilege",
+    "leastPrivilegeHint": "The pull request surface reads contents, checks and reviews, and writes comments and replies. It never needs repository administration, secrets or organization write access; a token that reports those scopes is flagged above.",
+    "remove": {
+      "title": "Remove {{forge}} account?",
+      "description": "The token for {{url}} is deleted from this host. Pull requests for that host stop loading until you add an account again.",
+      "button": "Remove account"
+    },
+    "toast": {
+      "added": "Added {{forge}}{{user}}.",
+      "addFailed": "The account was not added.",
+      "connected": "Connected {{forge}}{{user}}.",
+      "removed": "Removed {{name}}.",
+      "removeFailed": "The account was not removed.",
+      "imported": "Imported {{forge}}{{user}}.",
+      "importFailed": "No {{cli}} credential was imported."
+    }
+  },
+  "labs": {
+    "title": "Labs",
+    "lead": "Features that are complete but still settling in.",
+    "threads": "Threads",
+    "rewindFiles": "Rewind files with Edit from here",
+    "rewindFilesHint": "Put a thread’s own worktree back to the checkpoint taken before an edited message. Off by default while the file restore is still being hardened; the conversation rewind works either way.",
+    "rewindOffNote": "While this is off, editing an earlier prompt still removes that message and everything after it from the thread and the harness’s history; only the workspace files stay as they are.",
+    "sharing": "Sharing",
+    "guestLinks": "Guest links",
+    "guestLinksHint": "Let one teammate follow one thread in a browser, with no account. Every message they write waits for you.",
+    "guestSees": "What a guest can see",
+    "guestSeesHint": "One thread’s messages, the agent’s replies, its reasoning, plans and tool output, including anything the agent printed such as a value from a file. Never diffs, other threads, files, terminals or settings.",
+    "guestOffNote": "Turning guest links off ends every existing guest link on this machine and deletes the messages waiting for you; turning it back on does not revive them. Settling a thread, creating a new link or choosing Stop sharing also ends a link for good.",
+    "outsideAgents": "Outside agents",
+    "outsideAgentsOAuth": "Outside agents (OAuth)",
+    "outsideAgentsHint": "Let Claude Code, Codex or another local MCP client sign in over OAuth and work with your projects and threads. Off by default. Turning it off revokes every grant and drops every sign-in waiting for you.",
+    "outsideOffNote": "While this is off, h4rn’s OAuth routes do not exist, outside-agent tokens are refused, and no sign-in can be created. Agents h4rn runs keep their own tools."
+  },
+  "access": {
+    "title": "Sharing & access",
+    "offlineLead": "Outside agents connect to this machine. Reconnect to see who is connected and copy the MCP URL.",
+    "lead": "Let an agent you did not start work with h4rn, and decide what h4rn's own tools may do inside the agents h4rn runs.",
+    "outsideAgents": "Outside agents",
+    "outsideAgentsHint": "Add this URL to Claude Code, Codex or another MCP client that supports OAuth. The client signs in once; you choose its level here, in h4rn.",
+    "mcpUrl": "MCP URL",
+    "needsLoopback": "Outside agents need a loopback listener",
+    "copyMcpUrl": "Copy MCP URL",
+    "copyMcpUrlLabel": "Copy the outside-agent MCP URL",
+    "remoteNote": "This h4rn app is connected to {{machine}} from another device. That URL is the address on that computer's own loopback, so it works only there: an agent on the internet cannot reach it yet. Copy it from h4rn on {{machine}} itself.",
+    "waiting": "Waiting for you",
+    "readingAgents": "Reading connected agents…",
+    "noneConnected": "No outside agent is connected",
+    "noneConnectedHint": "Nothing can read or start threads from outside h4rn until you approve a sign-in.",
+    "inLabs": "Outside agents are in Labs. Turn them on in Settings → Labs → Outside agents (OAuth).",
+    "readingSetting": "Reading the outside-agent setting…",
+    "tools": "h4rn tools in your agents",
+    "toolsHint": "Agents h4rn runs can link pull requests to their thread and read its state. Turn the tools off per harness if you would rather they did not.",
+    "toolsOn": "Link pull requests, watch them and read the thread's status.",
+    "toolsOff": "No h4rn tools are offered to these sessions.",
+    "toolsIn": "h4rn tools in {{harness}}",
+    "connected": "Connected {{when}}",
+    "lastUsed": "Last used {{when}}",
+    "signInUntil": "Sign-in until {{when}}",
+    "revokeLabel": "Revoke {{name}}",
+    "revokeTitle": "Revoke {{name}}?",
+    "revokeThis": "Revoke this agent?",
+    "revokeDescription": "Its access token and refresh token stop working immediately. It must ask to sign in again to reconnect.",
+    "wantsToConnect": "{{name}} wants to connect",
+    "unverifiedName": "Unverified name, chosen by the app. If you approve, your browser returns to <code>{{origin}}</code>.",
+    "mayDo": "What {{name}} may do",
+    "deny": "Deny",
+    "approve": "Approve",
+    "levels": {
+      "read_only": {
+        "label": "Read only",
+        "description": "Reads projects, threads and providers; nothing changes."
+      },
+      "supervised": {
+        "label": "Supervised",
+        "description": "Starts and messages threads at approval-required."
+      },
+      "full_access": {
+        "label": "Full access",
+        "description": "Starts and messages threads at the mode it asks for."
+      }
+    },
+    "toast": {
+      "connected": "{{name}} is connected.",
+      "answerFailed": "Couldn't answer {{name}}.",
+      "revoked": "{{name}} is cut off.",
+      "revokedHint": "Every token it held is revoked; it must ask to sign in again.",
+      "revokeFailed": "Couldn't revoke {{name}}.",
+      "toolsOnFailed": "Couldn't turn on h4rn tools.",
+      "toolsOffFailed": "Couldn't turn off h4rn tools.",
+      "switchRestored": "The switch is back where it was.",
+      "outsideOn": "Outside agents are on.",
+      "outsideOff": "Outside agents are off.",
+      "outsideOnHint": "An agent you did not start can sign in from Settings → Sharing & access.",
+      "outsideOffHint": "Every grant is revoked and every waiting sign-in is dropped.",
+      "outsideOnFailed": "Couldn't turn on outside agents.",
+      "outsideOffFailed": "Couldn't turn off outside agents."
+    }
+  }
+}

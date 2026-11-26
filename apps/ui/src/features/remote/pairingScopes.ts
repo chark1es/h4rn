@@ -8,24 +8,34 @@
  */
 
 import type { PairScope } from "@/gen";
+import { formatList, i18n } from "@/lib/i18n";
 
+/** A scope's words come from `scopeLabel` and `scopeSub`. */
 export type ScopeOption = {
   id: PairScope;
-  label: string;
-  sub: string;
   /** `view` is always held. */
   locked: boolean;
 };
 
 export const SCOPE_OPTIONS: readonly ScopeOption[] = [
-  { id: "view", label: "View threads", sub: "Always included", locked: true },
-  { id: "approve", label: "Approve and reply", sub: "", locked: false },
-  { id: "terminal", label: "Terminal", sub: "Type into shells", locked: false },
-  { id: "files", label: "Files and edits", sub: "", locked: false },
-  { id: "admin", label: "Manage hosts and devices", sub: "Admin", locked: false },
+  { id: "view", locked: true },
+  { id: "approve", locked: false },
+  { id: "terminal", locked: false },
+  { id: "files", locked: false },
+  { id: "admin", locked: false },
 ];
 
 const ALL_SCOPES: readonly PairScope[] = SCOPE_OPTIONS.map((option) => option.id);
+
+/** A scope's name in the active language. */
+export function scopeLabel(scope: PairScope): string {
+  return i18n.t(`settings:devices.scopes.${scope}.label`);
+}
+
+/** A scope's second line in the active language, or "" when it has none. */
+export function scopeSub(scope: PairScope): string {
+  return i18n.t(`settings:devices.scopes.${scope}.sub`);
+}
 
 /** What the Settings checkboxes start as: view plus approve. */
 export const DEFAULT_PAIR_SCOPES: readonly PairScope[] = ["view", "approve"];
@@ -47,11 +57,15 @@ export function toggleScope(scopes: readonly PairScope[], scope: PairScope): Pai
 
 /** The Scopes column: "All", or the held scopes by name. */
 export function scopesLabel(scopes: readonly PairScope[] | undefined): string {
-  if (!scopes || scopes.length === 0 || scopes.length === ALL_SCOPES.length) return "All";
+  if (!scopes || scopes.length === 0 || scopes.length === ALL_SCOPES.length) {
+    return i18n.t("settings:devices.scopes.all");
+  }
   const names = scopes
     .filter((scope) => scope !== "view")
-    .map((scope) => SCOPE_OPTIONS.find((option) => option.id === scope)?.label ?? scope);
-  return names.length === 0 ? "View only" : names.join(", ");
+    .map((scope) => (ALL_SCOPES.includes(scope) ? scopeLabel(scope) : scope));
+  return names.length === 0
+    ? i18n.t("settings:devices.scopes.viewOnly")
+    : formatList(names, "conjunction", "narrow");
 }
 
 /** Shows an 8-character code as `ABCD-EFGH`. */

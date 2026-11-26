@@ -7,12 +7,15 @@ import {
   LogOutIcon,
 } from "lucide-react";
 import { useEffect, useState } from "react";
+import { Trans, useTranslation } from "react-i18next";
 
 import type { ProviderInfo } from "@/gen";
+import { i18n } from "@/lib/i18n";
 import { listProviders } from "./connect";
 import {
   cancelLogin,
   DEFAULT_CONNECT_URL,
+  type RemoteBusy,
   setConnectUrl,
   signIn,
   signInWithDeviceCode,
@@ -27,6 +30,13 @@ function relayHost(url: string): string {
   }
 }
 
+/** The store's current step, in the reader's language. */
+export function busyText(busy: RemoteBusy): string {
+  return busy.kind === "connecting"
+    ? i18n.t("settings:connect.busy.connecting", { name: busy.machineName })
+    : i18n.t(`settings:connect.busy.${busy.kind}`);
+}
+
 function providerLabel(provider: ProviderInfo): string {
   return provider.display_name || provider.id;
 }
@@ -38,6 +48,7 @@ function providerLabel(provider: ProviderInfo): string {
  * resolve back into `remoteStore`, so this form never handles a token.
  */
 export function ConnectSignIn({ compact = false }: { compact?: boolean }) {
+  const { t } = useTranslation(["settings", "common"]);
   const phase = useRemote((state) => state.phase);
   const connectUrl = useRemote((state) => state.connectUrl);
   const busy = useRemote((state) => state.busy);
@@ -83,14 +94,14 @@ export function ConnectSignIn({ compact = false }: { compact?: boolean }) {
       <h2>h4rn-connect</h2>
       <div className="q-field">
         <div className="lab">
-          <div className="t">Relay</div>
-          <div className="s">Self-hosted; only machines you pair are reachable.</div>
+          <div className="t">{t("account.relay")}</div>
+          <div className="s">{t("connect.relayHint")}</div>
         </div>
         <div className="ctl">
           <input
             className="q-input q-mono"
             value={draftUrl}
-            aria-label="h4rn-connect URL"
+            aria-label={t("connect.urlLabel")}
             spellCheck={false}
             style={{ maxWidth: 320, fontSize: 12 }}
             onChange={(event) => setDraftUrl(event.target.value)}
@@ -106,7 +117,7 @@ export function ConnectSignIn({ compact = false }: { compact?: boolean }) {
             disabled={!draftUrl.trim() || draftUrl.trim() === connectUrl}
             onClick={() => setConnectUrl(draftUrl.trim() || DEFAULT_CONNECT_URL)}
           >
-            Use
+            {t("connect.use")}
           </button>
         </div>
       </div>
@@ -114,8 +125,10 @@ export function ConnectSignIn({ compact = false }: { compact?: boolean }) {
       {login ? (
         <div className="q-field" style={{ alignItems: "flex-start" }}>
           <div className="lab">
-            <div className="t">Approval code</div>
-            <div className="s">Enter it at {new URL(login.verificationUri).host}</div>
+            <div className="t">{t("connect.approvalCode")}</div>
+            <div className="s">
+              {t("connect.enterAt", { host: new URL(login.verificationUri).host })}
+            </div>
           </div>
           <div className="ctl" style={{ display: "block" }}>
             <div className="q-code-big" style={{ marginBottom: 8 }}>
@@ -128,7 +141,7 @@ export function ConnectSignIn({ compact = false }: { compact?: boolean }) {
                 target="_blank"
                 rel="noreferrer"
               >
-                Open approval page
+                {t("connect.openApproval")}
               </a>
               <button
                 type="button"
@@ -136,14 +149,14 @@ export function ConnectSignIn({ compact = false }: { compact?: boolean }) {
                 onClick={() => void navigator.clipboard?.writeText(login.userCode)}
               >
                 <CopyIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-                Copy code
+                {t("connect.copyCode")}
               </button>
               <button type="button" className="q-btn ghost" onClick={cancelLogin}>
-                Cancel
+                {t("common:cancel")}
               </button>
             </div>
             <div className="q-faint" style={{ fontSize: 12, marginTop: 8 }}>
-              {busy ?? "Waiting for approval"}…
+              {busy ? busyText(busy) : t("connect.waiting")}
             </div>
           </div>
         </div>
@@ -153,9 +166,14 @@ export function ConnectSignIn({ compact = false }: { compact?: boolean }) {
             <div className="q-banner err wrap q-signin-err" role="alert">
               <AlertCircleIcon className="q-icon s14 ic" strokeWidth={1.5} aria-hidden />
               <div className="grow">
-                <b>Can’t reach h4rn-connect at {relayHost(connectUrl)}.</b> It may not be running.
+                <Trans
+                  t={t}
+                  i18nKey="connect.unreachable"
+                  values={{ host: relayHost(connectUrl) }}
+                  components={{ b: <b /> }}
+                />
                 <details className="q-signin-details">
-                  <summary>Details</summary>
+                  <summary>{t("proxy.probe.details")}</summary>
                   <span className="q-mono">{providersError}</span>
                 </details>
               </div>
@@ -165,21 +183,24 @@ export function ConnectSignIn({ compact = false }: { compact?: boolean }) {
                 disabled={probing}
                 onClick={() => setAttempt((count) => count + 1)}
               >
-                {probing ? "Retrying…" : "Retry"}
+                {probing ? t("connect.retrying") : t("common:retry")}
               </button>
             </div>
           ) : null}
           <div className="q-field">
             <div className="lab">
-              <div className="t">Sign in</div>
+              <div className="t">{t("connect.signIn")}</div>
               <div className="s">
                 {probing
-                  ? "Checking providers…"
+                  ? t("connect.checkingProviders")
                   : primary
-                    ? `${providerLabel(primary)} at ${new URL(primary.issuer).host}`
+                    ? t("connect.providerAt", {
+                        provider: providerLabel(primary),
+                        host: new URL(primary.issuer).host,
+                      })
                     : providersError
-                      ? "Available once the relay is reachable"
-                      : "The relay advertises no sign-in provider"}
+                      ? t("connect.availableOnceReachable")
+                      : t("connect.noProvider")}
               </div>
             </div>
             <div className="ctl" style={{ flexWrap: "wrap" }}>
@@ -194,7 +215,9 @@ export function ConnectSignIn({ compact = false }: { compact?: boolean }) {
                 ) : (
                   <KeyRoundIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
                 )}
-                {primary ? `Sign in with ${providerLabel(primary)}` : "Sign in"}
+                {primary
+                  ? t("connect.signInWith", { provider: providerLabel(primary) })
+                  : t("connect.signIn")}
               </button>
               {primary?.device_grant ? (
                 <button
@@ -203,7 +226,7 @@ export function ConnectSignIn({ compact = false }: { compact?: boolean }) {
                   disabled={signingIn}
                   onClick={() => void signInWithDeviceCode(primary.id)}
                 >
-                  Sign in on another device
+                  {t("connect.otherDevice")}
                   <ArrowRightIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
                 </button>
               ) : null}
@@ -215,7 +238,7 @@ export function ConnectSignIn({ compact = false }: { compact?: boolean }) {
       {error && !compact ? (
         <div className="q-field" style={{ alignItems: "flex-start" }}>
           <div className="lab">
-            <div className="t">Sign-in failed</div>
+            <div className="t">{t("connect.failed")}</div>
           </div>
           <div className="ctl">
             <span className="q-danger" style={{ fontSize: 12 }}>
@@ -229,20 +252,21 @@ export function ConnectSignIn({ compact = false }: { compact?: boolean }) {
 }
 
 export function SignOutButton({ onDone }: { onDone?: () => void }) {
+  const { t } = useTranslation(["settings", "common"]);
   const [confirming, setConfirming] = useState(false);
   const busy = useRemote((state) => state.busy);
   if (!confirming) {
     return (
       <button type="button" className="q-btn ghost" onClick={() => setConfirming(true)}>
         <LogOutIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-        Sign out
+        {t("devices.signOut")}
       </button>
     );
   }
   return (
     <span style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
       <span className="q-faint" style={{ fontSize: 12 }}>
-        Forget this device?
+        {t("connect.forgetDevice")}
       </span>
       <button
         type="button"
@@ -250,7 +274,7 @@ export function SignOutButton({ onDone }: { onDone?: () => void }) {
         onClick={() => setConfirming(false)}
         disabled={busy !== null}
       >
-        Cancel
+        {t("common:cancel")}
       </button>
       <button
         type="button"
@@ -263,7 +287,7 @@ export function SignOutButton({ onDone }: { onDone?: () => void }) {
           onDone?.();
         }}
       >
-        Sign out
+        {t("devices.signOut")}
       </button>
     </span>
   );

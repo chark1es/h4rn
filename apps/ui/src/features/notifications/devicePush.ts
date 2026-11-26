@@ -13,6 +13,7 @@
 
 import { remoteStore } from "@/features/remote/remoteStore";
 import { currentConnectClient } from "@/features/remote/session";
+import { i18n } from "@/lib/i18n";
 import {
   type DevicePushPermission,
   deviceAlertsPlatform,
@@ -53,16 +54,16 @@ let lastRegistered = false;
 
 /** One sentence about the phone's real notification state. */
 export function deviceStatusLine(device: DeviceAlertsState | null, signedIn: boolean): string {
-  if (!signedIn) return "Sign in to Connect first.";
-  if (device === null) return "Checking…";
-  if (device.available === false) return "Unavailable in this build.";
-  if (device.available === null) return "Could not check this phone's notifications. Try again.";
-  if (device.permission === "denied") return "Blocked in system settings.";
-  if (device.permission === "default")
-    return "This phone will ask for permission when you turn this on.";
-  if (device.enabled && device.registered) return "Registered with this phone.";
-  if (device.enabled) return "Registered, but Connect has not confirmed this phone yet.";
-  return "Off.";
+  if (!signedIn) return i18n.t("settings:notifications.device.signIn");
+  if (device === null) return i18n.t("common:checking");
+  if (device.available === false) return i18n.t("settings:notifications.device.unavailable");
+  if (device.available === null) return i18n.t("settings:notifications.device.checkFailed");
+  if (device.permission === "denied") return i18n.t("settings:notifications.device.blocked");
+  if (device.permission === "default") return i18n.t("settings:notifications.device.willAsk");
+  if (device.enabled && device.registered)
+    return i18n.t("settings:notifications.device.registered");
+  if (device.enabled) return i18n.t("settings:notifications.device.unconfirmed");
+  return i18n.t("settings:notifications.device.off");
 }
 
 /**
@@ -75,10 +76,10 @@ export function deviceStatusLine(device: DeviceAlertsState | null, signedIn: boo
 export function deviceAvailabilityNote(device: DeviceAlertsState | null): string | null {
   if (device === null) return null;
   if (device.configured === false) {
-    return "This Connect server has no push sender configured for this phone. An operator has to add one before alerts can arrive.";
+    return i18n.t("settings:notifications.device.noSender");
   }
   if (device.configured === null && device.error !== null) {
-    return "Could not check whether this Connect server can send alerts.";
+    return i18n.t("settings:notifications.device.senderUnknown");
   }
   return null;
 }
@@ -279,11 +280,11 @@ export async function readDeviceAlerts(): Promise<DeviceAlertsState> {
 /** Registers this install with Connect, rotating any old token. */
 export async function registerDeviceAlerts(): Promise<void> {
   const client = currentConnectClient();
-  if (!client) throw new Error("Sign in to Connect first.");
+  if (!client) throw new Error(i18n.t("settings:notifications.device.signIn"));
   const result = await nativePushStatus();
   if (result.kind === "failed") throw new Error(result.error);
   if (result.kind !== "checked" || !result.status.available) {
-    throw new Error("This build cannot receive alerts.");
+    throw new Error(i18n.t("settings:notifications.buildCannotReceive"));
   }
   const token = await nativePushToken();
   const platform = deviceAlertsPlatform();

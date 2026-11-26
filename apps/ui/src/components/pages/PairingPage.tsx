@@ -11,10 +11,23 @@ import {
   rejectPairingSas,
   useRemote,
 } from "@/features/remote/remoteStore";
+import type { PairScope } from "@/gen";
 import { useNow } from "@/hooks/use-now";
 import { machineSeed } from "@/lib/entities";
 import { navigate } from "@/lib/store/appStore";
 import { cn } from "@/lib/utils";
+
+/**
+ * The phone's pairing screen is still English (the pairing area converts it
+ * later), so it keeps its own scope words instead of Settings' translated ones.
+ */
+const SCOPE_COPY: Record<PairScope, { label: string; sub: string }> = {
+  view: { label: "View threads", sub: "Always included" },
+  approve: { label: "Approve and reply", sub: "" },
+  terminal: { label: "Terminal", sub: "Type into shells" },
+  files: { label: "Files and edits", sub: "" },
+  admin: { label: "Manage hosts and devices", sub: "Admin" },
+};
 
 function ScopeRow({ label, sub, on }: { label: string; sub?: string; on: boolean }) {
   return (
@@ -190,8 +203,12 @@ export function PairingPage() {
               {SCOPE_OPTIONS.map((option) => (
                 <ScopeRow
                   key={option.id}
-                  label={option.label}
-                  sub={option.id === "terminal" ? `Type into shells on ${hostLabel}` : option.sub}
+                  label={SCOPE_COPY[option.id].label}
+                  sub={
+                    option.id === "terminal"
+                      ? `Type into shells on ${hostLabel}`
+                      : SCOPE_COPY[option.id].sub
+                  }
                   on={option.locked || pending.payload.scopes.includes(option.id)}
                 />
               ))}

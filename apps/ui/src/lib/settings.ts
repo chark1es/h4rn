@@ -8,7 +8,6 @@ import {
   GitPullRequestIcon,
   LayersIcon,
   MessageSquareIcon,
-  PlugIcon,
   ServerIcon,
   SettingsIcon,
   Share2Icon,
@@ -18,39 +17,54 @@ import {
   UserIcon,
 } from "lucide-react";
 
+/** A Settings page. Its label comes from the `settings` catalogue: `nav.sections.<key>`. */
 export type SettingsSection = {
-  key: string;
-  label: string;
+  key: SettingsSectionKey;
   icon: typeof SettingsIcon;
-  group?: string;
+  group?: SettingsGroup;
 };
 
-export const SETTINGS_SECTIONS: SettingsSection[] = [
-  { key: "general", label: "General", icon: SettingsIcon },
-  { key: "appearance", label: "Appearance", icon: SunIcon },
-  { key: "notifications", label: "Notifications", icon: BellIcon },
-  { key: "chat", label: "Chat", icon: MessageSquareIcon },
-  { key: "shortcuts", label: "Shortcuts", icon: CommandIcon },
-  { key: "threads", label: "Threads", icon: MessageSquareIcon },
-  { key: "schedules", label: "Scheduled tasks", icon: CalendarClockIcon },
-  { key: "source-control", label: "Source control", icon: GitCommitHorizontalIcon },
-  { key: "hosts", label: "Hosts & devices", icon: ServerIcon, group: "Machines" },
-  { key: "harnesses", label: "Harnesses", icon: TerminalIcon, group: "Machines" },
-  { key: "worktrees", label: "Worktrees", icon: GitBranchIcon, group: "Machines" },
-  { key: "providers", label: "Providers", icon: LayersIcon, group: "Machines" },
-  { key: "resume", label: "Auto-resume", icon: TimerIcon, group: "Machines" },
-  { key: "forges", label: "Forges", icon: GitPullRequestIcon, group: "Machines" },
-  { key: "labs", label: "Labs", icon: FlaskConicalIcon, group: "Machines" },
-  { key: "account", label: "Account & relay", icon: UserIcon, group: "Account" },
-  { key: "access", label: "Sharing & access", icon: Share2Icon, group: "Account" },
-];
+export type SettingsSectionKey =
+  | "general"
+  | "appearance"
+  | "notifications"
+  | "chat"
+  | "shortcuts"
+  | "threads"
+  | "schedules"
+  | "source-control"
+  | "hosts"
+  | "harnesses"
+  | "worktrees"
+  | "providers"
+  | "resume"
+  | "forges"
+  | "labs"
+  | "account"
+  | "access";
 
-export const TOOLS_SECTION = {
-  key: "library",
-  label: "MCP servers",
-  icon: PlugIcon,
-  group: "Tools",
-} as const;
+/** A nav group heading; its label is `nav.groups.<group>`. */
+export type SettingsGroup = "Machines" | "Account";
+
+export const SETTINGS_SECTIONS: SettingsSection[] = [
+  { key: "general", icon: SettingsIcon },
+  { key: "appearance", icon: SunIcon },
+  { key: "notifications", icon: BellIcon },
+  { key: "chat", icon: MessageSquareIcon },
+  { key: "shortcuts", icon: CommandIcon },
+  { key: "threads", icon: MessageSquareIcon },
+  { key: "schedules", icon: CalendarClockIcon },
+  { key: "source-control", icon: GitCommitHorizontalIcon },
+  { key: "hosts", icon: ServerIcon, group: "Machines" },
+  { key: "harnesses", icon: TerminalIcon, group: "Machines" },
+  { key: "worktrees", icon: GitBranchIcon, group: "Machines" },
+  { key: "providers", icon: LayersIcon, group: "Machines" },
+  { key: "resume", icon: TimerIcon, group: "Machines" },
+  { key: "forges", icon: GitPullRequestIcon, group: "Machines" },
+  { key: "labs", icon: FlaskConicalIcon, group: "Machines" },
+  { key: "account", icon: UserIcon, group: "Account" },
+  { key: "access", icon: Share2Icon, group: "Account" },
+];
 
 export function settingsPath(section: string): string {
   return `/settings/${section}`;

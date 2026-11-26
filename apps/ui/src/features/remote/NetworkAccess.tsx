@@ -19,10 +19,11 @@ import {
   SmartphoneIcon,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import { Trans, useTranslation } from "react-i18next";
 
 import type { DirectDevice, PairScope } from "@/gen";
 import { useNow } from "@/hooks/use-now";
-import { relativeAge } from "@/lib/format";
+import { formatRelativeTime, i18n } from "@/lib/i18n";
 import { useApp } from "@/lib/store/appStore";
 import {
   cancelDirectPairing,
@@ -34,7 +35,14 @@ import {
   setNetworkAccess,
   useNetworkAccess,
 } from "./networkAccessStore";
-import { DEFAULT_PAIR_SCOPES, SCOPE_OPTIONS, scopesLabel, toggleScope } from "./pairingScopes";
+import {
+  DEFAULT_PAIR_SCOPES,
+  SCOPE_OPTIONS,
+  scopeLabel,
+  scopeSub,
+  scopesLabel,
+  toggleScope,
+} from "./pairingScopes";
 import { QrCode } from "./QrCode";
 import { shellKind, useRemote } from "./remoteStore";
 
@@ -107,6 +115,7 @@ export function DirectPairingBlock({
   onNewCode: () => void;
   onCancel: () => void;
 }) {
+  const { t } = useTranslation(["settings", "common"]);
   const [copied, setCopied] = useState(false);
   const remaining = offer.expiresAt - now;
   const expired = remaining <= 0;
@@ -125,27 +134,24 @@ export function DirectPairingBlock({
       <div className="q-qr">
         <QrCode
           value={offer.uri}
-          label={`Direct pairing QR code${hostName ? ` for ${hostName}` : ""}`}
+          label={hostName ? t("network.qrLabelFor", { host: hostName }) : t("network.qrLabel")}
           size={148}
         />
       </div>
       <div style={{ flex: 1, minWidth: 0 }}>
         <div className="q-muted" style={{ fontSize: 12 }}>
-          {expired
-            ? "This code has expired."
-            : "Scan with the h4rn app on the other device, or copy the link."}
+          {expired ? t("network.expired") : t("network.scan")}
         </div>
         <div className="q-faint q-num" style={{ fontSize: 12, marginTop: 4 }}>
           {expired ? (
-            "Generate a new code to pair."
+            t("network.generateNew")
           ) : (
-            <>
-              One device, once. Expires in{" "}
-              <span data-countdown="direct-pair" className="q-num">
-                {remainingText(remaining)}
-              </span>
-              .
-            </>
+            <Trans
+              t={t}
+              i18nKey="network.oneDevice"
+              values={{ time: remainingText(remaining) }}
+              components={{ countdown: <span data-countdown="direct-pair" className="q-num" /> }}
+            />
           )}
         </div>
         <div className="q-pair-scopes" style={{ marginTop: 12 }}>
@@ -164,8 +170,10 @@ export function DirectPairingBlock({
                   {on ? <CheckIcon className="q-icon s12" strokeWidth={2} /> : null}
                 </span>
                 <span>
-                  <span style={{ fontWeight: 500 }}>{scope.label}</span>
-                  {scope.sub ? <span className="q-faint sub">{scope.sub}</span> : null}
+                  <span style={{ fontWeight: 500 }}>{scopeLabel(scope.id)}</span>
+                  {scopeSub(scope.id) ? (
+                    <span className="q-faint sub">{scopeSub(scope.id)}</span>
+                  ) : null}
                 </span>
               </label>
             );
@@ -173,8 +181,7 @@ export function DirectPairingBlock({
         </div>
         {admin ? (
           <div className="q-faint" style={{ fontSize: 12, marginTop: 8 }}>
-            Admin lets that device change hosts, devices and this setting on{" "}
-            {hostName ?? "this computer"}.
+            {t("network.adminNote", { host: hostName ?? t("network.thisComputerLower") })}
           </div>
         ) : null}
         <div style={{ display: "flex", gap: 6, marginTop: 12, flexWrap: "wrap" }}>
@@ -193,14 +200,14 @@ export function DirectPairingBlock({
             ) : (
               <CopyIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
             )}
-            {copied ? "Copied" : "Copy link"}
+            {copied ? t("common:copied") : t("devices.pairing.copyLink")}
           </button>
           <button type="button" className="q-btn ghost" onClick={onNewCode}>
             <RefreshCwIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-            New code
+            {t("devices.pairing.newCode")}
           </button>
           <button type="button" className="q-btn ghost" onClick={onCancel}>
-            Cancel
+            {t("common:cancel")}
           </button>
         </div>
       </div>
@@ -210,7 +217,7 @@ export function DirectPairingBlock({
 
 /** A short, stable name for a device that only has a key: its first 8 hex digits. */
 export function directDeviceName(key: string): string {
-  return `Device ${key.slice(0, 8).toUpperCase()}`;
+  return i18n.t("settings:network.deviceName", { id: key.slice(0, 8).toUpperCase() });
 }
 
 function DirectDeviceRow({
@@ -224,6 +231,7 @@ function DirectDeviceRow({
   busy: boolean;
   onRevoke: () => Promise<boolean>;
 }) {
+  const { t } = useTranslation(["settings", "common"]);
   const [confirming, setConfirming] = useState(false);
   const name = directDeviceName(device.key);
   return (
@@ -239,27 +247,26 @@ function DirectDeviceRow({
       <td className="q-muted">{scopesLabel(device.scopes)}</td>
       <td className="q-muted">
         {device.paired_at
-          ? (() => {
-              const age = relativeAge(device.paired_at, now);
-              return age === "now" ? "Just now" : `${age} ago`;
-            })()
+          ? now - Date.parse(device.paired_at) < 60_000
+            ? t("about.justNow")
+            : formatRelativeTime(device.paired_at, now)
           : "—"}
       </td>
       <td>
         {device.connected ? (
           <span className="q-health">
             <span className="q-dot on" aria-hidden />
-            Connected
+            {t("network.connected")}
           </span>
         ) : (
-          <span className="q-muted">Not connected</span>
+          <span className="q-muted">{t("network.notConnected")}</span>
         )}
       </td>
       <td className="r" style={{ paddingRight: 0 }}>
         {confirming ? (
           <span style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
             <span className="q-faint" style={{ fontSize: 12 }}>
-              Revoke?
+              {t("devices.confirmRevoke")}
             </span>
             <button
               type="button"
@@ -267,21 +274,21 @@ function DirectDeviceRow({
               style={{ height: 24 }}
               onClick={() => setConfirming(false)}
             >
-              Cancel
+              {t("common:cancel")}
             </button>
             <button
               type="button"
               className="q-btn danger"
               style={{ height: 24 }}
               disabled={busy}
-              aria-label={`Revoke ${name}`}
+              aria-label={t("access.revokeLabel", { name })}
               onClick={() => {
                 void onRevoke().then((ok) => {
                   if (!ok) setConfirming(false);
                 });
               }}
             >
-              Revoke
+              {t("common:revoke")}
             </button>
           </span>
         ) : (
@@ -289,10 +296,10 @@ function DirectDeviceRow({
             type="button"
             className="q-btn danger"
             style={{ height: 24 }}
-            aria-label={`Revoke ${name}`}
+            aria-label={t("access.revokeLabel", { name })}
             onClick={() => setConfirming(true)}
           >
-            Revoke
+            {t("common:revoke")}
           </button>
         )}
       </td>
@@ -315,14 +322,15 @@ export function DirectDevicesTable({
   revoking: string | null;
   onRevoke: (key: string) => Promise<boolean>;
 }) {
+  const { t } = useTranslation(["settings", "common"]);
   return (
     <table className="q-tbl" data-testid="direct-devices">
       <thead>
         <tr>
-          <th>Device</th>
-          <th>Scopes</th>
-          <th>Paired</th>
-          <th>Status</th>
+          <th>{t("devices.table.device")}</th>
+          <th>{t("devices.table.scopes")}</th>
+          <th>{t("network.paired")}</th>
+          <th>{t("proxy.health.status")}</th>
           <th />
         </tr>
       </thead>
@@ -330,7 +338,7 @@ export function DirectDevicesTable({
         {devices.length === 0 ? (
           <tr>
             <td colSpan={5} className="q-muted" style={{ padding: "16px 0" }}>
-              No devices paired on this network yet.
+              {t("network.empty")}
             </td>
           </tr>
         ) : null}
@@ -350,6 +358,7 @@ export function DirectDevicesTable({
 
 /** The "This computer" group on Settings → Hosts. */
 export function NetworkAccessSettings() {
+  const { t } = useTranslation(["settings", "common"]);
   const transport = useApp((state) => state.connection.transport);
   const status = useApp((state) => state.connection.status);
   const hostName = useApp((state) =>
@@ -421,14 +430,11 @@ export function NetworkAccessSettings() {
 
   return (
     <div className="q-group">
-      <h2>This computer</h2>
+      <h2>{t("network.title")}</h2>
       <div className="q-field">
         <div className="lab">
-          <div className="t">Allow devices on this network</div>
-          <div className="s">
-            Other devices on your Wi-Fi or tailnet can connect after pairing. Traffic is end-to-end
-            encrypted.
-          </div>
+          <div className="t">{t("network.allow")}</div>
+          <div className="s">{t("network.allowHint")}</div>
           {accessError ? (
             <div className="s q-danger" role="status">
               {accessError}
@@ -439,7 +445,7 @@ export function NetworkAccessSettings() {
           <Switch
             checked={enabled}
             disabled={state.saving || !access}
-            label="Allow devices on this network"
+            label={t("network.allow")}
             onChange={(next) => void setNetworkAccess(next)}
           />
         </div>
@@ -448,8 +454,8 @@ export function NetworkAccessSettings() {
       {listening && addresses.length > 0 ? (
         <div className="q-field">
           <div className="lab">
-            <div className="t">Addresses</div>
-            <div className="s">What another device dials.</div>
+            <div className="t">{t("network.addresses")}</div>
+            <div className="s">{t("network.addressesHint")}</div>
           </div>
           <div className="ctl">
             <span className="q-mono" style={{ fontSize: 12, wordBreak: "break-all" }}>
@@ -458,7 +464,7 @@ export function NetworkAccessSettings() {
             <button
               type="button"
               className="q-ibtn"
-              aria-label="Copy addresses"
+              aria-label={t("network.copyAddresses")}
               onClick={() => void navigator.clipboard?.writeText(addresses.join(" "))}
             >
               <CopyIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
@@ -469,13 +475,13 @@ export function NetworkAccessSettings() {
 
       <div className="q-field">
         <div className="lab">
-          <div className="t">Pair a device</div>
+          <div className="t">{t("network.pair")}</div>
           <div className="s">
             {enabled
               ? listening
-                ? "Show a one-time code for a phone or computer on this network."
-                : "Waiting for the listener to bind."
-              : "Turn on network access first."}
+                ? t("network.pairHint")
+                : t("network.waitingListener")
+              : t("network.turnOnFirst")}
           </div>
           {state.offerError ? (
             <div className="s q-danger" role="status">
@@ -486,7 +492,7 @@ export function NetworkAccessSettings() {
         <div className="ctl">
           {open ? (
             <span className="q-faint" style={{ fontSize: 12 }}>
-              Pairing window open
+              {t("network.windowOpen")}
             </span>
           ) : (
             <button
@@ -500,7 +506,7 @@ export function NetworkAccessSettings() {
               ) : (
                 <QrCodeIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
               )}
-              Pair on this network
+              {t("network.pairButton")}
             </button>
           )}
         </div>
@@ -523,10 +529,10 @@ export function NetworkAccessSettings() {
       {open && !offer ? (
         <div className="q-field">
           <div className="lab">
-            <div className="t">{state.creating ? "Preparing a code…" : "No code yet"}</div>
-            {state.offerError ? null : (
-              <div className="s">The daemon arms a one-time secret for the code.</div>
-            )}
+            <div className="t">
+              {state.creating ? t("devices.pairing.preparing") : t("devices.pairing.noCode")}
+            </div>
+            {state.offerError ? null : <div className="s">{t("network.arms")}</div>}
           </div>
           <div className="ctl">
             <button
@@ -537,7 +543,7 @@ export function NetworkAccessSettings() {
                 void cancelDirectPairing();
               }}
             >
-              Cancel
+              {t("common:cancel")}
             </button>
           </div>
         </div>

@@ -1,0 +1,1234 @@
+{
+  "page": {
+    "label": "设置"
+  },
+  "nav": {
+    "back": "返回对话",
+    "backTitle": "返回对话  Esc",
+    "search": "搜索设置",
+    "tools": "工具",
+    "harnessUpdates": "有 harness 更新可用",
+    "hostsCount": "{{hosts}}，{{devices}}",
+    "hostCount_other": "{{count}} 台主机",
+    "deviceCount_other": "{{count}} 台设备",
+    "groups": {
+      "Machines": "机器",
+      "Account": "账户"
+    },
+    "sections": {
+      "general": "通用",
+      "appearance": "外观",
+      "notifications": "通知",
+      "chat": "聊天",
+      "shortcuts": "快捷键",
+      "threads": "对话",
+      "schedules": "定时任务",
+      "source-control": "源代码管理",
+      "hosts": "主机与设备",
+      "harnesses": "Harness",
+      "worktrees": "Worktree",
+      "providers": "提供方",
+      "resume": "自动恢复",
+      "forges": "代码托管平台",
+      "labs": "Labs",
+      "account": "账户与中继",
+      "access": "共享与访问"
+    },
+    "addMcp": "添加 MCP 服务器",
+    "mcpServers": "MCP 服务器",
+    "skills": "技能"
+  },
+  "errors": {
+    "didNotStick": "更改未能生效。"
+  },
+  "general": {
+    "title": "通用",
+    "lead": "h4rn 如何启动，以及在哪里保存本地状态。",
+    "daemon": "守护进程",
+    "dataDirectory": "数据目录"
+  },
+  "startup": {
+    "title": "启动",
+    "openAtLogin": "登录时打开",
+    "openAtLoginHint": "登录这台电脑时启动 h4rn",
+    "keepInTray": "在托盘中保持运行",
+    "trayMissing": "未创建托盘图标，因此关闭窗口会退出 h4rn",
+    "trayKeeps": "关闭窗口后 h4rn 留在托盘中——再次打开 h4rn 即可显示",
+    "trayQuits": "关闭窗口会退出 h4rn"
+  },
+  "about": {
+    "title": "关于",
+    "daemonVersion": "守护进程版本",
+    "updates": "更新",
+    "mobileUpdates": "移动端通过 App Store 和 Google Play 更新。",
+    "webUpdates": "网页版会在其主机提供新版本时更新。",
+    "available": "h4rn {{version}} 已可用",
+    "upToDate": "已是最新版本",
+    "notChecked": "尚未检查",
+    "version": "版本",
+    "checkForUpdates": "检查更新",
+    "lastChecked": "上次检查",
+    "justNow": "刚刚",
+    "never": "从未",
+    "checkAutomatically": "自动检查",
+    "checkAutomaticallyHint": "启动时检查，之后每 6 小时检查一次",
+    "checkAutomaticallyLabel": "自动检查更新"
+  },
+  "appearance": {
+    "title": "外观",
+    "lead": "h4rn 默认跟随系统。主题仅应用于此设备。",
+    "theme": "主题",
+    "colorScheme": "配色方案",
+    "followsSystem": "跟随系统设置",
+    "alwaysLight": "始终浅色",
+    "alwaysDark": "始终深色",
+    "schemes": {
+      "system": "系统",
+      "light": "浅色",
+      "dark": "深色"
+    },
+    "terminal": "终端",
+    "terminalMatches": "与应用主题一致",
+    "terminalToggle": "终端与应用主题一致",
+    "language": "语言",
+    "interfaceLanguage": "界面语言",
+    "languageSystem": "系统",
+    "languageFollowsSystem": "跟随系统：{{language}}",
+    "languageThisDevice": "仅应用于此设备"
+  },
+  "notifications": {
+    "title": "通知",
+    "lead": "只有需要你处理的事才会打扰你。",
+    "onThisDevice": "此设备",
+    "rows": {
+      "approvals": {
+        "title": "审批",
+        "subtitle": "有命令或问题等待处理",
+        "label": "审批通知"
+      },
+      "finishedTurns": {
+        "title": "已完成的回合",
+        "subtitle": "有对话进入“已完成”",
+        "label": "回合完成通知"
+      },
+      "hostOffline": {
+        "title": "主机离线",
+        "subtitle": "有主机无法访问",
+        "label": "主机离线通知"
+      }
+    },
+    "blocked": "已在系统设置中屏蔽",
+    "relayTooOld": "此中继不会报告此设备关联了哪些机器。请更新中继以接收主机离线提醒。",
+    "noLinks": "主机离线提醒需要通过中继关联的主机。此设备没有关联主机，因此没有可监视的其他主机。",
+    "pageUnavailable": "此页面上的通知已停止工作。请重新加载 h4rn 后重试。",
+    "mobileUnsupported": "此版本暂不发送通知。请使用桌面应用或浏览器。",
+    "browserUnsupported": "此浏览器不支持通知。",
+    "phoneAlerts": "手机提醒",
+    "agentAlerts": "通过 Connect 将智能体提醒发送到我的手机",
+    "agentAlertsHint": "这台机器的完成、失败、审批和提问提醒。",
+    "agentAlertsPaired": "每条提醒包含对话 ID、标题、项目名称、状态和时间，绝不包含消息正文、工具输出、文件路径或凭据。提醒经由 Connect 发送，而不是直接连接。",
+    "agentAlertsUnpaired": "将这台机器与 Connect 配对后，才能向手机发送提醒。",
+    "deviceNotifications": "设备通知",
+    "liveUpdates": "以实时通知显示运行中的智能体",
+    "liveUpdatesHint": "智能体工作、等待审批或向你提问时，一条常驻通知会显示对话和项目名称。完成、失败或达到限额的提醒会替换它。",
+    "liveUpdatesNeedDevice": "开启“设备通知”后才能使用实时通知。",
+    "deviceBlocked": "已在系统设置中屏蔽。请在那里允许 h4rn 的通知，然后重新打开此页面。",
+    "buildCannotReceive": "此版本无法接收提醒。",
+    "device": {
+      "signIn": "请先登录 Connect。",
+      "unavailable": "此版本不可用。",
+      "checkFailed": "无法检查这台手机的通知。请重试。",
+      "blocked": "已在系统设置中屏蔽。",
+      "willAsk": "开启后，这台手机会请求通知权限。",
+      "registered": "已在这台手机上注册。",
+      "unconfirmed": "已注册，但 Connect 尚未确认这台手机。",
+      "off": "已关闭。",
+      "noSender": "此 Connect 服务器没有为这台手机配置推送发送方。需要运维人员添加后提醒才能送达。",
+      "senderUnknown": "无法检查此 Connect 服务器能否发送提醒。"
+    },
+    "agentAlertsFailed": "无法更改智能体提醒"
+  },
+  "chat": {
+    "title": "聊天",
+    "lead": "智能体正在工作时，你的回复如何处理。这些选项仅应用于此设备。",
+    "followUp": "后续消息行为",
+    "sendWhileWorking": "智能体工作时发送",
+    "sendWhileWorkingHint": "排队：等待下一回合。引导：在智能体能够接受时，插入正在运行的回合。",
+    "queue": "排队",
+    "steer": "引导",
+    "enterNewLine": "Enter 键换行",
+    "enterNewLineOn": "Cmd/Ctrl+Enter 发送；加按 Shift 执行另一种后续操作。",
+    "enterNewLineOff": "Enter 发送；Cmd/Ctrl+Enter 执行另一种后续操作。"
+  },
+  "shortcuts": {
+    "title": "快捷键",
+    "leadCmd": "每个快捷键都是 Cmd 加一个键，因此打字不会触发命令。点击快捷键即可修改。更改仅应用于此设备。",
+    "leadCtrl": "每个快捷键都是 Ctrl 加一个键，因此打字不会触发命令。点击快捷键即可修改。更改仅应用于此设备。",
+    "holdCmd": "请按住 Cmd 再按键。",
+    "holdCtrl": "请按住 Ctrl 再按键。",
+    "needsModifier": "快捷键需要 Cmd 或 Ctrl 加一个键。",
+    "alreadyUsed": "已被“{{command}}”使用。",
+    "pressNew": "按下新的快捷键。按 Esc 取消。",
+    "resetLabel": "将 {{command}} 重置为 {{shortcut}}",
+    "resetTitle": "重置为 {{shortcut}}",
+    "recordingLabel": "正在为 {{command}} 录制快捷键",
+    "changeLabel": "修改 {{command}} 的快捷键，当前为 {{shortcut}}",
+    "pressKeys": "请按键…",
+    "groups": {
+      "General": "通用",
+      "Navigate": "导航",
+      "Thread": "对话",
+      "Panels": "面板"
+    },
+    "commands": {
+      "palette": {
+        "toggle": "搜索或运行"
+      },
+      "shortcuts": {
+        "open": "键盘快捷键"
+      },
+      "thread": {
+        "new": "新建对话",
+        "next": "下一个对话",
+        "previous": "上一个对话",
+        "reply": "聚焦输入框",
+        "permissions": "对话权限",
+        "settle": "了结对话",
+        "acknowledge": "确认（已完成）",
+        "snooze": "一小时后提醒",
+        "pin": "保留在“进行中”",
+        "reopen": "重新打开已了结的对话",
+        "steerQueuedMessage": "引导最早排队的消息",
+        "editQueuedMessage": "编辑最新排队的消息"
+      },
+      "settings": {
+        "open": "设置"
+      },
+      "theme": {
+        "toggle": "切换浅色和深色"
+      },
+      "nav": {
+        "inbox": "前往对话",
+        "pulls": "前往拉取请求",
+        "issues": "前往议题",
+        "usage": "前往用量",
+        "tools": "前往 MCP 服务器和技能"
+      },
+      "tab": {
+        "working": "显示“进行中”",
+        "done": "显示“已完成”",
+        "settled": "显示“已了结”"
+      },
+      "approval": {
+        "approve": "批准待处理的操作",
+        "deny": "拒绝待处理的操作"
+      },
+      "turn": {
+        "interrupt": "中断回合",
+        "previous": "上一条消息",
+        "next": "下一条消息"
+      },
+      "guest": {
+        "share": "与访客共享"
+      },
+      "composer": {
+        "attach": "附加文件"
+      },
+      "sidebar": {
+        "toggle": "切换侧边栏"
+      },
+      "panel": {
+        "toggle": "切换右侧面板",
+        "changes": "显示更改",
+        "subagents": "显示子智能体",
+        "files": "查找文件"
+      },
+      "view": {
+        "toggle": "在对话和 IDE 之间切换"
+      },
+      "terminal": {
+        "toggle": "切换终端"
+      }
+    }
+  },
+  "threads": {
+    "newThreads": "新对话",
+    "permissions": "权限",
+    "permissionsHint": "新对话开始时使用的模式。可在对话中途从输入框更改。",
+    "defaultPermissions": "默认权限",
+    "planNote": "只有具备真正计划模式的 harness 才提供“计划”；无法遵循该模式的 harness 会在对话开始时拒绝。",
+    "title": "对话",
+    "lead": "从此设备开始的对话的默认设置：权限模式，以及 h4rn 如何为其命名。对话创建后会保留自己的设置。",
+    "titles": "标题",
+    "connectForTitles": "连接到守护进程后才能读取标题模型。"
+  },
+  "schedules": {
+    "title": "定时任务",
+    "lead": "按计划或在 webhook 被调用时运行提示词。计时器由守护进程负责，关闭此应用不会停止任务。如果上一次运行仍在进行，下一个时段会被跳过；错过的时段会在守护进程恢复后补跑一次。",
+    "newTask": "新建任务",
+    "tasks": "任务",
+    "empty": "还没有定时任务。可以为定期审查、夜间检查或来自其他服务的 webhook 创建一个。",
+    "historyTitle": "历史 · {{name}}",
+    "noRuns": "还没有运行记录。",
+    "kinds": {
+      "once": "一次",
+      "every": "每隔…",
+      "daily": "每天",
+      "weekly": "每周",
+      "cron": "Cron",
+      "webhook": "Webhook 触发"
+    },
+    "units": {
+      "minutes": "分钟",
+      "hours": "小时"
+    },
+    "destinations": {
+      "new_thread": {
+        "label": "每次运行新建对话",
+        "hint": "每次运行都是一个独立的对话。"
+      },
+      "continue_thread": {
+        "label": "同一对话，延续上下文",
+        "hint": "之后的运行会发到同一段对话中。"
+      },
+      "fresh_session": {
+        "label": "同一对话，新会话",
+        "hint": "对话保持可读；每次运行都不带旧上下文。"
+      }
+    },
+    "placeholders": {
+      "jsonField": "JSON 字段，例如 {{example}}",
+      "header": "请求头，例如 {{example}}",
+      "query": "查询参数，例如 {{example}}",
+      "body": "原始请求体",
+      "request": "方法、路径、查询参数、请求头和请求体"
+    },
+    "editor": {
+      "when": "时间",
+      "schedule": "计划",
+      "dateTime": "日期和时间",
+      "date": "日期",
+      "time": "时间",
+      "interval": "间隔",
+      "intervalCount": "间隔数量",
+      "intervalUnit": "间隔单位",
+      "dailyTime": "每天的时间",
+      "days": "星期",
+      "weeklyTime": "每周的时间",
+      "cron": "Cron 表达式",
+      "cronHint": "分 时 日 月 星期",
+      "editLabel": "编辑定时任务",
+      "newLabel": "新建定时任务",
+      "editTitle": "编辑任务",
+      "nameLabel": "任务名称",
+      "timezone": "时区",
+      "timezoneHint": "按挂钟时间运行的计划使用此时区",
+      "destination": "运行去向",
+      "workspace": "工作区",
+      "workspaceLabel": "工作区路径",
+      "harness": "Harness",
+      "prompt": "提示词",
+      "enabled": "启用",
+      "enabledHint": "暂停的任务会保留历史记录和 URL。",
+      "enabledLabel": "任务已启用",
+      "fixFields": "请修正标出的字段后再保存。",
+      "save": "保存任务"
+    },
+    "webhook": {
+      "title": "Webhook",
+      "path": "URL 路径",
+      "saveFirst": "保存任务后会生成它的 URL。",
+      "secret": "任何持有此路径的人都能触发运行。如有泄露请轮换。",
+      "none": "还没有 URL。",
+      "unavailable": "不可用",
+      "hidden": "已隐藏",
+      "copyLabel": "复制 webhook 路径",
+      "copied": "路径已复制",
+      "copyFailed": "复制失败",
+      "rotate": "轮换",
+      "rotating": "正在轮换…",
+      "placeholders": "提示词占位符",
+      "placeholdersHint": "不会留下空值。每个值都会作为不可信的请求数据包裹起来。",
+      "tunnel": "公开 URL 需要一条通往此守护进程的隧道（Connect 中继传输的是类型化套接字，而不是普通 HTTP）。请将 Tailscale Funnel、Cloudflare Tunnel 或其他反向代理指向此守护进程的回环端口，并保留路径。"
+    },
+    "task": {
+      "toggleFailed": "任务未更改。",
+      "runFailed": "运行未启动。",
+      "pause": "暂停 {{name}}",
+      "resume": "恢复 {{name}}",
+      "run": "立即运行",
+      "runLabel": "立即运行 {{name}}",
+      "history": "历史",
+      "historyLabel": "{{name}} 的历史",
+      "deleteLabel": "删除 {{name}}"
+    },
+    "run": {
+      "never": "从未运行",
+      "ran": "运行于 {{when}}",
+      "skipped": "已跳过 {{when}}",
+      "failed": "失败于 {{when}}",
+      "scheduled": "计划于 {{when}}",
+      "openThread": "打开对话"
+    },
+    "outcome": {
+      "started": "已开始",
+      "skipped": "已跳过",
+      "failed": "失败"
+    },
+    "next": {
+      "webhook": "在其 URL 被调用时运行",
+      "paused": "已暂停",
+      "none": "没有后续运行",
+      "due": "现在到期 {{when}}",
+      "next": "下次 {{when}}"
+    },
+    "describe": {
+      "once": "{{date}} {{time}} 运行一次",
+      "everyMinutes_other": "每 {{count}} 分钟",
+      "everyHours_other": "每 {{count}} 小时",
+      "daily": "每天 {{time}}",
+      "weekly": "每周 {{days}} {{time}}",
+      "cron": "Cron {{expression}}",
+      "webhook": "Webhook 触发"
+    },
+    "delete": {
+      "title": "删除此定时任务？",
+      "description": "“{{name}}”及其运行历史将被删除。它已经启动的对话会保留。"
+    },
+    "validate": {
+      "nameRequired": "请为任务命名。",
+      "nameTooLong": "名称请少于 120 个字符。",
+      "workspaceRequired": "请选择工作区。",
+      "workspaceAbsolute": "请使用此主机上的绝对路径。",
+      "modelRequired": "请选择模型。",
+      "promptRequired": "请填写要发送的提示词。",
+      "timezone": "请选择有效的 IANA 时区。",
+      "dateTime": "请选择有效的日期和时间。",
+      "intervalRange": "请在 1 到 10080 之间选择。",
+      "time": "请选择有效的时刻。",
+      "weekday": "请至少选择一天。"
+    },
+    "cron": {
+      "fiveFields": "请使用五个字段：分 时 日 月 星期。",
+      "fields": {
+        "minute": "分钟",
+        "hour": "小时",
+        "dayOfMonth": "日",
+        "month": "月",
+        "dayOfWeek": "星期"
+      },
+      "step": "{{name}}字段 `{{part}}` 中的步长不是正数。",
+      "invalid": "{{name}}字段 `{{part}}` 无效。",
+      "notNumeric": "{{name}}字段 `{{part}}` 不是数字。",
+      "range": "{{name}} {{value}} 必须在 {{minimum}} 到 {{maximum}} 之间。",
+      "backwards": "{{name}}范围 `{{part}}` 的顺序颠倒了。"
+    }
+  },
+  "sourceControl": {
+    "title": "源代码管理与议题",
+    "lead": "在你需要时，提交信息和拉取请求文本可以由模型撰写。你自己写的内容不会被替换，“生成”也不会提交或创建任何东西。Linear 团队在下方按项目选择。",
+    "readingSetting": "正在读取设置…",
+    "messages": "提交与 PR 信息",
+    "modeLabel": "提交和拉取请求所用模型",
+    "modes": {
+      "off": "关闭",
+      "coding_agent": "编码智能体",
+      "text_generator": "文本生成器"
+    },
+    "whoWrites": "由谁撰写信息",
+    "whoWritesHint": "关闭时字段留空，不会启动任何东西。编码智能体会在无工具的情况下运行一次；文本生成器是你在“提供方”中配置的模型。",
+    "codingAgentHint": "“跟随对话的智能体”会为 Claude Code 对话运行 Claude Code。其他对话需要文本生成器；没有的话，“生成”会留空字段且不运行任何东西。",
+    "noClaudeCode": "此主机尚未安装 Claude Code。",
+    "codingAgentLabel": "用于撰写信息的编码智能体",
+    "followThread": "跟随对话的智能体",
+    "followThreadHint": "Claude Code 对话使用其自身",
+    "generatorHint": "提供方在“提供方”中配置。",
+    "model": "模型",
+    "modelHint": "留空则使用生成器自身的模型。",
+    "modelLabel": "用于提交和拉取请求信息的模型",
+    "modelPlaceholder": "模型名称",
+    "noGenerator": "尚未配置文本生成器。请在“提供方”中添加。",
+    "instructions": "自定义指令",
+    "instructionsHint": "可选。附加在每条提交信息和拉取请求的受信任指令之后，绝不会拼接进仓库文本。",
+    "instructionsLabel": "提交和拉取请求信息的自定义指令",
+    "instructionsPlaceholder": "例如：使用祈使语气，并说明用户可见的变化。",
+    "summary": {
+      "reading": "正在读取信息模型…",
+      "off": "提交和拉取请求文本由你撰写。",
+      "claudeCode": "信息由 Claude Code 撰写。",
+      "codex": "Codex 不用于撰写信息；请选择 Claude Code 或文本生成器。",
+      "otherHarness": "{{harness}} 不用于撰写信息。",
+      "followThread": "Claude Code 对话使用 Claude Code；其他对话需要文本生成器，否则不会生成任何内容。",
+      "generatorModel": "信息由使用 {{model}} 的文本生成器撰写。",
+      "generator": "信息由所选的文本生成器撰写。"
+    }
+  },
+  "linear": {
+    "hint": "使用个人 API 密钥连接。密钥保存在此主机上，绝不会返回给客户端，只用于读取团队的议题和发表评论。",
+    "table": {
+      "workspace": "工作区",
+      "account": "账户",
+      "connected": "连接时间"
+    },
+    "empty": "尚未连接 Linear 工作区。",
+    "keyLabel": "Linear API 密钥",
+    "keyPlaceholder": "Linear 个人 API 密钥",
+    "connect": "连接并测试",
+    "teams": "各项目的团队",
+    "teamsHint": "项目的团队会显示在“议题”页面中其代码托管平台议题的旁边。",
+    "teamFor": "{{project}} 的 Linear 团队",
+    "noTeam": "无 Linear 团队",
+    "toast": {
+      "connected": "Linear 已连接。",
+      "rejected": "Linear 拒绝了该密钥。",
+      "removeFailed": "未能移除 Linear 连接。",
+      "teamFailed": "未能保存 Linear 团队。"
+    }
+  },
+  "hosts": {
+    "title": "主机与设备",
+    "lead": "主机是运行智能体的机器；WSL 发行版是独立的主机，拥有各自的 harness 和凭据。设备是你用来监督它们的手机和电脑。",
+    "addHost": "添加主机",
+    "addHostToast": "使用 h4rnd login 添加机器。",
+    "addHostToastHint": "在该机器上运行 `h4rnd login --connect <url>`，然后刷新。",
+    "signInToPair": "登录后才能配对设备。",
+    "signInToPairHint": "配对通过 h4rn-connect 完成。请在“远程访问”下登录。",
+    "pairThroughRelay": "通过中继配对",
+    "connectedMachine": "已连接的机器",
+    "connectedTo": "已通过 h4rn-connect 连接到 {{machine}}",
+    "connectingTo": "正在连接 {{machine}}…",
+    "cantReach": "无法访问 {{target}}。",
+    "onlineMobile": "此应用可以断开连接并继续离线工作。",
+    "onlineDesktop": "本地守护进程也始终可用。",
+    "downMobile": "远程路径已中断。请选择其他机器，或断开连接。",
+    "downDesktop": "远程路径已中断。这台机器仍可运行智能体。",
+    "remoteAccess": "远程访问",
+    "remoteAccessHint": "登录 h4rn-connect 以访问此网络之外的机器，或继续使用本地守护进程。",
+    "machines": "机器",
+    "noMachines": "还没有机器登录到此中继。请在主机上运行 <code>{{command}}</code>。",
+    "noHosts": "无主机",
+    "reachable": "可访问",
+    "online": "在线",
+    "offline": "离线",
+    "connecting": "正在连接…",
+    "disconnect": "断开连接",
+    "connect": "连接",
+    "loadingHosts": "正在加载主机…",
+    "noHostsYet": "还没有主机响应。请启动守护进程，或在上方连接远程机器。",
+    "noneInstalled": "未安装",
+    "transport": "传输方式",
+    "transportHint": "由 Rust 传输层选择；TypeScript 仅负责显示。",
+    "encrypted": "已加密",
+    "path": {
+      "direct": "直连",
+      "relay": "中继"
+    },
+    "table": {
+      "machine": "机器",
+      "hosts": "主机",
+      "host": "主机",
+      "system": "系统",
+      "connection": "连接",
+      "presence": "在线状态",
+      "harnesses": "Harness",
+      "latency": "延迟"
+    }
+  },
+  "network": {
+    "title": "这台电脑",
+    "allow": "允许此网络上的设备",
+    "allowHint": "你的 Wi-Fi 或 tailnet 上的其他设备在配对后即可连接。流量端到端加密。",
+    "addresses": "地址",
+    "addressesHint": "其他设备要连接的地址。",
+    "copyAddresses": "复制地址",
+    "pair": "配对设备",
+    "pairHint": "为此网络上的手机或电脑显示一次性配对码。",
+    "waitingListener": "正在等待监听器绑定。",
+    "turnOnFirst": "请先开启网络访问。",
+    "windowOpen": "配对窗口已打开",
+    "pairButton": "在此网络上配对",
+    "arms": "守护进程会为配对码准备一次性密钥。",
+    "qrLabel": "直连配对二维码",
+    "qrLabelFor": "{{host}} 的直连配对二维码",
+    "expired": "此配对码已过期。",
+    "scan": "在另一台设备上用 h4rn 应用扫描，或复制链接。",
+    "generateNew": "生成新配对码以进行配对。",
+    "oneDevice": "仅限一台设备、一次使用。<countdown>{{time}}</countdown> 后过期。",
+    "adminNote": "“管理员”权限允许该设备更改 {{host}} 上的主机、设备和此设置。",
+    "thisComputerLower": "这台电脑",
+    "deviceName": "设备 {{id}}",
+    "connected": "已连接",
+    "notConnected": "未连接",
+    "paired": "配对时间",
+    "empty": "此网络上还没有配对的设备。"
+  },
+  "devices": {
+    "title": "设备",
+    "hint": "能够访问你主机的手机和电脑。每台设备有自己的权限范围，撤销其中一台不影响其他设备。",
+    "table": {
+      "device": "设备",
+      "kind": "类型",
+      "scopes": "权限范围",
+      "lastSeen": "最近在线"
+    },
+    "empty": "还没有配对的设备。",
+    "kind": {
+      "daemon": "守护进程",
+      "phone": "手机",
+      "computer": "电脑"
+    },
+    "rename": "重命名 {{name}}",
+    "saveName": "保存名称",
+    "thisDevice": "此设备",
+    "neverConnected": "从未连接",
+    "confirmSignOut": "要从此设备退出登录吗？",
+    "confirmDisconnect": "要断开此主机吗？",
+    "confirmRevoke": "要撤销吗？",
+    "signOut": "退出登录",
+    "scopes": {
+      "all": "全部",
+      "viewOnly": "仅查看",
+      "view": {
+        "label": "查看对话",
+        "sub": "始终包含"
+      },
+      "approve": {
+        "label": "审批和回复",
+        "sub": ""
+      },
+      "terminal": {
+        "label": "终端",
+        "sub": "在 shell 中输入"
+      },
+      "files": {
+        "label": "文件和编辑",
+        "sub": ""
+      },
+      "admin": {
+        "label": "管理主机和设备",
+        "sub": "管理员"
+      }
+    },
+    "pairing": {
+      "approved": "设备已批准。",
+      "rejected": "设备已拒绝。",
+      "approvedHint": "它现在可以按授予的权限范围访问此主机。",
+      "rejectedHint": "它的密钥已被撤销，从未访问过此主机。",
+      "decisionFailed": "无法记录配对决定。",
+      "wantsToConnect": "{{name}} 请求连接。它的屏幕上显示",
+      "compare": "仅当两边的代码一致时才批准。在此之前该设备无法访问此主机。",
+      "confirm": "确认设备",
+      "reject": "拒绝",
+      "expiresIn": "<countdown>{{time}}</countdown> 后过期",
+      "machineHint": "配对的设备可以访问这台机器的主机。",
+      "machineLabel": "要配对的机器",
+      "noMachines": "没有机器",
+      "qrLabel": "{{machine}} 的配对二维码",
+      "thisMachine": "这台机器",
+      "scan": "用 h4rn 应用扫描，或输入此代码",
+      "worksOnce": "仅限一台设备使用一次。将与 {{machine}} 配对。",
+      "copyLink": "复制链接",
+      "newCode": "新代码",
+      "preparing": "正在准备代码…",
+      "noCode": "还没有代码",
+      "generate": "生成配对码"
+    }
+  },
+  "account": {
+    "title": "账户与中继",
+    "lead": "中继用于访问不在你网络中的主机。在你允许之前，不会路由任何流量。",
+    "relay": "中继",
+    "pathTo": "{{path}}到 {{host}}",
+    "relayUrl": "中继 URL",
+    "pairedMachines": "已配对的机器",
+    "pairedMachinesHint": "通过 h4rn-connect 访问",
+    "onlineOf_other": "{{count}} 台中 {{online}} 台在线",
+    "manageHosts": "管理主机",
+    "account": "账户",
+    "signedIn": "已登录",
+    "thisDevice": "此设备",
+    "unknownDevice": "未知设备",
+    "manageDevices": "管理设备"
+  },
+  "connect": {
+    "relayHint": "自托管；只有你配对的机器才能访问。",
+    "urlLabel": "h4rn-connect URL",
+    "use": "使用",
+    "approvalCode": "授权码",
+    "enterAt": "请在 {{host}} 输入",
+    "openApproval": "打开授权页面",
+    "copyCode": "复制代码",
+    "waiting": "正在等待授权…",
+    "unreachable": "<b>无法访问 {{host}} 上的 h4rn-connect。</b>它可能未在运行。",
+    "retrying": "正在重试…",
+    "signIn": "登录",
+    "checkingProviders": "正在检查登录提供方…",
+    "providerAt": "{{host}} 上的 {{provider}}",
+    "availableOnceReachable": "中继可访问后即可使用",
+    "noProvider": "此中继未提供任何登录方式",
+    "signInWith": "使用 {{provider}} 登录",
+    "otherDevice": "在另一台设备上登录",
+    "failed": "登录失败",
+    "forgetDevice": "要忘记此设备吗？",
+    "busy": {
+      "openingSignIn": "正在打开登录页…",
+      "completingSignIn": "正在完成登录…",
+      "requestingCode": "正在请求授权码…",
+      "waitingForApproval": "正在等待授权…",
+      "connecting": "正在连接 {{name}}…",
+      "claimingPairing": "正在认领配对…",
+      "generatingCode": "正在生成配对码…"
+    },
+    "errors": {
+      "callbackState": "登录回调缺少 state 参数。",
+      "denied": "登录被拒绝。",
+      "expired": "该授权码已过期。"
+    }
+  },
+  "localMachine": {
+    "disconnect": "断开连接",
+    "disconnectFrom": "断开与 {{name}} 的连接",
+    "useLocal": "使用本地",
+    "useThis": "使用这台机器",
+    "useLocalLabel": "使用本地——断开与 {{name}} 的连接",
+    "useThisLabel": "使用这台机器——断开与 {{name}} 的连接",
+    "mobileTitle": "断开与 {{name}} 的连接。在你选择其他机器之前，此应用保持离线。",
+    "desktopTitle": "断开与 {{name}} 的连接，并使用这台机器上的守护进程"
+  },
+  "harnesses": {
+    "title": "Harness",
+    "lead": "h4rn 在此主机上运行的智能体 CLI。最新版本来自 npm 仓库，每隔几小时检查一次。",
+    "cliVersions": "CLI 版本",
+    "checkAgain": "重新检查",
+    "status": {
+      "notInstalled": "未安装",
+      "updateAvailable": "有可用更新",
+      "latestUnknown": "最新版本未知",
+      "upToDate": "已是最新"
+    },
+    "update": "更新",
+    "updating": "正在更新…",
+    "updateLabel": "更新 {{harness}}",
+    "manual": "h4rn 不会修改此安装。请在终端中运行 <code>{{command}}</code>。",
+    "failed": "失败",
+    "acp": {
+      "title": "本地 ACP 智能体",
+      "addButton": "添加 ACP 智能体",
+      "hint": "任何通过 stdio 使用 Agent Client Protocol 的命令。h4rn 会按你填写的参数原样启动它，不经过 shell。它以这台电脑的权限运行；安装、登录和更新需由你自己完成。",
+      "empty": "还没有本地 ACP 智能体。",
+      "probing": "正在启动智能体一次以完成 ACP 握手…",
+      "version": "版本 {{version}}",
+      "models_other": "{{count}} 个模型",
+      "noModels": "未公布任何模型",
+      "notFound": "未安装 · 找不到命令",
+      "notInstalledOption": "{{name}} · 未安装",
+      "managedOutside": "在 h4rn 之外管理",
+      "check": "检查",
+      "editLabel": "编辑 {{name}}",
+      "removeLabel": "移除 {{name}}",
+      "readFailed": "无法读取此智能体。",
+      "editAgent": "编辑智能体",
+      "reading": "正在读取智能体配置…",
+      "addTitle": "添加本地 ACP 智能体",
+      "formHint": "h4rn 会直接运行此命令，使用下方的参数，不做 shell 展开。它以这台电脑的权限运行。智能体自行管理更新和登录。",
+      "displayName": "显示名称",
+      "displayNameHint": "显示在此列表和新对话选择器中。",
+      "displayNameLabel": "ACP 智能体显示名称",
+      "instanceId": "实例 ID",
+      "instanceIdHint": "小写短名，在此主机上唯一。",
+      "instanceIdLabel": "ACP 智能体实例 ID",
+      "command": "命令",
+      "commandHint": "PATH 中的可执行文件名，或绝对路径。",
+      "commandLabel": "ACP 智能体命令",
+      "arguments": "参数",
+      "argumentsHint": "每行一个原样参数。不要使用引号或 shell 语法。",
+      "argumentLabel": "参数 {{row}}",
+      "removeArgument": "移除参数 {{row}}",
+      "addArgument": "添加参数",
+      "environment": "环境变量",
+      "environmentHint": "仅用于此命令的额外变量。",
+      "envNameLabel": "环境变量名 {{row}}",
+      "envValueLabel": "环境变量值 {{row}}",
+      "removeEnv": "移除环境变量第 {{row}} 行",
+      "addVariable": "添加变量",
+      "workingDir": "工作目录",
+      "workingDirHint": "智能体的启动位置；默认为对话的工作区。",
+      "threadWorkspace": "对话工作区",
+      "fixedPath": "固定路径",
+      "fixedPathLabel": "固定工作目录",
+      "addAgent": "添加智能体"
+    },
+    "validate": {
+      "idRequired": "需要填写实例 ID。",
+      "idPattern": "请使用小写字母、数字和单个连字符；以字母或数字开头和结尾。",
+      "idTooLong": "实例 ID 请不超过 64 个字符。",
+      "idLocked": "编辑时不能更改实例 ID。",
+      "idTaken": "该实例 ID 已被使用。",
+      "nameRequired": "需要填写显示名称。",
+      "nameTooLong": "显示名称请不超过 80 个字符。",
+      "nameOneLine": "显示名称必须为单行。",
+      "commandRequired": "需要填写命令。",
+      "commandOneLine": "命令必须为单行。",
+      "commandPath": "请使用 PATH 中的可执行文件名，或绝对路径。",
+      "argNul": "参数 {{row}} 包含 NUL 字节。",
+      "envName": "环境变量第 {{row}} 行需要类似 NAME 或 NAME_2 的名称。",
+      "envNul": "环境变量第 {{row}} 行包含 NUL 字节。",
+      "pathRequired": "请输入固定工作目录。",
+      "pathAbsolute": "工作目录必须是绝对路径。"
+    }
+  },
+  "worktrees": {
+    "title": "Worktree",
+    "lead": "h4rn 为对话和子智能体创建的 Git worktree，以及你的对话及其子智能体工作过的 worktree。清除会从磁盘删除检出目录。",
+    "newWorktrees": "新 worktree",
+    "newWorktreesHint": "这台机器放置新 worktree 检出目录的位置，以及分支的命名方式。已有的 worktree 保持原位。",
+    "location": "位置",
+    "locationHint": "绝对路径，或以 <code>~/</code> 开头的路径。留空则使用 h4rn 数据目录。",
+    "branchPrefix": "分支前缀",
+    "branchPrefixHint": "守护进程生成的分支名以此开头。无效字符会变为连字符；末尾斜杠可省略。",
+    "saved": "已保存在这台机器上。",
+    "inUse": "使用中",
+    "settled": "已了结",
+    "offline": "离线",
+    "removed_other": "已移除 {{count}} 个。",
+    "empty": "还没有 worktree。使用 worktree 隔离运行的子智能体，以及在 worktree 中工作的对话，都会显示在这里。",
+    "nothingSettled": "没有已了结的项目。",
+    "removeLabel": "移除 {{name}}",
+    "sentenceSeparator": "",
+    "origin": {
+      "subagent": "子智能体 worktree",
+      "thread": "对话工作区",
+      "harness": "由智能体创建"
+    },
+    "orphaned": "重启后遗留",
+    "removedBranchKept": "目录已删除，分支保留",
+    "removedRegistrationLeft": "目录已删除，注册信息保留",
+    "uncommitted": "有未提交的更改",
+    "remove": {
+      "title": "移除此 worktree？",
+      "checkoutDeleted": "{{path}} 处的检出目录会从磁盘删除。构建产物等被忽略的文件也会一并删除。",
+      "ownedBranchToo": "h4rn 创建的 {{branch}} 分支也会被删除。",
+      "goneBranchDeleted": "磁盘上已没有检出目录。它的 {{branch}} 分支会被删除。",
+      "gone": "磁盘上已没有检出目录。",
+      "goneRegistration": "磁盘上已没有检出目录；它的注册信息会被移除。",
+      "skipsUnmerged": "有未提交更改或未合并工作的会被跳过。",
+      "skipsUncommitted": "有未提交更改的会被跳过。",
+      "threadResume": "它的对话仍可能在那里继续。"
+    },
+    "force": {
+      "button": "仍然移除",
+      "title_other": "仍然移除 {{count}} 个 worktree？",
+      "description": "这些 worktree 中未提交的更改和未合并的提交将会丢失。正在进行的 rebase、merge、cherry-pick 或 bisect（包括其 autostash）以及暂存的更改都会丢失。当前位于这些路径的检出目录都会被删除。此操作无法撤销。",
+      "threadNote_other": "其中 {{count}} 个是由其他工具或你创建的对话工作区。"
+    },
+    "clearAll": {
+      "button": "全部清除",
+      "title_other": "最多移除 {{count}} 个 worktree？",
+      "description": "检出目录会从磁盘删除，h4rn 创建的 h4rn/sa-* 分支也会删除。有未提交更改或未合并工作的 worktree 会被跳过。对话正在使用的 worktree 会保留。构建产物等被忽略的文件会随检出目录一并删除。",
+      "kept_other": "保留 {{count}} 个对话工作区；请逐个移除。"
+    },
+    "otherConnection": {
+      "list": "此列表属于另一个连接。请先刷新。",
+      "settings": "这些设置属于另一个连接。请先重新加载。"
+    }
+  },
+  "proxy": {
+    "lead": "将 {{host}} 上的 harness 通过一个端点、使用多个凭据进行路由。密钥保存在 {{host}} 上；此应用只知道密钥是否存在。",
+    "onHost": "（位于 {{host}}）",
+    "profile": "配置",
+    "noProfile": "还没有配置",
+    "noProfileHint": "添加 CLIProxyAPI 实例的基础 URL 和它所需的密钥。h4rn 会在路由前先探测它。",
+    "startDaemon": "请在能访问该代理的主机上启动守护进程。",
+    "connection": "连接",
+    "managementKey": "管理密钥",
+    "accessKey": "访问密钥",
+    "accessKeyHint": "harness 发送的密钥",
+    "storedOn": "保存在 {{host}}",
+    "noKeyStored": "未保存密钥",
+    "newKey": "新密钥",
+    "newKeyLabel": "新的{{label}}",
+    "replace": "替换",
+    "noTrouble": "未发现问题。h4rn 可以从此配置读取模型和用量。",
+    "build": {
+      "notTested": "未测试",
+      "fork": "Fork 构建",
+      "upstream": "上游构建",
+      "unknown": "无法识别构建"
+    },
+    "management": {
+      "available": "已启用",
+      "open": "开放，无需密钥",
+      "needsKey": "需要密钥",
+      "disabled": "已停用",
+      "unknown": "未知"
+    },
+    "summary": {
+      "health": "健康状态",
+      "ok": "正常",
+      "unreachable": "无法访问",
+      "management": "管理接口",
+      "needsKeyHint": "添加管理密钥，h4rn 才能读取模型和凭据。",
+      "disabledHint": "请在 CLIProxyAPI 的配置中启用管理 API 以读取模型。",
+      "modelShape": "模型类型",
+      "noneDetected": "未检测到",
+      "usageHistory": "用量历史",
+      "usageFromProxy": "从代理读取",
+      "usageLocal": "不可用 · h4rn 自行统计用量"
+    },
+    "detail": {
+      "build": "构建",
+      "commit": "提交",
+      "usageQueue": "用量队列",
+      "legacyUsage": "旧版用量",
+      "configV8": "Config v8",
+      "performance": "性能",
+      "credentialsVerify": "凭据验证",
+      "cooldowns": "冷却",
+      "quotaProviders": "配额提供方",
+      "supported": "支持",
+      "supportedLegacy": "支持（≤ 6.9）",
+      "notAvailable": "不可用",
+      "routePresent": "路由存在",
+      "reported": "已报告",
+      "notReported": "未报告"
+    },
+    "cooldown": {
+      "plain": "冷却中",
+      "left": "冷却中 · {{left}}"
+    },
+    "models": {
+      "title": "模型",
+      "empty": "尚未读取到模型。请测试此配置，或开放其管理 API。",
+      "model": "模型",
+      "mapsTo": "映射到",
+      "context": "上下文",
+      "custom": "自定义",
+      "keepsId": "保留原始 ID",
+      "reading": "正在读取…",
+      "fromResponses_other": "{{count}} 个，来自响应",
+      "fromAliases_other": "{{count}} 个，来自响应和别名"
+    },
+    "add": {
+      "button": "添加配置",
+      "title": "添加配置",
+      "hint": "密钥会写入 {{host}} 上的密钥存储。此应用只知道密钥是否存在。",
+      "label": "名称",
+      "labelLabel": "配置名称",
+      "baseUrlLabel": "代理基础 URL",
+      "defaultLabel": "设为默认配置",
+      "save": "保存配置"
+    },
+    "harness": {
+      "title": "按 harness 覆盖",
+      "hint": "关闭表示 harness 使用自己的凭据。未开启的 harness 不会有任何变化。",
+      "routed": "已路由",
+      "own": "自有凭据",
+      "routeLabel": "通过 CLIProxyAPI 路由 {{harness}}",
+      "defaultModel": "{{harness}} 的默认模型",
+      "profileDefault": "配置默认值",
+      "preview": "{{harness}} 设置预览",
+      "storedOn": "保存在 {{host}}"
+    },
+    "apply": {
+      "interruptsOne": "将中断 {{host}} 上的 <em>{{title}}</em>。",
+      "interruptsMany_other": "将中断 {{host}} 上 {{count}} 个正在运行的回合。",
+      "restarted_other": "已重启 {{count}} 个会话。",
+      "applied": "已应用。之后启动的会话会使用它。",
+      "keepOld": "已在运行的会话在重启前保持原有路由。",
+      "button": "应用并重启",
+      "restarting": "正在重启…"
+    },
+    "probe": {
+      "title": "探测",
+      "when": "{{when}}，来自 {{host}}",
+      "never": "尚未探测",
+      "probing": "正在探测…",
+      "roundTrip": "往返 {{latency}}",
+      "details": "详情"
+    },
+    "health": {
+      "title": "凭据健康状态",
+      "none": "还没有健康快照。",
+      "unreadable": "无法读取管理 API。",
+      "noCredentials": "未报告任何凭据。",
+      "credential": "凭据",
+      "provider": "提供方",
+      "status": "状态",
+      "failed": "失败",
+      "cooldown": "冷却",
+      "ready": "就绪"
+    }
+  },
+  "textGeneration": {
+    "title": "文本生成器",
+    "lead": "只负责写文本的模型 API。h4rn 可以用它生成对话标题，而不必启动编码智能体。密钥保存在 {{host}} 上；此应用只知道密钥是否存在。",
+    "thisHost": "此主机",
+    "kinds": {
+      "open_ai_compatible": {
+        "label": "OpenAI 兼容",
+        "hint": "OpenAI、OpenRouter、Ollama、LM Studio"
+      },
+      "anthropic": {
+        "label": "Anthropic",
+        "hint": "api.anthropic.com"
+      }
+    },
+    "sendingPrompt": "正在发送一个极短的提示词…",
+    "replied": "{{latency}} 内回复。",
+    "repliedWith": "{{latency}} 内回复：“{{reply}}”",
+    "noAnswer": "生成器没有响应。",
+    "keyStored": "密钥保存在 {{host}}",
+    "noKey": "无密钥",
+    "test": "测试",
+    "testing": "正在测试…",
+    "addGenerator": "添加生成器",
+    "newGenerator": "新生成器",
+    "name": "名称",
+    "nameHint": "显示在标题模型选择器中",
+    "nameLabel": "生成器名称",
+    "kind": "类型",
+    "kindLabel": "生成器类型",
+    "baseUrlHint": "https，或仅限本机的 http",
+    "baseUrlLabel": "生成器基础 URL",
+    "modelHint": "用于撰写标题的模型",
+    "modelLabel": "生成器模型",
+    "apiKey": "API 密钥",
+    "apiKeyHint": "保存在 {{host}}；本地服务器可不填",
+    "apiKeyLabel": "生成器 API 密钥",
+    "writeOnly": "只写",
+    "saveGenerator": "保存生成器",
+    "retryOnline": "守护进程在线后重试。",
+    "empty": "还没有。已安装的编码智能体仍可撰写标题；添加生成器可使用更快、更便宜的模型。",
+    "titleModel": "标题模型",
+    "titleModelHint": "新对话会立即显示你第一条提示词的第一行。随后模型会写出更短的标题并替换它。你自己重命名的标题不会被替换。",
+    "titleModelLabel": "标题模型",
+    "whoWrites": "由谁撰写标题",
+    "codingAgentHint": "Claude Code 会在一个空文件夹中无工具运行一次，然后退出。“跟随对话的智能体”会为 Claude Code 对话使用 Claude Code；Codex 对话保留首行标题或使用文本生成器。",
+    "codingAgentLabel": "用于撰写标题的编码智能体",
+    "followThreadHint": "Claude Code 对话使用其自身；其他对话保留首行",
+    "generator": "生成器",
+    "generatorLabel": "用于撰写标题的文本生成器",
+    "manageUnderProviders": "在“提供方”中添加或移除生成器。",
+    "addUnderProviders": "请先在“提供方”中添加生成器。",
+    "titleModelDefault": "默认使用生成器的模型",
+    "summary": {
+      "reading": "正在读取标题模型…",
+      "off": "标题为第一条提示词的第一行。",
+      "claudeCode": "标题由 Claude Code 撰写一次。",
+      "codex": "Codex 不用于撰写标题；Codex 对话保留首行或使用文本生成器。",
+      "otherHarness": "{{harness}} 不用于撰写标题；对话保留首行。",
+      "followThread": "Claude Code 对话使用其自身的智能体撰写标题；其他对话保留首行或使用文本生成器。",
+      "generatorModel": "标题由使用 {{model}} 的文本生成器撰写。",
+      "generator": "标题由所选的文本生成器撰写。"
+    },
+    "validate": {
+      "baseUrlRequired": "请输入 API 根地址，例如 https://api.openai.com/v1。",
+      "notUrl": "这不是一个 URL。",
+      "keyInUrl": "请把密钥填在密钥字段中，而不是 URL 里。",
+      "useHttps": "请使用 https；http 仅限本地服务器。",
+      "httpLoopback": "普通 http 只能在本机使用（localhost 或 127.0.0.1）。",
+      "nameRequired": "请为此生成器命名。",
+      "modelRequired": "请输入它要调用的模型。"
+    }
+  },
+  "resume": {
+    "title": "自动恢复",
+    "lead": "当 harness 报告达到限额时，h4rn 可以让该回合保持排队，并在提供方重置后重试。这由守护进程调度；关闭应用不会取消。",
+    "policy": "策略",
+    "automatically": "自动恢复",
+    "failoverHint": "重置触发时优先使用代理的故障转移模型。",
+    "sameModelHint": "重置触发时使用相同的 harness 和模型重试。",
+    "failoverLabel": "恢复时尝试故障转移模型",
+    "failoverFirst": "优先故障转移",
+    "sameModel": "相同模型",
+    "longestWait": "最长等待",
+    "longestWaitHint": "重置时间未知时，会在此时间窗口内重试",
+    "current": "当前：{{duration}}",
+    "jitter": "随机延迟",
+    "jitterHint": "避免大量对话在同一秒恢复",
+    "jitterLabel": "随机延迟（秒）",
+    "seconds": "秒",
+    "prompt": "恢复提示词",
+    "promptHint": "连同保存的上下文一起发送给会话",
+    "observed_other": "已记录 {{count}} 次限额",
+    "failoverOn": "故障转移已开启",
+    "failoverOff": "故障转移已关闭",
+    "savePolicy": "保存策略"
+  },
+  "forges": {
+    "title": "代码托管平台",
+    "lead": "用于拉取请求、检查和评审的 GitHub、GitLab、Gitea、Forgejo、Bitbucket Cloud 和 Azure DevOps 账户。令牌保存在此主机上，所有调用都经过守护进程。",
+    "accounts": "账户",
+    "noAccounts": "还没有平台账户。请在下方添加令牌，或导入 CLI 已保存的令牌。",
+    "table": {
+      "account": "账户",
+      "host": "主机",
+      "scopes": "权限范围",
+      "added": "添加时间"
+    },
+    "notReported": "未报告",
+    "broadScopesTitle": "范围过宽：{{scopes}}",
+    "broaderThanNeeded": "超出所需范围",
+    "removeLabel": "移除 {{name}}",
+    "asUser": "（@{{username}}）",
+    "source": {
+      "pat": "令牌",
+      "o_auth_device": "GitHub 设备流程",
+      "gh_cli": "从 gh 导入",
+      "glab_cli": "从 glab 导入",
+      "bitbucket_api_token": "API 令牌（邮箱 + 令牌）",
+      "bitbucket_access_token": "工作区、项目或仓库访问令牌"
+    },
+    "scopes": {
+      "github": "请使用细粒度令牌，权限为 Contents: read、Pull requests: write 和 Checks: read。",
+      "gitlab": "请使用项目访问令牌，权限为 read_api 以及合并请求的写入权限。",
+      "gitea": "请使用对你要查看的仓库具有 repo 范围的令牌。",
+      "forgejo": "请使用对你要查看的仓库具有 repo 范围的令牌。",
+      "bitbucket": "请使用 Atlassian API 令牌（Account: read、Repositories: read、Pull requests: read and write）并配合你的 Atlassian 账户邮箱，或使用工作区、项目或仓库访问令牌（应用密码已于 2026 年 7 月停用）。",
+      "azure_devops": "请使用具有 Code: read & write 权限的个人访问令牌。"
+    },
+    "add": {
+      "title": "添加账户",
+      "forge": "平台",
+      "bitbucketNote": "应用密码已不可用。请粘贴 API 令牌并填写 Atlassian 账户邮箱，或粘贴工作区、项目或仓库访问令牌并将邮箱留空。",
+      "baseUrl": "基础 URL",
+      "baseUrlAzure": "请包含组织，例如 https://dev.azure.com/acme",
+      "baseUrlBitbucket": "仅支持 bitbucket.org 上的 Bitbucket Cloud",
+      "baseUrlSelfHosted": "自托管平台请指向其自身的主机",
+      "baseUrlLabel": "平台基础 URL",
+      "email": "Atlassian 账户邮箱",
+      "emailHint": "使用 API 令牌（邮箱 + 令牌）时需要。使用工作区、项目或仓库访问令牌时请留空。",
+      "needsRepository": "访问令牌无法读取你的账户，因此会针对某个仓库进行验证。请先从 Bitbucket 仓库的检出目录打开“拉取请求”页面，此表单才能检测到它。",
+      "validateAgainst": "验证所用仓库",
+      "validateAgainstHint": "用哪个检测到的 Bitbucket 仓库来验证此账户。默认使用第一个。",
+      "validateAgainstLabel": "用于验证的 Bitbucket 仓库",
+      "token": "令牌",
+      "tokenHint": "保存在此主机上，不会再次显示",
+      "tokenLabel": "平台令牌",
+      "tokenPlaceholder": "粘贴令牌",
+      "button": "添加账户",
+      "missingOrganization": "请在基础 URL 中加入组织。"
+    },
+    "device": {
+      "title": "GitHub 设备流程",
+      "enterCode_other": "请在 <link>{{uri}}</link> 输入此代码。代码将在 {{count}} 分钟后过期。",
+      "waiting": "正在等待授权…",
+      "stop": "停止",
+      "hint": "在浏览器中授权一次；守护进程会保存得到的令牌。需要主机上设置 H4RN_GITHUB_CLIENT_ID。",
+      "start": "开始设备流程",
+      "starting": "正在开始…",
+      "startFailed": "设备流程未能开始。",
+      "needsClientId": "请在守护进程上设置 H4RN_GITHUB_CLIENT_ID 以启用此功能。",
+      "slowDown": "GitHub 要求放慢请求；仍在等待…",
+      "expired": "代码已过期。请重新开始。"
+    },
+    "import": {
+      "title": "从 CLI 导入",
+      "hint": "读取 <code>gh</code> 或 <code>glab</code> 已为当前用户保存的令牌。确认之前不会导入任何内容。",
+      "fromGh": "从 gh 导入",
+      "fromGlab": "从 glab 导入",
+      "confirmTitle": "导入 {{cli}} 令牌？",
+      "confirmDescription": "h4rn 会读取 {{cli}} 为已登录用户保存的凭据，并保存在此主机上。仅在你信任这台机器时执行此操作。",
+      "confirmButton": "导入令牌"
+    },
+    "leastPrivilege": "最小权限",
+    "leastPrivilegeHint": "拉取请求功能会读取内容、检查和评审，并写入评论和回复。它从不需要仓库管理、密钥或组织写入权限；报告了这些范围的令牌会在上方被标记。",
+    "remove": {
+      "title": "移除 {{forge}} 账户？",
+      "description": "{{url}} 的令牌会从此主机删除。在重新添加账户之前，该主机的拉取请求将无法加载。",
+      "button": "移除账户"
+    },
+    "toast": {
+      "added": "已添加 {{forge}}{{user}}。",
+      "addFailed": "未能添加账户。",
+      "connected": "已连接 {{forge}}{{user}}。",
+      "removed": "已移除 {{name}}。",
+      "removeFailed": "未能移除账户。",
+      "imported": "已导入 {{forge}}{{user}}。",
+      "importFailed": "未导入任何 {{cli}} 凭据。"
+    }
+  },
+  "labs": {
+    "title": "Labs",
+    "lead": "已经完成、但仍在磨合中的功能。",
+    "threads": "对话",
+    "rewindFiles": "“从此处编辑”时回退文件",
+    "rewindFilesHint": "将对话自己的 worktree 恢复到被编辑消息之前的检查点。在文件恢复功能完善之前默认关闭；对话回退无论如何都可用。",
+    "rewindOffNote": "关闭时，编辑较早的提示词仍会从对话和 harness 的历史中移除该消息及其后的所有内容；只有工作区文件保持不变。",
+    "sharing": "共享",
+    "guestLinks": "访客链接",
+    "guestLinksHint": "让一位队友在浏览器中跟进一段对话，无需账户。他们写的每条消息都会等待你处理。",
+    "guestSees": "访客能看到的内容",
+    "guestSeesHint": "一段对话的消息、智能体的回复、推理、计划和工具输出，包括智能体打印出的任何内容（例如文件中的某个值）。绝不包括差异、其他对话、文件、终端或设置。",
+    "guestOffNote": "关闭访客链接会结束这台机器上所有现有的访客链接，并删除等待你处理的消息；重新开启不会恢复它们。了结对话、创建新链接或选择“停止共享”也会永久结束链接。",
+    "outsideAgents": "外部智能体",
+    "outsideAgentsOAuth": "外部智能体（OAuth）",
+    "outsideAgentsHint": "允许 Claude Code、Codex 或其他本地 MCP 客户端通过 OAuth 登录，并操作你的项目和对话。默认关闭。关闭后会撤销所有授权，并丢弃所有等待你处理的登录请求。",
+    "outsideOffNote": "关闭时，h4rn 的 OAuth 路由不存在，外部智能体令牌会被拒绝，也无法创建登录请求。h4rn 运行的智能体保留自己的工具。"
+  },
+  "access": {
+    "title": "共享与访问",
+    "offlineLead": "外部智能体会连接到这台机器。重新连接后可查看谁已连接并复制 MCP URL。",
+    "lead": "让不是你启动的智能体与 h4rn 协作，并决定 h4rn 自身的工具在它运行的智能体中能做什么。",
+    "outsideAgents": "外部智能体",
+    "outsideAgentsHint": "将此 URL 添加到 Claude Code、Codex 或其他支持 OAuth 的 MCP 客户端。客户端登录一次；你在 h4rn 中为它选择级别。",
+    "mcpUrl": "MCP URL",
+    "needsLoopback": "外部智能体需要一个回环监听器",
+    "copyMcpUrl": "复制 MCP URL",
+    "copyMcpUrlLabel": "复制外部智能体 MCP URL",
+    "remoteNote": "此 h4rn 应用正从另一台设备连接到 {{machine}}。该 URL 是那台电脑自己的回环地址，只能在那里使用：互联网上的智能体暂时无法访问。请在 {{machine}} 本机的 h4rn 中复制它。",
+    "waiting": "等待你处理",
+    "readingAgents": "正在读取已连接的智能体…",
+    "noneConnected": "没有已连接的外部智能体",
+    "noneConnectedHint": "在你批准登录之前，h4rn 外部的任何东西都无法读取或启动对话。",
+    "inLabs": "外部智能体位于 Labs 中。请在“设置 → Labs → 外部智能体（OAuth）”中开启。",
+    "readingSetting": "正在读取外部智能体设置…",
+    "tools": "你的智能体中的 h4rn 工具",
+    "toolsHint": "h4rn 运行的智能体可以将拉取请求关联到其对话并读取对话状态。如果你不希望这样，可按 harness 关闭这些工具。",
+    "toolsOn": "关联拉取请求、关注它们并读取对话状态。",
+    "toolsOff": "不向这些会话提供 h4rn 工具。",
+    "toolsIn": "{{harness}} 中的 h4rn 工具",
+    "connected": "{{when}}连接",
+    "lastUsed": "{{when}}使用过",
+    "signInUntil": "登录有效至 {{when}}",
+    "revokeLabel": "撤销 {{name}}",
+    "revokeTitle": "撤销 {{name}}？",
+    "revokeThis": "撤销此智能体？",
+    "revokeDescription": "它的访问令牌和刷新令牌会立即失效。它必须重新请求登录才能再次连接。",
+    "wantsToConnect": "{{name}} 请求连接",
+    "unverifiedName": "名称未经验证，由应用自行选择。如果你批准，浏览器会返回到 <code>{{origin}}</code>。",
+    "mayDo": "{{name}} 可以做什么",
+    "deny": "拒绝",
+    "approve": "批准",
+    "levels": {
+      "read_only": {
+        "label": "只读",
+        "description": "读取项目、对话和提供方；不做任何更改。"
+      },
+      "supervised": {
+        "label": "受监督",
+        "description": "以“需要审批”模式启动对话并发送消息。"
+      },
+      "full_access": {
+        "label": "完全访问",
+        "description": "以它请求的模式启动对话并发送消息。"
+      }
+    },
+    "toast": {
+      "connected": "{{name}} 已连接。",
+      "answerFailed": "无法回复 {{name}}。",
+      "revoked": "{{name}} 已被断开。",
+      "revokedHint": "它持有的所有令牌都已撤销；它必须重新请求登录。",
+      "revokeFailed": "无法撤销 {{name}}。",
+      "toolsOnFailed": "无法开启 h4rn 工具。",
+      "toolsOffFailed": "无法关闭 h4rn 工具。",
+      "switchRestored": "开关已恢复原状。",
+      "outsideOn": "外部智能体已开启。",
+      "outsideOff": "外部智能体已关闭。",
+      "outsideOnHint": "不是你启动的智能体可以从“设置 → 共享与访问”登录。",
+      "outsideOffHint": "所有授权都已撤销，所有等待中的登录请求都已丢弃。",
+      "outsideOnFailed": "无法开启外部智能体。",
+      "outsideOffFailed": "无法关闭外部智能体。"
+    }
+  }
+}

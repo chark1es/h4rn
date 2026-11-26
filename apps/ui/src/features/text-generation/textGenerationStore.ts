@@ -10,6 +10,7 @@ import type {
 } from "@/gen";
 import { toProtoError } from "@/lib/client/errors";
 import { HARNESS_LABELS } from "@/lib/entities";
+import { i18n } from "@/lib/i18n";
 import { getClient, useApp } from "@/lib/store/appStore";
 
 export type GeneratorFieldErrors = Partial<Record<"name" | "base_url" | "model", string>>;
@@ -234,20 +235,21 @@ const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "::1", "[::1]"]);
 /** Base-URL rule shown in the form: https anywhere, http only on loopback. */
 export function baseUrlError(value: string): string | null {
   const trimmed = value.trim();
-  if (!trimmed) return "Enter the API root, for example https://api.openai.com/v1.";
+  const t = i18n.getFixedT(null, "settings", "textGeneration.validate");
+  if (!trimmed) return t("baseUrlRequired");
   let parsed: URL;
   try {
     parsed = new URL(trimmed);
   } catch {
-    return "That is not a URL.";
+    return t("notUrl");
   }
   if (parsed.username || parsed.password) {
-    return "Put the key in the key field, not the URL.";
+    return t("keyInUrl");
   }
   if (parsed.protocol === "https:") return null;
-  if (parsed.protocol !== "http:") return "Use https, or http only for a local server.";
+  if (parsed.protocol !== "http:") return t("useHttps");
   if (!LOOPBACK_HOSTS.has(parsed.hostname.toLowerCase())) {
-    return "Plain http only works on this machine (localhost or 127.0.0.1).";
+    return t("httpLoopback");
   }
   return null;
 }
@@ -255,8 +257,8 @@ export function baseUrlError(value: string): string | null {
 /** Checks the add/edit form before it reaches the daemon. */
 export function validateGeneratorDraft(draft: TextGeneratorDraft): GeneratorFieldErrors | null {
   const errors: GeneratorFieldErrors = {};
-  if (!draft.name.trim()) errors.name = "Name this generator.";
-  if (!draft.model.trim()) errors.model = "Enter the model it should call.";
+  if (!draft.name.trim()) errors.name = i18n.t("settings:textGeneration.validate.nameRequired");
+  if (!draft.model.trim()) errors.model = i18n.t("settings:textGeneration.validate.modelRequired");
   const base = baseUrlError(draft.base_url);
   if (base) errors.base_url = base;
   return Object.keys(errors).length > 0 ? errors : null;
@@ -284,19 +286,16 @@ export function installedTitleAgents<T extends { harness: string; installed: str
 export function titleModelSummary(
   settings: { title: TextGenerationSettings["title"] } | null,
 ): string {
-  if (!settings) return "Reading the title model…";
+  const t = i18n.getFixedT(null, "settings", "textGeneration.summary");
+  if (!settings) return t("reading");
   const title = settings.title;
-  if (title.mode === "off") return "Titles are the first line of the first prompt.";
+  if (title.mode === "off") return t("off");
   if (title.mode === "coding_agent") {
-    if (title.harness === "claude_code") return "Titles are written once by Claude Code.";
-    if (title.harness === "codex") {
-      return "Codex is not used for titles; Codex threads keep the first line or use a text generator.";
-    }
+    if (title.harness === "claude_code") return t("claudeCode");
+    if (title.harness === "codex") return t("codex");
     return title.harness
-      ? `${HARNESS_LABELS[title.harness]} is not used for titles; threads keep the first line.`
-      : "Claude Code threads use their own agent for titles; other threads keep the first line or use a text generator.";
+      ? t("otherHarness", { harness: HARNESS_LABELS[title.harness] })
+      : t("followThread");
   }
-  return title.model
-    ? `Titles are written by a text generator with ${title.model}.`
-    : "Titles are written by the selected text generator.";
+  return title.model ? t("generatorModel", { model: title.model }) : t("generator");
 }

@@ -20,6 +20,7 @@ import type {
   ResponseBody,
 } from "@/gen";
 import { toProtoError } from "@/lib/client/errors";
+import { i18n } from "@/lib/i18n";
 import { getClient, pushToast } from "@/lib/store/appStore";
 
 export type AccessState = {
@@ -166,7 +167,7 @@ export async function respondSignIn(
     });
     if (decision === "approve" && level) {
       pushToast({
-        title: `${signIn.client_name} is connected.`,
+        title: i18n.t("settings:access.toast.connected", { name: signIn.client_name }),
         description: `${levelLabel(level)}: ${levelDescription(level)}`,
       });
     }
@@ -175,7 +176,7 @@ export async function respondSignIn(
     const proto = toProtoError(error);
     set({ signIns: before });
     pushToast({
-      title: `Couldn't answer ${signIn.client_name}.`,
+      title: i18n.t("settings:access.toast.answerFailed", { name: signIn.client_name }),
       description: `${proto.message}${proto.hint ? ` ${proto.hint}` : ""}`,
       variant: "error",
     });
@@ -200,15 +201,15 @@ export async function revokeAccessAgent(agent: OutsideAgentView): Promise<boolea
       request: { type: "revoke_outside_agent", client_id: agent.client_id },
     });
     pushToast({
-      title: `${agent.name} is cut off.`,
-      description: "Every token it held is revoked; it must ask to sign in again.",
+      title: i18n.t("settings:access.toast.revoked", { name: agent.name }),
+      description: i18n.t("settings:access.toast.revokedHint"),
     });
     return true;
   } catch (error) {
     const proto = toProtoError(error);
     set({ agents: before });
     pushToast({
-      title: `Couldn't revoke ${agent.name}.`,
+      title: i18n.t("settings:access.toast.revokeFailed", { name: agent.name }),
       description: `${proto.message}${proto.hint ? ` ${proto.hint}` : ""}`,
       variant: "error",
     });
@@ -259,8 +260,10 @@ export async function setAgentToolsEnabled(
     const proto = toProtoError(error);
     set({ settings: { ...current, enabled: before } });
     pushToast({
-      title: `Couldn't ${enabled ? "turn on" : "turn off"} h4rn tools.`,
-      description: `${proto.message} The switch is back where it was.${proto.hint ? ` ${proto.hint}` : ""}`,
+      title: enabled
+        ? i18n.t("settings:access.toast.toolsOnFailed")
+        : i18n.t("settings:access.toast.toolsOffFailed"),
+      description: `${proto.message} ${i18n.t("settings:access.toast.switchRestored")}${proto.hint ? ` ${proto.hint}` : ""}`,
       variant: "error",
     });
     return false;
@@ -304,17 +307,21 @@ export async function setOutsideAgentEnabled(enabled: boolean): Promise<boolean>
     }
     if (!enabled) set({ agents: [], signIns: [], mcpUrl: "" });
     pushToast({
-      title: enabled ? "Outside agents are on." : "Outside agents are off.",
+      title: enabled
+        ? i18n.t("settings:access.toast.outsideOn")
+        : i18n.t("settings:access.toast.outsideOff"),
       description: enabled
-        ? "An agent you did not start can sign in from Settings → Sharing & access."
-        : "Every grant is revoked and every waiting sign-in is dropped.",
+        ? i18n.t("settings:access.toast.outsideOnHint")
+        : i18n.t("settings:access.toast.outsideOffHint"),
     });
     return true;
   } catch (error) {
     const proto = toProtoError(error);
     set({ outsideEnabled: before });
     pushToast({
-      title: `Couldn't ${enabled ? "turn on" : "turn off"} outside agents.`,
+      title: enabled
+        ? i18n.t("settings:access.toast.outsideOnFailed")
+        : i18n.t("settings:access.toast.outsideOffFailed"),
       description: `${proto.message}${proto.hint ? ` ${proto.hint}` : ""}`,
       variant: "error",
     });
@@ -330,11 +337,11 @@ export async function setOutsideAgentEnabled(enabled: boolean): Promise<boolean>
 export function levelLabel(level: OutsideAgentLevel): string {
   switch (level) {
     case "read_only":
-      return "Read only";
+      return i18n.t("settings:access.levels.read_only.label");
     case "supervised":
-      return "Supervised";
+      return i18n.t("settings:access.levels.supervised.label");
     case "full_access":
-      return "Full access";
+      return i18n.t("settings:access.levels.full_access.label");
   }
 }
 
@@ -342,10 +349,10 @@ export function levelLabel(level: OutsideAgentLevel): string {
 export function levelDescription(level: OutsideAgentLevel): string {
   switch (level) {
     case "read_only":
-      return "Reads projects, threads and providers; nothing changes.";
+      return i18n.t("settings:access.levels.read_only.description");
     case "supervised":
-      return "Starts and messages threads at approval-required.";
+      return i18n.t("settings:access.levels.supervised.description");
     case "full_access":
-      return "Starts and messages threads at the mode it asks for.";
+      return i18n.t("settings:access.levels.full_access.description");
   }
 }
