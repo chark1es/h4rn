@@ -3,7 +3,7 @@
     "reconnecting": "Reconectando",
     "offline": "Sin conexión",
     "attempt": "intento {{attempt}}",
-    "cached": "en caché desde las {{time}}",
+    "cached": "caché: {{time}}",
     "noCache": "no hay hilos en caché",
     "reconnect": "Reconectar"
   },
