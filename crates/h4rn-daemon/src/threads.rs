@@ -1193,6 +1193,15 @@ struct ThreadRecord {
     held_promotions: Vec<QueuedMessageId>,
     /// Effort values the live session advertised.
     advertised_efforts: Vec<String>,
+    /// The live session's tool token was dropped by a revoke.
+    ///
+    /// A harness session is handed its token once, at start, so it cannot be
+    /// given a new one. The next turn on this session rather starts a fresh
+    /// one, which mints a new token: work under another live grant, or the
+    /// person's own, must not inherit a dead token. Set only when a turn under
+    /// the revoked family is in flight; an idle session keeps the token it
+    /// has, because its next turn is not the revoked grant's.
+    mcp_token_revoked: bool,
     /// The thread settings the live session was started with, or was last
     /// switched to in place.
     ///
@@ -1405,14 +1414,6 @@ impl SessionSlot {
                 ..
             } if *current == generation => grant.clone(),
             Self::None | Self::Starting(_) | Self::Live { .. } => None,
-        }
-    }
-
-    /// The grant the live session last delivered, whoever issued it.
-    fn current_grant(&self) -> Option<&WorkGrant> {
-        match self {
-            Self::Live { grant, .. } => grant.as_ref(),
-            Self::None | Self::Starting(_) => None,
         }
     }
 
@@ -3493,6 +3494,9 @@ impl ThreadRecord {
         }
         self.advertised_efforts.clear();
         self.session_settings = None;
+        // A fresh session mints a fresh tool token, so whatever this one had
+        // is no longer owed.
+        self.mcp_token_revoked = false;
         if self.handoff_satisfied_by == Some(generation) {
             // The session that held a native fork's copy is gone. The durable
             // `handoff_pending` now belongs to the next startup.
@@ -3551,6 +3555,9 @@ impl ThreadRecord {
         self.pump = None;
         self.advertised_efforts.clear();
         self.session_settings = None;
+        // The session that had the dead token is gone; the next startup mints
+        // a new one, so there is nothing left to restart for.
+        self.mcp_token_revoked = false;
         if self.handoff_satisfied_by == Some(generation) {
             // The copied history left with this session; the next startup owes
             // the handoff.
@@ -3610,6 +3617,13 @@ impl ThreadRecord {
             SessionSlot::Live { generation, .. } => *generation,
             SessionSlot::None | SessionSlot::Starting(_) => return None,
         };
+        // A revoke took this session's tool token, and a harness session cannot
+        // be handed another one. The next turn starts a fresh session, which
+        // mints a fresh token, instead of running without h4rn's tools.
+        if self.mcp_token_revoked {
+            self.mcp_token_revoked = false;
+            return self.detach_session(generation);
+        }
         let started = self.session_settings.as_ref()?;
         let mut wanted = ThreadSettings::of(&self.meta);
         // A turn whose sender capped its autonomy must not run on a session
@@ -4466,11 +4480,20 @@ impl ThreadManager {
         Some((dispatch.turn_id.clone(), dispatch.grant().cloned()))
     }
 
-    /// Drops the tool token of every session working under one of `families`.
+    /// Drops the tool token of every session with a turn in flight under one of
+    /// `families`.
     ///
     /// A revoke ends the grant's future work; this closes the live half too: a
     /// turn already running may finish, but its agent can no longer call h4rn's
     /// tools with the token it was handed.
+    ///
+    /// Only a turn under a revoked family is cut off. A session whose last
+    /// delivered turn was under family A and is now idle keeps its token: its
+    /// next turn runs under another, live grant or is the person's own, and
+    /// taking the token would leave that turn without h4rn's tools for no
+    /// reason. When one *is* dropped, the session is marked so its next turn
+    /// starts a fresh session and a fresh token instead of inheriting a dead
+    /// one.
     pub async fn revoke_tool_tokens_for_families(&self, families: &[String]) -> usize {
         if families.is_empty() {
             return 0;
@@ -4481,26 +4504,38 @@ impl ThreadManager {
         };
         let mut revoked = 0;
         for handle in handles {
-            let (thread_id, holds_grant) = {
+            let (thread_id, generation, in_flight) = {
                 let record = handle.lock().await;
                 let active = record
                     .active
                     .as_ref()
                     .and_then(|active| active.dispatch.grant())
-                    .map(|grant| families.contains(&grant.family));
-                let delivered = record
-                    .session
-                    .current_grant()
-                    .map(|grant| families.contains(&grant.family));
+                    .is_some_and(|grant| families.contains(&grant.family));
                 (
                     record.meta.thread_id.clone(),
-                    active.unwrap_or(false) || delivered.unwrap_or(false),
+                    record.session.generation(),
+                    active,
                 )
             };
-            if holds_grant {
-                if let Some(provider) = self.inner.mcp.get() {
-                    revoked += provider.revoke_thread(&thread_id);
-                }
+            if !in_flight {
+                continue;
+            }
+            let Some(provider) = self.inner.mcp.get() else {
+                continue;
+            };
+            let ended = provider.revoke_thread(&thread_id);
+            if ended == 0 {
+                // Nothing was handed out for this thread, so there is no
+                // session to restart.
+                continue;
+            }
+            revoked += ended;
+            let mut record = handle.lock().await;
+            // Only the session whose token was just dropped is marked. A turn
+            // can settle between the two locks, and a newer session may have
+            // started already; that one minted its own token and must keep it.
+            if record.session.generation() == generation {
+                record.mcp_token_revoked = true;
             }
         }
         revoked
@@ -5087,6 +5122,7 @@ impl ThreadManager {
             resume_at: None,
             limit: None,
             advertised_efforts: Vec::new(),
+            mcp_token_revoked: false,
             session_settings: None,
             settings_lock: Arc::new(Mutex::new(())),
             switch_lock: Arc::new(Mutex::new(())),
@@ -5325,6 +5361,7 @@ impl ThreadManager {
             resume_at: None,
             limit: None,
             advertised_efforts: Vec::new(),
+            mcp_token_revoked: false,
             session_settings: None,
             settings_lock: Arc::new(Mutex::new(())),
             ttft_ms: None,
@@ -5830,6 +5867,7 @@ impl ThreadManager {
             resume_at: None,
             limit: None,
             advertised_efforts: Vec::new(),
+            mcp_token_revoked: false,
             session_settings: None,
             settings_lock: Arc::new(Mutex::new(())),
             switch_lock: Arc::new(Mutex::new(())),
@@ -10922,6 +10960,7 @@ impl Inner {
                 resume_at: None,
                 limit: None,
                 advertised_efforts: Vec::new(),
+                mcp_token_revoked: false,
                 session_settings: None,
                 settings_lock: Arc::new(Mutex::new(())),
                 switch_lock: Arc::new(Mutex::new(())),

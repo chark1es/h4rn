@@ -213,7 +213,15 @@ impl OutsideAgents {
     /// in flight can still reach an agent, and the live session lost its tool
     /// token. An unknown token ends no family and still succeeds (RFC 7009).
     pub async fn revoke_token(&self, token: &str) -> Result<(), OAuthError> {
+        // A value that names no family ends nothing, so it is answered without
+        // the gate. Taking the write side first let anyone with a made-up token
+        // serialize every outside RPC behind them, one request at a time.
+        if self.store.token_family(token).is_none() {
+            return Ok(());
+        }
         let _gate = self.admission.write().await;
+        // Re-checked under the gate: the token may have been revoked while
+        // this call waited, and that revocation already drained its family.
         let families = self.store.revoke_token_families(token)?;
         self.drain_families(families).await;
         Ok(())

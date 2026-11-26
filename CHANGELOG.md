@@ -818,6 +818,14 @@ All notable changes to h4rn are recorded here. The format follows
 ### Fixed
 
 - **Revert files too notices a line-ending change, takes its checkpoint in a fraction of a second, and works next to an uninitialised submodule.** The plan compares two trees built the same raw way instead of reading the worktree through `.git/info/attributes` or a global attributes file, a 3,000-file checkpoint dropped from about 62 s to under half a second, an empty submodule folder no longer blocks every restore, the executable bit follows git's owner-bit rule, recovery refuses a root that became a symlink, a live subagent session gets no prompt while a restore commits, and the dialog's reason reads the removed turns instead of the message's own row. It still needs the Labs switch.
+- **Outside-agent revocation is cheap to refuse and leaves other work alone.** A made-up token no
+  longer waits on an admitted call before it is answered, so it cannot serialize every outside RPC,
+  and `DELETE /mcp` is counted against the same aggregate limit as the OAuth routes. Revoking one
+  grant only drops the tool token of a session with a turn running under that grant: a session whose
+  next turn belongs to another live grant or to the person keeps its tools, and one that did lose
+  them starts a fresh session with a fresh token on its next turn instead of running without h4rn's
+  tools. The Settings revoke and the Labs switch are covered by the same protocol-level ordering
+  test as the client-facing revokes.
 - **Thread controls keep what the model really offers.** The Fast row now
   follows the thread's current model instead of its harness (Codex advertises
   service tiers per model), and the model catalogue a session reports is saved
