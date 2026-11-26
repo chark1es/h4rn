@@ -170,7 +170,10 @@ export function ThreadHeader({
   const stateLabel =
     summary.tab === "done" && summary.agent_state === "done"
       ? t("header.doneAge", {
-          when: formatRelativeTime(summary.last_activity, Date.now(), { numeric: "auto", style: "narrow" }),
+          when: formatRelativeTime(summary.last_activity, Date.now(), {
+            numeric: "auto",
+            style: "narrow",
+          }),
         })
       : glyph.label;
 
