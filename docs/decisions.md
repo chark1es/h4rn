@@ -1948,9 +1948,10 @@ for. The row's state says what is actually known: `claimed` (written, the adapte
 called), `sending` (the adapter call has started, so delivery is unknown), `delivered` (the adapter
 took it) and `refused` (a definite refusal before any write). A failed claim append is undone and
 nothing was delivered. The `sending` write must land before the adapter is called; if it cannot, the
-message goes back to the queue and nothing is sent. Immediately after the adapter answers `Ok` the
-claim becomes `delivered`, before the transcript row is written, so a failed transcript cannot make a
-delivered steer look unsent. On a definite refusal (unsupported, missing binary, a protocol error
+message goes back to the queue and nothing is sent. After the adapter answers `Ok` a steer's claim
+stays `sending` until its transcript row is durable: a daemon that stops before that row lands shows
+the text as **May have been delivered** instead of dropping the only copy, and an append that keeps
+failing leaves the same visible row. On a definite refusal (unsupported, missing binary, a protocol error
 answer, or a closed writer the adapter knows never accepted the frame) the refusal is written down
 and the message goes back where it was; if the restore append fails, its retries run, and a restart
 still finds the refusal and restores the message. On an unclear outcome (a timeout, a dead transport
@@ -1958,13 +1959,25 @@ after the write) the claim stays `sending`, so a restart shows the message as **
 delivered** for the person to resend or discard, and no path ever sends it again on its own; the
 error says the message may have reached the agent because a second automatic delivery is worse than
 a row the person has to check. At startup a `claimed` or `refused` row goes back to the queue at its
-old position, a `sending` row becomes a queue row marked **May have been delivered** that the person
+old position (unless it never waited in the queue: an ordinary send's prompt is already its turn's
+user item), a `sending` row becomes a queue row marked **May have been delivered** that the person
 can send again or discard but that is never promoted automatically, and a `delivered` row is dropped:
 neither a crash before the adapter nor a failed restore can lose the only copy, and a crash during
 the adapter call is never silently re-sent. The claim reads the message under the same lock that
 removes it, so an edit committed in between cannot send text the person already replaced. The queue
 row publishes a per-row `steerable` flag, so the hint and the button never promise a steer for a
 message the daemon will move to the front instead.
+
+**An ordinary send to an idle thread keeps the same claim.** The append that starts its turn writes a
+`claimed` delivery claim for that turn, and the write steps it to `sending` before the adapter is
+called, so a daemon that stops during or after that write recovers the prompt as the visible **May
+have been delivered** row instead of losing the record that it was being sent. A `claimed` one (the
+adapter was never called) is dropped at startup because the prompt is already the turn's journaled
+user item: restoring it as a queue row would send the same text a second time. A `refused` one is
+dropped for the same reason — the refusal is already the turn's prompt and nothing was delivered —
+so a revoked grant before the write does not show the text in the transcript and in the queue at
+once. A claim written before the daemon recorded `from_queue` reads as a queue promotion, because
+every claim that build wrote for a turn's own prompt came from the queue.
 
 **A queued steer obeys the message's sender.** The stored ceiling and grant are read with the
 message: a message that carries a ceiling is never steered into a running turn, because a steer
@@ -1987,11 +2000,24 @@ under the session lock, after the `sending` write and immediately before the ada
 as a steer does: a family revoked after the delivery claim never receives the prompt, and the
 message goes back to the queue as known unsent. A definite pre-write refusal (`NotSent`) puts the
 claim back to `claimed`; any other failure keeps `sending`, because a timeout after the frame was
-written may already be in the turn. A direct steer writes the same claim before its adapter call
-even though it has no queue row, so an unclear result survives as a **May have been delivered** row.
-A parked prompt keeps its promoted claim: the parked record and the claim name the same dispatch,
-and the write that releases the pause carries both changes, so a crash between the release and the
-write still recovers the text.
+written may already be in the turn. A write whose outcome is unknown is never retried on a
+replacement session when the original one detaches, and a rate-limit pause never parks it: both
+would deliver the same text twice. Every path that promotes the oldest row — a settled turn's next
+step, a send to an idle thread, and **Send now** — marks the turn as that promotion, so the rule
+applies wherever the prompt came from. Its settlement turns the claim into the visible **May have
+been delivered** row, and only the person resends or discards it; a Stop the person already saw
+acknowledged settles that turn interrupted instead of as a rejected write. A direct steer writes the
+same claim
+before its adapter call even though it has no queue row, so an unclear result survives as a **May
+have been delivered** row. That claim becomes visible as soon as the outcome is unclear, not only
+after a restart. A parked prompt keeps its promoted claim: the parked record and the claim name the
+same dispatch, and the write that releases the pause carries both changes, so a crash between the
+release and the write still recovers the text. The one exception is a parked queue promotion whose
+claim already says `sending` (a journal written by a build before the park guard): the adapter may
+already hold the text, so a restart never rebuilds that dispatch, the text becomes the visible
+**May have been delivered** row, and the pause's firing applies the policy's continue prompt, which
+the person can supersede by resending the row. An ordinary send's parked claim keeps its restore
+even in `sending`, because its failed write was proven unaccepted before it was parked.
 
 **An uncertain row does not block the queue.** Only the person's Send now or Steer may retry a row
 marked **May have been delivered**; automatic promotion skips past such rows and starts the next
@@ -2007,10 +2033,17 @@ state back, so there is no phantom Working turn and the message is still deliver
 A steer the harness already took is **reported as delivered even when its transcript row could not
 be written**: `MessageAccepted.unrecorded` says the words are in the turn and only the row is
 missing. Reporting that as a failure would invite a resend, and the running turn would hold the same
-words twice. A direct steer writes the same `sending` claim before `guard.steer`, so the text has a
-durable copy even though it never had a queue row; an unclear outcome is reported as
-`ProtoErrorCode::DeliveryUnclear` and the recovered row says **May have been delivered**, while the
-composer keeps the draft until that row exists instead of clearing the only other copy.
+words twice. The claim stays `sending` until that row is durable, and the append is retried; each
+attempt starts from no claim, so a retry that lands does not leave the delivered text looking unsure
+to a later restart. If every attempt fails the text comes back as the visible **May have been
+delivered** row a restart would recover, so it can never vanish from both the transcript and the
+queue. A direct steer writes the same `sending` claim before `guard.steer`, so the text has a
+durable copy even though it never had a queue row. It re-checks the sender's grant under the session
+lock immediately before the adapter call, exactly as a promoted write does. An unclear outcome is
+reported as `ProtoErrorCode::DeliveryUnclear` and is shown as the **May have been delivered** row at
+once. The composer keeps the draft until that row exists — clearing it earlier would lose the only
+other copy — and clears it as soon as the matching row appears, so it never invites a second send of
+the same words.
 
 
 Queue edits, removals, moves and Send now are one daemon request (`QueueMessage`). Every mutation
@@ -2363,3 +2396,63 @@ configured a Firebase service account has push off; Connect reports that state
 and never pretends to send. The Android build compiles and runs without
 `google-services.json`; the feature is then unavailable and Settings says so.
 
+## ADR-052: iOS gets the same alert record, sent to APNs with the operator's own key
+
+**Status:** Accepted
+
+ADR-051's record, gating, grouping, dedupe and phone-side rules apply to iOS
+unchanged: the daemon publishes the same six fields, Connect still decides, and
+a phone's registration belongs to the account and device that created it. The
+device row now records the platform, and Connect builds the transport shape for
+that phone only — the Android FCM data message, or an iOS APNs alert carrying
+the same title and body in `aps.alert` and, as custom keys, only `h4rn_alert`,
+`state`, `thread_id` and `count`. There is still no field for a prompt, a
+reply, tool output, a diff, a file path or a credential.
+
+iOS is sent to APNs directly rather than through FCM. FCM for iOS requires the
+Firebase Messaging SDK, and the mobile shell links its Swift code as a local
+Swift Package through `swift-rs`, which links the package's own static archive
+and cannot link a SwiftPM dependency's archives. Adding Firebase would mean an
+Xcode project target this repository does not generate, and it would also make
+every iOS build depend on a `GoogleService-Info.plist`. The APNs auth key
+therefore lives on the relay beside the FCM service account: the operator sets
+`H4RN_CONNECT_APNS_KEY`, `H4RN_CONNECT_APNS_KEY_ID` and
+`H4RN_CONNECT_APNS_TEAM_ID`, and the relay signs an ES256 provider token,
+caches it for 50 minutes, and posts HTTP/2 alerts. A missing or partial key
+leaves iOS push off, reported honestly, and does not stop the relay from
+starting. `H4RN_CONNECT_APNS_URL` exists for tests and for the sandbox host a
+development build needs.
+
+iOS cannot execute app code for a plain data message while the app is
+suspended, so the alert is a visible APNs notification with
+`mutable-content: 1`. Without a Notification Service Extension, which needs its
+own Xcode target that the generated project cannot gain here, the local
+"signed in and switched on" flag cannot suppress a suspended app's alert. The
+guarantee stays the one ADR-051 already chose for a failed removal: taking the
+switch off removes the registration from Connect, and the phone clears what is
+already in Notification Centre. That is not a lock-screen promise: a signed-out
+or switched-off iPhone that cannot reach Connect may still show alerts while it
+is suspended, until the pending removal succeeds at the next sign-in. Android's
+local flag gives it the stronger guarantee; iOS documents the weaker one rather
+than claiming it. While the app is running, its notification delegate enforces
+the same rule as Android — quiet only for the exact thread on screen, never for
+a group — and a tap follows the existing `h4rn://thread/<id>` route, or opens
+h4rn for a grouped alert. A missing extension is documented as a limit rather
+than replaced by a weaker claim.
+
+The phone asks APNs for a fresh token on every launch when permission is
+granted, and waits for that callback; the cached token is only a fallback after
+a short timeout. A phone restored from a backup can otherwise keep offering a
+token Apple already retired: Connect would delete the row on a 410 and the phone
+would register the same dead value again forever. The UI re-registers on launch
+and when the app returns to the foreground, so a changed token replaces the old
+row. A tap that launches the app is buffered by the delegate and exposed as a
+one-shot command the UI reads during boot, because there is no page listener
+yet to receive the warm `h4rn-deep-link` event.
+
+`BadDeviceToken` and a bare 403 do not delete a registration. Apple answers
+`BadDeviceToken` when a development build talks to the production host (or the
+reverse) for a token that is still valid on the other host, and deleting every
+row on that would silence a phone because of an operator misconfiguration. Only
+`410` and an explicit `Unregistered` reason remove the row, the same caution
+ADR-051 applies to FCM's 404.

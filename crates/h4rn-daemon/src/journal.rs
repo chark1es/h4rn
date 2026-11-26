@@ -332,6 +332,24 @@ pub struct QueuedClaim {
     /// settling a turn drops its promoted claim but never an unclear steer's.
     #[serde(default)]
     pub promoted: bool,
+    /// Whether the message waited in the thread's queue before it was claimed.
+    ///
+    /// An ordinary send to an idle thread also writes a claim, but its prompt is
+    /// already the turn's journaled user item: a `claimed` one (the adapter was
+    /// never called) is dropped at startup instead of being queued again. A
+    /// `sending` one still becomes the visible unsure row, because the adapter
+    /// may have taken it and the transcript cannot say.
+    ///
+    /// An older daemon wrote no such field, and every promoted prompt it wrote
+    /// a claim for came from the queue, so a missing one must read back as a
+    /// promotion: treating it as an ordinary send would drop the only copy.
+    #[serde(default = "claim_from_queue_default")]
+    pub from_queue: bool,
+}
+
+/// The value `from_queue` had before the field was recorded.
+fn claim_from_queue_default() -> bool {
+    true
 }
 
 /// What a [`QueuedClaim`] knows about its message's delivery.
@@ -5636,5 +5654,37 @@ mod tests {
             turns[0].status,
             Some(h4rn_protocol::TurnStatus::Interrupted)
         );
+    }
+
+    /// A claim written before `from_queue` existed reads as a queue promotion.
+    ///
+    /// The older daemon wrote a claim only for prompts it promoted from the
+    /// queue, so a missing field must restore the message instead of dropping
+    /// it as an ordinary send's already journaled prompt.
+    #[test]
+    fn a_claim_from_an_older_daemon_reads_back_as_a_queue_promotion() {
+        let legacy = serde_json::json!({
+            "message": {
+                "message_id": "qm_legacy",
+                "text": "written by an older daemon",
+                "attachments": [],
+                "queued_at": "2026-08-24T11:59:00Z",
+                "steerable": false,
+                "delivery_unknown": false,
+                "ceiling": null,
+                "grant": null
+            },
+            "index": 0,
+            "turn_id": "turn_legacy",
+            "state": "claimed",
+            "promoted": true
+        });
+        let claim: QueuedClaim = serde_json::from_value(legacy).expect("the legacy claim shape");
+        assert!(
+            claim.from_queue,
+            "a claim without from_queue is not a promotion"
+        );
+        assert!(claim.promoted, "the legacy claim is still a turn's prompt");
+        assert_eq!(claim.state, QueuedClaimState::Claimed);
     }
 }

@@ -1542,6 +1542,7 @@ mod tests {
         let store = Store::from_pool(pool);
         let http = reqwest::Client::new();
         let push = Arc::new(FcmClient::new(&config, http.clone()));
+        let apns = Arc::new(crate::apns::ApnsClient::new(&config, http.clone()));
         AppState {
             keystore: Keystore::from_config(&config).expect("signing key"),
             envelope: Envelope::from_config(&config).expect("kek"),
@@ -1552,6 +1553,7 @@ mod tests {
             alerts: Arc::new(AlertService::new(
                 store.clone(),
                 Arc::clone(&push),
+                Arc::clone(&apns),
                 Duration::from_millis(1),
                 Duration::from_secs(120),
             )),
@@ -1559,6 +1561,7 @@ mod tests {
             config,
             http,
             push,
+            apns,
             started: std::time::Instant::now(),
         }
     }

@@ -1117,13 +1117,18 @@ pub struct UsageEvent {
     pub raw: Option<serde_json::Value>,
 }
 
-/// One Android install registering for push alerts (ADR-051).
+/// One phone registering for push alerts (ADR-051, ADR-052).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 pub struct PushDeviceRegistration {
     /// The caller's connect device id. A registration is refused for any other.
     pub device_id: String,
-    /// Firebase Cloud Messaging registration token.
+    /// The phone's push token: an FCM registration token on Android, an APNs
+    /// device token on iOS.
     pub token: String,
+    /// `android` or `ios`. Omitted means `android`, because every registration
+    /// from a client that predates iOS was an Android install.
+    #[serde(default)]
+    pub platform: Option<String>,
     /// Android package name, so delivery can be restricted to this app.
     #[serde(default)]
     pub package_name: Option<String>,
@@ -1135,9 +1140,12 @@ pub struct PushDeviceRegistration {
 /// What this relay can do about push, and how many devices this account has.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 pub struct ConnectPushStatus {
-    /// Whether an operator configured a Firebase service account.
+    /// Whether the Android (FCM) sender is configured.
+    ///
+    /// Kept for clients from before `platform_configured`, which are all
+    /// Android; a client that knows `platform_configured` reads that instead.
     pub configured: bool,
-    /// Registered Android installs on this account.
+    /// Registered installs on this account.
     pub devices: usize,
     /// Whether the caller's own device has a registration row.
     ///
@@ -1145,6 +1153,14 @@ pub struct ConnectPushStatus {
     /// "will this phone get an alert". Older relays omit it; unset means no.
     #[serde(default)]
     pub registered: bool,
+    /// Whether a sender for the caller's own platform is configured.
+    ///
+    /// A relay can have FCM for Android and no APNs key for iOS, so the
+    /// account-wide `configured` flag alone would tell an iPhone that alerts
+    /// will arrive when they cannot. Older relays omit it; unset means the
+    /// client falls back to `configured` (the Android answer).
+    #[serde(default)]
+    pub platform_configured: Option<bool>,
 }
 
 #[cfg(test)]

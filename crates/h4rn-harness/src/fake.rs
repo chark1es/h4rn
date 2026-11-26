@@ -91,6 +91,9 @@ impl EventSink {
 enum SendFailure {
     /// An ordinary transport failure. Its text is never parsed for a limit.
     Transport(String),
+    /// A definite pre-write refusal, as an adapter reports for a closed writer
+    /// it knows never accepted the frame.
+    NotSent(String),
     /// A provider limit the adapter parsed itself, with its reset when known.
     RateLimited(LimitSignal),
 }
@@ -1465,6 +1468,17 @@ impl FakeHarness {
         self
     }
 
+    /// Lets the first `ok_sends` prompts succeed, then refuses every later send
+    /// with the definite pre-write error `NotSent` and `message`.
+    ///
+    /// A test uses this for a closed writer the adapter knows never accepted the
+    /// frame: unlike a transport failure, the prompt is known not to have
+    /// reached the provider, so the daemon may safely try it again.
+    pub fn with_send_not_sent_after(mut self, ok_sends: usize, message: impl Into<String>) -> Self {
+        self.send_failure_after = Some((ok_sends, SendFailure::NotSent(message.into())));
+        self
+    }
+
     /// Lets the first `ok_sends` prompts succeed, then fails every later send
     /// with the typed limit signal an adapter parses for itself.
     ///
@@ -2229,6 +2243,10 @@ impl HarnessSession for FakeSession {
             }
             return Err(match failure {
                 SendFailure::Transport(message) => HarnessError::Transport {
+                    harness: self.kind,
+                    message,
+                },
+                SendFailure::NotSent(message) => HarnessError::NotSent {
                     harness: self.kind,
                     message,
                 },

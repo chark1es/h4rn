@@ -20,6 +20,7 @@ use std::net::SocketAddr;
 
 pub mod alerts;
 pub mod api;
+pub mod apns;
 pub mod config;
 pub mod crypto;
 pub mod dpop;
