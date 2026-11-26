@@ -668,9 +668,7 @@ function NotificationsForm() {
               </p>
             ) : null}
             {device?.available === false ? (
-              <p className="s q-muted">
-                This build has no Firebase configuration, so it cannot receive alerts.
-              </p>
+              <p className="s q-muted">This build cannot receive alerts.</p>
             ) : null}
             {availabilityNote ? <p className="s q-muted">{availabilityNote}</p> : null}
             {device?.error ? (

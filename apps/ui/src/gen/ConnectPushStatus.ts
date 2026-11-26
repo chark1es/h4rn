@@ -5,11 +5,11 @@
  */
 export type ConnectPushStatus = { 
 /**
- * Whether an operator configured a Firebase service account.
+ * Whether an operator configured any push sender.
  */
 configured: boolean, 
 /**
- * Registered Android installs on this account.
+ * Registered installs on this account.
  */
 devices: number, 
 /**
@@ -18,4 +18,13 @@ devices: number,
  * A phone asks about itself, so the account-wide count cannot answer
  * "will this phone get an alert". Older relays omit it; unset means no.
  */
-registered: boolean, };
+registered: boolean, 
+/**
+ * Whether a sender for the caller's own platform is configured.
+ *
+ * A relay can have FCM for Android and no APNs key for iOS, so the
+ * account-wide `configured` flag alone would tell an iPhone that alerts
+ * will arrive when they cannot. Older relays omit it; unset means the
+ * client falls back to `configured`.
+ */
+platform_configured: boolean | null, };

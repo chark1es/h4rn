@@ -209,6 +209,20 @@ pub struct Config {
     pub fcm_token_url: String,
     /// Base URL for the FCM v1 API. Tests point this at a mock server.
     pub fcm_url: String,
+    /// APNs signing key (`.p8` contents, or a path to the file)
+    /// (`H4RN_CONNECT_APNS_KEY`). Together with the key id and team id it
+    /// enables iOS alerts; any of the three missing disables them.
+    pub apns_key: Option<String>,
+    /// Key id of [`Config::apns_key`] (`H4RN_CONNECT_APNS_KEY_ID`).
+    pub apns_key_id: Option<String>,
+    /// Apple Developer team id that owns the key
+    /// (`H4RN_CONNECT_APNS_TEAM_ID`).
+    pub apns_team_id: Option<String>,
+    /// APNs topic: the iOS bundle id (`H4RN_CONNECT_APNS_TOPIC`).
+    pub apns_topic: String,
+    /// Base URL for APNs. Tests point this at a mock server, and a development
+    /// build must use the sandbox host.
+    pub apns_url: String,
     /// How long to collect activity transitions before grouping them. Tests
     /// shorten this; the default is one second.
     pub push_group_window_ms: u64,
@@ -247,6 +261,11 @@ impl Default for Config {
             fcm_service_account: None,
             fcm_token_url: "https://oauth2.googleapis.com/token".to_string(),
             fcm_url: "https://fcm.googleapis.com".to_string(),
+            apns_key: None,
+            apns_key_id: None,
+            apns_team_id: None,
+            apns_topic: "dev.h4rn.app".to_string(),
+            apns_url: "https://api.push.apple.com".to_string(),
             push_group_window_ms: 1_000,
             push_completion_max_age_secs: 120,
             guest_answer_timeout_secs: 120,
@@ -280,6 +299,11 @@ impl fmt::Debug for Config {
             )
             .field("fcm_token_url", &self.fcm_token_url)
             .field("fcm_url", &self.fcm_url)
+            .field("apns_key", &self.apns_key.as_ref().map(|_| "<redacted>"))
+            .field("apns_key_id", &self.apns_key_id)
+            .field("apns_team_id", &self.apns_team_id)
+            .field("apns_topic", &self.apns_topic)
+            .field("apns_url", &self.apns_url)
             .field("guest_answer_timeout_secs", &self.guest_answer_timeout_secs)
             .finish()
     }
@@ -410,6 +434,21 @@ impl Config {
         }
         if let Some(value) = env("H4RN_CONNECT_FCM_URL") {
             self.fcm_url = value;
+        }
+        if let Some(value) = env("H4RN_CONNECT_APNS_KEY") {
+            self.apns_key = Some(value);
+        }
+        if let Some(value) = env("H4RN_CONNECT_APNS_KEY_ID") {
+            self.apns_key_id = Some(value);
+        }
+        if let Some(value) = env("H4RN_CONNECT_APNS_TEAM_ID") {
+            self.apns_team_id = Some(value);
+        }
+        if let Some(value) = env("H4RN_CONNECT_APNS_TOPIC") {
+            self.apns_topic = value;
+        }
+        if let Some(value) = env("H4RN_CONNECT_APNS_URL") {
+            self.apns_url = value;
         }
         if let Some(value) = env("H4RN_CONNECT_PUSH_GROUP_WINDOW_MS") {
             self.push_group_window_ms = value.parse().map_err(|_| {

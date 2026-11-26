@@ -1,11 +1,11 @@
 # Mobile notifications
 
-Android can alert you when an agent finishes, fails, waits for an approval, asks
-a question or stops at a limit. Tap the alert to open that thread. Delivery goes
-through Connect only: a direct or Tailscale pairing is not enough, because the
-daemon does not hold a phone's push token and Google cannot reach a LAN address.
-
-iOS alerts are not part of this feature; Android is first.
+Your phone can alert you when an agent finishes, fails, waits for an approval,
+asks a question or stops at a limit. Tap the alert to open that thread. Android
+and iOS behave the same way and carry the same record. Delivery goes through
+Connect only: a direct or Tailscale pairing is not enough, because the daemon
+does not hold a phone's push token and a push provider cannot reach a LAN
+address.
 
 ## Turning alerts on
 
@@ -15,13 +15,14 @@ iOS alerts are not part of this feature; Android is first.
    until you turn it on, and turning it off stops the next publish. Turning it
    off works from any client, even one that is not signed in to Connect, because
    the setting belongs to the machine that publishes.
-3. In the Android app, open **Settings → Notifications → Phone alerts** and
-   turn on **Device notifications**. Android asks for notification permission
-   the first time (Android 13 and newer). The row shows the real state: the OS
-   permission, whether this phone registered with Connect (not whether another
-   phone on the account did), and whether the Connect server has a push sender
-   configured. A status call that fails is reported as unknown, not as a missing
-   sender.
+3. In the h4rn phone app, open **Settings → Notifications → Phone alerts** and
+   turn on **Device notifications**. The phone asks for notification permission
+   the first time (Android 13 and newer; on iOS the system dialog appears when
+   you turn the switch on). The row shows the real state: the OS permission,
+   whether this phone registered with Connect (not whether another phone on the
+   account did), and whether the Connect server has a push sender for this
+   phone's platform. A status call that fails is reported as unknown, not as a
+   missing sender.
 
 Alerts are quiet only when the app is in the foreground **and** that exact
 thread is on screen. Every other thread still alerts, as does the same thread
@@ -34,17 +35,20 @@ Turning **Device notifications** off removes this phone's registration from
 Connect. If that request cannot reach Connect (the phone is offline, or the
 relay errors), the app remembers the removal and retries it the next time it is
 signed in and opened, so the row does not linger and the phone does not keep
-alerting. While the switch is off the Android notification service also drops
-any data message that still arrives, as a second line of defence.
+alerting. While the switch is off the phone also drops or clears alerts locally,
+as a second line of defence: Android's notification service ignores data
+messages, and iOS clears everything already in Notification Centre and keeps a
+foreground alert quiet.
 
-Signing out does two things. The Android notification service's local flag goes
-off at once, whatever the relay can be reached for, so the signed-out phone never
-shows the old account's thread titles on the lock screen. A pending removal is
-kept as well and retried the next time this phone signs in, because the relay
-row belongs to the account that signed out. After the credentials are gone the
-app cannot retry on its own; the local flag is the guarantee until then, and
-signing out through `POST /v1/auth/logout` also deletes the token-scoped row on
-the relay. Turning the switch on again after signing in re-registers the phone.
+Signing out does two things. The phone's local "signed in and switch on" flag
+goes off at once, whatever the relay can be reached for, so the signed-out phone
+never shows the old account's thread titles on the lock screen. A pending
+removal is kept as well and retried the next time this phone signs in, because
+the relay row belongs to the account that signed out. After the credentials are
+gone the app cannot retry on its own; the local flag is the guarantee until
+then, and signing out through `POST /v1/auth/logout` also deletes the
+token-scoped row on the relay. Turning the switch on again after signing in
+re-registers the phone.
 
 ## What leaves the daemon
 
@@ -74,13 +78,34 @@ completion or approval that repeats the same state does. Connect also drops a
 completion that is more than two minutes old. Transitions that arrive together
 are grouped: two or more agents waiting for a person become one **N agents need
 attention** alert, and two or more finishing become one **N agents finished**
-alert. The count is of threads, not raw transitions, so one agent that raises
-the same hand twice inside the group window is still one agent.
+alert. The count is of threads, not raw transitions, so one agent that raises the
+same hand twice inside the group window is still one agent.
+
+## How each phone is told
+
+Connect records the platform on each phone's registration row and sends that
+phone the shape its OS needs. Both shapes are built from the same record and are
+sent to one phone at a time.
+
+**Android** receives an FCM data message with the display strings under
+`data` (`h4rn_alert`, `state`, `thread_id`, `title`, `body`, `count`). The app
+composes the notification itself, which is what lets a foreground alert for the
+thread already on screen never appear in the tray at all.
+
+**iOS** receives an APNs alert. The `aps` block carries the same title and body
+Android composes locally, `sound`, and `mutable-content: 1`; the only custom keys
+are the fixed record's `h4rn_alert`, `state`, `thread_id` and `count`. The title
+and body are not repeated as custom data. A grouped alert has an empty
+`thread_id`, so a tap opens h4rn. `apns-expiration` gives the alert the same
+300-second lifetime as the Android message.
 
 ## Operator setup: Connect
 
-Push is off when no Firebase service account is configured. Connect reports
-that state in `/v1/push/status`; it never pretends to send.
+Push is off per platform until that platform's credentials are configured.
+Connect reports each state in `/v1/push/status`; it never pretends to send. A
+relay can carry Android, iOS or both.
+
+### Android: Firebase
 
 1. Create a Firebase project and enable the Firebase Cloud Messaging API.
 2. Register the Android application id `dev.h4rn.app` in that project.
@@ -106,6 +131,43 @@ top-level `NOT_FOUND`, or a 404 with no such detail, is not enough evidence: a
 wrong `H4RN_CONNECT_FCM_URL` or project id also answers 404, and deleting every
 token on that would silence the whole account because of an operator typo.
 Those answers leave the token in place and only log the failure.
+
+### iOS: APNs
+
+iOS is sent to Apple directly, not through Firebase. The phone app has no
+Firebase SDK, so the token it registers is an APNs device token; Connect talks
+to APNs itself with the operator's own auth key.
+
+1. In the Apple Developer portal, create an **APNs Auth Key** (`.p8`) for the
+   team that owns `dev.h4rn.app`. Download it once; Apple does not show it
+   again. Note its **Key ID** and the **Team ID**.
+2. Give all three to the relay, either as the PEM itself or as a path to the
+   file:
+
+   ```sh
+   H4RN_CONNECT_APNS_KEY=/etc/h4rn/AuthKey_KEYID12345.p8
+   H4RN_CONNECT_APNS_KEY_ID=KEYID12345
+   H4RN_CONNECT_APNS_TEAM_ID=TEAM123456
+   ```
+
+   Any of the three missing leaves iOS push off and logs why; it never stops the
+   relay from starting. `H4RN_CONNECT_APNS_TOPIC` defaults to `dev.h4rn.app`,
+   and `H4RN_CONNECT_APNS_URL` defaults to `https://api.push.apple.com`; a
+   development build of the app must use
+   `H4RN_CONNECT_APNS_URL=https://api.sandbox.push.apple.com` because Apple
+   keeps the sandbox and production device sets separate.
+3. Restart `h4rn-connect`. The same `push_devices` migration records each
+   phone's platform.
+
+The sender signs an ES256 provider token with the key, caches it for 50 minutes
+(Apple's limit is one hour), and posts the alert over HTTP/2 to
+`/3/device/<token>`. A token is deleted only on a `410` or an explicit
+`Unregistered` reason; `BadDeviceToken` is deliberately not enough, because a
+development build pointed at the production host answers with it for a token
+that is still valid elsewhere. 429 and 5xx responses are retried with backoff,
+and an expired provider token is re-signed once. An `.p8` key is a credential:
+it belongs only on the relay, never in the app bundle, a CI environment or this
+repository.
 
 A device row belongs to the account that registered it. Registration accepts
 only the caller's own Connect device id, rotation replaces the old token,
@@ -134,16 +196,58 @@ The Firebase SDK is compiled into every build, so a normal release can enable
 alerts without a different native module. The service-account key belongs only
 on the relay, never in the APK or an EAS/build environment for the app.
 
+## Operator setup: the iOS build
+
+The iOS app needs no plist and no Firebase project. `apps/mobile/native/ios`
+holds a `H4rnPush` Swift target, linked from `apps/mobile/src-tauri/build.rs`,
+that registers for remote notifications and exposes the same five commands as
+Android (`push_status`, `push_request_permission`, `push_token`,
+`push_set_foreground_thread`, `push_set_enabled`). The APNs token is captured
+from the app delegate and cached on the device; Settings re-registers it with
+Connect on every launch, which is how a rotated token reaches the relay.
+
+What the build still needs from the owner is Apple's usual signing material:
+
+1. The `dev.h4rn.app` bundle id with the **Push Notifications** capability
+   enabled, and a provisioning profile that includes the
+   `aps-environment` entitlement. `Release` builds use `production`; a debug
+   build installed from Xcode uses `development` and must talk to the sandbox
+   APNs host above.
+2. A device, not the simulator: the simulator cannot receive a remote push
+   notification, so Settings on a simulator accepts the switch and then reports
+   that no APNs token arrived. This is a limitation of the simulator, not of the
+   relay.
+
+CI compiles the simulator build with no Apple credentials at all; it only
+verifies the Swift and Rust compile.
+
+**No Notification Service Extension ships yet.** iOS cannot run app code for an
+alert while the app is suspended, so the extension that would re-check the
+local switch before showing a suspended app's alert is not part of this
+release: adding one needs its own Xcode target, and the generated iOS project
+is not something this repository can add a target to. The switch-off removal
+from Connect is therefore the guarantee while the app is suspended, and the
+in-app delegate enforces the same rule (switch off, exact thread open, grouped
+alert) whenever the app is running. Do not rely on the local flag alone to
+silence a phone whose removal never reached Connect.
+
 ## Limits
 
 - Android needs Google Play services. A device without them cannot receive FCM.
+- iOS needs a signed build with the push entitlement, installed on a real
+  device, and an operator-configured APNs key on the relay. A simulator cannot
+  receive a remote push, and a development build must use the sandbox APNs host.
 - If the app is force-stopped in Android Settings, delivery stops until it is
   opened again. Android's battery modes can also delay a message.
 - Turning the app switch off removes the registration; if Connect cannot be
-  reached, the app retries until it confirms the row is gone, and the Android
-  service stays silent meanwhile. Turning off the daemon switch stops publishing
-  for every phone at once. Revoking the phone from the desktop removes its
+  reached, the app retries until it confirms the row is gone, and the phone
+  stays silent meanwhile. Turning off the daemon switch stops publishing for
+  every phone at once. Revoking the phone from the desktop removes its
   registration too.
+- On iOS, an alert delivered while the app is suspended is shown by the system
+  before any h4rn code runs. Without a Notification Service Extension the local
+  switch cannot suppress it; removal from Connect, and the in-app delegate, are
+  what keep a switched-off phone quiet.
 - A thread moved to Done by hand is a placement, not a finished turn, so it
   does not alert. A turn you stopped yourself does not alert either.
 - A turn stopped by a usage, token or turn limit asks for you only when

@@ -446,12 +446,14 @@ export class ConnectClient {
   async registerPushDevice(input: {
     deviceId: string;
     token: string;
+    platform?: "android" | "ios";
     packageName?: string;
     appVersion?: string;
   }): Promise<void> {
     await this.authorized("PUT", "/v1/push/devices", {
       device_id: input.deviceId,
       token: input.token,
+      platform: input.platform ?? "android",
       package_name: input.packageName ?? null,
       app_version: input.appVersion ?? null,
     });

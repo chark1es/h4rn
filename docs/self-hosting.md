@@ -96,6 +96,11 @@ both, using the snake_case names shown below.
 | `H4RN_CONNECT_FCM_SERVICE_ACCOUNT` | unset | Firebase service-account JSON, or a path to that file. Unset means Android push is off (ADR-051). |
 | `H4RN_CONNECT_FCM_TOKEN_URL` | `https://oauth2.googleapis.com/token` | OAuth2 token endpoint; tests point it at a mock. |
 | `H4RN_CONNECT_FCM_URL` | `https://fcm.googleapis.com` | FCM v1 base URL; tests point it at a mock. |
+| `H4RN_CONNECT_APNS_KEY` | unset | APNs auth key (`.p8` PEM), or a path to that file. With the key id and team id it enables iOS push (ADR-052); any of the three unset means iOS push is off. |
+| `H4RN_CONNECT_APNS_KEY_ID` | unset | Key ID of `H4RN_CONNECT_APNS_KEY`. |
+| `H4RN_CONNECT_APNS_TEAM_ID` | unset | Apple Developer team id that owns the key. |
+| `H4RN_CONNECT_APNS_TOPIC` | `dev.h4rn.app` | APNs topic (the app's bundle id). |
+| `H4RN_CONNECT_APNS_URL` | `https://api.push.apple.com` | APNs base URL; tests point it at a mock, and a development build needs `https://api.sandbox.push.apple.com`. |
 | `H4RN_CONNECT_PUSH_GROUP_WINDOW_MS` | `1000` | Window that groups simultaneous transitions into one alert. |
 | `H4RN_CONNECT_PUSH_COMPLETION_MAX_AGE_SECS` | `120` | Finished work older than this never alerts. |
 | `H4RN_CONNECT_GUEST_ANSWER_TIMEOUT_SECS` | `120` | How long Connect waits for a relayed guest exchange's answer before forgetting the exchange. |

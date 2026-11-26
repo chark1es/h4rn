@@ -65,6 +65,19 @@ All notable changes to h4rn are recorded here. The format follows
   configure one Firebase service account on Connect and supply `google-services.json` only when
   building the Android app, so the app and CI still build without it and Settings says when alerts
   are unavailable.
+- **iPhone alerts: the same agent alerts Android has, with the same privacy and behaviour rules.**
+  An iPhone registers with Connect through Settings → Notifications → Phone alerts, and an alert
+  arrives when an agent finishes, fails, needs approval, asks a question or stops at a limit.
+  Tapping it opens that thread; a grouped alert opens h4rn. A foreground alert stays quiet only
+  when that exact thread is on screen, and a grouped alert is never quiet. Connect records each
+  phone's platform and sends the Android data message or the iOS alert block from the same fixed
+  record; an iPhone payload carries only the documented fields, with nothing for a prompt, reply,
+  tool output, path or credential. Turning the switch off removes the registration and the phone
+  clears any alert still in Notification Centre; signing out turns the local flag off at once. The
+  iOS build needs no Firebase project: Connect sends to APNs with the operator's own `.p8` key, so
+  the app and CI compile without any credential. See
+  [docs/mobile-notifications.md](docs/mobile-notifications.md) and
+  [ADR-052](docs/decisions.md).
 - **A new thread can run in its own git worktree.** Choose **Run in a new
   worktree** in the New thread dialog, with an optional branch name. The daemon
   checks out the project's current `HEAD` on a generated `h4rn/<name>` branch

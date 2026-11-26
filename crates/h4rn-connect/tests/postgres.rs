@@ -1547,6 +1547,66 @@ async fn push_devices_register_rotate_and_leave_with_the_session() {
     assert_eq!(rows[0].0, token_two);
     assert_eq!(rows[0].1, "1.0.2");
 
+    // The row records the platform so Connect can choose the right sender.
+    let token_three = random_b64(32);
+    let (status, body) = send(
+        &state,
+        request(
+            Method::PUT,
+            "/v1/push/devices",
+            Some(&phone),
+            Some(serde_json::json!({
+                "device_id": phone.device.id.to_string(),
+                "token": token_three,
+                "platform": "ios",
+            })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let platform: String =
+        sqlx::query_scalar("SELECT platform FROM push_devices WHERE user_id = $1")
+            .bind(phone.user.id)
+            .fetch_one(state.store.pool())
+            .await
+            .unwrap();
+    assert_eq!(platform, "ios");
+    let (status, body) = send(
+        &state,
+        request(Method::GET, "/v1/push/status", Some(&phone), None),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["platform_configured"], false,
+        "this relay has no APNs key, so an iPhone must not be told alerts will arrive"
+    );
+
+    // A platform Connect does not know is refused rather than stored.
+    let (status, body) = send(
+        &state,
+        request(
+            Method::PUT,
+            "/v1/push/devices",
+            Some(&phone),
+            Some(serde_json::json!({
+                "device_id": phone.device.id.to_string(),
+                "token": token_three,
+                "platform": "watchos",
+            })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["code"], "push_platform_invalid");
+    let platform: String =
+        sqlx::query_scalar("SELECT platform FROM push_devices WHERE user_id = $1")
+            .bind(phone.user.id)
+            .fetch_one(state.store.pool())
+            .await
+            .unwrap();
+    assert_eq!(platform, "ios", "a refused registration changed the row");
+
     // A device can only register itself, and only remove itself.
     let (status, body) = send(
         &state,
@@ -1721,6 +1781,7 @@ async fn a_revoked_phone_loses_its_push_rows() {
             phone.user.id,
             &phone.device.id.to_string(),
             "revoked-phone-token",
+            "android",
             Some("dev.h4rn.app"),
             Some("1.0.1"),
         )
@@ -1849,6 +1910,7 @@ async fn alert_service_drops_stale_completions_groups_and_deletes_a_dead_token()
             kept.user.id,
             &kept.device.id.to_string(),
             "kept-token",
+            "android",
             None,
             None,
         )
@@ -1860,6 +1922,7 @@ async fn alert_service_drops_stale_completions_groups_and_deletes_a_dead_token()
             kept.user.id,
             &gone.device.id.to_string(),
             "gone-token",
+            "android",
             None,
             None,
         )
@@ -1873,9 +1936,13 @@ async fn alert_service_drops_stale_completions_groups_and_deletes_a_dead_token()
         ..Config::default()
     };
     let fcm = Arc::new(FcmClient::new(&config, reqwest::Client::new()));
+    let apns = Arc::new(h4rn_connect::apns::ApnsClient::disabled(
+        reqwest::Client::new(),
+    ));
     let service = Arc::new(AlertService::new(
         state.store.clone(),
         fcm,
+        apns,
         Duration::from_millis(100),
         Duration::from_secs(120),
     ));

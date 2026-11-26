@@ -24,6 +24,8 @@ mod preview;
 
 #[cfg(target_os = "ios")]
 tauri::ios_plugin_binding!(init_plugin_h4rn_secret_store);
+#[cfg(target_os = "ios")]
+tauri::ios_plugin_binding!(init_plugin_h4rn_push);
 
 /// Upper bound for a logical secret key.
 const MAX_SECRET_KEY: usize = 256;
@@ -33,9 +35,8 @@ const MAX_SECRET_VALUE: usize = 64 * 1024;
 #[cfg(any(target_os = "android", target_os = "ios"))]
 struct SecretStore(PluginHandle<tauri::Wry>);
 
-/// Android FCM bridge (ADR-051). The plugin is Android-only; iOS alerts are a
-/// later task, so the commands report the feature unavailable there.
-#[cfg(target_os = "android")]
+/// The phone's push bridge (ADR-051, ADR-052): FCM on Android, APNs on iOS.
+#[cfg(any(target_os = "android", target_os = "ios"))]
 struct PushBridge(PluginHandle<tauri::Wry>);
 
 /// The command's answer on every target; the host build reports unavailable.
@@ -186,7 +187,7 @@ fn secret_delete(app: tauri::AppHandle, key: String) -> Result<(), String> {
 /// Reports whether this build can push, the OS permission, and a cached token.
 #[tauri::command]
 fn push_status(app: tauri::AppHandle) -> Result<PushStatusValue, String> {
-    #[cfg(target_os = "android")]
+    #[cfg(any(target_os = "android", target_os = "ios"))]
     {
         let bridge = app.state::<PushBridge>();
         let mut status = bridge
@@ -197,7 +198,7 @@ fn push_status(app: tauri::AppHandle) -> Result<PushStatusValue, String> {
         Ok(status)
     }
 
-    #[cfg(not(target_os = "android"))]
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
         let _ = app;
         Ok(PushStatusValue {
@@ -210,10 +211,10 @@ fn push_status(app: tauri::AppHandle) -> Result<PushStatusValue, String> {
     }
 }
 
-/// Asks for the Android 13+ notification permission.
+/// Asks for the phone's notification permission (Android 13+, or iOS).
 #[tauri::command]
 fn push_request_permission(app: tauri::AppHandle) -> Result<(), String> {
-    #[cfg(target_os = "android")]
+    #[cfg(any(target_os = "android", target_os = "ios"))]
     {
         let bridge = app.state::<PushBridge>();
         bridge
@@ -222,17 +223,17 @@ fn push_request_permission(app: tauri::AppHandle) -> Result<(), String> {
             .map_err(|error| error.to_string())
     }
 
-    #[cfg(not(target_os = "android"))]
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
         let _ = app;
-        Err("device alerts are only implemented on Android".into())
+        Err("device alerts are only implemented on the mobile shells".into())
     }
 }
 
-/// Returns the current FCM registration token.
+/// Returns the current push token: FCM on Android, APNs on iOS.
 #[tauri::command]
 fn push_token(app: tauri::AppHandle) -> Result<String, String> {
-    #[cfg(target_os = "android")]
+    #[cfg(any(target_os = "android", target_os = "ios"))]
     {
         let bridge = app.state::<PushBridge>();
         bridge
@@ -242,10 +243,10 @@ fn push_token(app: tauri::AppHandle) -> Result<String, String> {
             .map_err(|error| error.to_string())
     }
 
-    #[cfg(not(target_os = "android"))]
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
         let _ = app;
-        Err("device alerts are only implemented on Android".into())
+        Err("device alerts are only implemented on the mobile shells".into())
     }
 }
 
@@ -256,7 +257,7 @@ fn push_set_foreground_thread(
     app: tauri::AppHandle,
     thread_id: Option<String>,
 ) -> Result<(), String> {
-    #[cfg(target_os = "android")]
+    #[cfg(any(target_os = "android", target_os = "ios"))]
     {
         let bridge = app.state::<PushBridge>();
         bridge
@@ -270,7 +271,7 @@ fn push_set_foreground_thread(
             .map_err(|error| error.to_string())
     }
 
-    #[cfg(not(target_os = "android"))]
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
         let _ = (app, thread_id);
         Ok(())
@@ -281,7 +282,7 @@ fn push_set_foreground_thread(
 /// message that still arrives while Off never reaches the tray.
 #[tauri::command]
 fn push_set_enabled(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
-    #[cfg(target_os = "android")]
+    #[cfg(any(target_os = "android", target_os = "ios"))]
     {
         let bridge = app.state::<PushBridge>();
         bridge
@@ -290,7 +291,7 @@ fn push_set_enabled(app: tauri::AppHandle, enabled: bool) -> Result<(), String> 
             .map_err(|error| error.to_string())
     }
 
-    #[cfg(not(target_os = "android"))]
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
         let _ = (app, enabled);
         Ok(())
@@ -367,7 +368,12 @@ pub fn run() {
                         let handle = api.register_android_plugin("dev.h4rn.app", "PushPlugin")?;
                         app.manage(PushBridge(handle));
                     }
-                    #[cfg(not(target_os = "android"))]
+                    #[cfg(target_os = "ios")]
+                    {
+                        let handle = api.register_ios_plugin(init_plugin_h4rn_push)?;
+                        app.manage(PushBridge(handle));
+                    }
+                    #[cfg(not(any(target_os = "android", target_os = "ios")))]
                     {
                         let _ = (app, api);
                     }

@@ -1,9 +1,11 @@
 /**
- * The native bridge for Android device alerts (ADR-051).
+ * The native bridge for phone alerts (ADR-051, ADR-052).
  *
- * Only an Android Tauri shell has the plugin. Every function is inert
- * elsewhere, so the shared UI can call it unconditionally; Settings hides the
- * device row when {@link deviceAlertsShell} is false.
+ * Only a mobile Tauri shell has the plugin: FCM on Android, APNs on iOS. Every
+ * function is inert elsewhere, so the shared UI can call it unconditionally;
+ * Settings hides the device row when {@link deviceAlertsShell} is false.
+ * Android and iOS expose the same commands and response shapes, so nothing
+ * here branches on the platform beyond detecting it.
  */
 
 type TauriInternals = {
@@ -13,12 +15,12 @@ type TauriInternals = {
 export type DevicePushPermission = "granted" | "denied" | "default" | "unknown";
 
 export type NativePushStatus = {
-  /** This build has a Firebase project configured. */
+  /** This build can receive alerts (Firebase configured on Android). */
   available: boolean;
   permission: DevicePushPermission;
-  /** Cached FCM token, when the plugin has one. */
+  /** The push token the shell cached: FCM on Android, APNs on iOS. */
   token: string | null;
-  /** The notification channel exists (created by the plugin). */
+  /** The notification channel exists (Android; always true on iOS). */
   channel: boolean;
   /** The shell's own version, sent with registration. */
   appVersion: string;
@@ -28,8 +30,8 @@ export type NativePushStatus = {
  * What the shell said about this phone.
  *
  * A failed command is its own answer: it says nothing about whether the build
- * has Firebase, so the UI reports "unknown" and lets the person try again
- * instead of claiming the build cannot carry alerts.
+ * can carry alerts, so the UI reports "unknown" and lets the person try again
+ * instead of claiming the build cannot carry them.
  */
 export type NativePushStatusResult =
   | { kind: "checked"; status: NativePushStatus }
@@ -42,9 +44,18 @@ function internals(): TauriInternals | null {
   return typeof candidate?.invoke === "function" ? candidate : null;
 }
 
-/** Whether this is an Android shell that can carry alerts. */
+/** The phone platform this shell runs on, or null when it cannot carry alerts. */
+export function deviceAlertsPlatform(): "android" | "ios" | null {
+  if (internals() === null) return null;
+  const ua = window.navigator.userAgent;
+  if (/Android/i.test(ua)) return "android";
+  if (/iPhone|iPad|iPod/i.test(ua)) return "ios";
+  return null;
+}
+
+/** Whether this is a phone shell that can carry alerts. */
 export function deviceAlertsShell(): boolean {
-  return internals() !== null && /Android/i.test(window.navigator.userAgent);
+  return deviceAlertsPlatform() !== null;
 }
 
 function describe(error: unknown): string {
@@ -86,7 +97,7 @@ export async function nativeRequestPushPermission(): Promise<void> {
 export async function nativePushToken(): Promise<string> {
   const api = internals();
   if (!api || !deviceAlertsShell()) {
-    throw new Error("Device alerts are only available in the Android app.");
+    throw new Error("Device alerts are only available in the h4rn phone app.");
   }
   try {
     return await api.invoke<string>("push_token");
