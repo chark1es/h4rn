@@ -99,6 +99,10 @@ function named(id: CommandId): RowName {
  * One palette row. cmdk matches what was typed against the shown name, the
  * English name and the English synonyms, so someone who learned the palette
  * in English still finds "settle" or "diff" after switching language.
+ *
+ * A row that opens a dialog ends in "…", the menu convention for "asks for
+ * more first". The command's shared name stays without it, because Settings →
+ * Shortcuts and the Keyboard shortcuts dialog list the same name.
  */
 function PaletteItem({
   row,
@@ -106,6 +110,7 @@ function PaletteItem({
   command,
   icon,
   disabled,
+  opensDialog,
   onSelect,
 }: {
   row: RowName;
@@ -113,6 +118,7 @@ function PaletteItem({
   command?: CommandId;
   icon?: ReactNode;
   disabled?: boolean;
+  opensDialog?: boolean;
   onSelect: () => void;
 }) {
   return (
@@ -123,7 +129,7 @@ function PaletteItem({
       onSelect={onSelect}
     >
       {icon}
-      {row.name}
+      {opensDialog ? `${row.name}…` : row.name}
       {command ? <CommandShortcut command={command} /> : null}
     </CommandItem>
   );
@@ -307,6 +313,7 @@ export function CommandPalette() {
               <PaletteItem
                 row={named("guest.share")}
                 synonyms="share guest teammate link"
+                opensDialog
                 icon={<Share2Icon aria-hidden />}
                 onSelect={() => close(() => openGuestShare(current.thread_id))}
               />
@@ -370,6 +377,7 @@ export function CommandPalette() {
           <PaletteItem
             row={named("thread.new")}
             synonyms="new thread start"
+            opensDialog
             icon={<PlusIcon aria-hidden />}
             command="thread.new"
             onSelect={() => close(openNewThread)}
@@ -538,6 +546,7 @@ export function CommandPalette() {
               <PaletteItem
                 row={named("shortcuts.open")}
                 synonyms="keyboard shortcuts help"
+                opensDialog
                 icon={<KeyboardIcon aria-hidden />}
                 command="shortcuts.open"
                 onSelect={() => close(openShortcuts)}

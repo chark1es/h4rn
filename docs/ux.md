@@ -436,7 +436,7 @@ message per thread. The mobile build does not send notifications yet and says so
 ### Global rules
 
 - Every action reachable by pointer is reachable by keyboard. Focus is always visible: 2 px cue ring at 2 px offset.
-- Every command is a chord: `⌘` on macOS, `Ctrl` on Windows and Linux, plus one key, optionally with `⇧` or `⌥`. There are no single-key shortcuts and no `G`-sequences, so typing never runs a command.
+- Every command is a chord: `⌘` on macOS, `Ctrl` on Windows and Linux, plus one key, optionally with `⇧` or `⌥`. There are no single-key shortcuts and no `G`-sequences, so typing never runs a command. The one exception is `⌥↑` (edit the newest queued message), which acts only when the caret is at the very start of the composer, where the key has no other use.
 - `⌘/` opens the shortcut sheet. Shortcuts are discoverable in tooltips and the palette; no hidden modes.
 - A command that does not apply right now (approve with nothing pending, settle with no thread) leaves the key alone, so the browser or the focused editor still gets it. Code editors and the terminal handle their own chords first.
 - Every shortcut is remappable in Settings → Shortcuts (stored per device). A new binding must include `⌘`/`Ctrl` and may not collide with another command. The registry in `apps/ui/src/lib/keybindings.ts` is the default.

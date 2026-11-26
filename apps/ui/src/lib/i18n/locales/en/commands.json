@@ -114,13 +114,13 @@
     }
   },
   "shortcutsDialog": {
-    "description": "Every command is Cmd or Ctrl plus a key, so typing never triggers one. Change any of them in <settings>Settings → Shortcuts</settings>.",
+    "description": "Commands are Cmd or Ctrl plus a key, so typing never triggers one. The exception, editing the newest queued message, acts only at the very start of the composer. Change any of them in <settings>Settings → Shortcuts</settings>.",
     "whileTyping": "While typing",
     "typing": {
       "send": "Send",
       "newLine": "New line",
       "recall": "Recall an earlier prompt",
-      "forward": "Walk prompts forward",
+      "forward": "Recall a newer prompt",
       "mention": "Mention a file",
       "command": "Run a command",
       "moveMenu": "Move in the @ or / menu",

@@ -15,6 +15,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { useTranslation } from "react-i18next";
 
 import type { H4rnClient } from "@/lib/client/client";
 import { cn } from "@/lib/utils";
@@ -34,6 +35,9 @@ const ARROWS: Record<string, string> = {
   ArrowRight: "\u001b[C",
   ArrowLeft: "\u001b[D",
 };
+
+/** Keycaps read the same in every language (docs/i18n.md). */
+const KEYCAP = { esc: "Esc", tab: "Tab", ctrl: "Ctrl" } as const;
 
 export function TerminalView({
   client,
@@ -63,6 +67,7 @@ export function TerminalView({
   const dimensionsRef = useRef(onDimensions);
   dimensionsRef.current = onDimensions;
 
+  const { t } = useTranslation(["thread", "common"]);
   const [status, setStatus] = useState<TerminalStatus>({ phase: "opening" });
   const [dimensions, setDimensions] = useState({ cols: 0, rows: 0 });
   const statusRef = useRef(status);
@@ -148,7 +153,7 @@ export function TerminalView({
           ref={surfaceRef}
           className="terminal-surface absolute inset-0"
           role="application"
-          aria-label="Terminal session"
+          aria-label={t("terminal.session")}
         />
 
         {showOpening ? (
@@ -156,7 +161,7 @@ export function TerminalView({
             className="pointer-events-none absolute inset-0 flex items-center justify-center text-[12px] text-[var(--fg-3)]"
             style={{ background: "color-mix(in oklch, var(--bg-sunk) 85%, transparent)" }}
           >
-            Opening shell…
+            {t("terminal.opening")}
           </div>
         ) : null}
 
@@ -171,13 +176,10 @@ export function TerminalView({
               <CircleAlertIcon className="size-5 text-[var(--danger)]" aria-hidden />
             )}
             <p className="text-[13px] font-medium text-[var(--fg)]">
-              {showOffline ? "The daemon is offline." : status.message}
+              {showOffline ? t("terminal.daemonOffline") : status.message}
             </p>
             <p className="max-w-[46ch] text-[12px] text-[var(--fg-2)]">
-              {status.hint ??
-                (showOffline
-                  ? "Reconnect and the terminal will open on its own."
-                  : "Close this tab and open a new terminal.")}
+              {status.hint ?? (showOffline ? t("terminal.reconnectHint") : t("terminal.closeHint"))}
             </p>
             <button
               type="button"
@@ -188,7 +190,7 @@ export function TerminalView({
               }}
             >
               <RefreshCwIcon className="size-3" aria-hidden />
-              {showOffline ? "Reconnect" : "Try again"}
+              {showOffline ? t("terminal.reconnect") : t("common:tryAgain")}
             </button>
           </div>
         ) : null}
@@ -197,21 +199,19 @@ export function TerminalView({
       {status.phase === "attached" ? (
         <div className="q-term-note">
           <CircleAlertIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-          <span>
-            Sized to this phone. Desktop viewers see the same {dimensions.cols || "—"} columns.
-          </span>
+          <span>{t("terminal.sized", { cols: dimensions.cols || "—" })}</span>
         </div>
       ) : null}
 
       <div
         className={cn("q-keybar sm:hidden", status.phase !== "attached" && "opacity-60")}
         role="toolbar"
-        aria-label="Terminal keys"
+        aria-label={t("terminal.keys")}
       >
-        <KeyButton label="Esc" onPress={() => sendKey("\u001b")} />
-        <KeyButton label="Tab" onPress={() => sendKey("\t")} />
+        <KeyButton label={KEYCAP.esc} onPress={() => sendKey("\u001b")} />
+        <KeyButton label={KEYCAP.tab} onPress={() => sendKey("\t")} />
         <KeyButton
-          label="Ctrl"
+          label={KEYCAP.ctrl}
           active={ctrlArmed}
           aria-pressed={ctrlArmed}
           onPress={() => setCtrlArmed((value) => !value)}
@@ -219,33 +219,37 @@ export function TerminalView({
         <KeyButton
           icon={<ArrowUpIcon strokeWidth={1.75} aria-hidden />}
           label="↑"
-          ariaLabel="Up arrow"
+          ariaLabel={t("terminal.up")}
           onPress={() => arrow("ArrowUp")}
         />
         <KeyButton
           icon={<ArrowDownIcon strokeWidth={1.75} aria-hidden />}
           label="↓"
-          ariaLabel="Down arrow"
+          ariaLabel={t("terminal.down")}
           onPress={() => arrow("ArrowDown")}
         />
         <KeyButton
           icon={<ArrowLeftIcon strokeWidth={1.75} aria-hidden />}
           label="←"
-          ariaLabel="Left arrow"
+          ariaLabel={t("terminal.left")}
           onPress={() => arrow("ArrowLeft")}
         />
         <KeyButton
           icon={<ArrowRightIcon strokeWidth={1.75} aria-hidden />}
           label="→"
-          ariaLabel="Right arrow"
+          ariaLabel={t("terminal.right")}
           onPress={() => arrow("ArrowRight")}
         />
-        <KeyButton label="Paste" onPress={() => void paste()} />
+        <KeyButton label={t("terminal.paste")} onPress={() => void paste()} />
       </div>
 
       {status.phase === "exited" ? (
         <div className="flex h-8 shrink-0 items-center justify-center border-t border-[var(--line)] bg-[var(--bg-sunk)] text-[12px] text-[var(--fg-3)]">
-          {status.message ?? "Process exited."}
+          {status.exit
+            ? status.exit.signal
+              ? t("terminal.exitedSignal", { signal: status.exit.signal })
+              : t("terminal.exitedStatus", { status: status.exit.status })
+            : t("terminal.exited")}
         </div>
       ) : null}
     </div>

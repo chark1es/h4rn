@@ -201,7 +201,7 @@ describe("thread controls", () => {
     await setLocalePreference("ja");
     expect(modeLabel("full_access")).toBe("フルアクセス");
     expect(threadModeChoices("codex").map((choice) => choice.label)).toContain("フルアクセス");
-    expect(effortLabel("xhigh")).toBe("非常に高い");
+    expect(effortLabel("xhigh")).toBe("超高");
     expect(effortLabel("turbo")).toBe("Turbo");
     expect(
       nonDefaultSettings(summary({ reasoning_effort: "high", fast: true }), "approval_required"),

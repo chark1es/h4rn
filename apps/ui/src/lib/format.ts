@@ -1,5 +1,5 @@
 import type { ToolStats } from "@/gen";
-import { activeLocale } from "@/lib/i18n";
+import { activeLocale, formatNumber, i18n } from "@/lib/i18n";
 
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
@@ -60,6 +60,17 @@ export function countdown(iso: string, now = Date.now()): string {
   return `${hours}h ${minutes.toString().padStart(2, "0")}m`;
 }
 
+/** A token count, compact for the active language ("12.3K", "1.2万"). */
+export function formatTokens(count: number): string {
+  return formatNumber(count, { notation: "compact", maximumFractionDigits: 1 });
+}
+
+/** An estimated cost in US dollars, written the way the active language writes money. */
+export function formatCost(micros: number): string {
+  if (micros <= 0) return "—";
+  return formatNumber(micros / 1_000_000, { style: "currency", currency: "USD" });
+}
+
 export function tokens(count: number): string {
   if (count >= 1_000_000) return `${(count / 1_000_000).toFixed(2)}M`;
   if (count >= 1_000) return `${(count / 1_000).toFixed(1)}k`;
@@ -117,17 +128,15 @@ export function toolStatsLabel(stats: ToolStats | null | undefined): ToolStatsLa
       kind: "text",
       text:
         stats.failed > 0
-          ? `${stats.passed} passed · ${stats.failed} failed`
-          : `${stats.passed} passed`,
+          ? i18n.t("thread:tool.passedFailed", { passed: stats.passed, failed: stats.failed })
+          : i18n.t("thread:tool.passed", { passed: stats.passed }),
     };
   }
-  const noun =
-    stats.unit === "files"
-      ? stats.count === 1
-        ? "file"
-        : "files"
-      : stats.count === 1
-        ? "match"
-        : "matches";
-  return { kind: "text", text: `${stats.count} ${noun}` };
+  return {
+    kind: "text",
+    text:
+      stats.unit === "files"
+        ? i18n.t("thread:tool.files", { count: stats.count })
+        : i18n.t("thread:tool.matches", { count: stats.count }),
+  };
 }

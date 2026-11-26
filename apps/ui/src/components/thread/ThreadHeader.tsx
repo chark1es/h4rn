@@ -15,6 +15,7 @@ import {
 } from "lucide-react";
 
 import { useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { AgentGlyph } from "@/components/agent/AgentGlyph";
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
@@ -39,7 +40,8 @@ import { useViewportWidth } from "@/hooks/use-viewport-width";
 import { glyphForThread } from "@/lib/agent";
 import { harnessSeed, machineSeed, threadHarnessLabel } from "@/lib/entities";
 import { latestForkableTurn } from "@/lib/fork";
-import { absoluteDateTime, relativeAge } from "@/lib/format";
+import { absoluteDateTime } from "@/lib/format";
+import { formatAge } from "@/lib/i18n";
 import { shortcutText, titleWithShortcut } from "@/lib/keybindings";
 import {
   acknowledgeThread,
@@ -70,6 +72,7 @@ export function ViewCluster({
   terminalOpen?: boolean;
   onToggleTerminal?: (() => void) | undefined;
 }) {
+  const { t } = useTranslation("thread");
   const view = useApp((state) => state.ui.layout.view);
   const layout = useApp((state) => state.ui.layout);
   const viewportWidth = useViewportWidth();
@@ -80,8 +83,8 @@ export function ViewCluster({
       <div
         className="q-seg inline q-viewseg"
         role="tablist"
-        aria-label="View"
-        title={titleWithShortcut("Switch view", "view.toggle")}
+        aria-label={t("header.view")}
+        title={titleWithShortcut(t("header.switchView"), "view.toggle")}
       >
         <button
           type="button"
@@ -89,7 +92,7 @@ export function ViewCluster({
           aria-selected={view === "thread"}
           onClick={() => setView("thread")}
         >
-          Thread
+          {t("header.thread")}
         </button>
         <button
           type="button"
@@ -104,9 +107,9 @@ export function ViewCluster({
         <button
           type="button"
           className={cn("q-ibtn", terminalOpen && "on")}
-          aria-label="Toggle terminal"
+          aria-label={t("header.toggleTerminal")}
           aria-pressed={terminalOpen}
-          title={titleWithShortcut("Terminal", "terminal.toggle")}
+          title={titleWithShortcut(t("header.terminal"), "terminal.toggle")}
           onClick={onToggleTerminal}
         >
           <TerminalIcon className="q-icon" strokeWidth={1.5} aria-hidden />
@@ -115,9 +118,9 @@ export function ViewCluster({
       <button
         type="button"
         className={cn("q-ibtn", panelOpen && "on")}
-        aria-label="Right panel"
+        aria-label={t("header.rightPanel")}
         aria-pressed={panelOpen}
-        title={titleWithShortcut("Right panel", "panel.toggle")}
+        title={titleWithShortcut(t("header.rightPanel"), "panel.toggle")}
         onClick={togglePanel}
       >
         <PanelRightIcon className="q-icon" strokeWidth={1.5} aria-hidden />
@@ -143,6 +146,7 @@ export function ThreadHeader({
   onOpenPanel?: () => void;
   stale?: boolean;
 }) {
+  const { t } = useTranslation("thread");
   const [renaming, setRenaming] = useState(false);
   const [gitOpen, setGitOpen] = useState(false);
   const hostOnline = host?.online ?? false;
@@ -159,31 +163,35 @@ export function ThreadHeader({
   // the daemon can no longer confirm.
   const glyph =
     stale && working && !unreachable
-      ? { kind: "offline" as const, label: "Last seen running" }
+      ? { kind: "offline" as const, label: t("glyph.lastSeenRunning") }
       : glyphForThread(summary, hostOnline);
   const isPhone = useIsPhone();
   const hostName = host?.name ?? summary.host;
   const stateLabel =
     summary.tab === "done" && summary.agent_state === "done"
-      ? `Done · ${relativeAge(summary.last_activity)}`
+      ? t("header.doneAge", { age: formatAge(summary.last_activity) })
       : glyph.label;
 
   const threadMenu = (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <button type="button" className={isPhone ? "navbtn" : "q-ibtn"} aria-label="Thread actions">
+        <button
+          type="button"
+          className={isPhone ? "navbtn" : "q-ibtn"}
+          aria-label={t("header.actions")}
+        >
           <MoreHorizontalIcon className={isPhone ? "q-icon s22" : "q-icon"} strokeWidth={1.5} />
         </button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-56">
-        <DropdownMenuLabel>Thread</DropdownMenuLabel>
+        <DropdownMenuLabel>{t("header.thread")}</DropdownMenuLabel>
         <DropdownMenuItem onSelect={() => void togglePin(summary.thread_id)}>
           <PinIcon aria-hidden />
-          {summary.pinned ? "Unpin from Working" : "Keep in Working"}
+          {summary.pinned ? t("header.menu.unpin") : t("header.menu.keep")}
         </DropdownMenuItem>
         <DropdownMenuItem onSelect={() => setRenaming(true)}>
           <PencilIcon aria-hidden />
-          Rename…
+          {t("header.menu.rename")}
         </DropdownMenuItem>
         <DropdownMenuItem
           disabled={!forkTurn}
@@ -192,59 +200,61 @@ export function ThreadHeader({
           }}
         >
           <GitForkIcon aria-hidden />
-          Fork from latest turn
+          {t("header.menu.fork")}
         </DropdownMenuItem>
         <DropdownMenuItem onSelect={() => setGitOpen(true)}>
           <GitBranchIcon aria-hidden />
-          Commit, push and PR…
+          {t("header.menu.git")}
         </DropdownMenuItem>
         <DropdownMenuItem onSelect={() => void setThreadTab(summary.thread_id, "done")}>
-          Move to Done
+          {t("header.menu.moveToDone")}
         </DropdownMenuItem>
         <DropdownMenuItem onSelect={() => void setThreadTab(summary.thread_id, "settled")}>
-          Settle now
+          {t("header.menu.settleNow")}
         </DropdownMenuItem>
         <DropdownMenuItem
           onSelect={() =>
             void snoozeThread(summary.thread_id, new Date(Date.now() + 3_600_000).toISOString())
           }
         >
-          Snooze for 1 h
+          {t("header.menu.snoozeHour")}
         </DropdownMenuItem>
         <DropdownMenuSeparator />
         {summary.tab !== "settled" ? (
           <DropdownMenuItem onSelect={() => openGuestShare(summary.thread_id)}>
             <Share2Icon aria-hidden />
-            Share with guest…
+            {t("header.menu.share")}
           </DropdownMenuItem>
         ) : null}
         <DropdownMenuItem
           onSelect={() => {
             void navigator.clipboard
               ?.writeText(`${window.location.origin}/t/${summary.thread_id}`)
-              .then(() => pushToast({ title: "Thread link copied.", variant: "success" }));
+              .then(() => pushToast({ title: t("header.menu.linkCopied"), variant: "success" }));
           }}
         >
           <Share2Icon aria-hidden />
-          Copy thread link
+          {t("header.menu.copyLink")}
         </DropdownMenuItem>
         <DropdownMenuItem onSelect={() => navigate({ kind: "hosts" })}>
           <ExternalLinkIcon aria-hidden />
-          Open hosts
+          {t("header.menu.openHosts")}
         </DropdownMenuItem>
         <DropdownMenuItem onSelect={() => navigate({ kind: "ide" })}>
           <CircleSlash2Icon aria-hidden />
-          Open in IDE
+          {t("header.menu.openInIde")}
         </DropdownMenuItem>
         <DropdownMenuSeparator />
         <DropdownMenuItem onSelect={toggleTheme}>
           <SunMoonIcon aria-hidden />
-          Toggle theme
+          {t("header.menu.toggleTheme")}
           <span className="ml-auto text-small text-fg-3">{shortcutText("theme.toggle")}</span>
         </DropdownMenuItem>
         <DropdownMenuSeparator />
         <DropdownMenuItem disabled>
-          <span className="text-small">Started {absoluteDateTime(summary.last_activity)}</span>
+          <span className="text-small">
+            {t("header.menu.started", { time: absoluteDateTime(summary.last_activity) })}
+          </span>
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
@@ -267,11 +277,11 @@ export function ThreadHeader({
         {renameDialog}
         {gitDialog}
         <div className="q-ph-nav">
-          <button type="button" className="navbtn" aria-label="Back to inbox" onClick={onBack}>
+          <button type="button" className="navbtn" aria-label={t("header.back")} onClick={onBack}>
             <span aria-hidden className="q-ph-back-glyph">
               ‹
             </span>
-            Inbox
+            {t("header.inbox")}
           </button>
           <span className="ttl" />
           <div className="q-ph-nav-actions">
@@ -279,7 +289,7 @@ export function ThreadHeader({
               <button
                 type="button"
                 className={cn("navbtn", terminalOpen && "on")}
-                aria-label="Toggle terminal"
+                aria-label={t("header.toggleTerminal")}
                 aria-pressed={terminalOpen}
                 onClick={onToggleTerminal}
               >
@@ -290,7 +300,7 @@ export function ThreadHeader({
               <button
                 type="button"
                 className="navbtn"
-                aria-label="Changes and subagents"
+                aria-label={t("header.panels")}
                 onClick={onOpenPanel}
               >
                 <FileDiffIcon className="q-icon s22" strokeWidth={1.5} aria-hidden />
@@ -322,7 +332,7 @@ export function ThreadHeader({
             <ThreadPullRequestBadge threadId={summary.thread_id} />
             <span className={cn("q-th-state", summary.needs_attention && "q-accent")}>
               <AgentGlyph glyph={glyph} size={14} />
-              <span>{stateLabel}</span>
+              <span title={stateLabel}>{stateLabel}</span>
             </span>
           </div>
         </div>
@@ -376,7 +386,7 @@ export function ThreadHeader({
 
       <div className={cn("q-th-state", summary.needs_attention && "q-accent")}>
         <AgentGlyph glyph={glyph} size={14} />
-        <span>{stateLabel}</span>
+        <span title={stateLabel}>{stateLabel}</span>
       </div>
 
       <div className="q-th-actions">
@@ -388,7 +398,7 @@ export function ThreadHeader({
             onClick={() => void interruptThread(summary.thread_id)}
           >
             <SquareIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-            Stop
+            {t("header.stop")}
           </button>
         ) : null}
 
@@ -401,14 +411,14 @@ export function ThreadHeader({
                 void snoozeThread(summary.thread_id, new Date(Date.now() + 3_600_000).toISOString())
               }
             >
-              Snooze
+              {t("header.snooze")}
             </button>
             <button
               type="button"
               className="q-btn primary"
               onClick={() => void acknowledgeThread(summary.thread_id)}
             >
-              Acknowledge <span className="q-kbd">A</span>
+              {t("header.acknowledge")} <span className="q-kbd">A</span>
             </button>
           </>
         ) : null}

@@ -7,13 +7,15 @@ import {
   RefreshCwIcon,
 } from "lucide-react";
 import { useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { AgentGlyph } from "@/components/agent/AgentGlyph";
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
 import type { SubagentState, SubagentView, ThreadSummary } from "@/gen";
 import { glyphForAgentState } from "@/lib/agent";
 import { harnessLabel, harnessSeed, machineSeed, subagentSeed } from "@/lib/entities";
-import { tokens } from "@/lib/format";
+import { formatTokens } from "@/lib/format";
+import { formatNumber, i18n } from "@/lib/i18n";
 import { openThread } from "@/lib/store/appStore";
 import { cn } from "@/lib/utils";
 
@@ -33,24 +35,7 @@ import {
 } from "./subagentStore";
 
 function stateLabel(view: SubagentView): string {
-  switch (view.state) {
-    case "starting":
-      return "Starting";
-    case "running":
-      return "Running";
-    case "awaiting_approval":
-      return "Needs approval";
-    case "scheduled":
-      return "Scheduled";
-    case "completed":
-      return "Done";
-    case "failed":
-      return "Failed";
-    case "cancelled":
-      return "Cancelled";
-    case "budget_exceeded":
-      return "Budget exceeded";
-  }
+  return i18n.t(`thread:subagents.state.${view.state}`);
 }
 
 function isTerminal(state: SubagentState): boolean {
@@ -68,16 +53,20 @@ function elapsedText(ms: number): string {
 }
 
 function progressLine(view: SubagentView): string {
-  const tokenText = `${tokens(view.progress.tokens)} tokens`;
+  const tokenText = i18n.t("thread:subagents.tokens", {
+    tokens: formatTokens(view.progress.tokens),
+  });
   if (view.state === "awaiting_approval") {
     const cap = view.budget.max_turns;
     const turn = view.progress.turns_started + 1;
-    return cap ? `turn ${turn} of ${cap} · ${tokenText}` : `${tokenText} · waiting on you`;
+    return cap
+      ? `${i18n.t("thread:subagents.turnOf", { turn, cap })} · ${tokenText}`
+      : `${tokenText} · ${i18n.t("thread:subagents.waitingOnYou")}`;
   }
   if (view.state === "failed" || view.state === "budget_exceeded") {
     return view.result?.error ?? stateLabel(view);
   }
-  if (view.state === "starting") return view.progress.current ?? "Starting";
+  if (view.state === "starting") return view.progress.current ?? stateLabel(view);
   return `${tokenText}${view.progress.current ? ` · ${view.progress.current}` : ""}`;
 }
 
@@ -120,6 +109,7 @@ function SubagentNode({
   selected: boolean;
   onSelect: () => void;
 }) {
+  const { t } = useTranslation("thread");
   const percent = budgetPercent(view);
   const waiting = view.state === "awaiting_approval";
   return (
@@ -142,7 +132,7 @@ function SubagentNode({
           <EntityAvatar
             seed={subagentSeed(view.host, parentThreadId, view.subagent_id)}
             kind="subagent"
-            label="subagent"
+            label={t("subagents.avatar")}
             size={14}
           />
           <EntityAvatar seed={machineSeed(view.host)} kind="machine" label={view.host} size={14} />
@@ -169,7 +159,9 @@ function SubagentNode({
           <div
             className="prog"
             role="progressbar"
-            aria-label={`Budget used ${percent}%`}
+            aria-label={t("subagents.budgetUsed", {
+              percent: formatNumber(percent / 100, { style: "percent" }),
+            })}
             aria-valuenow={percent}
             aria-valuemin={0}
             aria-valuemax={100}
@@ -183,16 +175,19 @@ function SubagentNode({
 }
 
 function Details({ view }: { view: SubagentView }) {
+  const { t } = useTranslation("thread");
   const [confirmingId, setConfirmingId] = useState<string | null>(null);
   const confirming = confirmingId === view.subagent_id;
   const cancelling = useSubagentStore((state) => state.cancelling);
 
   const budget = [
-    view.budget.max_turns ? `${view.budget.max_turns} turns` : null,
+    view.budget.max_turns ? t("subagents.details.turns", { count: view.budget.max_turns }) : null,
     view.budget.max_wall_time_secs
-      ? `${Math.round(view.budget.max_wall_time_secs / 60)} min`
+      ? t("subagents.details.minutes", { count: Math.round(view.budget.max_wall_time_secs / 60) })
       : null,
-    view.budget.max_tokens ? `${tokens(view.budget.max_tokens)} tokens` : null,
+    view.budget.max_tokens
+      ? t("subagents.tokens", { tokens: formatTokens(view.budget.max_tokens) })
+      : null,
   ]
     .filter(Boolean)
     .join(" · ");
@@ -201,39 +196,42 @@ function Details({ view }: { view: SubagentView }) {
     <div className="q-insp-sec">
       <h3>{view.task}</h3>
       <dl className="q-kv">
-        <dt>Runs on</dt>
+        <dt>{t("subagents.details.runsOn")}</dt>
         <dd>
           {view.host} · {harnessLabel(view.harness)}
         </dd>
-        <dt>Model</dt>
-        <dd className="q-mono">{view.model || "Parent default"}</dd>
-        <dt>Context</dt>
+        <dt>{t("subagents.details.model")}</dt>
+        <dd className="q-mono">{view.model || t("subagents.details.parentDefault")}</dd>
+        <dt>{t("subagents.details.context")}</dt>
         <dd>
           {view.context.kind === "summary"
-            ? "Summary handoff"
+            ? t("subagents.details.summary")
             : view.context.kind === "files"
-              ? `${view.context.paths.length} files`
-              : "None"}
+              ? t("subagents.details.files", { count: view.context.paths.length })
+              : t("subagents.details.none")}
         </dd>
-        <dt>Workspace</dt>
+        <dt>{t("subagents.details.workspace")}</dt>
         <dd>
-          {view.isolation === "worktree" ? (view.branch ?? "Worktree") : "Shared"}
+          {view.isolation === "worktree"
+            ? (view.branch ?? t("subagents.details.worktree"))
+            : t("subagents.details.shared")}
           <span className="q-faint"> · {view.workspace_path}</span>
         </dd>
-        <dt>Budget</dt>
-        <dd className="q-num">{budget || "Daemon defaults"}</dd>
-        <dt>Progress</dt>
+        <dt>{t("subagents.details.budget")}</dt>
+        <dd className="q-num">{budget || t("subagents.details.defaults")}</dd>
+        <dt>{t("subagents.details.progress")}</dt>
         <dd className="q-num">
-          {view.progress.turns_completed} turns · {tokens(view.progress.tokens)} tokens ·{" "}
+          {t("subagents.details.turns", { count: view.progress.turns_completed })} ·{" "}
+          {t("subagents.tokens", { tokens: formatTokens(view.progress.tokens) })} ·{" "}
           {elapsedText(view.progress.elapsed_ms)}
         </dd>
-        <dt>Approvals</dt>
-        <dd>Inherited from parent</dd>
-        <dt>Credential</dt>
+        <dt>{t("subagents.details.approvals")}</dt>
+        <dd>{t("subagents.details.inherited")}</dd>
+        <dt>{t("subagents.details.credential")}</dt>
         <dd style={{ display: "flex", alignItems: "center", gap: 4 }}>
           <KeyRoundIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />{" "}
           {view.credential.shared_with_parent
-            ? `Shared with parent · ${view.credential.label}`
+            ? t("subagents.details.sharedWithParent", { label: view.credential.label })
             : view.credential.label}
         </dd>
       </dl>
@@ -246,13 +244,13 @@ function Details({ view }: { view: SubagentView }) {
             if (view.child_thread_id) openThread(view.child_thread_id);
           }}
         >
-          Open thread
+          {t("subagents.details.openThread")}
         </button>
         {!isTerminal(view.state) ? (
           confirming ? (
             <>
               <button type="button" className="q-btn ghost" onClick={() => setConfirmingId(null)}>
-                Keep running
+                {t("subagents.details.keepRunning")}
               </button>
               <button
                 type="button"
@@ -263,7 +261,7 @@ function Details({ view }: { view: SubagentView }) {
                 {cancelling === view.subagent_id ? (
                   <LoaderIcon className="q-icon s14 q-spin" strokeWidth={1.5} aria-hidden />
                 ) : null}
-                Cancel subagent
+                {t("subagents.details.cancel")}
               </button>
             </>
           ) : (
@@ -272,7 +270,7 @@ function Details({ view }: { view: SubagentView }) {
               className="q-btn ghost"
               onClick={() => setConfirmingId(view.subagent_id)}
             >
-              Cancel subagent
+              {t("subagents.details.cancel")}
             </button>
           )
         ) : null}
@@ -282,8 +280,9 @@ function Details({ view }: { view: SubagentView }) {
 }
 
 function SubagentSkeleton() {
+  const { t } = useTranslation("thread");
   return (
-    <div className="q-tree" role="status" aria-busy="true" aria-label="Loading subagents">
+    <div className="q-tree" role="status" aria-busy="true" aria-label={t("subagents.loading")}>
       {[0, 1, 2].map((row) => (
         <div className="q-node" key={row} style={{ pointerEvents: "none" }}>
           <span className="gl">
@@ -301,6 +300,7 @@ function SubagentSkeleton() {
 
 /** Desktop right-panel tab: live delegation tree plus the selected child. */
 export function SubagentsPanel({ thread }: { thread: ThreadSummary }) {
+  const { t } = useTranslation(["thread", "common"]);
   const views = useSubagentViews(thread.thread_id);
   const loading = useSubagentLoading(thread.thread_id);
   const error = useSubagentError(thread.thread_id);
@@ -326,51 +326,48 @@ export function SubagentsPanel({ thread }: { thread: ThreadSummary }) {
       <div className="q-rp-bar">
         <span className="q-faint" style={{ fontSize: 12 }}>
           {views.length === 0
-            ? "No subagents"
-            : `${views.length} subagent${views.length === 1 ? "" : "s"}${
-                waiting > 0 ? ` · ${waiting} waiting on you` : ""
-              }`}
+            ? t("subagents.none")
+            : waiting > 0
+              ? `${t("subagents.count", { count: views.length })} · ${t("subagents.waiting", { count: waiting })}`
+              : t("subagents.count", { count: views.length })}
         </span>
         <span className="grow" />
         <button
           type="button"
           className="q-ibtn"
-          aria-label="Refresh subagents"
-          title="Refresh subagents"
+          aria-label={t("subagents.refresh")}
+          title={t("subagents.refresh")}
           onClick={() => void loadSubagents(thread.thread_id, true)}
         >
           <RefreshCwIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
         </button>
         <button type="button" className="q-btn ghost" onClick={openDelegate}>
           <PlusIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-          Delegate
+          {t("subagents.delegate")}
         </button>
       </div>
       <div className="q-rp-body q-scroll">
         {error ? (
           <div className="q-empty q-sub-empty">
-            <h3>Couldn’t load subagents</h3>
+            <h3>{t("subagents.loadFailed")}</h3>
             <p>{error}</p>
             <button
               type="button"
               className="q-btn secondary"
               onClick={() => void loadSubagents(thread.thread_id, true)}
             >
-              Retry
+              {t("common:retry")}
             </button>
           </div>
         ) : loading && views.length === 0 ? (
           <SubagentSkeleton />
         ) : views.length === 0 ? (
           <div className="q-empty q-sub-empty">
-            <h3>Nothing delegated</h3>
-            <p>
-              When {harnessLabel(thread.harness)} hands work to a subagent, it shows here with where
-              it runs, its budget, and what it’s waiting on.
-            </p>
+            <h3>{t("subagents.emptyTitle")}</h3>
+            <p>{t("subagents.emptyBody", { harness: harnessLabel(thread.harness) })}</p>
             <button type="button" className="q-btn secondary" onClick={openDelegate}>
               <PlusIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-              Delegate
+              {t("subagents.delegate")}
             </button>
           </div>
         ) : (
@@ -384,7 +381,7 @@ export function SubagentsPanel({ thread }: { thread: ThreadSummary }) {
                   <div className="t">
                     <span>{thread.title}</span>
                     <span className="q-faint q-num" style={{ fontSize: 12 }}>
-                      parent
+                      {t("subagents.parent")}
                     </span>
                   </div>
                   <div className="w">
@@ -403,7 +400,7 @@ export function SubagentsPanel({ thread }: { thread: ThreadSummary }) {
                     />{" "}
                     {harnessLabel(thread.harness)}
                   </div>
-                  <div className="s q-num">{thread.agent_state.replace(/_/g, " ")}</div>
+                  <div className="s q-num">{glyphForAgentState(thread.agent_state).label}</div>
                 </div>
               </div>
               <div className="q-kids">

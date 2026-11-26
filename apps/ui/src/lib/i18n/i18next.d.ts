@@ -5,6 +5,7 @@ import type enCommon from "./locales/en/common.json";
 import type enComposer from "./locales/en/composer.json";
 import type enSettings from "./locales/en/settings.json";
 import type enSidebar from "./locales/en/sidebar.json";
+import type enThread from "./locales/en/thread.json";
 
 // Message keys are checked against the English catalogue: a missing or
 // misspelled key is a type error.
@@ -17,6 +18,7 @@ declare module "i18next" {
       composer: typeof enComposer;
       settings: typeof enSettings;
       sidebar: typeof enSidebar;
+      thread: typeof enThread;
     };
     returnNull: false;
   }

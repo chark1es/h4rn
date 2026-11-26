@@ -1,5 +1,6 @@
 import { CheckIcon, CopyIcon } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 
@@ -16,6 +17,7 @@ function CodeBlock({ code, language }: { code: string; language: string | null }
   const theme = useApp((state) => state.ui.theme);
   const resolved = resolvedTheme(theme);
   const [html, setHtml] = useState<string | null>(null);
+  const { t } = useTranslation(["thread", "common"]);
   const [copied, setCopied] = useState(false);
 
   useEffect(() => {
@@ -56,10 +58,10 @@ function CodeBlock({ code, language }: { code: string; language: string | null }
           type="button"
           className="ml-auto flex items-center gap-1 text-caption text-fg-3 opacity-0 transition-opacity duration-[var(--dur-instant)] hover:text-fg focus-visible:opacity-100 group-hover/code:opacity-100"
           onClick={copy}
-          aria-label="Copy code"
+          aria-label={t("code.copy")}
         >
           {copied ? <CheckIcon className="size-3" /> : <CopyIcon className="size-3" />}
-          {copied ? "Copied" : "Copy"}
+          {copied ? t("common:copied") : t("common:copy")}
         </button>
       </div>
       {html ? (

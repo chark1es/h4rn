@@ -1,3 +1,4 @@
+import { i18n } from "@/lib/i18n";
 import type { TurnStatusOrRunning } from "@/lib/store/projection";
 
 /**
@@ -9,9 +10,9 @@ import type { TurnStatusOrRunning } from "@/lib/store/projection";
 export function stoppedNotice(status: TurnStatusOrRunning): string | null {
   switch (status) {
     case "token_limit":
-      return "Stopped: the agent hit its token limit.";
+      return i18n.t("thread:turn.stopped.token_limit");
     case "turn_limit":
-      return "Stopped: the agent hit its turn-request limit.";
+      return i18n.t("thread:turn.stopped.turn_limit");
     default:
       return null;
   }

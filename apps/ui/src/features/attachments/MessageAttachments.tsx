@@ -1,5 +1,6 @@
 import { DownloadIcon, FileTextIcon, ImageOffIcon } from "lucide-react";
 import { useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import {
   Dialog,
@@ -21,6 +22,7 @@ function isImage(mime: string): boolean {
 }
 
 function DownloadButton({ attachment, className }: { attachment: Attachment; className?: string }) {
+  const { t } = useTranslation("thread");
   const [busy, setBusy] = useState(false);
 
   const download = async () => {
@@ -31,10 +33,10 @@ function DownloadButton({ attachment, className }: { attachment: Attachment; cla
     } catch (error) {
       pushToast({
         variant: "error",
-        title: `Couldn’t download ${attachment.name}.`,
-        description: `${
-          error instanceof Error ? error.message : "The daemon did not send the file."
-        } Check the connection, then try again.`,
+        title: t("attachments.downloadFailed", { name: attachment.name }),
+        description: t("attachments.downloadHint", {
+          message: error instanceof Error ? error.message : t("attachments.notSent"),
+        }),
       });
     } finally {
       setBusy(false);
@@ -45,8 +47,8 @@ function DownloadButton({ attachment, className }: { attachment: Attachment; cla
     <button
       type="button"
       onClick={() => void download()}
-      aria-label={`Download ${attachment.name}`}
-      title={`Download ${attachment.name}`}
+      aria-label={t("attachments.download", { name: attachment.name })}
+      title={t("attachments.download", { name: attachment.name })}
       className={cn(
         "flex size-10 shrink-0 items-center justify-center rounded-sm text-fg-3 transition-colors duration-[var(--dur-instant)] hover:bg-bg hover:text-fg focus-visible:ring-2 focus-visible:ring-focus focus-visible:outline-none disabled:opacity-60 sm:size-7",
         className,
@@ -59,6 +61,7 @@ function DownloadButton({ attachment, className }: { attachment: Attachment; cla
 }
 
 function Thumbnail({ attachment, onOpen }: { attachment: Attachment; onOpen: () => void }) {
+  const { t } = useTranslation("thread");
   const { url, loading, error } = useBlobUrl(attachment.id, { thumbnail: true });
 
   if (error) {
@@ -67,7 +70,7 @@ function Thumbnail({ attachment, onOpen }: { attachment: Attachment; onOpen: () 
         <ImageOffIcon className="size-4 text-fg-3" aria-hidden />
         <div className="min-w-0">
           <p className="truncate text-small text-fg-2">{attachment.name}</p>
-          <p className="text-small text-fg-3">Preview unavailable</p>
+          <p className="text-small text-fg-3">{t("attachments.noPreview")}</p>
         </div>
         <DownloadButton attachment={attachment} className="self-end" />
       </div>
@@ -78,7 +81,7 @@ function Thumbnail({ attachment, onOpen }: { attachment: Attachment; onOpen: () 
     <button
       type="button"
       onClick={onOpen}
-      aria-label={`Open ${attachment.name}`}
+      aria-label={t("attachments.open", { name: attachment.name })}
       title={`${attachment.name} · ${formatBytes(attachment.size)}`}
       className="group relative aspect-[4/3] min-h-24 w-full overflow-hidden rounded-md border border-line bg-bg-side focus-visible:ring-2 focus-visible:ring-focus focus-visible:outline-none"
     >
@@ -105,6 +108,7 @@ function Lightbox({ attachment, onClose }: { attachment: Attachment | null; onCl
 }
 
 function LightboxBody({ attachment, onClose }: { attachment: Attachment; onClose: () => void }) {
+  const { t } = useTranslation(["thread", "common"]);
   const { url, loading, error } = useBlobUrl(attachment.id);
 
   return (
@@ -121,10 +125,12 @@ function LightboxBody({ attachment, onClose }: { attachment: Attachment; onClose
 
         <div className="flex min-h-40 items-center justify-center overflow-auto bg-bg-sunk px-2">
           {loading || !url ? (
-            <p className="py-16 text-small text-fg-3">Loading {attachment.name}…</p>
+            <p className="py-16 text-small text-fg-3">
+              {t("attachments.loading", { name: attachment.name })}
+            </p>
           ) : error ? (
             <p className="max-w-[42ch] py-16 text-center text-small text-danger">
-              {error} Check the connection, or download the original.
+              {t("attachments.previewFailed", { message: error })}
             </p>
           ) : (
             <img
@@ -142,7 +148,7 @@ function LightboxBody({ attachment, onClose }: { attachment: Attachment; onClose
             onClick={onClose}
             className="h-8 rounded-sm border border-line px-2.5 text-small font-medium text-fg transition-colors duration-[var(--dur-instant)] hover:bg-bg-side focus-visible:ring-2 focus-visible:ring-focus focus-visible:outline-none"
           >
-            Close
+            {t("common:close")}
           </button>
         </DialogFooter>
       </DialogContent>

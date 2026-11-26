@@ -3,6 +3,7 @@ import "./terminal.css";
 
 import { ChevronLeftIcon, PlusIcon, SearchIcon, TerminalIcon, XIcon } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import { Trans, useTranslation } from "react-i18next";
 
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
 import { useIsPhone } from "@/hooks/use-media-query";
@@ -39,6 +40,7 @@ export function TerminalPanel({
   hidden?: boolean;
   onClose: () => void;
 }) {
+  const { t } = useTranslation("thread");
   const client = getClient();
   const isPhone = useIsPhone();
   const online = useApp((state) => state.connection.status === "online");
@@ -86,16 +88,26 @@ export function TerminalPanel({
   };
 
   return (
-    <section aria-label="Terminal panel" className={cn("q-term", hidden && "hidden")}>
+    <section aria-label={t("terminal.panel")} className={cn("q-term", hidden && "hidden")}>
       {isPhone ? (
         <>
           <div className="q-ph-nav">
-            <button type="button" className="navbtn" aria-label="Back to thread" onClick={onClose}>
+            <button
+              type="button"
+              className="navbtn"
+              aria-label={t("terminal.back")}
+              onClick={onClose}
+            >
               <ChevronLeftIcon className="q-icon s24" strokeWidth={1.5} aria-hidden />
-              Thread
+              {t("terminal.thread")}
             </button>
-            <span className="ttl">Terminal</span>
-            <button type="button" className="navbtn" aria-label="New terminal" onClick={addTab}>
+            <span className="ttl">{t("terminal.title")}</span>
+            <button
+              type="button"
+              className="navbtn"
+              aria-label={t("terminal.new")}
+              onClick={addTab}
+            >
               <PlusIcon className="q-icon s22" strokeWidth={1.5} aria-hidden />
             </button>
           </div>
@@ -133,7 +145,7 @@ export function TerminalPanel({
                   </button>
                   <button
                     type="button"
-                    aria-label={`Close ${tab.title}`}
+                    aria-label={t("terminal.close", { name: tab.title })}
                     className="q-ttab-x"
                     onClick={() => closeTab(tab.key)}
                   >
@@ -142,7 +154,12 @@ export function TerminalPanel({
                 </div>
               );
             })}
-            <button type="button" aria-label="New terminal" className="q-ibtn" onClick={addTab}>
+            <button
+              type="button"
+              aria-label={t("terminal.new")}
+              className="q-ibtn"
+              onClick={addTab}
+            >
               <PlusIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
             </button>
           </div>
@@ -160,8 +177,8 @@ export function TerminalPanel({
                   setSearchOpen(false);
                 }
               }}
-              placeholder="Find in terminal"
-              aria-label="Find in terminal"
+              placeholder={t("terminal.find")}
+              aria-label={t("terminal.find")}
               className="q-input"
               style={{ width: 144, height: 24, flex: "none" }}
             />
@@ -175,16 +192,16 @@ export function TerminalPanel({
           </span>
           <span
             className={cn("q-health", online ? "q-ok" : "q-danger")}
-            title={online ? "Daemon connected" : "Daemon offline"}
+            title={online ? t("terminal.connected") : t("terminal.disconnected")}
             style={{ flex: "none", marginRight: 4, fontSize: 11 }}
           >
             <span className={cn("q-dot", online ? "on" : "off")} aria-hidden />
-            {online ? "live" : "offline"}
+            {online ? t("terminal.live") : t("terminal.offline")}
           </span>
 
           <button
             type="button"
-            aria-label="Find in terminal"
+            aria-label={t("terminal.find")}
             aria-pressed={searchOpen}
             className={cn("q-ibtn", searchOpen && "on")}
             onClick={() => setSearchOpen((value) => !value)}
@@ -193,7 +210,7 @@ export function TerminalPanel({
           </button>
           <button
             type="button"
-            aria-label="Close terminal panel"
+            aria-label={t("terminal.closePanel")}
             className="q-ibtn"
             onClick={onClose}
           >
@@ -217,14 +234,18 @@ export function TerminalPanel({
           }}
         >
           <TerminalIcon className="q-icon s20 q-faint" strokeWidth={1.5} aria-hidden />
-          <p style={{ margin: 0, fontWeight: 500 }}>No terminal is open</p>
+          <p style={{ margin: 0, fontWeight: 500 }}>{t("terminal.noneOpen")}</p>
           <p className="q-faint" style={{ margin: 0, maxWidth: "48ch", fontSize: 12 }}>
-            Start a shell in <span className="q-mono">{cwd}</span>. It runs on {host} and keeps
-            running when this panel closes.
+            <Trans
+              t={t}
+              i18nKey="terminal.startIn"
+              values={{ cwd, host }}
+              components={{ path: <span className="q-mono" /> }}
+            />
           </p>
           <button type="button" className="q-btn secondary" onClick={addTab}>
             <PlusIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
-            New terminal
+            {t("terminal.new")}
           </button>
         </div>
       ) : (

@@ -323,6 +323,7 @@
 .q-rp-tab .c {
   color: var(--fg-3);
   font-weight: 400;
+  flex: none;
 }
 .q-tabs button .c {
   color: var(--fg-3);
@@ -1350,6 +1351,16 @@ fieldset.q-seg-fs {
   color: var(--fg-2);
   padding-right: 6px;
   white-space: nowrap;
+}
+/* When the header runs out of room, the state word gives way before the
+   actions do; the orb's title still carries the whole label. */
+.q-th-head > .q-th-state {
+  min-width: 0;
+  flex-shrink: 1;
+}
+.q-th-head > .q-th-state > span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .q-th-actions {
   display: flex;
@@ -4495,6 +4506,16 @@ fieldset.q-seg-fs {
     font-size: 14px;
     padding-right: 0;
   }
+  /* The state word gives way first on a narrow phone (a long translation, or
+     a long harness name); the orb's title still carries the whole label. */
+  .q-ph-th-meta > span.q-th-state {
+    flex: 0 1 auto;
+    min-width: 0;
+  }
+  .q-ph-th-meta > span.q-th-state > span:last-child {
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
   .q-ph-th-meta .grow {
     flex: 1;
   }
@@ -5276,6 +5297,7 @@ fieldset.q-seg-fs {
   min-height: 0;
   background: var(--bg);
   position: relative;
+  container: rp / inline-size;
 }
 .q-rp-head {
   display: flex;
@@ -5285,6 +5307,19 @@ fieldset.q-seg-fs {
   padding: 0 10px 0 16px;
   border-bottom: 1px solid var(--line);
   flex: none;
+}
+/* A narrow panel tightens the tabs before any name has to shrink: below the
+   default width in every language, and at it in Spanish, whose names run
+   longest. */
+@container rp (max-width: 380px) {
+  .q-rp-head {
+    gap: 10px;
+  }
+}
+@container rp (max-width: 440px) {
+  :lang(es) .q-rp-head {
+    gap: 10px;
+  }
 }
 .q-rp-head > .q-ibtn {
   align-self: center;
@@ -5296,7 +5331,18 @@ fieldset.q-seg-fs {
   gap: 6px;
   color: var(--fg-2);
   font-weight: 500;
+  /* A tab name stays on one line; when the panel is too narrow for every
+     name (its 320 px minimum, or a longer language), the names shrink with
+     an ellipsis and the count stays. The full name is the tab's title. */
+  white-space: nowrap;
+  min-width: 0;
+  flex-shrink: 1;
   transition: color var(--dur-1);
+}
+.q-rp-tab-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .q-rp-tab:hover {
   color: var(--fg);
