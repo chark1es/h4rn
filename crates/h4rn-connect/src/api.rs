@@ -1292,9 +1292,6 @@ async fn register_push_device(
     // An APNs device token is hex. Storing an FCM token or a truncated value
     // under `ios` would make every send fail and the row would never be
     // deleted, so the shape is refused at registration.
-    // An APNs device token is hex. Storing an FCM token or a truncated value
-    // under `ios` would make every send fail and the row would never be
-    // deleted, so the shape is refused at registration.
     if platform == "ios" && !crate::apns::is_valid_device_token(token) {
         return Err(AppError::bad_request(
             "push_token_invalid",
@@ -1371,7 +1368,10 @@ async fn push_status(
         crate::push::PushPlatform::Ios => state.apns.configured(),
     };
     Ok(Json(ConnectPushStatus {
-        configured: state.push.configured() || state.apns.configured(),
+        // Clients from before `platform_configured` are all Android and read
+        // this flag as "my sender exists", so it stays the FCM answer; an
+        // APNs-only relay must not tell an older Android client alerts work.
+        configured: state.push.configured(),
         devices: devices.len(),
         registered: own.is_some(),
         platform_configured: Some(platform_configured),

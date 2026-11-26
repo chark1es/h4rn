@@ -73,12 +73,23 @@ public final class H4rnPushCenter: NSObject, UNUserNotificationCenterDelegate {
     }
   }
 
+  /// Becomes the notification delegate, synchronously.
+  ///
+  /// Apple requires the delegate before the app finishes launching: a tap
+  /// that cold-starts the app is delivered to whatever delegate is set then,
+  /// and a delegate assigned later (after an async hop, or when the webview
+  /// loads) never receives it. The plugin's constructor calls this during
+  /// Tauri's setup, inside launch.
+  public func installDelegate() {
+    UNUserNotificationCenter.current().delegate = self
+  }
+
   /// Installs the delegate, the APNs capture and this launch's registration.
   public func install() {
+    installDelegate()
     DispatchQueue.main.async {
       guard !self.installed else { return }
       self.installed = true
-      UNUserNotificationCenter.current().delegate = self
       h4rnInstallRemoteNotificationCapture()
       self.rearmRegistration()
     }

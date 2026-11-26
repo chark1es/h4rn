@@ -274,9 +274,11 @@ never reached Connect.
   that cannot reach Connect may still show alerts while suspended, until the
   pending removal succeeds at the next sign-in. There is no lock-screen
   guarantee for that case on iOS; the equivalent guarantee is Android-only.
-- On iOS, a tap that launches the app is buffered by the native delegate and
-  read once by the app during boot, so it opens its thread after a cold start
-  as well as while the app is running.
+- On iOS, a tap that launches the app is buffered by the native delegate,
+  which is installed during launch as Apple requires, and read once by the app
+  during boot, so it opens its thread after a cold start as well as while the
+  app is running. This path is compiled in CI but has only been checked by
+  reading, not on a device; confirm it on a real iPhone before relying on it.
 - A thread moved to Done by hand is a placement, not a finished turn, so it
   does not alert. A turn you stopped yourself does not alert either.
 - A turn stopped by a usage, token or turn limit asks for you only when

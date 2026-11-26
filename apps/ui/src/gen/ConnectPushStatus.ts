@@ -5,7 +5,10 @@
  */
 export type ConnectPushStatus = { 
 /**
- * Whether an operator configured any push sender.
+ * Whether the Android (FCM) sender is configured.
+ *
+ * Kept for clients from before `platform_configured`, which are all
+ * Android; a client that knows `platform_configured` reads that instead.
  */
 configured: boolean, 
 /**
@@ -25,6 +28,6 @@ registered: boolean,
  * A relay can have FCM for Android and no APNs key for iOS, so the
  * account-wide `configured` flag alone would tell an iPhone that alerts
  * will arrive when they cannot. Older relays omit it; unset means the
- * client falls back to `configured`.
+ * client falls back to `configured` (the Android answer).
  */
 platform_configured: boolean | null, };

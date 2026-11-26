@@ -87,5 +87,8 @@ class H4rnPushPlugin: Plugin {
 
 @_cdecl("init_plugin_h4rn_push")
 public func initPluginPush() -> Plugin {
+  // Runs during launch: the delegate must be in place before a cold-start
+  // tap is delivered, so it is not left for `load(webview:)`.
+  H4rnPushCenter.shared.installDelegate()
   return H4rnPushPlugin()
 }
