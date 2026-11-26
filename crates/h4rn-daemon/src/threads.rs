@@ -6082,6 +6082,11 @@ impl ThreadManager {
 
         let mut prepared = None;
         let mut reservation = None;
+        // What the restore really did, not what the request asked for: a turn
+        // that changed nothing writes nothing and is reported as such.
+        let mut restored_files = false;
+        // Ignored paths the turn touched that were left exactly as they are.
+        let mut left_alone: Vec<String> = Vec::new();
         if restore_files {
             // File restore is behind Settings → Labs and off by default: the
             // conversation rewind is ready, the file restore is still being
@@ -6134,8 +6139,7 @@ impl ThreadManager {
             for turn in &removed {
                 if store.checkpoint(thread_id, turn).is_none() {
                     return Err(ManagerError::Conflict(
-                        "this message has no complete file checkpoint, so its files cannot be restored"
-                            .into(),
+                        store.checkpoint_refusal(thread_id, turn),
                     ));
                 }
             }
@@ -6202,15 +6206,20 @@ impl ThreadManager {
                     )));
                 }
             };
-            if let Err(message) = applied {
-                return Err(ManagerError::Refused {
-                    message,
-                    hint: Some(
-                        "Check that the worktree is writable and try again; nothing was changed"
-                            .into(),
-                    ),
-                });
-            }
+            let outcome = match applied {
+                Ok(outcome) => outcome,
+                Err(message) => {
+                    return Err(ManagerError::Refused {
+                        message,
+                        hint: Some(
+                            "Check that the worktree is writable and try again; nothing was changed"
+                                .into(),
+                        ),
+                    });
+                }
+            };
+            restored_files = outcome.files + outcome.deleted > 0;
+            left_alone = outcome.left_alone;
             prepared = Some(prepared_restore);
         }
 
@@ -6258,7 +6267,7 @@ impl ThreadManager {
         let wire = vec![Event::ThreadRewound {
             thread_id: thread_id.clone(),
             before_item_id: before_item_id.to_owned(),
-            files_restored: restore_files,
+            files_restored: restored_files,
             restore_id: prepared.as_ref().map(|p| p.restore_id().to_owned()),
             at: now,
         }];
@@ -6268,8 +6277,13 @@ impl ThreadManager {
             record.meta.agent_fingerprint = old_fingerprint;
             record.meta.provider_turns = old_provider;
             record.state = old_state;
-            if let Some(prepared) = &prepared {
-                crate::rewind::abort_restore(prepared);
+            if let Some(prepared) = &prepared
+                && let Err(rollback) = crate::rewind::abort_restore(prepared)
+            {
+                tracing::error!(
+                    %rollback,
+                    "an abandoned rewind could not put its files back; the restore journal is kept for the next startup"
+                );
             }
             return Err(error);
         }
@@ -6289,7 +6303,8 @@ impl ThreadManager {
             before_item_id: before_item_id.to_owned(),
             prompt: target.text,
             attachments: target.attachments,
-            files_restored: restore_files,
+            files_restored: restored_files,
+            left_alone,
             method,
         })
     }
@@ -6326,6 +6341,7 @@ impl ThreadManager {
                 method: h4rn_protocol::RewindMethod::Unsupported,
                 files_enabled: self.file_rewind_enabled(),
                 files_available: false,
+                left_alone: Vec::new(),
             });
         }
         let events = self
@@ -6355,6 +6371,10 @@ impl ThreadManager {
         };
         let removed = crate::rewind::removed_turns(&prompts, index);
         let mut files_available = self.file_rewind_enabled() && record.linked_worktree;
+        // Ignored paths the removed turns touched. The dialog says plainly
+        // that they will stay as they are, because a restore never rewinds an
+        // ignored file.
+        let mut left_alone: Vec<String> = Vec::new();
         if files_available {
             let workspace = std::path::PathBuf::from(&record.meta.workspace_path);
             files_available = record.meta.worktree_identity.is_some()
@@ -6367,6 +6387,11 @@ impl ThreadManager {
                         files_available = removed
                             .iter()
                             .all(|turn| store.checkpoint(thread_id, turn).is_some());
+                        if files_available {
+                            left_alone = crate::rewind::ignored_paths_touched(
+                                store, &workspace, thread_id, &removed,
+                            );
+                        }
                     }
                     None => files_available = false,
                 }
@@ -6376,6 +6401,7 @@ impl ThreadManager {
             method,
             files_enabled: self.file_rewind_enabled(),
             files_available,
+            left_alone,
         })
     }
 
@@ -9273,38 +9299,157 @@ impl ThreadManager {
     /// journal commit.
     ///
     /// A restore whose `ThreadRewound` event reached the journal keeps its
-    /// files; every other one is put back from its durable backup. Runs once at
-    /// startup, after the snapshot store is installed.
+    /// files; every other one is put back from its durable backup. Nothing is
+    /// touched until the journal can be read and its recorded folder is still
+    /// the thread's own worktree, so a moved checkout never receives another
+    /// thread's bytes. A journal that cannot be read is kept untouched, never
+    /// rolled back on a guess: the person is told which thread was left alone
+    /// and the daemon keeps booting. Runs once at startup, after the snapshot
+    /// store is installed.
     pub async fn recover_pending_restores(&self) -> Result<(), ManagerError> {
         let Some(store) = self.inner.snapshots.get().cloned() else {
             return Ok(());
         };
-        for restore_id in crate::rewind::pending_restore_ids(&store) {
-            let committed = match crate::rewind::restore_thread(&store, &restore_id) {
-                Some(thread_id) => self
-                    .inner
-                    .journal
-                    .read_wire_since(&thread_id, 0)
-                    .await
-                    .map(|events| {
-                        events.iter().any(|wire| {
-                            matches!(
-                                &wire.event,
-                                Event::ThreadRewound {
-                                    restore_id: Some(id),
-                                    ..
-                                } if id == &restore_id
-                            )
-                        })
-                    })
-                    .unwrap_or(false),
-                None => false,
+        for journal in crate::rewind::pending_journals(&store) {
+            let restore_id = journal.restore_id().to_owned();
+            // An unreadable journal is not an uncommitted one. Refuse to roll
+            // anything back, keep every journal, and surface the failure: the
+            // daemon must not guess about bytes it cannot read, and one bad
+            // journal must not keep the whole daemon down.
+            let pending = match crate::rewind::read_pending_journal(&journal) {
+                Ok(pending) => pending,
+                Err(error) => {
+                    tracing::error!(
+                        %restore_id,
+                        thread_id = ?journal.thread_id(),
+                        %error,
+                        "a restore journal cannot be read; leaving its files and journal alone"
+                    );
+                    self.notice_restore_left_alone(
+                        journal.thread_id().cloned(),
+                        format!(
+                            "an interrupted file restore could not be read, so nothing was rolled back: {error}"
+                        ),
+                    )
+                    .await;
+                    continue;
+                }
             };
-            if let Err(error) = crate::rewind::recover_restore(&store, &restore_id, committed) {
-                tracing::warn!(%restore_id, %error, "could not recover an interrupted file restore");
+            let thread_id = pending.thread_id().clone();
+            // The journal's folder must still be the checkout the thread was
+            // created in: the same git dir and common dir. A moved worktree
+            // whose old path holds another checkout must never be written to.
+            let expected = match self.inner.handle(&thread_id).await {
+                Ok(handle) => {
+                    let record = handle.lock().await;
+                    record.meta.worktree_identity.clone()
+                }
+                Err(error) => {
+                    tracing::error!(
+                        %restore_id,
+                        %thread_id,
+                        %error,
+                        "an interrupted restore's thread cannot be loaded; leaving its files and journal alone"
+                    );
+                    self.notice_restore_left_alone(
+                        Some(thread_id.clone()),
+                        "an interrupted file restore belongs to a thread that cannot be loaded, so its files were left alone"
+                            .into(),
+                    )
+                    .await;
+                    continue;
+                }
+            };
+            let current = crate::worktrees::git::linked_identity(pending.workspace());
+            if expected.is_none() || expected.as_ref() != current.as_ref() {
+                tracing::error!(
+                    %restore_id,
+                    %thread_id,
+                    workspace = %pending.workspace().display(),
+                    "an interrupted restore's folder is no longer the thread's worktree; leaving its files and journal alone"
+                );
+                self.notice_restore_left_alone(
+                    Some(thread_id.clone()),
+                    format!(
+                        "an interrupted file restore's folder is no longer this thread's worktree, so nothing was rolled back in {}",
+                        pending.workspace().display()
+                    ),
+                )
+                .await;
+                continue;
+            }
+            // Whether the cut committed is in the thread's journal. A journal
+            // that cannot be read answers nothing, so the files are left
+            // alone rather than rolled back on a guess.
+            let committed = match self.inner.journal.read_wire_since(&thread_id, 0).await {
+                Ok(events) => events.iter().any(|wire| {
+                    matches!(
+                        &wire.event,
+                        Event::ThreadRewound {
+                            restore_id: Some(id),
+                            ..
+                        } if id == &restore_id
+                    )
+                }),
+                Err(error) => {
+                    tracing::error!(
+                        %restore_id,
+                        %thread_id,
+                        %error,
+                        "the thread's journal cannot be read; leaving its interrupted restore alone"
+                    );
+                    self.notice_restore_left_alone(
+                        Some(thread_id.clone()),
+                        "an interrupted file restore could not be checked against the thread's history, so nothing was rolled back"
+                            .into(),
+                    )
+                    .await;
+                    continue;
+                }
+            };
+            if let Err(error) = crate::rewind::recover_restore(&store, &pending, committed) {
+                tracing::error!(
+                    %restore_id,
+                    %error,
+                    "could not recover an interrupted file restore; its journal is kept for the next startup"
+                );
+                self.notice_restore_left_alone(
+                    Some(thread_id.clone()),
+                    "an interrupted file restore was left alone and will be retried at the next start"
+                        .into(),
+                )
+                .await;
             }
         }
         Ok(())
+    }
+
+    /// Shows a durable error row on a thread whose interrupted restore was not
+    /// finished, so the person is not left with a silently half-restored
+    /// worktree.
+    async fn notice_restore_left_alone(&self, thread_id: Option<ThreadId>, message: String) {
+        let Some(thread_id) = thread_id else {
+            // A journal that cannot be read cannot name a thread, so there is
+            // no transcript to put the row in; the log line above is the only
+            // place left to say it.
+            return;
+        };
+        let Ok(handle) = self.inner.handle(&thread_id).await else {
+            return;
+        };
+        let mut record = handle.lock().await;
+        let wire = vec![Event::Error {
+            thread_id: Some(thread_id),
+            message,
+            hint: Some(
+                "The restore journal is kept on disk; check that the worktree is writable and restart the app"
+                    .into(),
+            ),
+            retryable: true,
+        }];
+        if let Err(error) = self.inner.emit(&mut record, Vec::new(), wire).await {
+            tracing::warn!(%error, "could not show the unreadable restore journal's notice");
+        }
     }
 
     /// Every distinct workspace path any thread has used.
@@ -13109,8 +13254,26 @@ impl Inner {
             if let Some((workspace, thread)) = checkpoint {
                 let turn = dispatch.turn_id.clone();
                 let _ = tokio::task::spawn_blocking(move || {
-                    if let Some(commit) = crate::worktrees::git::checkpoint_commit(&workspace) {
-                        let _ = store.record_checkpoint(&workspace, &thread, &turn, &commit);
+                    match crate::worktrees::git::checkpoint_commit(&workspace) {
+                        Ok(Some(checkpoint)) => {
+                            let _ = store.record_checkpoint(
+                                &workspace,
+                                &thread,
+                                &turn,
+                                &checkpoint.tree,
+                                &checkpoint.ignored,
+                            );
+                        }
+                        // The repository could not be captured at all: there is
+                        // no complete checkpoint, and the restore says so.
+                        Ok(None) => {}
+                        // The capture itself cannot be complete (an older git,
+                        // too many ignored paths). Keep the reason so the
+                        // restore names it instead of a generic refusal.
+                        Err(reason) => {
+                            let _ = store
+                                .record_checkpoint_incomplete(&workspace, &thread, &turn, &reason);
+                        }
                     }
                 })
                 .await;
@@ -45062,6 +45225,237 @@ mod tests {
                 .any(|prompt| prompt.contains("after an earlier message was edited")),
             "C continued from the rewound history: {:?}",
             prompts.get()
+        );
+        manager.shutdown().await;
+    }
+
+    /// A prompt parked behind a pause is one the person already sent: editing
+    /// an earlier message would cut it, so the rewind refuses until it runs or
+    /// is dismissed.
+    #[tokio::test]
+    async fn a_parked_prompt_refuses_the_rewind() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let journal: Arc<dyn Journal> =
+            Arc::new(SqliteJournal::in_memory().await.expect("journal"));
+        let host = HostId::new("host_test");
+        let manager = open_test_manager_with_journal(
+            FakeHarness::new().with_kind(HarnessKind::Codex),
+            host.clone(),
+            journal.clone(),
+        )
+        .await;
+        let mut events = manager.subscribe();
+        let mut request = new_thread(host, workspace.path(), "A");
+        request.harness = HarnessKind::Codex;
+        let created = manager.create_thread(request).await.expect("create");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+        let wire = journal
+            .read_wire_since(&created.thread_id, 0)
+            .await
+            .expect("wire");
+        let item = wire
+            .iter()
+            .find_map(|wire| match &wire.event {
+                Event::ItemCompleted {
+                    item:
+                        Item::Message {
+                            item_id,
+                            role: MessageRole::User,
+                            text,
+                            ..
+                        },
+                    ..
+                } if text == "A" => Some(item_id.clone()),
+                _ => None,
+            })
+            .expect("A's item");
+
+        let handle = manager
+            .inner
+            .handle(&created.thread_id)
+            .await
+            .expect("handle");
+        handle.lock().await.meta.parked = Some(ParkedPrompt {
+            turn_id: TurnId::new("turn_parked"),
+            text: "parked".into(),
+            item_id: None,
+            attachments: Vec::new(),
+            mode_ceiling: None,
+            grant: None,
+        });
+        let refused = manager
+            .rewind_thread(&created.thread_id, &item, false)
+            .await
+            .expect_err("a parked prompt refuses the rewind");
+        assert!(
+            refused.to_string().contains("automatic resume is armed"),
+            "{refused}"
+        );
+        assert!(
+            !journal
+                .read_wire_since(&created.thread_id, 0)
+                .await
+                .expect("wire")
+                .iter()
+                .any(|wire| matches!(wire.event, Event::ThreadRewound { .. })),
+            "a refused rewind journals no cut"
+        );
+
+        handle.lock().await.meta.parked = None;
+        drop(handle);
+        manager
+            .rewind_thread(&created.thread_id, &item, false)
+            .await
+            .expect("the edit works once the parked prompt is gone");
+        manager.shutdown().await;
+    }
+
+    /// Startup recovery trusts the folder a restore journal recorded. It must
+    /// still be the thread's own worktree: a moved checkout whose old path now
+    /// holds another one never receives the journal's bytes.
+    #[tokio::test]
+    async fn startup_recovery_leaves_a_replaced_worktree_alone() {
+        let base = tempfile::tempdir().expect("base");
+        let repo = base.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo");
+        let git = |dir: &std::path::Path, args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .status()
+                .expect("git");
+            assert!(status.success(), "git {args:?} failed");
+        };
+        git(&repo, &["init", "-q", "-b", "main"]);
+        git(&repo, &["config", "user.email", "t@example.invalid"]);
+        git(&repo, &["config", "user.name", "h4rn test"]);
+        std::fs::write(repo.join("README.md"), "hello\n").expect("readme");
+        git(&repo, &["add", "README.md"]);
+        git(&repo, &["commit", "-q", "-m", "init"]);
+        let worktree = base.path().join("worktree");
+        git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "thread-branch",
+                worktree.to_str().expect("utf8 worktree"),
+            ],
+        );
+
+        let data = tempfile::tempdir().expect("data");
+        let journal: Arc<dyn Journal> =
+            Arc::new(SqliteJournal::in_memory().await.expect("journal"));
+        let host = HostId::new("host_test");
+        let manager = open_test_manager_with_journal(
+            FakeHarness::new().with_kind(HarnessKind::Codex),
+            host.clone(),
+            journal.clone(),
+        )
+        .await;
+        let store = Arc::new(crate::fs::SnapshotStore::new(data.path()).expect("store"));
+        manager.set_snapshot_store(Arc::clone(&store));
+        manager.set_file_rewind_enabled(true);
+        let mut events = manager.subscribe();
+        let mut request = new_thread(host, &worktree, "A");
+        request.harness = HarnessKind::Codex;
+        let created = manager.create_thread(request).await.expect("create");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+
+        std::fs::write(worktree.join("README.md"), "after\n").expect("edit");
+        let prepared = crate::rewind::prepare_restore(
+            &store,
+            &worktree,
+            &created.thread_id,
+            std::slice::from_ref(&created.turn_id),
+        )
+        .expect("prepare");
+        let restore_id = prepared.restore_id().to_owned();
+        crate::rewind::apply_restore(&prepared).expect("apply");
+        // The daemon stops here, before the cut committed.
+        drop(prepared);
+        assert_eq!(
+            std::fs::read_to_string(worktree.join("README.md")).expect("readme"),
+            "hello\n"
+        );
+
+        // The worktree moves and a different checkout takes its old path.
+        let moved = base.path().join("moved");
+        std::fs::rename(&worktree, &moved).expect("move the worktree");
+        std::fs::create_dir_all(&worktree).expect("replacement");
+        std::fs::write(worktree.join("README.md"), "sentinel\n").expect("sentinel");
+
+        manager
+            .recover_pending_restores()
+            .await
+            .expect("recovery runs");
+        assert_eq!(
+            std::fs::read_to_string(worktree.join("README.md")).expect("readme"),
+            "sentinel\n",
+            "recovery never writes into a replaced checkout"
+        );
+        assert_eq!(
+            crate::rewind::pending_restore_ids(&store),
+            vec![restore_id],
+            "the journal is kept for a checkout that can still be verified"
+        );
+        manager.shutdown().await;
+    }
+
+    /// One unreadable restore journal is reported on its thread and kept on
+    /// disk, and the daemon keeps booting: it must not guess about bytes it
+    /// cannot read, nor stay down over one journal.
+    #[tokio::test]
+    async fn an_unreadable_restore_journal_does_not_stop_the_daemon() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let data = tempfile::tempdir().expect("data");
+        let journal: Arc<dyn Journal> =
+            Arc::new(SqliteJournal::in_memory().await.expect("journal"));
+        let host = HostId::new("host_test");
+        let manager =
+            open_test_manager_with_journal(FakeHarness::new(), host.clone(), journal.clone()).await;
+        let store = Arc::new(crate::fs::SnapshotStore::new(data.path()).expect("store"));
+        manager.set_snapshot_store(Arc::clone(&store));
+        let mut events = manager.subscribe();
+        let created = manager
+            .create_thread(new_thread(host, workspace.path(), "A"))
+            .await
+            .expect("create");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+
+        let path = store
+            .restore_journal_path(&created.thread_id, "restore_broken")
+            .expect("journal path");
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("restores dir");
+        std::fs::write(&path, b"not json").expect("broken journal");
+
+        manager
+            .recover_pending_restores()
+            .await
+            .expect("recovery does not abort the daemon");
+        assert_eq!(
+            crate::rewind::pending_restore_ids(&store),
+            vec!["restore_broken".to_owned()],
+            "the unreadable journal is kept, never deleted"
+        );
+        let wire = journal
+            .read_wire_since(&created.thread_id, 0)
+            .await
+            .expect("wire");
+        assert!(
+            wire.iter().any(|wire| matches!(
+                &wire.event,
+                Event::Error {
+                    thread_id: Some(id),
+                    message,
+                    ..
+                } if id == &created.thread_id && message.contains("restore")
+            )),
+            "the person sees a notice on the thread"
         );
         manager.shutdown().await;
     }

@@ -112,13 +112,85 @@ a complete pre-turn checkpoint. A thread in the project's main checkout rewinds
 its conversation only, because restoring a shared checkout would change files
 other work sees.
 
-A complete checkpoint is the git tree of the whole tracked worktree captured
-just before the turn's prompt reaches the agent. It covers files a shell command
-changed even when no tool call named them. Checkpoints are only captured while
-the Labs switch is on, so a turn sent while it was off has none; turning the
-switch on does not invent one for work that already ran. Turns recorded without
-one — an older thread, or a harness that never recorded it — refuse **Revert
-files too** with a clear message rather than restoring a partial set.
+A complete checkpoint is the git tree of the whole worktree captured just
+before the turn's prompt reaches the agent: every tracked file and every
+untracked file git does not ignore. It covers files a shell command changed even
+when no tool call named them. The tree keeps git's own modes, so an executable
+bit and a symlink's target come back, and a rename becomes the old path restored
+plus the new path removed — a staged rename included, because the plan never
+asks git to pair the two paths into one. A checkpoint recorded before
+checkpoints covered the whole worktree (a tracked-only tree) is not complete.
+Checkpoints are only captured while the Labs switch is on, so a turn sent while
+it was off has none; turning the switch on does not invent one for work that
+already ran. Turns recorded without a complete checkpoint — an older thread, or
+a harness that never recorded it — refuse **Revert files too** with a clear
+message rather than restoring a partial set.
+
+The selected message's own checkpoint decides the restore. A later removed
+turn's checkpoint never overrides it: rewinding to before the chosen message
+puts the whole removed range back to that one tree. A path absent from a
+complete checkpoint is removed, including an untracked file a shell command
+created, even when a tool later named it and a capture holds its bytes: the
+tree is the earlier, whole-worktree evidence, and a capture is never the base
+for restored bytes.
+
+### Ignored files are out of scope
+
+**Revert files too** restores only what git could see at the checkpoint:
+tracked files and untracked files git does not ignore. It never writes,
+recreates or removes a path that was ignored then, nor anything inside an
+ignored folder. Build output, caches and secret `.env` files are not the turn's
+work to rewind, and their pre-turn bytes cannot be proved from timestamps: `cp
+-p`, `rsync -t`, `tar x` and `mv` keep old modification times, clocks skew, and
+a file deleted before a tool named it looks absent. Restoring one of them from a
+mid-turn capture would silently invent a state that never existed.
+
+The checkpoint still records which ignored paths (or ignored folders) were
+present when it was taken. That listing is how the restore recognises a path
+that was ignored then and is visible now — the turn emptied `.gitignore` or ran
+`git add -f` — and leaves it exactly as the turn left it. A recorded folder
+entry covers everything beneath it. The listing cannot say which of those files
+already existed, and the turn may remove the rule and create its own file
+there, so nothing under a recorded folder is written, recreated or removed, and
+every path the turn touched there is named. Leaving a file the turn created is
+safer than deleting one that was already there. Ignoring more than 10,000 paths
+makes the listing incomplete, so the checkpoint is incomplete and **Revert
+files too** refuses with that reason.
+
+The dialog and the answer name the ignored paths the turn touched (from the
+tool calls and captures that named them, and from recorded ignored files that
+are gone now) and were left as they are, so the person knows those were not
+rewound. This is a plain note, not an error.
+
+### Exact bytes
+
+A checkpoint is taken without conversion: every path is hashed with
+`git hash-object --no-filters` and written to a fresh scratch index with
+`update-index --cacheinfo`, so no attribute source can convert or filter what is
+stored — not `.gitattributes`, not `.git/info/attributes`, and not the global
+`core.attributesFile` — and `core.autocrlf` never runs. Restore reads the raw
+blob back, so a CRLF file comes back with its CRLF and a filtered file comes
+back with its working-tree bytes, whatever the rules say now. The plan's diff
+reads attributes from an empty tree, which needs git 2.40 or newer; on an older
+git the checkpoint is incomplete and the restore refuses with a message naming
+the version.
+
+The permission bits on disk are kept — only the executable bit is set or
+cleared, and it comes from the checkpoint. A file the restore has to recreate
+gets the bits a capture recorded before the turn, so a 0600 file is never
+recreated as 0644; with no recorded bits it gets the conventional 0644 or 0755.
+A rollback puts back the exact bits each file had, and never writes through a
+link: the bytes go to a temporary file and are renamed into place, so a path
+that is now a symlink is replaced rather than followed.
+
+An untracked nested git repository is left out of the plan: git records it as a
+gitlink the real index does not have, and it is not a file the restore can put
+back. A submodule the real index does name still refuses the restore when its
+pointer changed.
+
+Git paths are relative to the repository root. A thread created in a
+subdirectory of the repository resolves them there, and a change outside that
+thread's own worktree refuses the restore instead of writing somewhere else.
 
 Restoring is refused when another thread or agent session uses that directory,
 a folder inside it, or a folder that contains it. Completed subagents of the
@@ -132,27 +204,51 @@ A symlink the turn added is removed itself, never its target, and a restore
 never writes through a symlinked parent.
 
 The restore writes a durable journal first: the intended changes and a blob of
-the bytes each path held before. Then it applies the files, commits the cut and
-the journal changes together, and only then publishes the new in-memory state.
-If the commit fails, the files are put back from the journal and the
-conversation is unchanged. If the daemon stops between the apply and the
-commit, the next startup rolls the restore back; a committed cut is kept and
-its journal removed. A missing snapshot blob, a file too large to capture, a
-path that now escapes the worktree, a target that is now a folder or a failed
-write refuses or rolls back the whole rewind.
+the bytes each path held before, with its permission bits. The backup blobs, the
+journal and every restored file and folder are flushed to disk before the
+journal says the restore is committed; a folder chain the restore creates is
+flushed one level at a time in its parent. Then it applies the files, commits
+the cut and the journal changes together, and only then publishes the new
+in-memory state. If the commit fails, the files are put back from the journal
+and the conversation is unchanged; the journal is removed only once that
+rollback is on disk, so a failed one is retried at the next startup. If the
+daemon stops between the apply and the commit, the next startup rolls the
+restore back; a committed cut is kept and its journal removed. Both a live
+rollback and startup recovery walk every recorded parent without following a
+link and prove the nearest real folder is still inside the journal's root; a
+folder that has become a symlink refuses the rollback, which then keeps its
+journal. A missing blob, a
+file too large to capture, a failed `git` read, a path that now escapes the
+worktree, a target that is now a folder, a failed unlink and a failed write
+refuse or roll back the whole rewind. A failed `git` read is never read as a
+deletion.
+
+The answer reports what the restore really did: it says files were restored only
+when it wrote or removed at least one path. A path that already holds the
+checkpoint's bytes and mode is neither rewritten nor counted, so a turn that
+changed nothing leaves the worktree as it was and says so.
 
 The worktree must still be the registration the thread was created with: the
 same git dir and common dir. A moved worktree whose old path now holds another
-checkout is refused. The workspace is reserved from the first file write
-through the commit, so a thread or agent session that would start there waits
-or is refused.
+checkout is refused. Startup recovery checks the same identity, and that the
+journal's saved root is still the workspace's own repository root, before it
+touches anything a journal recorded; it leaves the files and the journal alone
+when they do not match. A journal that cannot be read is not treated as an
+uncommitted restore: recovery refuses to roll anything back, keeps the journal,
+shows the error on its thread (the journal's name carries the thread id, so it
+is still known) and carries on booting, so one bad journal never keeps the whole
+daemon down. The workspace is reserved from the first file write through the
+commit, so a thread or agent session that would start there waits or is
+refused.
 
-The switch stays off by default because the file restore still has known gaps.
-A later checkpoint can override the one the message names; a rename, a symlink
-and a file mode are not carried; a failed capture can be read as a deletion; and
-a restore writes bytes only, so ownership and extended attributes are left as
-they are. The conversation rewind never depends on any of that, which is why it
-is available without the Lab.
+The switch stays off by default while the file restore is still being hardened.
+A restore keeps the file's own permission bits and git's executable bit only, so
+ownership and extended attributes are left as they are; ignored files are never
+touched; and the checkpoint and the restore both use raw bytes, so conversion
+rules and filters do not alter what comes back. A changed submodule pointer
+refuses the restore, while an untracked nested repository is left alone. The
+conversation rewind never depends on any of that, which is why it is available
+without the Lab.
 
 ## Safety
 

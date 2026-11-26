@@ -2323,28 +2323,73 @@ the plan of the selected prompt, because the thread-wide capability cannot name
 what an older prompt, or a first prompt, will really use. File restore is a
 **Labs** feature, off by default while it is still being hardened: the daemon
 refuses it, the summary reports it unavailable and the dialog hides it until
-Settings → Labs turns it on. Its whole-tree checkpoint is only captured while
-the switch is on, so a turn sent while it was off has none and can rewind only
-its conversation. It exists only for
-a thread in its own linked worktree with a complete pre-turn checkpoint (a git
-tree of the whole tracked worktree), is refused when another live thread or
-agent session shares the directory (finished, fully idle subagents of the same
-thread excepted), and requires the same worktree registration the thread was
-created with. The restore writes a durable journal
-with the replaced bytes, applies the files, commits the cut and the record
-changes together, and only then publishes the new in-memory state. A failed
-commit rolls the files back; a crash between apply and commit is rolled back at
-the next startup, while a committed cut keeps its files. The workspace is
-reserved through the commit so nothing starts inside it mid-restore. Symlinks
-are restored as directory entries and never followed.
+Settings → Labs turns it on. Its whole-worktree checkpoint is only captured
+while the switch is on, so a turn sent while it was off has none and can rewind
+only its conversation. It exists only for
+a thread in its own linked worktree with a complete pre-turn checkpoint: a git
+tree of every tracked file and every untracked file git does not ignore, with
+git's modes, symlinks and renames. A tree recorded before that (tracked files
+only), one whose ignored listing could not be read, or one with more than
+10,000 ignored paths is not complete and refuses the restore, naming the reason
+when the capture itself could not be complete. The checkpoint records the
+ignored paths (or ignored folders) that were present, but those are out of
+scope: the restore never writes, recreates or removes a path git ignored then,
+nor anything inside a recorded ignored folder. Timestamps cannot prove a
+pre-turn byte — `cp -p`, `rsync -t`, `tar x` and `mv` keep old mtimes, clocks
+skew, and a file deleted before a tool named it looks absent — so the ignored
+listing only recognises a path ignored then and visible now (the turn emptied
+`.gitignore` or force-added it), which is left exactly as it is and named in the
+dialog and the answer. A recorded folder entry covers everything beneath it, so
+nothing under one is written, recreated or removed: the listing cannot say which
+files already existed there, and leaving a file the turn created is safer than
+deleting one that existed. It is refused when another live
+thread or agent session shares the directory (finished, fully idle subagents of
+the same thread excepted), and requires the same worktree registration the
+thread was created with. The selected message's own checkpoint decides the
+whole restore; later removed turns never override it. A path absent from the
+complete tree is removed even when a mid-turn capture holds bytes, because the
+tree is the earlier whole-worktree evidence; captures never decide restored
+bytes, so a rename keeps its old path and a file that existed is never deleted
+on the tree's word. Git paths resolve from the repository root, and a change
+outside the thread's worktree refuses the restore. A checkpoint is taken
+without conversion: each path is hashed with `hash-object --no-filters` into a
+fresh scratch index, so no attribute source (including `.git/info/attributes`
+and the global `core.attributesFile`) or filter converts it, and its blobs are
+read back raw, so a CRLF file or one under a filter attribute returns exactly
+the bytes it had rather than a converted form. The plan's `--attr-source` needs
+git 2.40 or newer; an older git makes the checkpoint incomplete and the refusal
+names the version. The file's existing permission bits are kept and
+only the executable bit is set or cleared; a recreated file gets the bits a
+capture recorded before the turn, never a blanket 0644, and an untracked nested
+repository is left out of the plan while a submodule the real index names still
+refuses when its pointer changed. The restore writes a durable
+journal with the replaced bytes and their modes, flushes backups,
+files and folders (a folder chain one level at a time in its parent), applies
+the files, commits the cut and the record changes together, and only then
+publishes the new in-memory state. A path that already matches is neither
+rewritten nor counted as restored. A failed commit
+rolls the files back, and the journal stays until that rollback is on disk; a
+crash between apply and commit is rolled back at the next startup, while a
+committed cut keeps its files. Startup recovery re-checks the worktree identity
+and that the journal's root is still the workspace's repository root before
+touching anything, and both it and a live rollback refuse an entry whose parent
+is now a symlink or leads outside that root, keeping the journal; a journal that
+cannot be read is not an uncommitted restore:
+it is kept, nothing is rolled back, the error is shown on its thread and the
+daemon keeps booting. The workspace is reserved through the commit so nothing
+starts inside it mid-restore. A symlink is restored as a directory entry and
+never followed, a failed unlink stops the restore, and a failed `git` read
+refuses it rather than becoming a deletion. A rollback writes a temporary file
+and renames it into place, so it too never writes through a link that now sits
+at the path.
 
 **Consequences.** The transcript and provider history can be at slightly
 different points between the rewind and the next prompt, but no session that
 still holds the removed turns is ever written to. The word "rewind" in the UI
 means the conversation; file restore is a separate, explicitly warned Labs
 choice offered only where a complete checkpoint exists, so it can be held back
-while its remaining correctness gaps are closed without taking the conversation
-rewind with it. A provider that loses its native boundary degrades to a handoff
+while its remaining gaps (a bytes-only restore with no ownership or extended
+attributes) are closed without taking the conversation rewind with it. A provider that loses its native boundary degrades to a handoff
 rather than resuming the wrong history, and the person is told when it does.
 
 ## ADR-051: Phone alerts carry a fixed thread transition, never conversation content

@@ -92,6 +92,7 @@ vi.mock("@/lib/store/appStore", () => ({
     method: "handoff",
     files_enabled: false,
     files_available: false,
+    left_alone: [],
   })),
   rewindThread: vi.fn(),
   consumeComposerRestore: vi.fn(),
