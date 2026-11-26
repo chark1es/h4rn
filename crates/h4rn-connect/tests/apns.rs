@@ -122,6 +122,8 @@ async fn an_alert_is_sent_as_an_apns_alert_with_a_cached_provider_token() {
     assert_eq!(body["thread_id"], "th_one");
 
     // Both sends reuse one provider token: Apple's token was signed once.
+    // ES256 is deterministic, so equal strings alone would also pass if the
+    // client re-signed identical claims; the counter proves the cache hit.
     let tokens = requests
         .iter()
         .filter_map(|request| {
@@ -132,6 +134,11 @@ async fn an_alert_is_sent_as_an_apns_alert_with_a_cached_provider_token() {
         })
         .collect::<Vec<_>>();
     assert_eq!(tokens[0], tokens[1], "the provider token was not cached");
+    assert_eq!(
+        client.signings(),
+        1,
+        "the second send signed a new provider token"
+    );
 }
 
 #[tokio::test]
@@ -280,4 +287,9 @@ async fn an_expired_provider_token_is_re_signed_once() {
         .await
         .expect("re-sign and retry");
     assert_eq!(expired.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        client.signings(),
+        2,
+        "the expired provider token was not re-signed"
+    );
 }

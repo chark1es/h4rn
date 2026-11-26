@@ -279,7 +279,10 @@ impl FcmClient {
                         retry_sleep(attempt).await;
                         continue;
                     }
-                    return Err(SendError::Failed(format!("FCM request failed: {error}")));
+                    return Err(SendError::Failed(format!(
+                        "FCM request failed: {}",
+                        error.without_url()
+                    )));
                 }
             };
             let status = response.status();
@@ -329,7 +332,9 @@ impl FcmClient {
             ])
             .send()
             .await
-            .map_err(|error| SendError::Failed(format!("token request failed: {error}")))?;
+            .map_err(|error| {
+                SendError::Failed(format!("token request failed: {}", error.without_url()))
+            })?;
         let status = response.status();
         let text = response.text().await.unwrap_or_default();
         if !status.is_success() {

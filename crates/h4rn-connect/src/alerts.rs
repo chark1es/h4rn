@@ -1,5 +1,9 @@
-//! Alert selection and delivery for Android push (ADR-051).
+//! Alert selection and delivery for both phone platforms (ADR-051, ADR-052).
 //!
+//! Selection is platform-neutral: the same record, dedupe, cutoff and grouping
+//! rules decide what to send. Delivery reads each registration's platform and
+//! hands an Android row to FCM and an iOS row to APNs, each with its own
+//! message shape.
 //! Connect may see the same transition many times (a reconnect, a retry, a
 //! daemon restart), so the delivered baseline is stored per `(user, thread)`
 //! and keyed by the transition id: a replayed frame is dropped before it can

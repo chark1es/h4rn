@@ -44,10 +44,20 @@ struct ApnsKey {
     signing_key: SigningKey,
 }
 
-#[derive(Clone, Debug)]
 struct CachedJwt {
     value: String,
     expires_at: DateTime<Utc>,
+}
+
+impl std::fmt::Debug for CachedJwt {
+    /// A provider token is a bearer credential: it must never reach a log.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CachedJwt")
+            .field("value", &"<redacted>")
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
 }
 
 /// The APNs sender and its cached provider token.
@@ -57,6 +67,12 @@ pub struct ApnsClient {
     endpoint: String,
     topic: String,
     jwt: Mutex<Option<CachedJwt>>,
+    /// How many provider tokens this client has signed.
+    ///
+    /// ES256 is deterministic, so two signatures over the same claims are
+    /// byte-identical and a test cannot tell a cache hit from a fresh signing
+    /// by comparing them. This counter is the observable difference.
+    signings: std::sync::atomic::AtomicU64,
 }
 
 impl std::fmt::Debug for ApnsClient {
@@ -107,6 +123,7 @@ impl ApnsClient {
             endpoint: config.apns_url.trim_end_matches('/').to_string(),
             topic: config.apns_topic.clone(),
             jwt: Mutex::new(None),
+            signings: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -118,12 +135,22 @@ impl ApnsClient {
             endpoint: String::new(),
             topic: String::new(),
             jwt: Mutex::new(None),
+            signings: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
     /// Whether an operator configured a complete APNs key.
     pub fn configured(&self) -> bool {
         self.key.is_some()
+    }
+
+    /// How many provider tokens this client has signed.
+    ///
+    /// Exposed so tests can prove a second send reused the cached token rather
+    /// than signing an identical one; ES256 signatures are deterministic.
+    #[doc(hidden)]
+    pub fn signings(&self) -> u64 {
+        self.signings.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Sends one alert to one APNs device token.
@@ -173,7 +200,7 @@ impl ApnsClient {
                         retry_sleep(attempt).await;
                         continue;
                     }
-                    return Err(SendError::Failed(format!("APNs request failed: {error}")));
+                    return Err(SendError::Failed(request_failure(error)));
                 }
             };
             let status = response.status();
@@ -218,6 +245,8 @@ impl ApnsClient {
             }
         }
         let value = sign_provider_token(key, now).map_err(SendError::Failed)?;
+        self.signings
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         *self.jwt.lock().await = Some(CachedJwt {
             value: value.clone(),
             expires_at: now + JWT_LIFETIME,
@@ -231,6 +260,31 @@ fn error_reason(body: &str) -> Option<String> {
     serde_json::from_str::<serde_json::Value>(body)
         .ok()
         .and_then(|value| value["reason"].as_str().map(ToString::to_string))
+}
+
+/// Describes a failed request without its URL.
+///
+/// The URL ends in the device token, which is a delivery credential; an error
+/// string reaches logs, so it must not carry the token with it.
+fn request_failure(error: reqwest::Error) -> String {
+    format!("APNs request failed: {}", error.without_url())
+}
+
+/// The number of hex characters an APNs device token may have.
+///
+/// Apple currently issues 64; the range leaves room for a longer format while
+/// still refusing an FCM token or a truncated value.
+const MIN_DEVICE_TOKEN_CHARS: usize = 64;
+const MAX_DEVICE_TOKEN_CHARS: usize = 200;
+
+/// Whether a value looks like an APNs device token.
+///
+/// A registration that stores something else would make every send fail with
+/// `BadDeviceToken` and never delete the row, so the shape is checked when the
+/// phone registers rather than on each alert.
+pub fn is_valid_device_token(token: &str) -> bool {
+    (MIN_DEVICE_TOKEN_CHARS..=MAX_DEVICE_TOKEN_CHARS).contains(&token.len())
+        && token.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 /// Whether APNs says this device token is gone for good.
@@ -359,6 +413,46 @@ mod tests {
         verifying
             .verify(format!("{}.{}", parts[0], parts[1]).as_bytes(), &signature)
             .expect("signature verifies");
+    }
+
+    #[test]
+    fn a_cached_provider_token_never_prints_itself() {
+        let cached = CachedJwt {
+            value: "header.claims.signature".to_string(),
+            expires_at: Utc::now(),
+        };
+        let debug = format!("{cached:?}");
+        assert!(!debug.contains("signature"), "{debug}");
+        assert!(debug.contains("<redacted>"));
+    }
+
+    #[test]
+    fn an_ios_device_token_must_be_hex_and_the_right_size() {
+        assert!(is_valid_device_token(&"ab".repeat(32)));
+        assert!(is_valid_device_token(&"CD".repeat(100)));
+        // Too short, too long, not hex, or not a token at all.
+        assert!(!is_valid_device_token(&"ab".repeat(31)));
+        assert!(!is_valid_device_token(&"ab".repeat(101)));
+        assert!(!is_valid_device_token(&"zz".repeat(32)));
+        assert!(!is_valid_device_token("fcm-token:APA91b-something"));
+        assert!(!is_valid_device_token(""));
+    }
+
+    #[tokio::test]
+    async fn a_request_error_does_not_name_the_device_token() {
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("client");
+        let error = client
+            .post("http://127.0.0.1:1/3/device/deadbeefcafe")
+            .send()
+            .await
+            .expect_err("nothing listens on port 1");
+        assert!(error.url().is_some(), "the failure must have carried a URL");
+        let described = request_failure(error);
+        assert!(!described.contains("127.0.0.1"), "{described}");
+        assert!(!described.contains("deadbeefcafe"), "{described}");
     }
 
     #[test]

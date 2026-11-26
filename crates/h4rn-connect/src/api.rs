@@ -1240,7 +1240,7 @@ async fn revoke_device(
 // Push devices
 // ---------------------------------------------------------------------------
 
-/// Registers or rotates this install's FCM token.
+/// Registers or rotates this install's push token.
 ///
 /// A caller may only register its own connect device. The user id always comes
 /// from the authenticated token, never from the body, so a device can never be
@@ -1289,6 +1289,18 @@ async fn register_push_device(
             ));
         }
     };
+    // An APNs device token is hex. Storing an FCM token or a truncated value
+    // under `ios` would make every send fail and the row would never be
+    // deleted, so the shape is refused at registration.
+    // An APNs device token is hex. Storing an FCM token or a truncated value
+    // under `ios` would make every send fail and the row would never be
+    // deleted, so the shape is refused at registration.
+    if platform == "ios" && !crate::apns::is_valid_device_token(token) {
+        return Err(AppError::bad_request(
+            "push_token_invalid",
+            "an iOS token must be 64-200 hexadecimal characters",
+        ));
+    }
     state
         .store
         .register_push_device(
