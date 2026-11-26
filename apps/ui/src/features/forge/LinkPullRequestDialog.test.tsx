@@ -4,6 +4,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { ForgePrSummary, ForgeRepoRef, ThreadSummary } from "@/gen";
+import { setLocalePreference } from "@/lib/i18n";
 
 import { LinkPullRequestDialog } from "./LinkPullRequestDialog";
 import { ForgeApi } from "./store";
@@ -142,6 +143,33 @@ describe("Link pull request dialog", () => {
     await waitFor(() => expect(onClose).toHaveBeenCalled());
     expect(request).toHaveBeenCalledWith(
       expect.objectContaining({ type: "link_pull_request", number: 42, repo }),
+    );
+  });
+});
+
+describe("Link pull request dialog in another language", () => {
+  afterEach(async () => {
+    await setLocalePreference("en");
+  });
+
+  it("words the dialog and a link it cannot read in Spanish", async () => {
+    const { api, request } = client();
+    await setLocalePreference("es");
+    render(<LinkPullRequestDialog open thread={thread} onClose={() => undefined} api={api} />);
+
+    expect(screen.getByRole("heading", { name: "Vincular pull request" })).toBeTruthy();
+    expect(
+      await screen.findByText("Pega un enlace o elige un pull request abierto de h4rn/api."),
+    ).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("URL del pull request"), {
+      target: { value: "not a link" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Vincular" }));
+    expect((await screen.findByRole("alert")).textContent).toContain(
+      "Ese no es un enlace de pull request que h4rn pueda leer",
+    );
+    expect(request).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: "link_pull_request" }),
     );
   });
 });

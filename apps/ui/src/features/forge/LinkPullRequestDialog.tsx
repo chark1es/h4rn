@@ -1,5 +1,6 @@
 import { GitPullRequestIcon } from "lucide-react";
 import { useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import {
   Dialog,
@@ -36,6 +37,7 @@ export function LinkPullRequestDialog({
   onClose: () => void;
   api?: () => ForgeApi;
 }) {
+  const { t } = useTranslation(["pullRequests", "common"]);
   const [url, setUrl] = useState("");
   const [repos, setRepos] = useState<ForgeRemote[]>([]);
   const [candidates, setCandidates] = useState<ForgePrSummary[]>([]);
@@ -84,7 +86,7 @@ export function LinkPullRequestDialog({
     try {
       await api().linkPullRequest(thread.thread_id, repo, number);
       notifyThreadLinks(thread.thread_id);
-      pushToast({ title: `Linked #${number} to this thread.`, variant: "success" });
+      pushToast({ title: t("linkDialog.linked", { number }), variant: "success" });
       onClose();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -99,9 +101,7 @@ export function LinkPullRequestDialog({
       repos.map((entry) => entry.repo),
     );
     if (!reference) {
-      setError(
-        "That is not a pull request link h4rn can read (GitHub, GitLab, Gitea, Forgejo, Bitbucket or Azure DevOps). Paste the page URL, including the number.",
-      );
+      setError(t("linkDialog.invalid"));
       return;
     }
     void link(reference.repo, reference.number);
@@ -113,11 +113,11 @@ export function LinkPullRequestDialog({
     <Dialog open={open} onOpenChange={(value) => (value ? undefined : onClose())}>
       <DialogContent className="gap-3 sm:max-w-[560px]">
         <DialogHeader>
-          <DialogTitle>Link pull request</DialogTitle>
+          <DialogTitle>{t("linkDialog.title")}</DialogTitle>
           <DialogDescription>
             {knownRepo
-              ? `Paste a link, or pick an open pull request from ${knownRepo.owner}/${knownRepo.repo}.`
-              : "Paste a pull request link. This workspace has no forge remote, so there is no repository to pick from."}
+              ? t("linkDialog.pickFrom", { repo: `${knownRepo.owner}/${knownRepo.repo}` })
+              : t("linkDialog.noRemote")}
           </DialogDescription>
         </DialogHeader>
 
@@ -129,7 +129,7 @@ export function LinkPullRequestDialog({
               if (event.key === "Enter") submitUrl();
             }}
             placeholder="https://github.com/owner/repo/pull/12"
-            aria-label="Pull request URL"
+            aria-label={t("linkDialog.urlLabel")}
             autoFocus
           />
           <button
@@ -138,7 +138,7 @@ export function LinkPullRequestDialog({
             disabled={busy || url.trim().length === 0}
             onClick={submitUrl}
           >
-            Link
+            {t("linkDialog.link")}
           </button>
         </div>
 
@@ -150,10 +150,10 @@ export function LinkPullRequestDialog({
 
         {loading ? (
           <p className="q-faint" style={{ fontSize: 12 }}>
-            Reading the repository…
+            {t("linkDialog.reading")}
           </p>
         ) : candidates.length > 0 ? (
-          <ul className="q-pr-picks" aria-label="Open pull requests">
+          <ul className="q-pr-picks" aria-label={t("linkDialog.openList")}>
             {candidates.map((pr) => (
               <li key={pr.number}>
                 <button
@@ -173,13 +173,13 @@ export function LinkPullRequestDialog({
           </ul>
         ) : knownRepo && !loading && !error ? (
           <p className="q-faint" style={{ fontSize: 12 }}>
-            No open pull requests in {knownRepo.owner}/{knownRepo.repo}.
+            {t("linkDialog.noneOpen", { repo: `${knownRepo.owner}/${knownRepo.repo}` })}
           </p>
         ) : null}
 
         <DialogFooter>
           <button type="button" className="q-btn ghost" onClick={onClose}>
-            Cancel
+            {t("common:cancel")}
           </button>
         </DialogFooter>
       </DialogContent>

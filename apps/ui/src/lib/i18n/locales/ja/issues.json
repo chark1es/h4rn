@@ -1,0 +1,79 @@
+{
+  "title": "Issue",
+  "search": {
+    "label": "Issue を検索",
+    "placeholder": "トラッカーを検索",
+    "clear": "クリア"
+  },
+  "filters": {
+    "label": "Issue のフィルター",
+    "open": "オープン",
+    "closed": "クローズ",
+    "all": "すべて",
+    "assigned": "自分が担当",
+    "created": "自分が作成",
+    "mentioning": "自分へのメンション"
+  },
+  "projects": {
+    "label": "プロジェクト",
+    "none": "プロジェクトはまだありません。",
+    "accountFor": "{{name}} のアカウント"
+  },
+  "reading": "トラッカーを読み込み中…",
+  "bitbucket": "<strong>{{name}}</strong>：Bitbucket Cloud には Issue の API がありません。Atlassian が 2026 年 8 月に廃止したため、このプロジェクトではプルリクエストのみ表示します。",
+  "noAccount": "<strong>{{name}}</strong>：このリポジトリに一致する {{forge}} アカウントがありません。",
+  "empty": {
+    "title": "表示する Issue はありません",
+    "body": "Forge のリモートがあるプロジェクトを追加するか、設定 → ソース管理とイシュー で Linear のチームを選んでください。"
+  },
+  "loadMore": "さらに読み込む",
+  "select": {
+    "title": "Issue を選択",
+    "body": "説明、コメント、操作がここに表示されます。"
+  },
+  "age": {
+    "now": "たった今"
+  },
+  "state": {
+    "open": "オープン",
+    "closed": "クローズ"
+  },
+  "detail": {
+    "label": "Issue",
+    "reading": "Issue を読み込み中…",
+    "openOnTracker": "トラッカーで開く",
+    "linkNeedsThread": "この Issue をリンクするにはスレッドを開いてください",
+    "unlink": "リンクを解除",
+    "link": "このスレッドにリンク",
+    "readOnlyLinear": "この Linear のチームはプロジェクトに関連付けられていないため、Issue は読み取り専用です。設定 → ソース管理 でプロジェクトのチームを選んでください。",
+    "readOnlyForge": "このプロジェクトはリポジトリを所有していないため、Issue は読み取り専用です。",
+    "titleLabel": "Issue のタイトル",
+    "descriptionLabel": "Issue の説明",
+    "noDescription": "_説明はありません。_",
+    "labels": "ラベル",
+    "labelsPlaceholder": "bug, frontend",
+    "assignees": "担当者",
+    "assigneesPlaceholder": "alice, bob",
+    "closeReason": "クローズの理由",
+    "reasons": {
+      "completed": "完了",
+      "not_planned": "対応予定なし",
+      "duplicate": "重複"
+    },
+    "duplicateLabel": "重複元の Issue 番号",
+    "duplicatePlaceholder": "Issue 番号",
+    "duplicateMissing": "重複元の Issue を指定してください",
+    "close": "Issue をクローズ",
+    "reopen": "Issue を再オープン",
+    "linkedPrs": "リンクされたプルリクエスト",
+    "comments": "コメント",
+    "noComments": "まだコメントはありません。",
+    "someone": "誰か",
+    "loadMoreComments": "さらにコメントを読み込む",
+    "newComment": "新しいコメント",
+    "writeComment": "コメントを書く",
+    "sending": "送信中…",
+    "comment": "コメント",
+    "rejected": "トラッカーが受け付けませんでした。"
+  }
+}

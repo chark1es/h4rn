@@ -1,0 +1,79 @@
+{
+  "title": "Issues",
+  "search": {
+    "label": "Buscar issues",
+    "placeholder": "Buscar en el gestor",
+    "clear": "Borrar"
+  },
+  "filters": {
+    "label": "Filtros de issues",
+    "open": "Abiertos",
+    "closed": "Cerrados",
+    "all": "Todos",
+    "assigned": "Asignados a mí",
+    "created": "Abiertos por mí",
+    "mentioning": "Me mencionan"
+  },
+  "projects": {
+    "label": "Proyectos",
+    "none": "Aún no hay proyectos.",
+    "accountFor": "Cuenta para {{name}}"
+  },
+  "reading": "Leyendo los gestores…",
+  "bitbucket": "<strong>{{name}}</strong>: Bitbucket Cloud no tiene API de issues. Atlassian la retiró en agosto de 2026, así que este proyecto solo muestra pull requests.",
+  "noAccount": "<strong>{{name}}</strong>: ninguna cuenta de {{forge}} coincide con este repositorio.",
+  "empty": {
+    "title": "No hay issues que mostrar",
+    "body": "Añade un proyecto con un remoto de forja o elige un equipo de Linear en Ajustes → Control de versiones e incidencias."
+  },
+  "loadMore": "Cargar más",
+  "select": {
+    "title": "Selecciona un issue",
+    "body": "Su descripción, comentarios y acciones se abren aquí."
+  },
+  "age": {
+    "now": "ahora mismo"
+  },
+  "state": {
+    "open": "Abierto",
+    "closed": "Cerrado"
+  },
+  "detail": {
+    "label": "Issue",
+    "reading": "Leyendo el issue…",
+    "openOnTracker": "Abrir en el gestor",
+    "linkNeedsThread": "Abre un hilo para vincular este issue",
+    "unlink": "Desvincular",
+    "link": "Vincular a este hilo",
+    "readOnlyLinear": "Este equipo de Linear no está asociado a un proyecto, así que sus issues son de solo lectura. Elige el equipo de un proyecto en Ajustes → Control de versiones.",
+    "readOnlyForge": "Este proyecto no es dueño del repositorio, así que el issue es de solo lectura.",
+    "titleLabel": "Título del issue",
+    "descriptionLabel": "Descripción del issue",
+    "noDescription": "_Sin descripción._",
+    "labels": "Etiquetas",
+    "labelsPlaceholder": "bug, frontend",
+    "assignees": "Asignados",
+    "assigneesPlaceholder": "alice, bob",
+    "closeReason": "Motivo de cierre",
+    "reasons": {
+      "completed": "Completado",
+      "not_planned": "No planificado",
+      "duplicate": "Duplicado"
+    },
+    "duplicateLabel": "Número del issue duplicado",
+    "duplicatePlaceholder": "Número de issue",
+    "duplicateMissing": "Indica el issue del que este es duplicado",
+    "close": "Cerrar issue",
+    "reopen": "Reabrir issue",
+    "linkedPrs": "Pull requests vinculados",
+    "comments": "Comentarios",
+    "noComments": "Aún no hay comentarios.",
+    "someone": "Alguien",
+    "loadMoreComments": "Cargar más comentarios",
+    "newComment": "Nuevo comentario",
+    "writeComment": "Escribe un comentario",
+    "sending": "Enviando…",
+    "comment": "Comentar",
+    "rejected": "El gestor no aceptó el cambio."
+  }
+}

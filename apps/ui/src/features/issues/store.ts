@@ -23,6 +23,7 @@ import type {
   ResponseBody,
   ThreadIssue,
 } from "@/gen";
+import { formatDateTime, formatRelativeTime, i18n } from "@/lib/i18n";
 
 export type IssueRequest = (request: ClientRequest) => Promise<ResponseBody>;
 
@@ -331,31 +332,34 @@ export function issueKey(scope: IssueScope, id: string): string {
 }
 
 export function issueStateLabel(state: ForgeIssueState): string {
-  return state === "closed" ? "Closed" : "Open";
+  return state === "closed" ? i18n.t("issues:state.closed") : i18n.t("issues:state.open");
 }
 
 export function relativeIssueAge(iso: string | null): string {
   if (!iso) return "";
   const then = new Date(iso).getTime();
   if (!Number.isFinite(then)) return "";
-  const seconds = Math.max(0, Math.round((Date.now() - then) / 1000));
-  if (seconds < 60) return "just now";
-  const minutes = Math.round(seconds / 60);
-  if (minutes < 60) return `${minutes}m ago`;
-  const hours = Math.round(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
-  const days = Math.round(hours / 24);
-  if (days < 30) return `${days}d ago`;
-  return new Date(iso).toLocaleDateString();
+  const now = Date.now();
+  const elapsed = Math.max(0, now - then);
+  if (elapsed < 60_000) return i18n.t("issues:age.now");
+  // Older than a month reads better as the date, in the active language.
+  if (elapsed >= 30 * 86_400_000) {
+    return formatDateTime(then, { year: "numeric", month: "numeric", day: "numeric" });
+  }
+  // Written out for a sentence ("3 hours ago", "3 時間前"), not a column's "3h".
+  return formatRelativeTime(then, now);
 }
 
-/** Filters the page offers, in the order the brief names them. */
-export const ISSUE_FILTERS: Array<{ key: ForgeIssueFilter; label: string }> = [
-  { key: "open", label: "Open" },
-  { key: "closed", label: "Closed" },
-  { key: "assigned", label: "Assigned to me" },
-  { key: "created", label: "Opened by me" },
-  { key: "mentioning", label: "Mentioning me" },
+/**
+ * Filters the page offers, in the order the brief names them. The page names
+ * each one through `issues:filters.<key>`.
+ */
+export const ISSUE_FILTERS: ForgeIssueFilter[] = [
+  "open",
+  "closed",
+  "assigned",
+  "created",
+  "mentioning",
 ];
 
 /** The daemon's error message, or the raw string, stated plainly. */
