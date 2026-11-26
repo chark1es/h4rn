@@ -114,6 +114,56 @@ export function fastSupported(harness: HarnessKind, agentId?: string | null): bo
   return harness === "codex" && !agentId;
 }
 
+/**
+ * Whether the Fast row belongs on this thread.
+ *
+ * The fast tier belongs to the model, so the daemon answers for the thread's
+ * current model in `fast_available` from every model a session has described.
+ * `true` is the only answer that offers the row: an unknown tier (an older
+ * daemon, a model no session has run) or a known "no tier" hides it, because
+ * offering Fast on a guess is how a tierless model used to receive one.
+ */
+export function threadFastSupported(
+  summary: Pick<ThreadSummary, "harness" | "fast_available">,
+): boolean {
+  return summary.fast_available === true;
+}
+
+/**
+ * Whether a new thread on `model` should offer Fast.
+ *
+ * The tier belongs to the model, so the answer comes from what threads on the
+ * same host already learned about that exact model. Without one the row stays
+ * hidden: guessing from the harness is what offered Fast for a model that has
+ * no tier.
+ */
+export function newThreadFastSupported(
+  harness: HarnessKind,
+  host: HostId | "",
+  model: string,
+  threads: readonly ThreadSummary[],
+): boolean {
+  if (!fastSupported(harness)) return false;
+  // Each thread on this host keeps the answers its sessions' catalogues
+  // reported, per model, so the dialog can answer for a model no thread runs
+  // right now.
+  for (const thread of threads) {
+    if (thread.harness !== harness || thread.host !== host) continue;
+    const answer = thread.fast_models?.[model];
+    if (typeof answer === "boolean") return answer;
+  }
+  // Older daemons report only the thread's current model; a thread that ran
+  // the chosen model still answers for it.
+  const known = threads.find(
+    (thread) =>
+      thread.harness === harness &&
+      thread.host === host &&
+      thread.model === model &&
+      typeof thread.fast_available === "boolean",
+  );
+  return known?.fast_available === true;
+}
+
 /** A human label for one effort value. */
 export function effortLabel(effort: string): string {
   switch (effort) {

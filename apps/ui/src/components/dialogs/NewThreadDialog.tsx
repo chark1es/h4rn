@@ -43,7 +43,7 @@ import { closeNewThread, createThread, useApp } from "@/lib/store/appStore";
 import { defaultThreadHostId, localOnlyHostOptions } from "@/lib/thread-hosts";
 import {
   effortLabel,
-  fastSupported,
+  newThreadFastSupported,
   newThreadModel,
   threadEffortChoices,
   threadModeChoices,
@@ -351,7 +351,14 @@ export function NewThreadDialog() {
     setFast(false);
   }, [effortKey]);
   const efforts = threadEffortChoices(harness);
-  const fastAvailable = fastSupported(harness);
+  // Fast belongs to the chosen model: the threads on this host are the only
+  // per-model answers this device has, so an unknown model shows no row.
+  const fastAvailable = newThreadFastSupported(harness, boundHost, model, threadValues);
+  useEffect(() => {
+    // Never carry Fast into a model that does not offer it: the daemon would
+    // refuse the start, and the row is hidden so it could not be turned off.
+    if (!fastAvailable) setFast(false);
+  }, [fastAvailable]);
   useEffect(() => {
     if (!open) return;
     // An agent that manages its own mode gets no choice from this dialog, so
