@@ -241,8 +241,8 @@ async fn labs_guard(
 
 /// Caps the unauthenticated endpoints before their body is parsed.
 ///
-/// `DELETE /mcp` is another way to end a grant, so it shares the same bucket
-/// as the OAuth mutations. Both MCP paths are covered: the hub endpoint the
+/// `DELETE /mcp` with an outside agent's token is another way to end a grant,
+/// so it shares the same bucket as the OAuth mutations. Both MCP paths are covered: the hub endpoint the
 /// outside token arrives on, and the outside router's own `/mcp/outside`.
 /// While the Labs switch is off the shared `/mcp` route only answers its
 /// "not here" refusal, so that request spends no hit.
@@ -256,8 +256,14 @@ pub(crate) async fn aggregate_guard(
         path,
         "/oauth/register" | "/oauth/authorize" | "/oauth/token" | "/oauth/revoke"
     );
+    // On the shared `/mcp` route only an outside agent's bearer counts: the
+    // hub's own harness sessions end there too, and charging them would let
+    // outside or junk traffic 429 a harness's goodbye and leave its token live.
     let mcp_delete = request.method() == axum::http::Method::DELETE
-        && (path == "/mcp/outside" || (path == "/mcp" && service.enabled()));
+        && (path == "/mcp/outside"
+            || (path == "/mcp"
+                && service.enabled()
+                && super::outside::is_outside_request(request.headers())));
     if (oauth_mutation || mcp_delete)
         && let Err(seconds) = service.check_aggregate()
     {

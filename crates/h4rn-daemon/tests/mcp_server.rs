@@ -2609,6 +2609,55 @@ async fn delete_mcp_is_behind_the_aggregate_limit_and_post_is_not() {
     daemon.stop().await;
 }
 
+/// A harness session's own `DELETE /mcp` is never charged or refused.
+///
+/// Only an outside agent's bearer counts against the revocation bucket. The
+/// hub's harness sessions end on the same route, and a spent bucket must not
+/// leave a harness token live because its goodbye was answered 429.
+#[tokio::test]
+async fn a_non_outside_delete_mcp_is_neither_charged_nor_refused() {
+    let daemon = boot(None).await;
+    let client = http();
+    let (_, outside) = approved_agent(&daemon, &client, "read_only").await;
+    daemon
+        .outside
+        .set_aggregate_limits(RateLimiter::new(1, Duration::from_secs(60)));
+
+    // A bearer that is not an outside token does not spend the one hit...
+    let hub = client
+        .delete(daemon.mcp_url())
+        .bearer_auth(format!("hub-session-{}", "x".repeat(16)))
+        .send()
+        .await
+        .expect("hub delete");
+    assert_ne!(
+        hub.status(),
+        StatusCode::TOO_MANY_REQUESTS,
+        "a non-outside DELETE /mcp was refused by the outside bucket"
+    );
+    // ...so the outside agent's own DELETE still gets it.
+    let deleted = client
+        .delete(daemon.mcp_url())
+        .bearer_auth(&outside)
+        .send()
+        .await
+        .expect("outside delete");
+    assert_eq!(
+        deleted.status(),
+        StatusCode::NO_CONTENT,
+        "a non-outside DELETE /mcp spent the outside bucket"
+    );
+    // With the hit spent, a non-outside DELETE is still not refused.
+    let again = client
+        .delete(daemon.mcp_url())
+        .bearer_auth(format!("hub-session-{}", "y".repeat(16)))
+        .send()
+        .await
+        .expect("hub delete again");
+    assert_ne!(again.status(), StatusCode::TOO_MANY_REQUESTS);
+    daemon.stop().await;
+}
+
 /// The Settings operations are ordered like the client-facing revokes.
 ///
 /// Both go through the protocol surface the Settings page uses, and both must
