@@ -73,7 +73,7 @@
       "hint": "Editar {{project}}"
     },
     "newThread": {
-      "label": "Hilo nuevo",
+      "label": "Nuevo hilo",
       "hint": "Empieza uno en {{project}}"
     }
   },
@@ -143,9 +143,9 @@
     },
     "sendNow": "Enviar ahora",
     "sendAgain": "Enviar de nuevo",
-    "sendAgainTitle": "Envía este mensaje de nuevo; puede que ya esté en el turno",
-    "steerTitle": "Dirige este mensaje al turno en curso",
-    "frontTitle": "Mueve este mensaje al principio de la cola",
+    "sendAgainTitle": "Enviar este mensaje de nuevo; puede que ya esté en el turno",
+    "steerTitle": "Dirigir este mensaje al turno en curso",
+    "frontTitle": "Mover este mensaje al principio de la cola",
     "editTitle": "Editar en el compositor",
     "discard": "Descartar",
     "discardTitle": "Descartar esta fila",

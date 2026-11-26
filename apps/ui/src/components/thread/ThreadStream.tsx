@@ -1,12 +1,14 @@
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { CircleCheckIcon } from "lucide-react";
 import { useEffect, useMemo, useRef } from "react";
+import { useTranslation } from "react-i18next";
 
 import { MessageAttachments } from "@/features/attachments/MessageAttachments";
 import type { QueuedMessage, ThreadSummary } from "@/gen";
 import { useIsPhone } from "@/hooks/use-media-query";
 import { harnessLabel } from "@/lib/entities";
-import { absoluteTime, cost, duration, tokens } from "@/lib/format";
+import { absoluteTime, formatCost, formatTokens } from "@/lib/format";
+import { formatDuration } from "@/lib/i18n";
 import { useApp } from "@/lib/store/appStore";
 import type { MessageItem, PendingMessage, StreamTurn } from "@/lib/store/projection";
 import { isRealTurn } from "@/lib/store/projection";
@@ -40,12 +42,13 @@ export function nextTurnIndex(
 }
 
 function PendingTurn({ message }: { message: PendingMessage }) {
+  const { t } = useTranslation("thread");
   return (
     <div className={cn("q-turn q-you-msg", message.sending && "q-faint")}>
       {message.text ? <div className="q-bubble">{message.text}</div> : null}
       <MessageAttachments attachments={message.attachments} align="end" />
       <div className="q-you-meta">
-        <span>{message.sending ? "Sending…" : "Sent"}</span>
+        <span>{message.sending ? t("stream.sending") : t("stream.sent")}</span>
       </div>
     </div>
   );
@@ -58,6 +61,7 @@ function PendingTurn({ message }: { message: PendingMessage }) {
  * token count for it would be invented: it says where it came from instead.
  */
 export function ThreadReceipt({ summary, turns }: { summary: ThreadSummary; turns: StreamTurn[] }) {
+  const { t } = useTranslation("thread");
   if (summary.tab !== "done" || summary.agent_state !== "done") return null;
   // A switch divider is not a turn the agent wrote: it must neither make a
   // conversation look imported nor hide that it was.
@@ -83,17 +87,17 @@ export function ThreadReceipt({ summary, turns }: { summary: ThreadSummary; turn
       <div className="q-live-line">
         <CircleCheckIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
         <span>
-          {imported ? (
-            <>
-              Imported from {harnessLabel(source)} · {absoluteTime(summary.last_activity)}
-            </>
-          ) : (
-            <>
-              Finished {absoluteTime(summary.last_activity)} · {duration(summary.usage.duration_ms)}{" "}
-              · {tokens(summary.usage.input_tokens + summary.usage.output_tokens)} tokens ·{" "}
-              {cost(summary.usage.cost_micros)} est.
-            </>
-          )}
+          {imported
+            ? t("stream.imported", {
+                harness: harnessLabel(source),
+                time: absoluteTime(summary.last_activity),
+              })
+            : t("stream.finished", {
+                time: absoluteTime(summary.last_activity),
+                duration: formatDuration(summary.usage.duration_ms),
+                tokens: formatTokens(summary.usage.input_tokens + summary.usage.output_tokens),
+                cost: formatCost(summary.usage.cost_micros),
+              })}
         </span>
       </div>
     </div>
@@ -119,6 +123,7 @@ export function ThreadStream({
   editDisabledReason?: string | null | undefined;
   staleAt?: number | null;
 }) {
+  const { t } = useTranslation("thread");
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const atBottom = useRef(true);
   const focusTurn = useRef(0);
@@ -217,7 +222,7 @@ export function ThreadStream({
         const element = event.currentTarget;
         atBottom.current = element.scrollHeight - element.scrollTop - element.clientHeight < 160;
       }}
-      aria-label="Thread stream"
+      aria-label={t("stream.label")}
       role="log"
     >
       <div
@@ -270,8 +275,9 @@ export function ThreadStream({
 }
 
 export function ThreadStreamSkeleton() {
+  const { t } = useTranslation("thread");
   return (
-    <div className="q-stream" role="status" aria-busy="true" aria-label="Loading thread">
+    <div className="q-stream" role="status" aria-busy="true" aria-label={t("pane.loading")}>
       <div className="q-col">
         <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 32 }}>
           <div className="q-skel" style={{ width: "58%", height: 62, borderRadius: 14 }} />

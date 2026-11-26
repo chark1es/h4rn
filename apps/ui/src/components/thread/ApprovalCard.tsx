@@ -1,20 +1,13 @@
 import { ChevronDownIcon, ShieldCheckIcon } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 import { ShortcutCaps } from "@/components/common/Kbd";
-import type { ApprovalKind } from "@/gen";
 import { harnessLabel } from "@/lib/entities";
 import { tildePath } from "@/lib/format";
 import { respondApproval, useApp } from "@/lib/store/appStore";
 
-const KIND_LABEL: Record<ApprovalKind, string> = {
-  command: "run a command",
-  file_change: "change a file",
-  permission: "use a permission",
-  plan: "review a plan",
-  question: "answer a question",
-};
-
 export function ApprovalCard({ threadId }: { threadId: string }) {
+  const { t } = useTranslation("thread");
   const log = useApp((state) => state.logs[threadId]);
   const summary = useApp((state) => state.threads[threadId]);
   const hosts = useApp((state) => state.hosts);
@@ -32,8 +25,8 @@ export function ApprovalCard({ threadId }: { threadId: string }) {
 
   const status = log?.approvals?.[first.approvalId]?.status ?? "pending";
   const more = pending.length - 1;
-  const hostName = hosts[summary?.host ?? ""]?.name ?? summary?.host ?? "the host";
-  const harness = summary ? harnessLabel(summary.harness) : "Agent";
+  const hostName = hosts[summary?.host ?? ""]?.name ?? summary?.host ?? t("approval.theHost");
+  const harness = summary ? harnessLabel(summary.harness) : t("approval.agent");
   const hostOnline = hosts[summary?.host ?? ""]?.online ?? false;
   const blocked = connection !== "online" || !hostOnline;
   const sending = status === "sending";
@@ -45,14 +38,14 @@ export function ApprovalCard({ threadId }: { threadId: string }) {
   };
 
   return (
-    <section className="q-ask" aria-label="Approval request">
+    <section className="q-ask" aria-label={t("approval.label")}>
       <div className="q-ask-h">
         <ShieldCheckIcon className="q-icon" strokeWidth={1.5} aria-hidden />
         <span className="t">
-          {harness} on {hostName} wants to {KIND_LABEL[first.approvalKind]}
+          {t(`approval.wants.${first.approvalKind}`, { harness, host: hostName })}
         </span>
         <span className="q-faint" style={{ fontSize: 12 }}>
-          {more > 0 ? `+${more} more` : "now"}
+          {more > 0 ? t("approval.more", { count: more }) : t("approval.now")}
         </span>
       </div>
       {summary?.workspace_path ? (
@@ -82,17 +75,18 @@ export function ApprovalCard({ threadId }: { threadId: string }) {
       <div className="q-ask-f">
         {blocked ? (
           <span className="q-faint" style={{ fontSize: 12 }}>
-            Reconnect to approve or deny. Nothing runs until you do.
+            {t("approval.reconnect")}
           </span>
         ) : (
           <button
             type="button"
             className="q-btn ghost"
             aria-disabled="true"
-            title="Not available yet"
+            title={t("approval.notAvailable")}
             onClick={(event) => event.preventDefault()}
           >
-            Always allow <ChevronDownIcon className="q-icon s12" strokeWidth={1.75} aria-hidden />
+            {t("approval.alwaysAllow")}{" "}
+            <ChevronDownIcon className="q-icon s12" strokeWidth={1.75} aria-hidden />
           </button>
         )}
         <span className="grow" />
@@ -103,7 +97,7 @@ export function ApprovalCard({ threadId }: { threadId: string }) {
           aria-disabled={waiting || undefined}
           onClick={() => respond("deny")}
         >
-          Deny <ShortcutCaps command="approval.deny" />
+          {t("approval.deny")} <ShortcutCaps command="approval.deny" />
         </button>
         <button
           type="button"
@@ -114,10 +108,10 @@ export function ApprovalCard({ threadId }: { threadId: string }) {
           onClick={() => respond("approve")}
         >
           {sending ? (
-            "Approving…"
+            t("approval.approving")
           ) : (
             <>
-              Approve <ShortcutCaps command="approval.approve" />
+              {t("approval.approve")} <ShortcutCaps command="approval.approve" />
             </>
           )}
         </button>

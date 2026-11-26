@@ -1,5 +1,6 @@
 import { Code2Icon, FileDigitIcon } from "lucide-react";
 import { useMemo } from "react";
+import { useTranslation } from "react-i18next";
 import { highlightCode } from "@/features/ide/DiffView";
 import { collapseDiff, computeDiff, type DiffRow } from "@/features/ide/diff";
 import type { FsDiff } from "@/gen";
@@ -32,6 +33,7 @@ export function FileDiff({
   /** The phone sheet labels the file itself, so skip the sticky header. */
   bare?: boolean;
 }) {
+  const { t } = useTranslation("thread");
   const rows = useMemo(() => {
     if (!diff) return [];
     const all = collapseDiff(computeDiff(diff.before ?? "", diff.after ?? ""), 4);
@@ -62,8 +64,8 @@ export function FileDiff({
           <button
             type="button"
             className="q-ibtn"
-            aria-label={`Open ${name} in the IDE`}
-            title="Open in IDE"
+            aria-label={t("changes.diff.open", { name })}
+            title={t("changes.openInIde")}
             onClick={onOpen}
           >
             <Code2Icon className="q-icon s14" strokeWidth={1.5} aria-hidden />
@@ -72,7 +74,7 @@ export function FileDiff({
       )}
       {loading && !diff ? (
         <div className="q-hunk">
-          <div className="hh">Loading diff…</div>
+          <div className="hh">{t("changes.diff.loading")}</div>
         </div>
       ) : diff && !diff.binary && rows.length > 0 ? (
         <div
@@ -101,7 +103,9 @@ export function FileDiff({
         </div>
       ) : (
         <div className="q-hunk">
-          <div className="hh">{diff?.note ?? `Collapsed · ${added + removed} lines`}</div>
+          <div className="hh">
+            {diff?.note ?? t("changes.diff.collapsed", { count: added + removed })}
+          </div>
         </div>
       )}
     </div>

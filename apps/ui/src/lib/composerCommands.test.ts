@@ -46,7 +46,7 @@ describe("composerCommands", () => {
     await setLocalePreference("zh-CN");
     const commands = composerCommands(summary, { ...options, terminalOpen: true });
     expect(commands.find((c) => c.id === "terminal.toggle")?.label).toBe("隐藏终端");
-    expect(commands.find((c) => c.id === "thread.new")?.hint).toBe("在 h4rn 中开始一个");
+    expect(commands.find((c) => c.id === "thread.new")?.hint).toBe("在 h4rn 中开始新对话");
     expect(rankCommands(commands, "终端")[0]?.id).toBe("terminal.toggle");
     expect(rankCommands(commands, "interrupt")[0]?.id).toBe("thread.stop");
   });

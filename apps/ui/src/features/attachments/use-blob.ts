@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 
 import type { AttachmentId } from "@/gen";
+import { i18n } from "@/lib/i18n";
 import { getClient } from "@/lib/store/appStore";
 
 import { blobObjectUrl } from "./download";
@@ -40,7 +41,7 @@ export function useBlobUrl(
         setState({
           url: null,
           loading: false,
-          error: error instanceof Error ? error.message : "The file could not be loaded.",
+          error: error instanceof Error ? error.message : i18n.t("thread:attachments.loadFailed"),
         });
       });
 

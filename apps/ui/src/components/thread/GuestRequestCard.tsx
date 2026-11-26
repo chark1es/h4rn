@@ -1,15 +1,11 @@
 import { PaperclipIcon, SendIcon, UserRoundIcon, XIcon } from "lucide-react";
+import { useTranslation } from "react-i18next";
+import { formatBytes } from "@/features/attachments/upload";
 import { dismissGuestRequest, sendGuestRequest, useGuest } from "@/features/guest/guestStore";
 import type { GuestRequest, ThreadId } from "@/gen";
 import { absoluteTime } from "@/lib/format";
 import { useApp } from "@/lib/store/appStore";
 import { cn } from "@/lib/utils";
-
-function fileSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
 
 /**
  * One guest message waiting for the owner (ADR-044).
@@ -19,10 +15,11 @@ function fileSize(bytes: number): string {
  */
 export function GuestRequestCard({ threadId }: { threadId: ThreadId }) {
   const requests = useApp((state) => state.logs[threadId]?.guestRequests);
+  const { t } = useTranslation("thread");
   const answering = useGuest().answering;
   if (!requests || requests.length === 0) return null;
   return (
-    <section className="q-guest-reqs" aria-label="Guest requests">
+    <section className="q-guest-reqs" aria-label={t("guest.requests")}>
       {requests.map((request) => (
         <GuestRequestRow
           key={request.request_id}
@@ -44,33 +41,34 @@ function GuestRequestRow({
   request: GuestRequest;
   busy: boolean;
 }) {
+  const { t } = useTranslation("thread");
   const attachments = request.attachments ?? [];
   return (
-    <section className="q-guest-req" aria-label="Guest request waiting for you">
+    <section className="q-guest-req" aria-label={t("guest.waiting")}>
       <div className="q-guest-req-head">
         <span className="q-guest-req-tag">
           <UserRoundIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
-          Request
+          {t("guest.tag")}
         </span>
         <span className="q-faint" style={{ fontSize: 11.5 }}>
-          from a guest · {absoluteTime(request.created_at)}
+          {t("guest.from", { time: absoluteTime(request.created_at) })}
         </span>
       </div>
       {request.text ? <p className="q-guest-req-text">{request.text}</p> : null}
       {attachments.length ? (
-        <ul className="q-guest-req-files" aria-label="Files">
+        <ul className="q-guest-req-files" aria-label={t("guest.files")}>
           {attachments.map((attachment) => (
             <li key={`${attachment.name}:${attachment.size}`} className="q-guest-req-file">
               <PaperclipIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
               <span className="q-guest-req-name">{attachment.name}</span>
-              <span className="q-faint">{fileSize(attachment.size)}</span>
+              <span className="q-faint">{formatBytes(attachment.size)}</span>
             </li>
           ))}
         </ul>
       ) : null}
       <div className="q-guest-req-foot">
         <span className="q-faint" style={{ fontSize: 11.5 }}>
-          Send runs it as a turn with this thread&rsquo;s current permissions.
+          {t("guest.sendHint")}
         </span>
         <button
           type="button"
@@ -79,7 +77,7 @@ function GuestRequestRow({
           onClick={() => void dismissGuestRequest(threadId, request.request_id)}
         >
           <XIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-          Dismiss
+          {t("guest.dismiss")}
         </button>
         <button
           type="button"
@@ -88,7 +86,7 @@ function GuestRequestRow({
           onClick={() => void sendGuestRequest(threadId, request.request_id)}
         >
           <SendIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-          Send
+          {t("guest.send")}
         </button>
       </div>
     </section>

@@ -148,6 +148,7 @@ import {
 import type { FileEntry, FsListing } from "@/gen";
 import { setFollowUpBehavior, setMultilineEnter } from "@/lib/chatSettings";
 import { draftStorageKey, flushDrafts, readThreadDraft, writeThreadDraft } from "@/lib/drafts";
+import { setLocalePreference } from "@/lib/i18n";
 import { Composer } from "./Composer";
 
 const HOST = "host_ui";
@@ -1292,6 +1293,21 @@ describe("Composer / command menu", () => {
     expect(option(/Stop the turn/)).not.toBeNull();
     expect(option(/Open the terminal/)).not.toBeNull();
     expect(option(/New thread/)).not.toBeNull();
+  });
+
+  it("relabels an open menu when the language changes", async () => {
+    renderComposer();
+    typeInto(textarea(), "/");
+    expect(await screen.findByRole("listbox", { name: "Commands" })).toBeTruthy();
+    expect(option(/New thread/)).not.toBeNull();
+
+    try {
+      await act(() => setLocalePreference("es"));
+      expect(option(/Nuevo hilo/)).not.toBeNull();
+      expect(option(/New thread/)).toBeNull();
+    } finally {
+      await act(() => setLocalePreference("system"));
+    }
   });
 
   it("runs the highlighted h4rn action and clears the slash text", async () => {

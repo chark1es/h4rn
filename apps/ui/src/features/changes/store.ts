@@ -9,6 +9,7 @@ import type {
   ThreadSummary,
   TurnId,
 } from "@/gen";
+import { i18n } from "@/lib/i18n";
 
 /**
  * The Changes tab's data layer.
@@ -80,7 +81,7 @@ export async function loadTurnChanges(
     turn_id: turnId,
   });
   if (response.type !== "fs_turn_changes") {
-    throw new Error("The daemon did not return a change set.");
+    throw new Error(i18n.t("thread:changes.errors.noChangeSet"));
   }
   return response.changes;
 }
@@ -128,13 +129,13 @@ export async function revertFile(
     }
   }
   if (!resolved) {
-    return { path: file.path, outcome: "skipped", message: "No diff is available." };
+    return { path: file.path, outcome: "skipped", message: i18n.t("thread:changes.errors.noDiff") };
   }
   if (resolved.binary) {
     return {
       path: file.path,
       outcome: "skipped",
-      message: "Binary files cannot be reverted from here.",
+      message: i18n.t("thread:changes.errors.binary"),
     };
   }
   try {
@@ -147,7 +148,11 @@ export async function revertFile(
       });
       return response.type === "fs_deleted"
         ? { path: file.path, outcome: "deleted" }
-        : { path: file.path, outcome: "failed", message: "The daemon did not delete the file." };
+        : {
+            path: file.path,
+            outcome: "failed",
+            message: i18n.t("thread:changes.errors.notDeleted"),
+          };
     }
     const response = await request({
       type: "fs_write",
@@ -158,13 +163,17 @@ export async function revertFile(
       base_etag: file.after_etag,
     });
     if (response.type !== "fs_written") {
-      return { path: file.path, outcome: "failed", message: "The daemon did not write the file." };
+      return {
+        path: file.path,
+        outcome: "failed",
+        message: i18n.t("thread:changes.errors.notWritten"),
+      };
     }
     return response.result.conflict
       ? {
           path: file.path,
           outcome: "failed",
-          message: "The file changed after the diff loaded. Reload and try again.",
+          message: i18n.t("thread:changes.errors.conflict"),
         }
       : { path: file.path, outcome: "reverted" };
   } catch (error) {

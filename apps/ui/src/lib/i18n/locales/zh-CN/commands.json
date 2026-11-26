@@ -114,13 +114,13 @@
     }
   },
   "shortcutsDialog": {
-    "description": "每个命令都是 Cmd 或 Ctrl 加一个键，因此打字时不会误触发。可在<settings>设置 → 快捷键</settings>中更改。",
+    "description": "命令都是 Cmd 或 Ctrl 加一个键，因此打字时不会误触发。唯一的例外是编辑最新的排队消息，它只在光标位于输入框开头时生效。可在<settings>设置 → 快捷键</settings>中更改。",
     "whileTyping": "输入时",
     "typing": {
       "send": "发送",
       "newLine": "换行",
       "recall": "调出之前的提示词",
-      "forward": "向后浏览提示词",
+      "forward": "调出较新的提示词",
       "mention": "提及文件",
       "command": "运行命令",
       "moveMenu": "在 @ 或 / 菜单中移动",
