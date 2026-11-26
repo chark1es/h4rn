@@ -437,7 +437,7 @@ describe("the pull requests page in another language", () => {
 
     fireEvent.click(await screen.findByRole("button", { name: /Fix the widget/ }));
     await screen.findByRole("heading", { name: /Fix the widget/ });
-    expect(screen.getByText(/alice が 3 時間前に作成/)).toBeTruthy();
+    expect(screen.getByText(/alice が作成（3 時間前）/)).toBeTruthy();
     expect(screen.queryByText(/3h前/)).toBeNull();
   });
 

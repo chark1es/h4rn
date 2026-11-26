@@ -1,0 +1,180 @@
+{
+  "title": "Usage",
+  "refresh": "Refresh usage",
+  "allThreads": "All threads on every machine",
+  "scope": {
+    "label": "Scope",
+    "thread": "Thread",
+    "workspace": "Workspace",
+    "machine": "Machine",
+    "global": "Global"
+  },
+  "range": {
+    "label": "Range",
+    "today": "Today",
+    "14d": "14 days",
+    "30d": "30 days",
+    "all": "All"
+  },
+  "groupBy": {
+    "label": "Group by",
+    "harness": "Harness",
+    "model": "Model"
+  },
+  "metric": {
+    "label": "Chart metric",
+    "tokens": "Tokens",
+    "cost": "Cost"
+  },
+  "chart": {
+    "title": {
+      "tokens": {
+        "hour": {
+          "harness": "Tokens per hour by harness",
+          "model": "Tokens per hour by model"
+        },
+        "day": {
+          "harness": "Tokens per day by harness",
+          "model": "Tokens per day by model"
+        }
+      },
+      "cost": {
+        "hour": {
+          "harness": "Cost per hour by harness",
+          "model": "Cost per hour by model"
+        },
+        "day": {
+          "harness": "Cost per day by harness",
+          "model": "Cost per day by model"
+        }
+      }
+    },
+    "viewTable": "View as table",
+    "viewChart": "View as chart",
+    "empty": "No metered turns in this range yet.",
+    "bar": "{{label}} · {{value}}",
+    "hour": "Hour",
+    "day": "Day",
+    "total": "Total"
+  },
+  "stats": {
+    "tokens": "Tokens",
+    "tokensIn": "{{tokens}} in",
+    "cost": "Cost",
+    "estimate": "estimate",
+    "throughput": "Throughput",
+    "tokPerSec": "tok/s",
+    "turns_one": "{{count, number}} turn",
+    "turns_other": "{{count, number}} turns",
+    "firstToken": "First token",
+    "mean": "mean",
+    "active": "Active",
+    "activeShare": "{{percent}} active",
+    "runtime": "Runtime",
+    "wallTime": "wall time"
+  },
+  "breakdown": {
+    "title": {
+      "harness": "By harness",
+      "model": "By model"
+    },
+    "aside": "Cost uses your price table · estimates, not billing",
+    "empty": "Nothing metered in this range.",
+    "harness": "Harness",
+    "model": "Model",
+    "tokens": "Tokens",
+    "cost": "Cost",
+    "tps": "tok/s",
+    "ttft": "TTFT",
+    "runs": "Runs",
+    "active": "Active"
+  },
+  "activeIdle": {
+    "title": "Active vs idle",
+    "active": "active · {{percent}}",
+    "idle": "{{duration}} idle",
+    "note": "Idle counts time a turn waited on you: approvals, questions, and limits."
+  },
+  "limits": {
+    "title": "Limits",
+    "settings": "Auto-resume settings",
+    "unavailable": "Limits are unavailable right now. {{detail}}",
+    "none": "No limits observed. h4rn reads them from the harness or the proxy when they appear.",
+    "account": "account",
+    "limited": "Limited",
+    "limitedAt": "Limited · {{percent}}",
+    "resets": "Resets {{time}} · in {{countdown}}",
+    "resetsNow": "Resets now",
+    "noReset": "No reset time reported.",
+    "window": {
+      "hours_one": "{{count, number}}-hour",
+      "hours_other": "{{count, number}}-hour",
+      "weekly": "weekly",
+      "daily": "daily",
+      "monthly": "monthly"
+    },
+    "source": {
+      "harness": "reported by the harness",
+      "proxy": "from the proxy",
+      "provider": "from the provider"
+    }
+  },
+  "resets": {
+    "title": "Reset history",
+    "aside": "Newest first",
+    "observed": "Observed",
+    "harness": "Harness",
+    "account": "Account",
+    "reset": "Reset",
+    "source": "Source",
+    "unknown": "unknown",
+    "sourceName": {
+      "harness": "harness",
+      "proxy": "proxy",
+      "provider": "provider"
+    }
+  },
+  "offline": {
+    "title": "Showing the last report",
+    "connecting": "The daemon is connecting. Numbers stay as last read; refresh when it reconnects.",
+    "degraded": "The daemon is degraded. Numbers stay as last read; refresh when it reconnects.",
+    "offline": "The daemon is offline. Numbers stay as last read; refresh when it reconnects."
+  },
+  "error": {
+    "hint": "Try a wider range or refresh."
+  },
+  "footnote": "Usage is counted by h4rn itself; a missing price shows “—” rather than $0.00. Costs are estimates, not billing.",
+  "time": {
+    "now": "now",
+    "unknown": "unknown"
+  },
+  "footer": {
+    "tokens": "{{tokens}} tokens",
+    "cost": "{{cost}} est.",
+    "rate": "{{rate}} tok/s",
+    "ttft": "TTFT {{time}}",
+    "active": "{{duration}} active",
+    "context": "{{percent}} context"
+  },
+  "resume": {
+    "paused": "{{title}} is paused",
+    "hitLimit": "{{harness}} hit a limit.",
+    "hitLimitUnknown": "The harness hit a limit.",
+    "hitLimitAt": "{{harness}} hit a limit at {{time}}. h4rn resumes the turn at {{resumeAt}} with its saved context.",
+    "hitLimitAtUnknown": "The harness hit a limit at {{time}}. h4rn resumes the turn at {{resumeAt}} with its saved context.",
+    "autoResumesAt": "Auto-resumes at {{time}}",
+    "untilAutoResume": "until auto-resume",
+    "lastFailed": "Last attempt failed: {{error}}",
+    "failOver": "Fail over…",
+    "failingOver": "Failing over…",
+    "cancel": "Cancel auto-resume",
+    "cancelShort": "Cancel",
+    "cancelling": "Cancelling…",
+    "resumeNow": "Resume now",
+    "resuming": "Resuming…",
+    "noFailover": "There is no model to fail over to",
+    "resumeOn": "{{harness}} hit its limit. Resume now on:",
+    "resumeOnUnknown": "The harness hit its limit. Resume now on:",
+    "default": "default"
+  }
+}

@@ -41,7 +41,7 @@ import { glyphForThread } from "@/lib/agent";
 import { harnessSeed, machineSeed, threadHarnessLabel } from "@/lib/entities";
 import { latestForkableTurn } from "@/lib/fork";
 import { absoluteDateTime } from "@/lib/format";
-import { formatAge } from "@/lib/i18n";
+import { formatRelativeTime } from "@/lib/i18n";
 import { shortcutText, titleWithShortcut } from "@/lib/keybindings";
 import {
   acknowledgeThread,
@@ -169,7 +169,12 @@ export function ThreadHeader({
   const hostName = host?.name ?? summary.host;
   const stateLabel =
     summary.tab === "done" && summary.agent_state === "done"
-      ? t("header.doneAge", { age: formatAge(summary.last_activity) })
+      ? t("header.doneAge", {
+          when: formatRelativeTime(summary.last_activity, Date.now(), {
+            numeric: "auto",
+            style: "narrow",
+          }),
+        })
       : glyph.label;
 
   const threadMenu = (

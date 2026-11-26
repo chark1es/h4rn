@@ -29,7 +29,7 @@
     "toggleTerminal": "Toggle terminal",
     "terminal": "Terminal",
     "rightPanel": "Right panel",
-    "doneAge": "Done · {{age}}",
+    "doneAge": "Done · {{when}}",
     "actions": "Thread actions",
     "back": "Back to inbox",
     "inbox": "Inbox",

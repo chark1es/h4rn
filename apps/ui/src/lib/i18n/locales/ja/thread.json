@@ -29,7 +29,7 @@
     "toggleTerminal": "ターミナルの表示を切り替え",
     "terminal": "ターミナル",
     "rightPanel": "右パネル",
-    "doneAge": "完了 · {{age}}",
+    "doneAge": "完了 · {{when}}",
     "actions": "スレッドの操作",
     "back": "受信トレイに戻る",
     "inbox": "受信トレイ",
@@ -112,9 +112,9 @@
     "limit": {
       "title": "使用量の上限に達しました。",
       "armed": "自動再開が有効です。",
-      "armedIn": "自動再開が有効です。{{time}} 後に再開します。",
+      "armedIn": "自動再開が有効です。{{time}}後に再開します。",
       "off": "自動再開はオフです。手動で再開してください。",
-      "offAfter": "自動再開はオフです。{{time}} 後に手動で再開してください。"
+      "offAfter": "自動再開はオフです。{{time}}後に手動で再開してください。"
     }
   },
   "rewind": {
@@ -135,7 +135,7 @@
     },
     "passed": "{{passed, number}} 件成功",
     "passedFailed": "{{passed, number}} 件成功 · {{failed, number}} 件失敗",
-    "files_other": "{{count, number}} 個のファイル",
+    "files_other": "{{count, number}} 件のファイル",
     "matches_other": "{{count, number}} 件一致"
   },
   "approval": {
@@ -203,7 +203,7 @@
     "trigger": "harness を切り替え：",
     "title": "harness を切り替え",
     "close": "harness の切り替えを閉じる",
-    "noOther": "このホストには他の harness がインストールされていません。設定 → Harnesses でインストールしてから戻ってください。",
+    "noOther": "このホストには他の harness がインストールされていません。設定 → Harness でインストールしてから戻ってください。",
     "note": "スレッドは履歴、ワークスペース、新しい harness が対応するすべての設定を引き継ぎ、会話の引き継ぎ内容から続行します。",
     "harness": "Harness",
     "model": "モデル",
@@ -238,7 +238,7 @@
     "loading": "変更を読み込み中",
     "emptyTitle": "まだ変更はありません",
     "emptyBody": "このスレッドで {{harness}} が編集したファイルがターンごとにここに表示され、ワンクリックで HEAD との差分を確認できます。",
-    "by_other": "{{host}} の {{harness}} · {{time}} 以降 {{count, number}} 個のファイル",
+    "by_other": "{{host}} の {{harness}} · {{time}} 以降 {{count, number}} 件のファイル",
     "new": "新規",
     "revertFile": "{{name}} を元に戻す",
     "revertAll": "すべて元に戻す…",
@@ -247,13 +247,13 @@
     "ideNote": "ファイルはエディターで開き、エージェントの開始時点と比較されます。上でターンを選ぶと絞り込めます。",
     "confirm": {
       "fileTitle": "{{name}} を元に戻しますか？",
-      "allTitle_other": "{{count, number}} 個のファイルを元に戻しますか？",
+      "allTitle_other": "{{count, number}} 件のファイルを元に戻しますか？",
       "fileBody": "ファイルはこのターンの前の状態に戻ります。ここから元に戻すことはできません。",
-      "allBody_other": "この範囲の {{count, number}} 個のファイルがすべてターン前の状態に戻ります。ここから元に戻すことはできません。",
+      "allBody_other": "この範囲の {{count, number}} 件のファイルがすべてターン前の状態に戻ります。ここから元に戻すことはできません。",
       "confirm": "元に戻す"
     },
-    "reverted_other": "{{count, number}} 個のファイルを元に戻しました。",
-    "revertedSome": "{{total, number}} 個中 {{done, number}} 個のファイルを元に戻しました。",
+    "reverted_other": "{{count, number}} 件のファイルを元に戻しました。",
+    "revertedSome": "{{total, number}} 件中 {{done, number}} 件のファイルを元に戻しました。",
     "failed": "失敗",
     "errors": {
       "noChangeSet": "デーモンから変更セットが返されませんでした。",
@@ -264,7 +264,7 @@
       "conflict": "差分の読み込み後にファイルが変更されました。再読み込みしてもう一度お試しください。"
     },
     "card": {
-      "changed_other": "{{count, number}} 個のファイルを変更",
+      "changed_other": "{{count, number}} 件のファイルを変更",
       "review": "確認",
       "openPanel": "「変更」パネルで開く"
     },
@@ -288,7 +288,7 @@
       "starting": "起動中",
       "running": "実行中",
       "awaiting_approval": "承認が必要",
-      "scheduled": "予定済み",
+      "scheduled": "スケジュール済み",
       "completed": "完了",
       "failed": "失敗",
       "cancelled": "キャンセル済み",
@@ -299,7 +299,7 @@
     "waitingOnYou": "対応待ち",
     "budgetUsed": "予算の使用率 {{percent}}",
     "none": "サブエージェントなし",
-    "count_other": "{{count, number}} 個のサブエージェント",
+    "count_other": "サブエージェント {{count, number}} 件",
     "waiting_other": "{{count, number}} 件が対応待ち",
     "refresh": "サブエージェントを更新",
     "delegate": "委任",
@@ -315,7 +315,7 @@
       "parentDefault": "親の既定",
       "context": "コンテキスト",
       "summary": "要約で引き継ぎ",
-      "files_other": "{{count, number}} 個のファイル",
+      "files_other": "{{count, number}} 件のファイル",
       "none": "なし",
       "workspace": "ワークスペース",
       "worktree": "Worktree",

@@ -5,6 +5,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   activeLocale,
   formatAge,
+  formatClock,
+  formatClockUnit,
   formatDuration,
   formatNumber,
   formatRelativeTime,
@@ -136,6 +138,7 @@ describe("plurals and formatting", () => {
 
     await setLocalePreference("ja");
     expect(formatRelativeTime(now - 5 * 60_000, now)).toBe("5 分前");
+    expect(formatDuration(6 * 3_600_000 + 30 * 60_000)).toBe("6時間30分");
     await setLocalePreference("es");
     expect(formatNumber(12345.5)).toBe("12.345,5");
   });
@@ -156,6 +159,29 @@ describe("plurals and formatting", () => {
     await setLocalePreference("es");
     expect(formatAge(now - 5 * 60_000, now)).toBe("5min");
     expect(formatAge(now, now)).toBe("ahora");
+  });
+
+  it("writes a clock figure with the language's own units, no space inside CJK", async () => {
+    expect(formatClock(125)).toBe("2m 05s");
+    expect(formatClock(5_400)).toBe("1h 30m");
+    expect(formatClock(9)).toBe("9s");
+    expect(formatClockUnit(450, "millisecond")).toBe("450ms");
+
+    await setLocalePreference("es");
+    expect(formatClock(125)).toBe("2min 05s");
+    expect(formatClock(5_400)).toBe("1h 30min");
+
+    await setLocalePreference("ja");
+    expect(formatClock(125)).toBe("2分05秒");
+    expect(formatClock(5_400)).toBe("1時間30分");
+    expect(formatClock(9)).toBe("9秒");
+    expect(formatClockUnit(450, "millisecond")).toBe("450ミリ秒");
+    expect(formatClockUnit(1.7, "second", { minimumFractionDigits: 1 })).toBe("1.7秒");
+
+    await setLocalePreference("zh-CN");
+    expect(formatClock(125)).toBe("2分05秒");
+    expect(formatClock(5_400)).toBe("1小时30分");
+    expect(formatClockUnit(450, "millisecond")).toBe("450毫秒");
   });
 
   it("says how many threads need you in each language's plural", () => {

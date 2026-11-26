@@ -1,0 +1,182 @@
+{
+  "title": "Uso",
+  "refresh": "Actualizar uso",
+  "allThreads": "Todos los hilos de todas las máquinas",
+  "scope": {
+    "label": "Ámbito",
+    "thread": "Hilo",
+    "workspace": "Espacio de trabajo",
+    "machine": "Máquina",
+    "global": "Global"
+  },
+  "range": {
+    "label": "Periodo",
+    "today": "Hoy",
+    "14d": "14 días",
+    "30d": "30 días",
+    "all": "Todo"
+  },
+  "groupBy": {
+    "label": "Agrupar por",
+    "harness": "Harness",
+    "model": "Modelo"
+  },
+  "metric": {
+    "label": "Métrica del gráfico",
+    "tokens": "Tokens",
+    "cost": "Coste"
+  },
+  "chart": {
+    "title": {
+      "tokens": {
+        "hour": {
+          "harness": "Tokens por hora y harness",
+          "model": "Tokens por hora y modelo"
+        },
+        "day": {
+          "harness": "Tokens por día y harness",
+          "model": "Tokens por día y modelo"
+        }
+      },
+      "cost": {
+        "hour": {
+          "harness": "Coste por hora y harness",
+          "model": "Coste por hora y modelo"
+        },
+        "day": {
+          "harness": "Coste por día y harness",
+          "model": "Coste por día y modelo"
+        }
+      }
+    },
+    "viewTable": "Ver como tabla",
+    "viewChart": "Ver como gráfico",
+    "empty": "Aún no hay turnos medidos en este periodo.",
+    "bar": "{{label}} · {{value}}",
+    "hour": "Hora",
+    "day": "Día",
+    "total": "Total"
+  },
+  "stats": {
+    "tokens": "Tokens",
+    "tokensIn": "{{tokens}} de entrada",
+    "cost": "Coste",
+    "estimate": "estimado",
+    "throughput": "Velocidad",
+    "tokPerSec": "tok/s",
+    "turns_one": "{{count, number}} turno",
+    "turns_many": "{{count, number}} turnos",
+    "turns_other": "{{count, number}} turnos",
+    "firstToken": "Primer token",
+    "mean": "media",
+    "active": "Activo",
+    "activeShare": "{{percent}} activo",
+    "runtime": "Duración",
+    "wallTime": "tiempo real"
+  },
+  "breakdown": {
+    "title": {
+      "harness": "Por harness",
+      "model": "Por modelo"
+    },
+    "aside": "El coste usa tu tabla de precios · estimaciones, no facturación",
+    "empty": "Nada medido en este periodo.",
+    "harness": "Harness",
+    "model": "Modelo",
+    "tokens": "Tokens",
+    "cost": "Coste",
+    "tps": "tok/s",
+    "ttft": "TTFT",
+    "runs": "Turnos",
+    "active": "Activo"
+  },
+  "activeIdle": {
+    "title": "Activo frente a inactivo",
+    "active": "activo · {{percent}}",
+    "idle": "{{duration}} inactivo",
+    "note": "El tiempo inactivo es el que un turno esperó por ti: aprobaciones, preguntas y límites."
+  },
+  "limits": {
+    "title": "Límites",
+    "settings": "Ajustes de reanudación automática",
+    "unavailable": "Los límites no están disponibles ahora mismo. {{detail}}",
+    "none": "No se ha observado ningún límite. h4rn los lee del harness o del proxy cuando aparecen.",
+    "account": "cuenta",
+    "limited": "Limitado",
+    "limitedAt": "Limitado · {{percent}}",
+    "resets": "Se restablece: {{time}} · en {{countdown}}",
+    "resetsNow": "Se restablece ahora",
+    "noReset": "No se ha indicado hora de restablecimiento.",
+    "window": {
+      "hours_one": "límite de {{count, number}} hora",
+      "hours_many": "límite de {{count, number}} horas",
+      "hours_other": "límite de {{count, number}} horas",
+      "weekly": "semanal",
+      "daily": "diario",
+      "monthly": "mensual"
+    },
+    "source": {
+      "harness": "informado por el harness",
+      "proxy": "del proxy",
+      "provider": "del proveedor"
+    }
+  },
+  "resets": {
+    "title": "Historial de restablecimientos",
+    "aside": "Los más recientes primero",
+    "observed": "Observado",
+    "harness": "Harness",
+    "account": "Cuenta",
+    "reset": "Restablecimiento",
+    "source": "Origen",
+    "unknown": "desconocido",
+    "sourceName": {
+      "harness": "harness",
+      "proxy": "proxy",
+      "provider": "proveedor"
+    }
+  },
+  "offline": {
+    "title": "Mostrando el último informe",
+    "connecting": "El daemon se está conectando. Las cifras son las de la última lectura; actualiza cuando vuelva a conectarse.",
+    "degraded": "La conexión con el daemon es inestable. Las cifras son las de la última lectura; actualiza cuando vuelva a conectarse.",
+    "offline": "El daemon está desconectado. Las cifras son las de la última lectura; actualiza cuando vuelva a conectarse."
+  },
+  "error": {
+    "hint": "Prueba un periodo más amplio o actualiza."
+  },
+  "footnote": "h4rn cuenta el uso por sí mismo; si falta un precio se muestra «—» en lugar de 0,00 $. Los costes son estimaciones, no facturación.",
+  "time": {
+    "now": "ahora",
+    "unknown": "desconocido"
+  },
+  "footer": {
+    "tokens": "{{tokens}} tokens",
+    "cost": "{{cost}} est.",
+    "rate": "{{rate}} tok/s",
+    "ttft": "TTFT {{time}}",
+    "active": "{{duration}} activo",
+    "context": "{{percent}} de contexto"
+  },
+  "resume": {
+    "paused": "{{title}} está en pausa",
+    "hitLimit": "{{harness}} alcanzó un límite.",
+    "hitLimitUnknown": "El harness alcanzó un límite.",
+    "hitLimitAt": "{{harness}} alcanzó un límite a las {{time}}. h4rn reanuda el turno a las {{resumeAt}} con su contexto guardado.",
+    "hitLimitAtUnknown": "El harness alcanzó un límite a las {{time}}. h4rn reanuda el turno a las {{resumeAt}} con su contexto guardado.",
+    "autoResumesAt": "Reanudación automática: {{time}}",
+    "untilAutoResume": "hasta la reanudación automática",
+    "lastFailed": "Falló el último intento: {{error}}",
+    "failOver": "Conmutar…",
+    "failingOver": "Conmutando…",
+    "cancel": "Cancelar la reanudación automática",
+    "cancelShort": "Cancelar",
+    "cancelling": "Cancelando…",
+    "resumeNow": "Reanudar ahora",
+    "resuming": "Reanudando…",
+    "noFailover": "No hay ningún modelo al que conmutar",
+    "resumeOn": "{{harness}} alcanzó su límite. Reanudar ahora con:",
+    "resumeOnUnknown": "El harness alcanzó su límite. Reanudar ahora con:",
+    "default": "predeterminado"
+  }
+}

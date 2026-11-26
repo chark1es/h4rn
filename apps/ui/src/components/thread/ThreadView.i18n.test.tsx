@@ -1,12 +1,12 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
 import type { ThreadSummary, ToolCall } from "@/gen";
 import { glyphForThread, glyphForToolStatus } from "@/lib/agent";
 import { formatCost, formatTokens, toolStatsLabel } from "@/lib/format";
-import { setLocalePreference } from "@/lib/i18n";
+import { i18n, setLocalePreference } from "@/lib/i18n";
 import { getState, rewindRefusal, store } from "@/lib/store/appStore";
 import { createThreadLog, type StreamTurn } from "@/lib/store/projection";
 import { stoppedNotice } from "@/lib/turn";
@@ -229,6 +229,48 @@ describe("the thread view in another language", () => {
     expect(receipt).toContain("完成于");
     expect(receipt).toContain("2分钟5秒");
     expect(receipt).toContain("1.2万 token");
+  });
+
+  it("writes how long ago a thread finished as words, not a narrow column unit", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-01-01T03:00:00Z"));
+    try {
+      const done = { ...summary, tab: "done", agent_state: "done" } as ThreadSummary;
+      store.setState({ ...getState(), threads: { thread_1: done } });
+      await act(() => setLocalePreference("ja"));
+      render(
+        <ThreadHeader
+          summary={done}
+          host={{ ...hostFixture, online: true }}
+          onBack={() => {}}
+          onToggleTerminal={() => {}}
+        />,
+      );
+      expect(screen.getAllByText("完了 · 3時間前").length).toBeGreaterThan(0);
+      expect(screen.queryByText(/3h/)).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("follows each language's conventions for times, counters and names", async () => {
+    await setLocalePreference("zh-CN");
+    expect(i18n.t("thread:turn.limit.armedIn", { time: "5分钟" })).toBe(
+      "自动恢复已开启，将在 5分钟后恢复。",
+    );
+    expect(i18n.t("thread:harnessSwitch.noOther")).toContain("“设置 → Harness”");
+
+    await setLocalePreference("ja");
+    expect(i18n.t("thread:turn.limit.offAfter", { time: "5分" })).toBe(
+      "自動再開はオフです。5分後に手動で再開してください。",
+    );
+    expect(i18n.t("thread:harnessSwitch.noOther")).toContain("設定 → Harness で");
+    expect(i18n.t("thread:subagents.state.scheduled")).toBe("スケジュール済み");
+    expect(i18n.t("thread:subagents.count", { count: 3 })).toBe("サブエージェント 3 件");
+    expect(i18n.t("thread:tool.files", { count: 2 })).toBe("2 件のファイル");
+
+    await setLocalePreference("es");
+    expect(i18n.t("thread:approval.more", { count: 2 })).toBe("+2 más");
   });
 
   it("says why rewinding is unavailable in the active language", async () => {
