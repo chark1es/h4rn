@@ -6,9 +6,10 @@ import WebKit
 /// The process-wide push state and the notification centre delegate (ADR-052).
 ///
 /// iOS shows an alert from its own notification block, so unlike Android the
-/// app never renders the body. The delegate here only decides whether to keep
-/// the alert quiet (foreground, exact thread, or the switch off) and where a
-/// tap goes.
+/// app never renders the body; the Notification Service Extension
+/// (`native/ios-notifications`) only rewords it in the phone's language
+/// (ADR-055). The delegate here only decides whether to keep the alert quiet
+/// (foreground, exact thread, or the switch off) and where a tap goes.
 public final class H4rnPushCenter: NSObject, UNUserNotificationCenterDelegate {
   public static let shared = H4rnPushCenter()
 

@@ -115,7 +115,14 @@ All notable changes to h4rn are recorded here. The format follows
   thread, a group's "N agents need attention", the Live Update line and the
   notification channel's name. Connect sends the raw thread titles alongside
   its English words, so an older app or an older relay still shows readable
-  English. iOS alerts stay English for now (see `docs/mobile-notifications.md`).
+  English.
+- **iPhone alerts in Chinese, Spanish and Japanese.** A Notification Service
+  Extension words each iOS alert in the phone's language, with the same words
+  as Android, and Connect sends it the project and thread titles Android
+  already gets. An app without the extension, or an extension that runs out of
+  time, still shows Connect's English. Run `scripts/mobile-ios-notifications.sh`
+  after `tauri ios init`; a signed build needs an App ID and profile for
+  `dev.h4rn.app.notifications` (see `docs/mobile-notifications.md`).
 - **Android Live Updates show a running agent.** A separate switch under
   Settings → Notifications → Phone alerts shows each running thread as an
   ongoing notification with its project and whether it is working, waiting for

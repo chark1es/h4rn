@@ -1,0 +1,14 @@
+/*
+  Phone alert words (ADR-054, ADR-055). The Notification Service Extension
+  words each alert from these, in the phone's language. The names and words
+  match Android's push_strings.xml; AlertResourcesTests checks both. The
+  glossary in docs/i18n.md applies. Group titles are in Localizable.stringsdict.
+*/
+
+"push_untitled_thread" = "A thread";
+"push_working" = "Working";
+"push_finished" = "Finished";
+"push_failed" = "Failed";
+"push_needs_approval" = "Needs approval";
+"push_asks_for_input" = "Asks for input";
+"push_stopped_at_limit" = "Stopped at a limit";

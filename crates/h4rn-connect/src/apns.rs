@@ -164,7 +164,7 @@ impl ApnsClient {
             return Err(SendError::Disabled);
         };
         let encoded = payload.to_string();
-        if encoded.len() > 4096 {
+        if encoded.len() > crate::push::APNS_MAX_PAYLOAD_BYTES {
             return Err(SendError::Failed(
                 "the APNs payload is larger than Apple's 4096-byte limit".to_string(),
             ));

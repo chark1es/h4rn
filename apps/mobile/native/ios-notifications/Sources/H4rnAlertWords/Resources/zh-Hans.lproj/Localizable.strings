@@ -1,0 +1,7 @@
+"push_untitled_thread" = "对话";
+"push_working" = "进行中";
+"push_finished" = "已完成";
+"push_failed" = "失败";
+"push_needs_approval" = "需要审批";
+"push_asks_for_input" = "需要你回答";
+"push_stopped_at_limit" = "已达到上限并停止";

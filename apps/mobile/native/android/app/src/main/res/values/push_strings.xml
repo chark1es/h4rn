@@ -3,7 +3,9 @@
   Phone alert words (ADR-054). Connect sends the state, project, count and
   raw thread titles, and the app words the alert from these, in the phone's
   language. Each language has the same names here; PushResourcesTest checks
-  it. The glossary in docs/i18n.md applies.
+  it. The glossary in docs/i18n.md applies. The iOS extension has the same
+  words under the same names (apps/mobile/native/ios-notifications), and its
+  AlertResourcesTests fails when the two differ.
   The file is not strings.xml: the Tauri template owns that one, and
   scripts/mobile-android.sh copies this overlay over the generated project.
 -->

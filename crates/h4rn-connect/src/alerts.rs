@@ -38,9 +38,11 @@ const MAX_LINE_CHARS: usize = 120;
 
 /// The most bytes a grouped alert's `thread_titles` field may add.
 ///
-/// FCM refuses a message over 4096 bytes, and the English `body` already
-/// lists the same titles. A group too large for both drops this field, and the
-/// phone shows Connect's English body instead of losing the whole alert.
+/// FCM and APNs both refuse a message over 4096 bytes, and the English `body`
+/// already lists the same titles. A group too large for both drops this field,
+/// and the phone shows Connect's English body instead of losing the whole
+/// alert. The APNs payload also checks its encoded size, because JSON can
+/// write a title's byte as up to six (`PushMessage::apns_payload`).
 const MAX_GROUP_TITLES_BYTES: usize = 1024;
 
 /// One notification Connect decided to send.
@@ -1139,6 +1141,38 @@ mod tests {
         assert_eq!(data["count"], "4");
         assert_eq!(data["state"], "failed");
         assert_eq!(data["title"], "4 agents finished");
+    }
+
+    #[test]
+    fn an_iphone_gets_the_same_wording_fields_as_android() {
+        // The extension words an iOS alert from the same fields, and the
+        // English alert stays in `aps.alert` (ADR-055).
+        let ios = |alert: &PushAlert| {
+            PushMessage {
+                token: "apns-token",
+                platform: PushPlatform::Ios,
+                package_name: None,
+                data: alert.data(),
+            }
+            .apns_payload()
+        };
+        let single = ios(&single(&activity(AgentAlertState::Completed, ""), "proj"));
+        assert_eq!(single["thread_title"], "");
+        assert_eq!(single["project"], "proj");
+        assert_eq!(single["state"], "completed");
+        assert_eq!(single["aps"]["alert"]["title"], "A thread");
+        assert_eq!(single["aps"]["alert"]["body"], "proj · Finished");
+        assert!(single.get("thread_titles").is_none());
+
+        let alerts = group_activities(&[
+            activity(AgentAlertState::Approval, "one"),
+            activity(AgentAlertState::Input, ""),
+        ]);
+        let group = ios(&alerts[0]);
+        assert_eq!(group["thread_titles"], "one\n");
+        assert_eq!(group["count"], "2");
+        assert_eq!(group["state"], "input");
+        assert_eq!(group["aps"]["alert"]["title"], "2 agents need attention");
     }
 
     #[test]
