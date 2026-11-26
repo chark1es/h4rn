@@ -515,10 +515,12 @@ function LimitRow({ limit }: { limit: LimitStatus }) {
       </div>
       <div className="q-faint num" style={{ fontSize: 12, marginTop: 5 }}>
         {limit.reset_at
-          ? t("limits.resets", {
-              time: absoluteTime(limit.reset_at),
-              countdown: countdownPrecise(limit.reset_at, now),
-            })
+          ? Date.parse(limit.reset_at) <= now
+            ? t("limits.resetsNow")
+            : t("limits.resets", {
+                time: absoluteTime(limit.reset_at),
+                countdown: countdownPrecise(limit.reset_at, now),
+              })
           : (limit.message ?? t("limits.noReset"))}
       </div>
     </div>

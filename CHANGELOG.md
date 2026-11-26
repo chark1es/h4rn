@@ -52,8 +52,10 @@ All notable changes to h4rn are recorded here. The format follows
   tables, limits and reset history, the auto-resume cards and the usage footer
   under the composer follow the Language choice. Token counts, costs,
   percentages, durations and dates use the language's own formats (the footer
-  now writes tokens like the receipt, "12.4K"); model ids, harness names and
-  provider messages stay as sent.
+  now writes tokens like the receipt, "12.4K"; Chinese and Japanese durations
+  read "2分05秒" with no stray spaces; costs keep a plain "$" in every
+  language). A limit whose reset time has passed says "Resets now". Model ids,
+  harness names and provider messages stay as sent.
 - **Android Live Updates show a running agent.** A separate switch under
   Settings → Notifications → Phone alerts shows each running thread as an
   ongoing notification with its project and whether it is working, waiting for

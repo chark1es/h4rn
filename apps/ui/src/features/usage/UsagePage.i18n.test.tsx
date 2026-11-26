@@ -185,7 +185,7 @@ describe("the usage page in another language", () => {
     await renderPage();
     expect(screen.getByRole("heading", { name: "使用量" })).toBeTruthy();
     expect(screen.getByRole("heading", { name: "harness 別の 1 日あたりのトークン" })).toBeTruthy();
-    expect(screen.getByRole("tab", { name: "14 日", selected: true })).toBeTruthy();
+    expect(screen.getByRole("tab", { name: "14 日間", selected: true })).toBeTruthy();
     expect(screen.getByRole("tablist", { name: "期間" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "使用量を更新" })).toBeTruthy();
     // The token stat sets the compact unit apart: 1.2 and 万, never "12.4k".
@@ -194,9 +194,16 @@ describe("the usage page in another language", () => {
     expect(screen.getByText("3 ターン")).toBeTruthy();
     expect(screen.getByText("5 時間")).toBeTruthy();
     expect(screen.getByText("プロキシ")).toBeTruthy();
-    // Japanese durations use its own units, not a Latin "2m05s".
-    expect(screen.getAllByText("2 分05 秒").length).toBeGreaterThan(0);
+    // Japanese durations use its own units with no space inside, never a Latin
+    // "2m05s" or a spaced "2 分05 秒": the countdown, the stats and the
+    // breakdown's Active column.
+    expect(document.querySelector(".cd")?.textContent).toBe("2分05秒");
+    expect(screen.getAllByRole("cell", { name: "2分05秒" }).length).toBeGreaterThan(0);
+    expect(screen.getAllByRole("cell", { name: "640ミリ秒" }).length).toBeGreaterThan(0);
+    expect(screen.getByText(/あと 2時間05分$/)).toBeTruthy();
     expect(screen.queryByText(/\d+m\d+s/)).toBeNull();
+    expect(screen.queryByText(/\d [分秒]|\d 時間\d/)).toBeNull();
+    expect(screen.queryByText(/\d+\s?ms\b/)).toBeNull();
     expect(screen.getByText("Fix the parser は一時停止中です")).toBeTruthy();
     expect(screen.getByRole("button", { name: "今すぐ再開" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "自動再開をキャンセル" })).toBeTruthy();
@@ -218,8 +225,51 @@ describe("the usage page in another language", () => {
     expect(screen.getByRole("heading", { name: "Por harness" })).toBeTruthy();
     expect(screen.getByRole("columnheader", { name: "Coste" })).toBeTruthy();
     expect(screen.getByText("3 turnos")).toBeTruthy();
-    expect(screen.getByText("de 5 horas")).toBeTruthy();
-    expect(screen.getAllByText("1,25 US$").length).toBeGreaterThan(0);
+    expect(screen.getByText("límite de 5 horas")).toBeTruthy();
+    expect(screen.getAllByText("1,25 $").length).toBeGreaterThan(0);
+    expect(screen.queryByText(/US\$/)).toBeNull();
+  });
+
+  it("words durations in Chinese without a space or a Latin unit", async () => {
+    await act(() => setLocalePreference("zh-CN"));
+    await renderPage();
+    expect(document.querySelector(".cd")?.textContent).toBe("2分05秒");
+    expect(screen.getAllByRole("cell", { name: "2分05秒" }).length).toBeGreaterThan(0);
+    expect(screen.getAllByRole("cell", { name: "640毫秒" }).length).toBeGreaterThan(0);
+    expect(screen.getByText(/还有 2小时05分$/)).toBeTruthy();
+    expect(screen.queryByText(/分钟/)).toBeNull();
+    expect(screen.queryByText(/\d+\s?ms\b/)).toBeNull();
+  });
+
+  it("says a limit resets now once its reset time has passed", async () => {
+    mock.responses.get_limits = {
+      type: "limits",
+      report: { limits: [{ ...limit, reset_at: "2026-03-10T11:59:00Z" }] },
+    };
+    await renderPage();
+    expect(screen.getByText("Resets now")).toBeTruthy();
+    expect(screen.queryByText(/in now/)).toBeNull();
+    cleanup();
+
+    await act(() => setLocalePreference("ja"));
+    await renderPage();
+    expect(screen.getByText("まもなくリセット")).toBeTruthy();
+    expect(screen.queryByText(/あと 今/)).toBeNull();
+  });
+
+  it("rewords the open page, its tables and its figures when the language changes", async () => {
+    await renderPage();
+    expect(screen.getByRole("columnheader", { name: "Active" })).toBeTruthy();
+    expect(screen.getAllByRole("cell", { name: "2m 05s" }).length).toBeGreaterThan(0);
+    expect(screen.getByText("K")).toBeTruthy();
+
+    await act(() => setLocalePreference("ja"));
+    expect(screen.getByRole("heading", { name: "使用量" })).toBeTruthy();
+    expect(screen.getByRole("columnheader", { name: "アクティブ" })).toBeTruthy();
+    expect(screen.queryByRole("columnheader", { name: "Active" })).toBeNull();
+    expect(screen.getAllByRole("cell", { name: "2分05秒" }).length).toBeGreaterThan(0);
+    expect(screen.queryAllByRole("cell", { name: "2m 05s" })).toHaveLength(0);
+    expect(screen.getByText("万")).toBeTruthy();
   });
 });
 
@@ -233,7 +283,14 @@ describe("the usage footer under the composer", () => {
     await act(() => setLocalePreference("zh-CN"));
     render(<UsageFooter threadId="thread_1" />);
     expect(screen.getByText("1.2万 token")).toBeTruthy();
-    expect(screen.getByText("活跃 2分钟05秒")).toBeTruthy();
+    expect(screen.getByText("活跃 2分05秒")).toBeTruthy();
+    expect(screen.getByText("TTFT 640毫秒")).toBeTruthy();
     expect(screen.getByText("上下文 40%")).toBeTruthy();
+    cleanup();
+
+    await act(() => setLocalePreference("ja"));
+    render(<UsageFooter threadId="thread_1" />);
+    expect(screen.getByText("アクティブ 2分05秒")).toBeTruthy();
+    expect(screen.getByText("TTFT 640ミリ秒")).toBeTruthy();
   });
 });

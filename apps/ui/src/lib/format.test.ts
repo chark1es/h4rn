@@ -1,6 +1,24 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
-import { toolStatsLabel } from "./format";
+import { formatCost, toolStatsLabel } from "./format";
+import { setLocalePreference } from "./i18n";
+
+afterEach(async () => {
+  await setLocalePreference("en");
+});
+
+describe("formatCost", () => {
+  it("writes the narrow dollar sign in every language, as the chart axis does", async () => {
+    expect(formatCost(1_230_000)).toBe("$1.23");
+    expect(formatCost(0)).toBe("—");
+    await setLocalePreference("zh-CN");
+    expect(formatCost(1_230_000)).toBe("$1.23");
+    await setLocalePreference("es");
+    expect(formatCost(1_230_000)).toBe("1,23\u00a0$");
+    await setLocalePreference("ja");
+    expect(formatCost(1_230_000)).toBe("$1.23");
+  });
+});
 
 describe("toolStatsLabel", () => {
   it("passes a diffstat through for the +N −M pair", () => {

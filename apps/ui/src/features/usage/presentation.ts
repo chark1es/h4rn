@@ -1,5 +1,12 @@
 import type { UsageBucketPoint } from "@/gen";
-import { activeLocale, formatDateTime, formatList, formatNumber, i18n } from "@/lib/i18n";
+import {
+  activeLocale,
+  formatClock,
+  formatClockUnit,
+  formatDateTime,
+  formatNumber,
+  i18n,
+} from "@/lib/i18n";
 
 const SERIES_COLORS = ["var(--s1)", "var(--s2)", "var(--s3)", "var(--s4)"];
 
@@ -13,47 +20,19 @@ export function seriesColor(key: string, index: number): string {
   return SERIES_COLORS[index % SERIES_COLORS.length] ?? "var(--fg-2)";
 }
 
-type TimeUnit = "millisecond" | "second" | "minute" | "hour";
-
-/**
- * How wide a unit reads in the usage figures. Each catalogue picks it: "2h 5m"
- * in English, but Japanese takes the short form ("2 時間5 分"), never a Latin
- * "2h5m".
- */
-function unitDisplay(): "narrow" | "short" {
-  return i18n.t("usage:unitDisplay") === "short" ? "short" : "narrow";
-}
-
-function unit(value: number, name: TimeUnit, options: Intl.NumberFormatOptions = {}): string {
-  return formatNumber(value, { style: "unit", unit: name, unitDisplay: unitDisplay(), ...options });
-}
-
-/** Two units, the second padded so a ticking figure keeps its width: "2m 05s". */
-function clock(seconds: number): string {
-  const hours = Math.floor(seconds / 3600);
-  const minutes = Math.floor((seconds % 3600) / 60);
-  const rest = seconds % 60;
-  const pair = (major: string, minor: string) => formatList([major, minor], "unit", "narrow");
-  if (hours > 0) {
-    return pair(unit(hours, "hour"), unit(minutes, "minute", { minimumIntegerDigits: 2 }));
-  }
-  if (minutes > 0) {
-    return pair(unit(minutes, "minute"), unit(rest, "second", { minimumIntegerDigits: 2 }));
-  }
-  return unit(rest, "second");
-}
-
 /** A length of time for a stat or a table cell: "9s", "2m 05s", "1h 30m". */
 export function formatSpan(ms: number): string {
-  if (!Number.isFinite(ms) || ms <= 0) return unit(0, "second");
-  return clock(Math.round(ms / 1000));
+  return formatClock(ms / 1000);
 }
 
 /** Milliseconds below a second, seconds with one decimal above it. */
 export function firstToken(ms: number): string {
   if (!Number.isFinite(ms) || ms <= 0) return "—";
-  if (ms < 1000) return unit(Math.round(ms), "millisecond");
-  return unit(ms / 1000, "second", { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+  if (ms < 1000) return formatClockUnit(Math.round(ms), "millisecond");
+  return formatClockUnit(ms / 1000, "second", {
+    minimumFractionDigits: 1,
+    maximumFractionDigits: 1,
+  });
 }
 
 /** A share already rounded to a whole percent (0–100), written the language's way. */
@@ -130,5 +109,5 @@ export function countdownPrecise(iso: string | null, now = Date.now()): string {
   if (!Number.isFinite(then)) return i18n.t("usage:time.unknown");
   const delta = then - now;
   if (delta <= 0) return i18n.t("usage:time.now");
-  return clock(Math.ceil(delta / 1000));
+  return formatClock(Math.ceil(delta / 1000));
 }

@@ -37,49 +37,23 @@ export function absoluteDateTime(iso: string): string {
   }).format(date);
 }
 
-export function duration(ms: number): string {
-  if (!Number.isFinite(ms) || ms <= 0) return "0s";
-  const seconds = Math.round(ms / 1000);
-  if (seconds < 60) return `${seconds}s`;
-  const minutes = Math.floor(seconds / 60);
-  const rest = seconds % 60;
-  if (minutes < 60) return `${minutes}m ${rest.toString().padStart(2, "0")}s`;
-  const hours = Math.floor(minutes / 60);
-  return `${hours}h ${(minutes % 60).toString().padStart(2, "0")}m`;
-}
-
-export function countdown(iso: string, now = Date.now()): string {
-  const then = Date.parse(iso);
-  if (!Number.isFinite(then)) return "reset time unknown";
-  const delta = then - now;
-  if (delta <= 0) return "now";
-  if (delta < MINUTE) return `${Math.ceil(delta / 1000)}s`;
-  if (delta < HOUR) return `${Math.ceil(delta / MINUTE)}m`;
-  const hours = Math.floor(delta / HOUR);
-  const minutes = Math.ceil((delta % HOUR) / MINUTE);
-  return `${hours}h ${minutes.toString().padStart(2, "0")}m`;
-}
-
 /** A token count, compact for the active language ("12.3K", "1.2万"). */
 export function formatTokens(count: number): string {
   return formatNumber(count, { notation: "compact", maximumFractionDigits: 1 });
 }
 
-/** An estimated cost in US dollars, written the way the active language writes money. */
+/**
+ * An estimated cost in US dollars, written the way the active language writes
+ * money. The symbol is the narrow "$" in every language ("1,23 $", not
+ * "1,23 US$"), the same as the usage chart's axis.
+ */
 export function formatCost(micros: number): string {
   if (micros <= 0) return "—";
-  return formatNumber(micros / 1_000_000, { style: "currency", currency: "USD" });
-}
-
-export function tokens(count: number): string {
-  if (count >= 1_000_000) return `${(count / 1_000_000).toFixed(2)}M`;
-  if (count >= 1_000) return `${(count / 1_000).toFixed(1)}k`;
-  return `${count}`;
-}
-
-export function cost(micros: number): string {
-  if (micros <= 0) return "—";
-  return `$${(micros / 1_000_000).toFixed(2)}`;
+  return formatNumber(micros / 1_000_000, {
+    style: "currency",
+    currency: "USD",
+    currencyDisplay: "narrowSymbol",
+  });
 }
 
 /** The daemon computes tok/s (tool time excluded); this only formats it. */

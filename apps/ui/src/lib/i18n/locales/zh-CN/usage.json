@@ -1,5 +1,4 @@
 {
-  "unitDisplay": "narrow",
   "title": "用量",
   "refresh": "刷新用量",
   "allThreads": "所有机器上的全部对话",
@@ -104,6 +103,7 @@
     "limited": "已受限",
     "limitedAt": "已受限 · {{percent}}",
     "resets": "{{time}} 重置 · 还有 {{countdown}}",
+    "resetsNow": "即将重置",
     "noReset": "未报告重置时间。",
     "window": {
       "hours_other": "{{count, number}} 小时",
