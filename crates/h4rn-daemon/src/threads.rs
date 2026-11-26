@@ -8886,23 +8886,39 @@ impl ThreadManager {
     /// files; every other one is put back from its durable backup. Nothing is
     /// touched until the journal can be read and its recorded folder is still
     /// the thread's own worktree, so a moved checkout never receives another
-    /// thread's bytes. Runs once at startup, after the snapshot store is
-    /// installed.
+    /// thread's bytes. A journal that cannot be read is kept untouched, never
+    /// rolled back on a guess: the person is told which thread was left alone
+    /// and the daemon keeps booting. Runs once at startup, after the snapshot
+    /// store is installed.
     pub async fn recover_pending_restores(&self) -> Result<(), ManagerError> {
         let Some(store) = self.inner.snapshots.get().cloned() else {
             return Ok(());
         };
-        for restore_id in crate::rewind::pending_restore_ids(&store) {
+        for journal in crate::rewind::pending_journals(&store) {
+            let restore_id = journal.restore_id().to_owned();
             // An unreadable journal is not an uncommitted one. Refuse to roll
             // anything back, keep every journal, and surface the failure: the
-            // daemon must not guess about bytes it cannot read.
-            let pending = crate::rewind::read_pending_restore(&store, &restore_id).map_err(
-                |error| {
-                    ManagerError::Internal(format!(
-                        "the restore journal {restore_id} cannot be read, so no interrupted restore was rolled back: {error}"
-                    ))
-                },
-            )?;
+            // daemon must not guess about bytes it cannot read, and one bad
+            // journal must not keep the whole daemon down.
+            let pending = match crate::rewind::read_pending_journal(&journal) {
+                Ok(pending) => pending,
+                Err(error) => {
+                    tracing::error!(
+                        %restore_id,
+                        thread_id = ?journal.thread_id(),
+                        %error,
+                        "a restore journal cannot be read; leaving its files and journal alone"
+                    );
+                    self.notice_restore_left_alone(
+                        journal.thread_id().cloned(),
+                        format!(
+                            "an interrupted file restore could not be read, so nothing was rolled back: {error}"
+                        ),
+                    )
+                    .await;
+                    continue;
+                }
+            };
             let thread_id = pending.thread_id().clone();
             // The journal's folder must still be the checkout the thread was
             // created in: the same git dir and common dir. A moved worktree
@@ -8919,6 +8935,12 @@ impl ThreadManager {
                         %error,
                         "an interrupted restore's thread cannot be loaded; leaving its files and journal alone"
                     );
+                    self.notice_restore_left_alone(
+                        Some(thread_id.clone()),
+                        "an interrupted file restore belongs to a thread that cannot be loaded, so its files were left alone"
+                            .into(),
+                    )
+                    .await;
                     continue;
                 }
             };
@@ -8930,41 +8952,88 @@ impl ThreadManager {
                     workspace = %pending.workspace().display(),
                     "an interrupted restore's folder is no longer the thread's worktree; leaving its files and journal alone"
                 );
+                self.notice_restore_left_alone(
+                    Some(thread_id.clone()),
+                    format!(
+                        "an interrupted file restore's folder is no longer this thread's worktree, so nothing was rolled back in {}",
+                        pending.workspace().display()
+                    ),
+                )
+                .await;
                 continue;
             }
             // Whether the cut committed is in the thread's journal. A journal
             // that cannot be read answers nothing, so the files are left
             // alone rather than rolled back on a guess.
-            let committed = self
-                .inner
-                .journal
-                .read_wire_since(&thread_id, 0)
-                .await
-                .map(|events| {
-                    events.iter().any(|wire| {
-                        matches!(
-                            &wire.event,
-                            Event::ThreadRewound {
-                                restore_id: Some(id),
-                                ..
-                            } if id == &restore_id
-                        )
-                    })
-                })
-                .map_err(|error| {
-                    ManagerError::Internal(format!(
-                        "the journal for {thread_id} cannot be read, so the interrupted restore {restore_id} was left alone: {error}"
-                    ))
-                })?;
+            let committed = match self.inner.journal.read_wire_since(&thread_id, 0).await {
+                Ok(events) => events.iter().any(|wire| {
+                    matches!(
+                        &wire.event,
+                        Event::ThreadRewound {
+                            restore_id: Some(id),
+                            ..
+                        } if id == &restore_id
+                    )
+                }),
+                Err(error) => {
+                    tracing::error!(
+                        %restore_id,
+                        %thread_id,
+                        %error,
+                        "the thread's journal cannot be read; leaving its interrupted restore alone"
+                    );
+                    self.notice_restore_left_alone(
+                        Some(thread_id.clone()),
+                        "an interrupted file restore could not be checked against the thread's history, so nothing was rolled back"
+                            .into(),
+                    )
+                    .await;
+                    continue;
+                }
+            };
             if let Err(error) = crate::rewind::recover_restore(&store, &pending, committed) {
                 tracing::error!(
                     %restore_id,
                     %error,
                     "could not recover an interrupted file restore; its journal is kept for the next startup"
                 );
+                self.notice_restore_left_alone(
+                    Some(thread_id.clone()),
+                    "an interrupted file restore was left alone and will be retried at the next start"
+                        .into(),
+                )
+                .await;
             }
         }
         Ok(())
+    }
+
+    /// Shows a durable error row on a thread whose interrupted restore was not
+    /// finished, so the person is not left with a silently half-restored
+    /// worktree.
+    async fn notice_restore_left_alone(&self, thread_id: Option<ThreadId>, message: String) {
+        let Some(thread_id) = thread_id else {
+            // A journal that cannot be read cannot name a thread, so there is
+            // no transcript to put the row in; the log line above is the only
+            // place left to say it.
+            return;
+        };
+        let Ok(handle) = self.inner.handle(&thread_id).await else {
+            return;
+        };
+        let mut record = handle.lock().await;
+        let wire = vec![Event::Error {
+            thread_id: Some(thread_id),
+            message,
+            hint: Some(
+                "The restore journal is kept on disk; check that the worktree is writable and restart the app"
+                    .into(),
+            ),
+            retryable: true,
+        }];
+        if let Err(error) = self.inner.emit(&mut record, Vec::new(), wire).await {
+            tracing::warn!(%error, "could not show the unreadable restore journal's notice");
+        }
     }
 
     /// Every distinct workspace path any thread has used.
@@ -12636,8 +12705,14 @@ impl Inner {
             if let Some((workspace, thread)) = checkpoint {
                 let turn = dispatch.turn_id.clone();
                 let _ = tokio::task::spawn_blocking(move || {
-                    if let Some(commit) = crate::worktrees::git::checkpoint_commit(&workspace) {
-                        let _ = store.record_checkpoint(&workspace, &thread, &turn, &commit);
+                    if let Some(checkpoint) = crate::worktrees::git::checkpoint_commit(&workspace) {
+                        let _ = store.record_checkpoint(
+                            &workspace,
+                            &thread,
+                            &turn,
+                            &checkpoint.tree,
+                            &checkpoint.ignored,
+                        );
                     }
                 })
                 .await;
@@ -42592,6 +42667,60 @@ mod tests {
             crate::rewind::pending_restore_ids(&store),
             vec![restore_id],
             "the journal is kept for a checkout that can still be verified"
+        );
+        manager.shutdown().await;
+    }
+
+    /// One unreadable restore journal is reported on its thread and kept on
+    /// disk, and the daemon keeps booting: it must not guess about bytes it
+    /// cannot read, nor stay down over one journal.
+    #[tokio::test]
+    async fn an_unreadable_restore_journal_does_not_stop_the_daemon() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let data = tempfile::tempdir().expect("data");
+        let journal: Arc<dyn Journal> =
+            Arc::new(SqliteJournal::in_memory().await.expect("journal"));
+        let host = HostId::new("host_test");
+        let manager =
+            open_test_manager_with_journal(FakeHarness::new(), host.clone(), journal.clone()).await;
+        let store = Arc::new(crate::fs::SnapshotStore::new(data.path()).expect("store"));
+        manager.set_snapshot_store(Arc::clone(&store));
+        let mut events = manager.subscribe();
+        let created = manager
+            .create_thread(new_thread(host, workspace.path(), "A"))
+            .await
+            .expect("create");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+
+        let path = store
+            .restore_journal_path(&created.thread_id, "restore_broken")
+            .expect("journal path");
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("restores dir");
+        std::fs::write(&path, b"not json").expect("broken journal");
+
+        manager
+            .recover_pending_restores()
+            .await
+            .expect("recovery does not abort the daemon");
+        assert_eq!(
+            crate::rewind::pending_restore_ids(&store),
+            vec!["restore_broken".to_owned()],
+            "the unreadable journal is kept, never deleted"
+        );
+        let wire = journal
+            .read_wire_since(&created.thread_id, 0)
+            .await
+            .expect("wire");
+        assert!(
+            wire.iter().any(|wire| matches!(
+                &wire.event,
+                Event::Error {
+                    thread_id: Some(id),
+                    message,
+                    ..
+                } if id == &created.thread_id && message.contains("restore")
+            )),
+            "the person sees a notice on the thread"
         );
         manager.shutdown().await;
     }

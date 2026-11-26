@@ -1109,7 +1109,21 @@ pub fn is_linked_worktree(workspace: &Path) -> bool {
     norm(&workspace.join(dir)) != norm(&workspace.join(common))
 }
 
-/// The tree of the whole worktree at this instant, as a git tree hash.
+/// One complete pre-turn checkpoint of a worktree.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Checkpoint {
+    /// The tree of the whole worktree, as a git tree hash.
+    pub tree: String,
+    /// Repository-relative paths (or folders, with a trailing `/`) git ignored
+    /// when the tree was taken, sorted.
+    ///
+    /// Ignored content is outside the tree by design, so its absence from the
+    /// tree says nothing about whether it existed. Recording what was ignored
+    /// keeps a restore from deleting it on the tree's word.
+    pub ignored: Vec<String>,
+}
+
+/// The whole worktree at this instant, as a checkpoint.
 ///
 /// The tree is built in a scratch copy of the checkout's index with
 /// `git add -A`, so it covers every tracked file and every untracked file git
@@ -1120,9 +1134,10 @@ pub fn is_linked_worktree(workspace: &Path) -> bool {
 /// checkpoint to rewind to.
 ///
 /// Ignored files are outside the tree by design (they are build output, not
-/// work); an ignored path a tool named is still covered by the turn's
-/// per-path capture.
-pub fn checkpoint_commit(workspace: &Path) -> Option<String> {
+/// work), so the checkpoint records which ignored paths were present (see
+/// [`Checkpoint::ignored`]). A checkpoint whose ignored listing cannot be read
+/// is `None`: without it, a restore could delete an ignored file that existed.
+pub fn checkpoint_commit(workspace: &Path) -> Option<Checkpoint> {
     run_with_timeout(workspace, ["rev-parse", "HEAD"], OBSERVATION_GIT_TIMEOUT)
         .ok()
         .filter(|head| !head.is_empty())?;
@@ -1143,7 +1158,32 @@ pub fn checkpoint_commit(workspace: &Path) -> Option<String> {
     )
     .ok()?;
     let tree = tree.trim().to_owned();
-    (!tree.is_empty()).then_some(tree)
+    let ignored = ignored_paths(workspace).ok()?;
+    (!tree.is_empty()).then_some(Checkpoint { tree, ignored })
+}
+
+/// Repository-relative paths git ignores in this worktree, sorted.
+///
+/// `--directory` collapses an ignored folder to one entry ending in `/`, so a
+/// build directory with thousands of objects costs one line. Names only: the
+/// checkpoint must not depend on reading the ignored content.
+fn ignored_paths(workspace: &Path) -> Result<Vec<String>, String> {
+    let raw = run_bytes_with_timeout(
+        workspace,
+        [
+            "ls-files",
+            "-z",
+            "--others",
+            "--ignored",
+            "--exclude-standard",
+            "--directory",
+            "--full-name",
+        ],
+        OBSERVATION_GIT_TIMEOUT,
+    )?;
+    let mut paths = nul_paths(&raw)?;
+    paths.sort();
+    Ok(paths)
 }
 
 /// One git path inside the checkout's git dir (`--git-path`).
@@ -1211,21 +1251,40 @@ pub fn checkpoint_changes(
     workspace: &Path,
     checkpoint: &str,
 ) -> Result<Vec<CheckpointChange>, String> {
+    // Rename detection would report a staged rename as only its new path, and
+    // restoring that path would delete the file without putting the old one
+    // back. Asking for every path on both sides undoes a rename as the old path
+    // restored plus the new path removed.
     let changed = run_bytes_with_timeout(
         workspace,
-        ["diff", "--name-only", "-z", checkpoint, "--"],
+        [
+            "-c",
+            "diff.renames=false",
+            "diff",
+            "--no-renames",
+            "--name-only",
+            "-z",
+            checkpoint,
+            "--",
+        ],
         OBSERVATION_GIT_TIMEOUT,
     )?;
     let untracked = run_bytes_with_timeout(
         workspace,
-        ["ls-files", "-z", "--others", "--exclude-standard"],
+        [
+            "ls-files",
+            "-z",
+            "--others",
+            "--exclude-standard",
+            "--full-name",
+        ],
         OBSERVATION_GIT_TIMEOUT,
     )?;
     let tree = tree_entries(workspace, checkpoint)?;
     let mut plan: BTreeMap<String, Option<CheckpointValue>> = BTreeMap::new();
     for path in nul_paths(&changed)? {
         let value = match tree.get(&path) {
-            Some(entry) => Some(checkpoint_value(workspace, &path, entry)?),
+            Some(entry) => Some(checkpoint_value(workspace, checkpoint, &path, entry)?),
             None => None,
         };
         plan.insert(path, value);
@@ -1235,10 +1294,11 @@ pub fn checkpoint_changes(
             // Git reports a path in the tree but untracked in the checkout as
             // deleted even when its bytes still match. Only a real difference
             // belongs in the plan.
-            if plan.contains_key(&path) || same_as_checkpoint(workspace, &path, entry)? {
+            if plan.contains_key(&path) || same_as_checkpoint(workspace, checkpoint, &path, entry)?
+            {
                 continue;
             }
-            let value = Some(checkpoint_value(workspace, &path, entry)?);
+            let value = Some(checkpoint_value(workspace, checkpoint, &path, entry)?);
             plan.insert(path, value);
         } else {
             plan.entry(path).or_insert(None);
@@ -1297,10 +1357,15 @@ fn tree_entries(workspace: &Path, checkpoint: &str) -> Result<BTreeMap<String, T
 
 /// The checkpoint's state for one tree entry.
 ///
-/// A missing blob is an error: restoring something else (a deletion, an empty
-/// file) would not be the checkpoint's bytes.
+/// A regular file is read through `--filters`, the way a checkout would write
+/// it: the stored object is the clean form, so a CRLF file would come back with
+/// bare newlines and an LFS or smudge-filtered file would come back as its
+/// pointer. A filter that cannot run is an error, never a raw blob: restoring
+/// something else (a deletion, a pointer file) would not be the checkpoint's
+/// bytes.
 fn checkpoint_value(
     workspace: &Path,
+    checkpoint: &str,
     path: &str,
     entry: &TreeEntry,
 ) -> Result<CheckpointValue, String> {
@@ -1309,26 +1374,41 @@ fn checkpoint_value(
             "{path} is a submodule, and a submodule pointer cannot be put back"
         ));
     }
+    if entry.mode == MODE_SYMLINK {
+        let bytes = run_bytes_with_timeout(
+            workspace,
+            ["cat-file", "blob", &entry.object],
+            OBSERVATION_GIT_TIMEOUT,
+        )
+        .map_err(|error| format!("could not read {path} from the checkpoint: {error}"))?;
+        return Ok(CheckpointValue::Symlink {
+            target: bytes_to_path(bytes)?,
+        });
+    }
     let bytes = run_bytes_with_timeout(
         workspace,
-        ["cat-file", "blob", &entry.object],
+        [
+            "cat-file",
+            "--filters",
+            &format!("--path={path}"),
+            &format!("{checkpoint}:{path}"),
+        ],
         OBSERVATION_GIT_TIMEOUT,
     )
     .map_err(|error| format!("could not read {path} from the checkpoint: {error}"))?;
-    if entry.mode == MODE_SYMLINK {
-        Ok(CheckpointValue::Symlink {
-            target: bytes_to_path(bytes)?,
-        })
-    } else {
-        Ok(CheckpointValue::File {
-            bytes,
-            executable: entry.mode == MODE_EXECUTABLE,
-        })
-    }
+    Ok(CheckpointValue::File {
+        bytes,
+        executable: entry.mode == MODE_EXECUTABLE,
+    })
 }
 
 /// Whether the path on disk still matches the checkpoint entry.
-fn same_as_checkpoint(workspace: &Path, path: &str, entry: &TreeEntry) -> Result<bool, String> {
+fn same_as_checkpoint(
+    workspace: &Path,
+    checkpoint: &str,
+    path: &str,
+    entry: &TreeEntry,
+) -> Result<bool, String> {
     let absolute = workspace.join(path);
     let meta = match std::fs::symlink_metadata(&absolute) {
         Ok(meta) => meta,
@@ -1343,7 +1423,7 @@ fn same_as_checkpoint(workspace: &Path, path: &str, entry: &TreeEntry) -> Result
             return Ok(false);
         };
         let CheckpointValue::Symlink { target: expected } =
-            checkpoint_value(workspace, path, entry)?
+            checkpoint_value(workspace, checkpoint, path, entry)?
         else {
             return Ok(false);
         };
@@ -1352,7 +1432,8 @@ fn same_as_checkpoint(workspace: &Path, path: &str, entry: &TreeEntry) -> Result
     if !meta.is_file() {
         return Ok(false);
     }
-    let CheckpointValue::File { bytes, executable } = checkpoint_value(workspace, path, entry)?
+    let CheckpointValue::File { bytes, executable } =
+        checkpoint_value(workspace, checkpoint, path, entry)?
     else {
         return Ok(false);
     };

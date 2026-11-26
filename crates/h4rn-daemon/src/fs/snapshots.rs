@@ -39,6 +39,19 @@ pub struct SnapshotEntry {
     pub size_bytes: u64,
     /// True when the file was too large to capture.
     pub skipped: bool,
+    /// The file's Unix permission bits at capture time, when the platform has
+    /// them. A restore keeps the current bits and only toggles the exec bit, so
+    /// this is what an ignored path was executable as before the turn.
+    #[serde(default)]
+    pub mode: Option<u32>,
+    /// Whether the captured content predates the turn.
+    ///
+    /// A capture is taken the first time a tool names a path. A shell command
+    /// can write the path before that, so a capture can hold mid-turn bytes; it
+    /// is the pre-turn state only when the file's own content timestamp is no
+    /// later than the checkpoint that opened the turn.
+    #[serde(default)]
+    pub pre_turn: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -60,6 +73,13 @@ struct Manifest {
     /// than restore a partial set. Missing therefore means incomplete.
     #[serde(default)]
     checkpoint_complete: bool,
+    /// Repository-relative paths git ignored when the checkpoint was taken.
+    ///
+    /// The checkpoint tree cannot see them, so their absence from the tree does
+    /// not mean they were absent. An older manifest has no list: its checkpoint
+    /// predates the completeness of this record and is refused by the restore.
+    #[serde(default)]
+    ignored: Vec<String>,
     files: BTreeMap<String, SnapshotEntry>,
 }
 
@@ -103,9 +123,11 @@ impl SnapshotStore {
                 captured_at: Utc::now(),
                 checkpoint: None,
                 checkpoint_complete: false,
+                ignored: Vec::new(),
                 files: BTreeMap::new(),
             });
         let mut added = 0;
+        let turn_started = manifest.captured_at;
         for raw in paths {
             let Ok(relative) = normalize_relative(raw) else {
                 continue;
@@ -117,9 +139,10 @@ impl SnapshotStore {
             if manifest.files.contains_key(&rel) {
                 continue;
             }
-            manifest
-                .files
-                .insert(rel.clone(), self.capture_one(workspace, &rel)?);
+            manifest.files.insert(
+                rel.clone(),
+                self.capture_one(workspace, &rel, turn_started)?,
+            );
             added += 1;
         }
         if added > 0 {
@@ -133,7 +156,12 @@ impl SnapshotStore {
         Ok(added)
     }
 
-    fn capture_one(&self, workspace: &Path, rel: &str) -> Result<SnapshotEntry, FsError> {
+    fn capture_one(
+        &self,
+        workspace: &Path,
+        rel: &str,
+        turn_started: DateTime<Utc>,
+    ) -> Result<SnapshotEntry, FsError> {
         let absolute = resolve_inside(workspace, rel, ResolveMode::Existing);
         let Ok(path) = absolute else {
             // A path that does not exist yet is a file the turn is about to
@@ -145,9 +173,16 @@ impl SnapshotStore {
                 etag: None,
                 size_bytes: 0,
                 skipped: false,
+                mode: None,
+                pre_turn: true,
             });
         };
         let metadata = fs::metadata(&path).map_err(|error| FsError::Io(error.to_string()))?;
+        let pre_turn = metadata
+            .modified()
+            .map(DateTime::<Utc>::from)
+            .is_ok_and(|modified| modified <= turn_started);
+        let mode = mode_of(&metadata);
         if metadata.len() > MAX_SNAPSHOT_BYTES {
             return Ok(SnapshotEntry {
                 path: rel.to_owned(),
@@ -156,6 +191,8 @@ impl SnapshotStore {
                 etag: None,
                 size_bytes: metadata.len(),
                 skipped: true,
+                mode,
+                pre_turn,
             });
         }
         let bytes = fs::read(&path).map_err(|error| FsError::Io(error.to_string()))?;
@@ -168,6 +205,8 @@ impl SnapshotStore {
             etag: Some(etag),
             size_bytes: metadata.len(),
             skipped: false,
+            mode,
+            pre_turn,
         })
     }
 
@@ -267,12 +306,18 @@ impl SnapshotStore {
     }
 
     /// Records the complete pre-turn git tree for a turn.
+    ///
+    /// `ignored` is the checkpoint's ignored listing (see
+    /// [`crate::worktrees::git::Checkpoint::ignored`]); it is stored with the
+    /// tree so a restore can tell an ignored path's absence from an absence
+    /// that is authoritative.
     pub fn record_checkpoint(
         &self,
         workspace: &Path,
         thread_id: &ThreadId,
         turn_id: &TurnId,
         commit: &str,
+        ignored: &[String],
     ) -> Result<(), FsError> {
         let manifest_path = self.manifest_path(thread_id, turn_id)?;
         let mut manifest = self
@@ -284,12 +329,14 @@ impl SnapshotStore {
                 captured_at: Utc::now(),
                 checkpoint: None,
                 checkpoint_complete: false,
+                ignored: Vec::new(),
                 files: BTreeMap::new(),
             });
         manifest.checkpoint = Some(commit.to_owned());
         // The capture stages the whole worktree in git, untracked files
         // included, so a recorded checkpoint is complete by construction.
         manifest.checkpoint_complete = true;
+        manifest.ignored = ignored.to_vec();
         if let Some(parent) = manifest_path.parent() {
             fs::create_dir_all(parent).map_err(|error| FsError::Io(error.to_string()))?;
         }
@@ -297,6 +344,35 @@ impl SnapshotStore {
             serde_json::to_vec_pretty(&manifest).map_err(|error| FsError::Io(error.to_string()))?;
         fs::write(&manifest_path, json).map_err(|error| FsError::Io(error.to_string()))?;
         Ok(())
+    }
+
+    /// The ignored paths the turn's checkpoint recorded, sorted.
+    ///
+    /// Empty when the checkpoint has no listing: an older record whose absence
+    /// from the tree cannot be trusted for ignored paths.
+    pub fn ignored(&self, thread_id: &ThreadId, turn_id: &TurnId) -> Vec<String> {
+        let Ok(path) = self.manifest_path(thread_id, turn_id) else {
+            return Vec::new();
+        };
+        self.load_manifest(&path)
+            .map(|manifest| manifest.ignored)
+            .unwrap_or_default()
+    }
+
+    /// Where one restore journal lives: `<restores>/<restore_id>.<thread>.json`.
+    ///
+    /// The thread is part of the name so startup recovery can still name it
+    /// when the journal itself cannot be read, and show the person which thread
+    /// was left alone.
+    pub fn restore_journal_path(
+        &self,
+        thread_id: &ThreadId,
+        restore_id: &str,
+    ) -> Result<PathBuf, FsError> {
+        let thread = safe_component(thread_id.as_str())?;
+        Ok(self
+            .restores_dir()
+            .join(format!("{restore_id}.{thread}.json")))
     }
 
     /// The complete pre-turn git tree recorded for a turn, when there is one.
@@ -372,6 +448,19 @@ fn sync_dir(dir: &Path) -> std::io::Result<()> {
 #[cfg(not(unix))]
 fn sync_dir(_dir: &Path) -> std::io::Result<()> {
     Ok(())
+}
+
+/// A file's Unix permission bits, when the platform has them.
+#[cfg(unix)]
+fn mode_of(metadata: &fs::Metadata) -> Option<u32> {
+    use std::os::unix::fs::PermissionsExt;
+    Some(metadata.permissions().mode() & 0o7777)
+}
+
+/// A platform without Unix permission bits has no mode to record.
+#[cfg(not(unix))]
+fn mode_of(_metadata: &fs::Metadata) -> Option<u32> {
+    None
 }
 
 /// Makes an identifier safe as one path component without losing uniqueness.

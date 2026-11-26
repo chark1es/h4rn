@@ -27,6 +27,8 @@ use crate::journal::WireEvent;
 thread_local! {
     /// Test-only: make every durability flush in a restore fail.
     static FAIL_SYNC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Test-only: every folder `sync_dir` has flushed, in order.
+    static DIR_SYNCS: std::cell::RefCell<Vec<PathBuf>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// The machine-wide Labs switch for "Rewind files with Edit from here".
@@ -291,8 +293,8 @@ enum RestoreChange {
 enum Backup {
     /// The path did not exist.
     Absent,
-    /// The path held these bytes with this executable bit.
-    File { bytes: Vec<u8>, executable: bool },
+    /// The path held these bytes with these permission bits.
+    File { bytes: Vec<u8>, mode: u32 },
     /// The path was a symlink to this target.
     Symlink(PathBuf),
 }
@@ -306,10 +308,32 @@ pub(crate) struct PreparedRestore {
     record_path: PathBuf,
 }
 
+/// One restore journal on disk, before its contents are read.
+#[derive(Debug)]
+pub(crate) struct PendingJournal {
+    restore_id: String,
+    thread_id: Option<ThreadId>,
+    path: PathBuf,
+}
+
+impl PendingJournal {
+    /// The durable id the journal's restore commits with.
+    pub(crate) fn restore_id(&self) -> &str {
+        &self.restore_id
+    }
+
+    /// The thread the journal belongs to, read from its name, so recovery can
+    /// still name the thread when the journal itself cannot be read.
+    pub(crate) fn thread_id(&self) -> Option<&ThreadId> {
+        self.thread_id.as_ref()
+    }
+}
+
 /// A restore journal read back at startup, before anything is touched.
 #[derive(Debug)]
 pub(crate) struct PendingRestore {
     record: RestoreRecord,
+    path: PathBuf,
 }
 
 impl PendingRestore {
@@ -363,6 +387,10 @@ enum BackupRecord {
     Absent,
     File {
         blob: String,
+        /// The full permission bits to put back. Older journals recorded only
+        /// the executable bit; `mode` is then absent and the bit decides.
+        #[serde(default)]
+        mode: Option<u32>,
         #[serde(default)]
         executable: bool,
     },
@@ -411,6 +439,10 @@ pub(crate) fn prepare_restore(
             first.as_str()
         )
     })?;
+    // The checkpoint tree cannot see ignored paths, so the paths it had to
+    // ignore are recorded beside it. Their absence from the tree says nothing
+    // about whether they existed.
+    let ignored = store.ignored(thread_id, first);
     let mut targets: BTreeMap<String, Option<crate::worktrees::git::CheckpointValue>> =
         BTreeMap::new();
     // One checkpoint decides the whole restore: the pre-turn state of the
@@ -419,12 +451,11 @@ pub(crate) fn prepare_restore(
     for change in crate::worktrees::git::checkpoint_changes(&repo, &checkpoint)? {
         targets.insert(change.path, change.value);
     }
-    // The turn's per-path captures are the pre-turn bytes for paths the git
-    // checkpoint does not contain: ignored files, and anything git did not
-    // stage. A capture never overrides a path the checkpoint has (the tree is
-    // the earlier, whole-worktree evidence), but captured bytes beat the
-    // checkpoint's absence, so a file that existed before the turn is put back
-    // instead of deleted.
+    // Captures only fill in ignored paths. For anything else, a complete
+    // checkpoint's absence is the earlier, whole-worktree evidence: a file the
+    // turn's own shell command created and a later tool named must be removed,
+    // not resurrected from a mid-turn capture.
+    let mut captured: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for entry in store.entries(thread_id, first) {
         let relative = normalize_relative(&entry.path)
             .map_err(|error| format!("{} cannot be restored: {error}", entry.path))?;
@@ -441,7 +472,25 @@ pub(crate) fn prepare_restore(
             // evidence and wins over a later per-path capture.
             continue;
         }
+        if !ignored_covers(&ignored, &path) {
+            // Not ignored at checkpoint time, so the tree's absence is
+            // authoritative: the path did not exist when the turn began.
+            continue;
+        }
         if entry.existed {
+            if !entry.pre_turn {
+                // The turn had already written this ignored path before the
+                // capture, so the captured bytes are not the pre-turn state.
+                // Never remove it on the tree's word; refuse if that is what
+                // the plan would do.
+                if targets.contains_key(&path) {
+                    return Err(format!(
+                        "{} was ignored when this message's checkpoint was taken and the turn changed it before it could be captured, so its pre-message contents are not known",
+                        entry.path
+                    ));
+                }
+                continue;
+            }
             let blob = entry.blob.as_deref().ok_or_else(|| {
                 if entry.skipped {
                     format!(
@@ -461,15 +510,35 @@ pub(crate) fn prepare_restore(
                     entry.path
                 )
             })?;
-            let executable = current_is_executable(&absolute);
+            // The executable bit comes from the capture, not from what the
+            // turn left on disk.
+            let executable = entry
+                .mode
+                .map(|mode| mode & 0o111 != 0)
+                .unwrap_or_else(|| current_is_executable(&absolute));
             targets.insert(
-                path,
+                path.clone(),
                 Some(crate::worktrees::git::CheckpointValue::File { bytes, executable }),
             );
+            captured.insert(path);
         } else if !targets.contains_key(&path) && absolute.symlink_metadata().is_ok() {
             // Captured as absent before the turn and present now: the turn
             // created it.
-            targets.insert(path, None);
+            targets.insert(path.clone(), None);
+            captured.insert(path);
+        }
+    }
+    // An ignored path the capture did not cover was never removed on the
+    // tree's word: the tree could not see it, so its absence is not evidence.
+    for (path, value) in &targets {
+        if value.is_none()
+            && ignored_covers(&ignored, path)
+            && !captured.contains(path)
+            && repo.join(path).symlink_metadata().is_ok()
+        {
+            return Err(format!(
+                "{path} was ignored when this message's checkpoint was taken, so the checkpoint cannot prove it was absent; refusing to remove it"
+            ));
         }
     }
 
@@ -518,7 +587,7 @@ pub(crate) fn prepare_restore(
                 bytes: fs::read(&op.absolute).map_err(|error| {
                     format!("could not read {} before restoring it: {error}", op.path)
                 })?,
-                executable: is_executable(&meta),
+                mode: mode_of(&meta),
             },
             Ok(_) => {
                 return Err(format!(
@@ -538,7 +607,9 @@ pub(crate) fn prepare_restore(
     }
 
     let restore_id = format!("restore_{}", uuid::Uuid::now_v7());
-    let record_path = store.restores_dir().join(format!("{restore_id}.json"));
+    let record_path = store
+        .restore_journal_path(thread_id, &restore_id)
+        .map_err(|error| format!("could not name the restore journal: {error}"))?;
     write_record(store, &record_path, thread_id, &root, &repo, &ops, &backups)?;
     Ok(PreparedRestore {
         restore_id,
@@ -552,6 +623,11 @@ pub(crate) fn prepare_restore(
 pub(crate) fn apply_restore(prepared: &PreparedRestore) -> Result<FileRestore, String> {
     let mut result = FileRestore::default();
     for (index, op) in prepared.ops.iter().enumerate() {
+        if op.already_matches() {
+            // The path already holds the checkpoint's bytes and mode: nothing
+            // to write, and nothing to report as restored.
+            continue;
+        }
         if let Err(error) = apply_op(op) {
             let rollback_error = rollback(&prepared.backups[..=index]).err();
             return match rollback_error {
@@ -576,16 +652,51 @@ pub(crate) fn apply_restore(prepared: &PreparedRestore) -> Result<FileRestore, S
     Ok(result)
 }
 
+impl RestoreOp {
+    /// Whether the path already is exactly what this op would make it.
+    fn already_matches(&self) -> bool {
+        match &self.change {
+            RestoreChange::File { bytes, executable } => {
+                let Ok(meta) = self.absolute.symlink_metadata() else {
+                    return false;
+                };
+                if !meta.is_file() {
+                    return false;
+                }
+                fs::read(&self.absolute).is_ok_and(|current| current == *bytes)
+                    && is_executable(&meta) == *executable
+            }
+            RestoreChange::Symlink { target } => {
+                self.absolute
+                    .symlink_metadata()
+                    .is_ok_and(|meta| meta.file_type().is_symlink())
+                    && fs::read_link(&self.absolute).is_ok_and(|current| &current == target)
+            }
+            RestoreChange::Remove => matches!(
+                self.absolute.symlink_metadata(),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound
+            ),
+        }
+    }
+}
+
 /// Applies one path, writing through nothing.
 fn apply_op(op: &RestoreOp) -> Result<(), String> {
     let parent = op
         .absolute
         .parent()
         .ok_or_else(|| format!("{} has no parent folder", op.absolute.display()))?;
-    fs::create_dir_all(parent)
-        .map_err(|error| format!("could not create {}: {error}", parent.display()))?;
+    create_dir_all_durable(parent)?;
     match &op.change {
         RestoreChange::File { bytes, executable } => {
+            // Keep the permission bits the file has now (a 0600 file stays
+            // private) and only set the executable bit the checkpoint names.
+            let existing_mode = op
+                .absolute
+                .symlink_metadata()
+                .ok()
+                .filter(std::fs::Metadata::is_file)
+                .map(|meta| mode_of(&meta));
             if op.leaf_symlink || op.absolute.is_dir() {
                 // A link is removed itself, never followed: a failed unlink
                 // must stop the restore instead of writing through the link
@@ -598,7 +709,7 @@ fn apply_op(op: &RestoreOp) -> Result<(), String> {
                 })?;
             }
             write_durable(&op.absolute, bytes)?;
-            set_executable(&op.absolute, *executable)?;
+            set_restored_mode(&op.absolute, existing_mode, *executable)?;
         }
         RestoreChange::Symlink { target } => {
             if op.absolute.symlink_metadata().is_ok() {
@@ -645,35 +756,72 @@ pub(crate) fn abort_restore(prepared: &PreparedRestore) -> Result<(), String> {
 }
 
 /// Every restore journal still on disk, oldest first.
-pub(crate) fn pending_restore_ids(store: &SnapshotStore) -> Vec<String> {
+///
+/// The thread is read from the journal's name, so an unreadable journal can
+/// still be reported against its thread.
+pub(crate) fn pending_journals(store: &SnapshotStore) -> Vec<PendingJournal> {
     let Ok(entries) = fs::read_dir(store.restores_dir()) else {
         return Vec::new();
     };
-    let mut ids: Vec<String> = entries
+    let mut journals: Vec<PendingJournal> = entries
         .filter_map(Result::ok)
         .filter_map(|entry| {
             let name = entry.file_name().into_string().ok()?;
-            name.strip_suffix(".json").map(str::to_owned)
+            let stem = name.strip_suffix(".json")?;
+            // New journals are `<restore_id>.<thread>.json`; an older or
+            // foreign name has no thread, and its contents are the only source.
+            let (restore_id, thread_id) = match stem.rsplit_once('.') {
+                Some((restore_id, thread)) if restore_id.starts_with("restore_") => {
+                    (restore_id.to_owned(), Some(ThreadId::new(thread)))
+                }
+                _ => (stem.to_owned(), None),
+            };
+            Some(PendingJournal {
+                restore_id,
+                thread_id,
+                path: entry.path(),
+            })
         })
         .collect();
-    ids.sort();
-    ids
+    journals.sort_by(|left, right| left.path.cmp(&right.path));
+    journals
+}
+
+/// The ids of every restore journal still on disk, oldest first.
+#[cfg(test)]
+pub(crate) fn pending_restore_ids(store: &SnapshotStore) -> Vec<String> {
+    pending_journals(store)
+        .into_iter()
+        .map(|journal| journal.restore_id)
+        .collect()
 }
 
 /// Reads a pending restore journal before anything is touched.
 ///
 /// A journal that cannot be read is an error, never an empty one: recovery
 /// must not guess that an unreadable restore was uncommitted.
+pub(crate) fn read_pending_journal(journal: &PendingJournal) -> Result<PendingRestore, String> {
+    let bytes = fs::read(&journal.path)
+        .map_err(|error| format!("could not read the restore journal: {error}"))?;
+    let record: RestoreRecord = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("the restore journal is not readable: {error}"))?;
+    Ok(PendingRestore {
+        record,
+        path: journal.path.clone(),
+    })
+}
+
+/// Reads one restore journal by id, for callers that already know the name.
+#[cfg(test)]
 pub(crate) fn read_pending_restore(
     store: &SnapshotStore,
     restore_id: &str,
 ) -> Result<PendingRestore, String> {
-    let path = store.restores_dir().join(format!("{restore_id}.json"));
-    let bytes =
-        fs::read(&path).map_err(|error| format!("could not read the restore journal: {error}"))?;
-    let record: RestoreRecord = serde_json::from_slice(&bytes)
-        .map_err(|error| format!("the restore journal is not readable: {error}"))?;
-    Ok(PendingRestore { record })
+    let journal = pending_journals(store)
+        .into_iter()
+        .find(|journal| journal.restore_id == restore_id)
+        .ok_or_else(|| format!("the restore journal {restore_id} is not on disk"))?;
+    read_pending_journal(&journal)
 }
 
 /// Finishes or rolls back one interrupted restore at startup.
@@ -687,12 +835,27 @@ pub(crate) fn recover_restore(
     committed: bool,
 ) -> Result<(), String> {
     if !committed {
+        // The journal's entry paths are relative to the root it recorded, but
+        // recovery writes them. That root must still be the workspace's own
+        // repository root; anything else could write outside the worktree.
+        if !record_root_matches(&pending.record) {
+            return Err(format!(
+                "the restore journal's saved root {} is not the repository root of {}, so its files were left alone",
+                pending.record.base().display(),
+                pending.workspace().display()
+            ));
+        }
         rollback_record(store, &pending.record)?;
     }
-    let path = store
-        .restores_dir()
-        .join(format!("{}.json", pending.record.restore_id));
-    remove_file_durable(&path)
+    remove_file_durable(&pending.path)
+}
+
+/// Whether a journal's saved root is still the workspace's repository root.
+fn record_root_matches(record: &RestoreRecord) -> bool {
+    let Some(toplevel) = crate::worktrees::git::toplevel(Path::new(&record.workspace)) else {
+        return false;
+    };
+    crate::worktrees::git::norm(record.base()) == toplevel
 }
 
 /// Writes the restore journal durably before any file changes.
@@ -709,11 +872,12 @@ fn write_record(
     for (index, (_, backup)) in backups.iter().enumerate() {
         let backup = match backup {
             Backup::Absent => BackupRecord::Absent,
-            Backup::File { bytes, executable } => BackupRecord::File {
+            Backup::File { bytes, mode } => BackupRecord::File {
                 blob: store
                     .store_blob(bytes)
                     .map_err(|error| format!("could not keep {} for rollback: {error}", ops[index].path))?,
-                executable: *executable,
+                mode: Some(*mode),
+                executable: mode & 0o111 != 0,
             },
             Backup::Symlink(target) => BackupRecord::Symlink {
                 target: target.to_str().map(str::to_owned).ok_or_else(|| {
@@ -768,7 +932,11 @@ fn rollback_record(store: &SnapshotStore, record: &RestoreRecord) -> Result<(), 
                     return Err(format!("could not inspect {}: {error}", entry.path));
                 }
             },
-            BackupRecord::File { blob, executable } => {
+            BackupRecord::File {
+                blob,
+                mode,
+                executable,
+            } => {
                 let bytes = store.read_blob(blob).ok_or_else(|| {
                     format!(
                         "the bytes kept to put {} back are missing from the restore journal",
@@ -777,7 +945,9 @@ fn rollback_record(store: &SnapshotStore, record: &RestoreRecord) -> Result<(), 
                 })?;
                 write_parented(&absolute, &bytes)
                     .map_err(|error| format!("could not put {} back: {error}", entry.path))?;
-                set_executable(&absolute, *executable)
+                // Put back the exact bits the file had, not a default mode.
+                let mode = mode.unwrap_or(if *executable { 0o755 } else { 0o644 });
+                set_mode(&absolute, mode)
                     .map_err(|error| format!("could not put {} back: {error}", entry.path))?;
             }
             BackupRecord::Symlink { target } => {
@@ -875,11 +1045,23 @@ fn current_is_executable(_path: &Path) -> bool {
     false
 }
 
+/// A file's Unix permission bits.
+#[cfg(unix)]
+fn mode_of(meta: &fs::Metadata) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    meta.permissions().mode() & 0o7777
+}
+
+/// A platform without Unix permission bits has no mode to keep.
+#[cfg(not(unix))]
+fn mode_of(_meta: &fs::Metadata) -> u32 {
+    0
+}
+
 /// Whether the file is executable.
 #[cfg(unix)]
 fn is_executable(meta: &fs::Metadata) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    meta.permissions().mode() & 0o111 != 0
+    mode_of(meta) & 0o111 != 0
 }
 
 /// Whether the file is executable.
@@ -888,19 +1070,47 @@ fn is_executable(_meta: &fs::Metadata) -> bool {
     false
 }
 
-/// Sets a restored file's executable bit to the checkpoint's.
+/// Sets a restored file's executable bit while keeping the bits it had.
+///
+/// A capture can hold only the executable state; the rest of a file's mode
+/// belongs to the person (a 0600 `.env` must not become world-readable), so
+/// only the executable bit is toggled. A file that did not exist before gets
+/// the conventional 0644 or 0755.
 #[cfg(unix)]
-fn set_executable(path: &Path, executable: bool) -> Result<(), String> {
-    use std::os::unix::fs::PermissionsExt;
-    let mode = if executable { 0o755 } else { 0o644 };
-    fs::set_permissions(path, fs::Permissions::from_mode(mode))
-        .map_err(|error| format!("could not restore the mode of {}: {error}", path.display()))
+fn set_restored_mode(path: &Path, existing: Option<u32>, executable: bool) -> Result<(), String> {
+    let mode = match existing {
+        // Set exec bit where the file is readable, so a 0600 file that is
+        // executable becomes 0700, never 0711.
+        Some(mode) if executable => mode | ((mode & 0o444) >> 2),
+        Some(mode) => mode & !0o111,
+        None if executable => 0o755,
+        None => 0o644,
+    };
+    set_mode(path, mode)
 }
 
 /// A platform without Unix permission bits keeps them as the filesystem gave
 /// them.
 #[cfg(not(unix))]
-fn set_executable(_path: &Path, _executable: bool) -> Result<(), String> {
+fn set_restored_mode(
+    _path: &Path,
+    _existing: Option<u32>,
+    _executable: bool,
+) -> Result<(), String> {
+    Ok(())
+}
+
+/// Sets a file's permission bits exactly.
+#[cfg(unix)]
+fn set_mode(path: &Path, mode: u32) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(mode))
+        .map_err(|error| format!("could not restore the mode of {}: {error}", path.display()))
+}
+
+/// A platform without Unix permission bits has no mode to set.
+#[cfg(not(unix))]
+fn set_mode(_path: &Path, _mode: u32) -> Result<(), String> {
     Ok(())
 }
 
@@ -920,10 +1130,46 @@ fn write_durable(path: &Path, bytes: &[u8]) -> Result<(), String> {
 /// Writes bytes through a missing parent folder.
 fn write_parented(path: &Path, bytes: &[u8]) -> Result<(), String> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|error| format!("could not create {}: {error}", parent.display()))?;
+        create_dir_all_durable(parent)?;
     }
     write_durable(path, bytes)
+}
+
+/// Creates a folder chain one level at a time, flushing each new folder in its
+/// parent, so a crash right after the restore cannot lose a folder the journal
+/// says exists.
+fn create_dir_all_durable(dir: &Path) -> Result<(), String> {
+    let mut missing: Vec<PathBuf> = Vec::new();
+    let mut current = dir.to_path_buf();
+    loop {
+        match fs::symlink_metadata(&current) {
+            Ok(meta) if meta.is_dir() => break,
+            Ok(_) => {
+                return Err(format!(
+                    "could not create {}: it is not a folder",
+                    current.display()
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                missing.push(current.clone());
+            }
+            Err(error) => {
+                return Err(format!("could not inspect {}: {error}", current.display()));
+            }
+        }
+        match current.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => current = parent.to_path_buf(),
+            _ => break,
+        }
+    }
+    for path in missing.iter().rev() {
+        fs::create_dir(path)
+            .map_err(|error| format!("could not create {}: {error}", path.display()))?;
+        if let Some(parent) = path.parent() {
+            sync_dir(parent)?;
+        }
+    }
+    Ok(())
 }
 
 /// Flushes a file's contents to disk.
@@ -940,6 +1186,8 @@ fn sync_file(file: &mut fs::File, path: &Path) -> Result<(), String> {
 /// unlink.
 #[cfg(unix)]
 fn sync_dir(dir: &Path) -> Result<(), String> {
+    #[cfg(test)]
+    DIR_SYNCS.with(|dirs| dirs.borrow_mut().push(dir.to_path_buf()));
     let file = fs::File::open(dir)
         .map_err(|error| format!("could not open {} to flush it: {error}", dir.display()))?;
     file.sync_all()
@@ -987,8 +1235,8 @@ fn rollback(backups: &[(PathBuf, Backup)]) -> Result<(), String> {
     let mut first_error = None;
     for (path, backup) in backups {
         let restored = match backup {
-            Backup::File { bytes, executable } => {
-                write_parented(path, bytes).and_then(|()| set_executable(path, *executable))
+            Backup::File { bytes, mode } => {
+                write_parented(path, bytes).and_then(|()| set_mode(path, *mode))
             }
             Backup::Absent => match path.symlink_metadata() {
                 Ok(_) => remove_file_durable(path),
@@ -1046,6 +1294,21 @@ fn canonical_or_lexical(path: &Path) -> PathBuf {
             }
         }
         normalized
+    })
+}
+
+/// Whether a path is one of the checkpoint's ignored entries, or inside one.
+///
+/// An entry with a trailing `/` is an ignored folder (`--directory` collapses
+/// it), so every path under it is ignored too.
+fn ignored_covers(ignored: &[String], path: &str) -> bool {
+    ignored.iter().any(|entry| {
+        let entry = entry.trim_end_matches('/');
+        !entry.is_empty()
+            && (path == entry
+                || path
+                    .strip_prefix(entry)
+                    .is_some_and(|rest| rest.starts_with('/')))
     })
 }
 
@@ -1243,12 +1506,33 @@ mod tests {
 
         /// Records the whole-worktree checkpoint a turn captured.
         fn checkpoint(&self, turn: &str) -> String {
-            let tree =
+            let checkpoint =
                 crate::worktrees::git::checkpoint_commit(&self.repo).expect("checkpoint tree");
             self.store
-                .record_checkpoint(&self.repo, &self.thread, &TurnId::new(turn), &tree)
+                .record_checkpoint(
+                    &self.repo,
+                    &self.thread,
+                    &TurnId::new(turn),
+                    &checkpoint.tree,
+                    &checkpoint.ignored,
+                )
                 .expect("record checkpoint");
-            tree
+            checkpoint.tree
+        }
+
+        /// Records a checkpoint captured from a workspace inside the repo.
+        fn checkpoint_in(&self, workspace: &Path, turn: &str) {
+            let checkpoint =
+                crate::worktrees::git::checkpoint_commit(workspace).expect("checkpoint tree");
+            self.store
+                .record_checkpoint(
+                    workspace,
+                    &self.thread,
+                    &TurnId::new(turn),
+                    &checkpoint.tree,
+                    &checkpoint.ignored,
+                )
+                .expect("record checkpoint");
         }
 
         fn prepare(&self, turns: &[&str]) -> Result<PreparedRestore, String> {
@@ -1474,6 +1758,7 @@ mod tests {
             "captured_at": chrono::Utc::now(),
             "checkpoint": tree,
             "checkpoint_complete": true,
+            "ignored": ["big.bin"],
             "files": {
                 "big.bin": {
                     "path": "big.bin",
@@ -1481,7 +1766,9 @@ mod tests {
                     "blob": null,
                     "etag": null,
                     "size_bytes": 99999999,
-                    "skipped": true
+                    "skipped": true,
+                    "mode": 420,
+                    "pre_turn": true
                 }
             }
         });
@@ -1511,6 +1798,7 @@ mod tests {
             "captured_at": chrono::Utc::now(),
             "checkpoint": tree,
             "checkpoint_complete": true,
+            "ignored": ["keep.txt"],
             "files": {
                 "keep.txt": {
                     "path": "keep.txt",
@@ -1518,7 +1806,9 @@ mod tests {
                     "blob": missing,
                     "etag": missing,
                     "size_bytes": 7,
-                    "skipped": false
+                    "skipped": false,
+                    "mode": 420,
+                    "pre_turn": true
                 }
             }
         });
@@ -1575,9 +1865,13 @@ mod tests {
 
         let fixture = Fixture::new(&[("link.txt", "was a file\n")]);
         fixture.checkpoint("turn_1");
-        write(&fixture.repo, "target.txt", "keep me\n");
+        // The link points outside the worktree: it is not in the plan, so no
+        // rollback touches the target. Only the failed unlink can keep the
+        // restore from writing through the link.
+        let outside = fixture.dir.path().join("outside.txt");
+        fs::write(&outside, "keep me\n").unwrap();
         fs::remove_file(fixture.repo.join("link.txt")).unwrap();
-        std::os::unix::fs::symlink("target.txt", fixture.repo.join("link.txt")).unwrap();
+        std::os::unix::fs::symlink(&outside, fixture.repo.join("link.txt")).unwrap();
         let prepared = fixture.prepare(&["turn_1"]).expect("prepare");
 
         // The link's folder refuses the unlink; writing through the link would
@@ -1588,13 +1882,13 @@ mod tests {
 
         assert!(result.is_err(), "a failed unlink stops the restore");
         assert_eq!(
-            read(&fixture.repo, "target.txt"),
+            fs::read_to_string(&outside).unwrap(),
             "keep me\n",
-            "the restore never wrote through the link"
+            "the restore never wrote through the link into its target"
         );
         assert_eq!(
             fs::read_link(fixture.repo.join("link.txt")).unwrap(),
-            PathBuf::from("target.txt")
+            outside
         );
     }
 
@@ -1738,5 +2032,402 @@ mod tests {
         assert_eq!(read(&fixture.repo, "a.txt"), "before a");
         assert_eq!(read(&fixture.repo, "b.txt"), "before b");
         assert!(pending_restore_ids(&fixture.store).is_empty());
+    }
+
+    // ---- council round 1 fixes -------------------------------------------
+
+    #[test]
+    fn a_staged_rename_keeps_its_old_path() {
+        let fixture = Fixture::new(&[("a.txt", "a\n")]);
+        fixture.checkpoint("turn_1");
+        // A staged rename makes `git diff` detect a rename and print only the
+        // new path, which would delete the file without putting the old one
+        // back.
+        git(&fixture.repo, &["mv", "a.txt", "c.txt"]);
+
+        let prepared = fixture.prepare(&["turn_1"]).expect("prepare");
+        let outcome = run_restore(&prepared);
+        assert_eq!(
+            read(&fixture.repo, "a.txt"),
+            "a\n",
+            "the staged rename's old path is back"
+        );
+        assert!(
+            !fixture.repo.join("c.txt").exists(),
+            "the staged rename's new path is removed"
+        );
+        assert_eq!(outcome.files, 1);
+        assert_eq!(outcome.deleted, 1);
+    }
+
+    #[test]
+    fn a_plain_move_staged_with_git_add_keeps_its_old_path() {
+        let fixture = Fixture::new(&[("a.txt", "a\n")]);
+        fixture.checkpoint("turn_1");
+        fs::rename(fixture.repo.join("a.txt"), fixture.repo.join("c.txt")).unwrap();
+        git(&fixture.repo, &["add", "-A"]);
+
+        let prepared = fixture.prepare(&["turn_1"]).expect("prepare");
+        run_restore(&prepared);
+        assert_eq!(read(&fixture.repo, "a.txt"), "a\n");
+        assert!(!fixture.repo.join("c.txt").exists());
+    }
+
+    #[test]
+    fn emptying_gitignore_never_removes_an_ignored_file_that_existed() {
+        let fixture = Fixture::new(&[(".gitignore", ".env\n"), ("README.md", "hi\n")]);
+        write(&fixture.repo, ".env", "SECRET=1\n");
+        fixture.checkpoint("turn_1");
+        // The turn empties .gitignore, so .env becomes an ordinary untracked
+        // path. The tree cannot see it, but it existed all along.
+        write(&fixture.repo, ".gitignore", "");
+
+        let error = fixture.prepare(&["turn_1"]).unwrap_err();
+        assert!(error.contains(".env"), "{error}");
+        assert_eq!(
+            read(&fixture.repo, ".env"),
+            "SECRET=1\n",
+            "a file that was ignored at checkpoint time is never removed on the tree's word"
+        );
+    }
+
+    #[test]
+    fn forcing_an_ignored_file_into_the_index_never_removes_it() {
+        let fixture = Fixture::new(&[(".gitignore", "secret.log\n"), ("README.md", "hi\n")]);
+        write(&fixture.repo, "secret.log", "before\n");
+        fixture.checkpoint("turn_1");
+        // `git add -f` makes the ignored file look new beside the tree.
+        git(&fixture.repo, &["add", "-f", "secret.log"]);
+
+        let error = fixture.prepare(&["turn_1"]).unwrap_err();
+        assert!(error.contains("secret.log"), "{error}");
+        assert_eq!(read(&fixture.repo, "secret.log"), "before\n");
+    }
+
+    #[test]
+    fn a_subdirectory_workspace_recognises_its_ignored_paths() {
+        let fixture = Fixture::new(&[(".gitignore", "sub/secret.log\n"), ("sub/a.txt", "one")]);
+        write(&fixture.repo, "sub/secret.log", "before\n");
+        // The checkpoint is captured where the thread runs, a subdirectory of
+        // the repository; its ignored paths must still resolve from the root.
+        fixture.checkpoint_in(&fixture.repo.join("sub"), "turn_1");
+        git(&fixture.repo, &["add", "-f", "sub/secret.log"]);
+
+        let workspace = fixture.repo.join("sub");
+        let error = fixture.prepare_in(&workspace, &["turn_1"]).unwrap_err();
+        assert!(error.contains("sub/secret.log"), "{error}");
+        assert_eq!(read(&fixture.repo, "sub/secret.log"), "before\n");
+    }
+
+    #[test]
+    fn an_ignored_folder_the_turn_added_to_is_never_wiped() {
+        let fixture = Fixture::new(&[(".gitignore", "build/\n"), ("README.md", "hi\n")]);
+        write(&fixture.repo, "build/keep.o", "keep\n");
+        fixture.checkpoint("turn_1");
+        write(&fixture.repo, "build/new.o", "new\n");
+        git(&fixture.repo, &["add", "-f", "build/new.o"]);
+
+        let error = fixture.prepare(&["turn_1"]).unwrap_err();
+        assert!(error.contains("build/new.o"), "{error}");
+        assert_eq!(
+            read(&fixture.repo, "build/keep.o"),
+            "keep\n",
+            "the ignored folder's existing content is never wiped"
+        );
+        assert_eq!(read(&fixture.repo, "build/new.o"), "new\n");
+    }
+
+    #[test]
+    fn a_mid_turn_capture_never_resurrects_a_file_the_turn_created() {
+        let fixture = Fixture::new(&[("README.md", "hi\n")]);
+        fixture.checkpoint("turn_1");
+        // A shell command creates the file; a later tool names it, so the
+        // capture holds mid-turn bytes. The complete checkpoint's absence is
+        // the earlier evidence: the turn created it.
+        write(&fixture.repo, "new.txt", "created\n");
+        fixture
+            .store
+            .capture(
+                &fixture.repo,
+                &fixture.thread,
+                &TurnId::new("turn_1"),
+                &["new.txt".into()],
+            )
+            .unwrap();
+
+        let prepared = fixture.prepare(&["turn_1"]).expect("prepare");
+        let outcome = run_restore(&prepared);
+        assert_eq!(outcome.deleted, 1);
+        assert!(
+            !fixture.repo.join("new.txt").exists(),
+            "a mid-turn capture never brings back a file the turn created"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_ignored_file_changed_before_it_was_captured_refuses() {
+        use std::time::{Duration, SystemTime};
+
+        let fixture = Fixture::new(&[(".gitignore", "secret.log\n"), ("README.md", "hi\n")]);
+        write(&fixture.repo, "secret.log", "before\n");
+        fixture.checkpoint("turn_1");
+        // The turn rewrites the ignored file first; a later tool then names it,
+        // so the capture holds mid-turn bytes and is not the pre-turn state.
+        write(&fixture.repo, "secret.log", "mid-turn\n");
+        let stamp = SystemTime::now() + Duration::from_secs(3600);
+        std::fs::File::options()
+            .write(true)
+            .open(fixture.repo.join("secret.log"))
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(stamp))
+            .unwrap();
+        fixture
+            .store
+            .capture(
+                &fixture.repo,
+                &fixture.thread,
+                &TurnId::new("turn_1"),
+                &["secret.log".into()],
+            )
+            .unwrap();
+        git(&fixture.repo, &["add", "-f", "secret.log"]);
+
+        let error = fixture.prepare(&["turn_1"]).unwrap_err();
+        assert!(error.contains("secret.log"), "{error}");
+        assert_eq!(
+            read(&fixture.repo, "secret.log"),
+            "mid-turn\n",
+            "nothing was changed by a refused prepare"
+        );
+    }
+
+    #[test]
+    fn a_crlf_file_comes_back_as_worktree_bytes() {
+        let fixture = Fixture::new(&[(".gitattributes", "*.bat text eol=crlf\n")]);
+        write(&fixture.repo, "script.bat", "a\r\nb\r\n");
+        git(&fixture.repo, &["add", "-A"]);
+        git(&fixture.repo, &["commit", "-q", "-m", "crlf"]);
+        fixture.checkpoint("turn_1");
+        // The turn rewrites it with bare newlines and different lines.
+        write(&fixture.repo, "script.bat", "a\nb\nc\n");
+
+        let prepared = fixture.prepare(&["turn_1"]).expect("prepare");
+        run_restore(&prepared);
+        assert_eq!(
+            fs::read(fixture.repo.join("script.bat")).unwrap(),
+            b"a\r\nb\r\n",
+            "the restore writes what a checkout would write, not the clean blob"
+        );
+    }
+
+    #[test]
+    fn a_filtered_file_comes_back_as_worktree_bytes() {
+        let fixture = Fixture::new(&[("README.md", "hi\n")]);
+        git(
+            &fixture.repo,
+            &["config", "filter.extra.clean", "sed 's/^SMUDGED //'"],
+        );
+        git(
+            &fixture.repo,
+            &["config", "filter.extra.smudge", "sed 's/^/SMUDGED /'"],
+        );
+        write(&fixture.repo, ".gitattributes", "*.bin filter=extra\n");
+        write(&fixture.repo, "data.bin", "SMUDGED payload\n");
+        git(&fixture.repo, &["add", "-A"]);
+        git(&fixture.repo, &["commit", "-q", "-m", "filter"]);
+        fixture.checkpoint("turn_1");
+        write(&fixture.repo, "data.bin", "SMUDGED changed\n");
+
+        let prepared = fixture.prepare(&["turn_1"]).expect("prepare");
+        run_restore(&prepared);
+        assert_eq!(
+            read(&fixture.repo, "data.bin"),
+            "SMUDGED payload\n",
+            "the smudge filter runs, so the file is not restored as its stored pointer"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_restore_keeps_a_private_files_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let fixture = Fixture::new(&[("secret.env", "one\n")]);
+        fs::set_permissions(
+            fixture.repo.join("secret.env"),
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        fixture.checkpoint("turn_1");
+        write(&fixture.repo, "secret.env", "two\n");
+
+        let prepared = fixture.prepare(&["turn_1"]).expect("prepare");
+        run_restore(&prepared);
+        assert_eq!(read(&fixture.repo, "secret.env"), "one\n");
+        assert_eq!(
+            fs::metadata(fixture.repo.join("secret.env"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600,
+            "a restored private file stays private"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_abort_keeps_a_private_files_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let fixture = Fixture::new(&[("secret.env", "before\n")]);
+        fs::set_permissions(
+            fixture.repo.join("secret.env"),
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        fixture.checkpoint("turn_1");
+        write(&fixture.repo, "secret.env", "after\n");
+        let prepared = fixture.prepare(&["turn_1"]).expect("prepare");
+
+        FAIL_SYNC.with(|flag| flag.set(true));
+        let result = apply_restore(&prepared);
+        FAIL_SYNC.with(|flag| flag.set(false));
+
+        assert!(result.is_err());
+        assert_eq!(read(&fixture.repo, "secret.env"), "after\n");
+        assert_eq!(
+            fs::metadata(fixture.repo.join("secret.env"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600,
+            "the rollback puts back the exact bits the file had"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_captured_ignored_file_gets_its_pre_turn_exec_bit() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let fixture = Fixture::new(&[(".gitignore", "run.sh\n"), ("README.md", "hi\n")]);
+        write(&fixture.repo, "run.sh", "#!/bin/sh\necho one\n");
+        fs::set_permissions(
+            fixture.repo.join("run.sh"),
+            fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        fixture.checkpoint("turn_1");
+        fixture
+            .store
+            .capture(
+                &fixture.repo,
+                &fixture.thread,
+                &TurnId::new("turn_1"),
+                &["run.sh".into()],
+            )
+            .unwrap();
+        // The turn rewrites the ignored script and drops the executable bit.
+        write(&fixture.repo, "run.sh", "changed\n");
+        fs::set_permissions(
+            fixture.repo.join("run.sh"),
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+
+        let prepared = fixture.prepare(&["turn_1"]).expect("prepare");
+        run_restore(&prepared);
+        assert_eq!(read(&fixture.repo, "run.sh"), "#!/bin/sh\necho one\n");
+        assert_eq!(
+            fs::metadata(fixture.repo.join("run.sh"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700,
+            "the capture's pre-turn executable bit is back, and the file stays private"
+        );
+    }
+
+    #[test]
+    fn a_new_folder_chain_is_flushed_in_each_parent() {
+        let fixture = Fixture::new(&[("deep/a/b/keep.txt", "keep\n")]);
+        fixture.checkpoint("turn_1");
+        // The turn deletes the whole folder tree, so the restore recreates it.
+        fs::remove_dir_all(fixture.repo.join("deep")).unwrap();
+        DIR_SYNCS.with(|dirs| dirs.borrow_mut().clear());
+
+        let prepared = fixture.prepare(&["turn_1"]).expect("prepare");
+        run_restore(&prepared);
+        assert_eq!(read(&fixture.repo, "deep/a/b/keep.txt"), "keep\n");
+        let synced = DIR_SYNCS.with(|dirs| dirs.borrow().clone());
+        for folder in ["deep", "deep/a", "deep/a/b"] {
+            assert!(
+                synced.contains(&fixture.repo.join(folder)),
+                "{folder} was created without flushing it in its parent: {synced:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unchanged_captured_file_is_not_counted_as_restored() {
+        let fixture = Fixture::new(&[(".gitignore", "secret.log\n"), ("README.md", "hi\n")]);
+        write(&fixture.repo, "secret.log", "same\n");
+        fixture.checkpoint("turn_1");
+        fixture
+            .store
+            .capture(
+                &fixture.repo,
+                &fixture.thread,
+                &TurnId::new("turn_1"),
+                &["secret.log".into()],
+            )
+            .unwrap();
+
+        let prepared = fixture.prepare(&["turn_1"]).expect("prepare");
+        let outcome = run_restore(&prepared);
+        assert_eq!(
+            outcome.files + outcome.deleted,
+            0,
+            "a path that already matches is neither rewritten nor reported"
+        );
+        assert_eq!(read(&fixture.repo, "secret.log"), "same\n");
+    }
+
+    #[test]
+    fn recovery_refuses_a_journal_whose_root_is_not_the_workspace_root() {
+        let fixture = Fixture::new(&[("sub/a.txt", "one"), ("top.txt", "top")]);
+        fixture.checkpoint("turn_1");
+        write(&fixture.repo, "sub/a.txt", "two");
+        let workspace = fixture.repo.join("sub");
+        let prepared = fixture
+            .prepare_in(&workspace, &["turn_1"])
+            .expect("prepare");
+        let restore_id = prepared.restore_id().to_owned();
+        // A journal whose saved root is not the workspace's repo root would
+        // write outside the worktree; recovery must refuse it.
+        let mut record: serde_json::Value =
+            serde_json::from_slice(&fs::read(&prepared.record_path).unwrap()).unwrap();
+        record["root"] =
+            serde_json::json!(fixture.dir.path().join("elsewhere").display().to_string());
+        fs::write(&prepared.record_path, serde_json::to_vec(&record).unwrap()).unwrap();
+        apply_restore(&prepared).expect("apply");
+
+        let pending = read_pending_restore(&fixture.store, &restore_id).expect("read");
+        let error = recover_restore(&fixture.store, &pending, false).unwrap_err();
+        assert!(error.contains("saved root"), "{error}");
+        assert_eq!(
+            read(&fixture.repo, "sub/a.txt"),
+            "one",
+            "a refused rollback leaves the applied restore's files"
+        );
+        assert_eq!(
+            pending_restore_ids(&fixture.store),
+            vec![restore_id],
+            "the journal is kept"
+        );
     }
 }

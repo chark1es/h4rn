@@ -2270,23 +2270,37 @@ while the switch is on, so a turn sent while it was off has none and can rewind
 only its conversation. It exists only for
 a thread in its own linked worktree with a complete pre-turn checkpoint: a git
 tree of every tracked file and every untracked file git does not ignore, with
-git's modes, symlinks and renames. A tree recorded before that (tracked files
-only) is not complete and refuses the restore. It is refused when another live
+git's modes, symlinks and renames, plus the ignored paths (or ignored folders)
+that were present. A tree recorded before that (tracked files only), or one
+whose ignored listing could not be read, is not complete and refuses the
+restore. It is refused when another live
 thread or agent session shares the directory (finished, fully idle subagents of
 the same thread excepted), and requires the same worktree registration the
 thread was created with. The selected message's own checkpoint decides the
-whole restore; later removed turns never override it, and captured bytes for a
-path the tree lacks beat the tree's absence. Git paths resolve from the
-repository root, and a change outside the thread's worktree refuses the restore.
-The restore writes a durable journal with the replaced bytes and their modes,
-flushes backups,
-files and folders, applies the files, commits the cut and the record changes
-together, and only then publishes the new in-memory state. A failed commit
+whole restore; later removed turns never override it. A path absent from the
+complete tree is removed even when a mid-turn capture holds bytes, because the
+tree is the earlier whole-worktree evidence. Captures fill in only paths git
+ignored at checkpoint time, and only when the capture predates the turn's first
+write; otherwise the restore is refused and names the path, so a rename keeps
+its old path and a file that existed is never deleted on the tree's word. Git
+paths resolve from the repository root, and a change outside the thread's
+worktree refuses the restore. A restored file is written through git's
+`cat-file --filters` pipeline, so eol conversion and smudge filters produce the
+bytes a checkout would, and a filter that cannot run refuses the restore. The
+file's existing permission bits are kept and only the executable bit is set or
+cleared; a rollback puts back the exact bits. The restore writes a durable
+journal with the replaced bytes and their modes, flushes backups,
+files and folders (a folder chain one level at a time in its parent), applies
+the files, commits the cut and the record changes together, and only then
+publishes the new in-memory state. A path that already matches is neither
+rewritten nor counted as restored. A failed commit
 rolls the files back, and the journal stays until that rollback is on disk; a
 crash between apply and commit is rolled back at the next startup, while a
 committed cut keeps its files. Startup recovery re-checks the worktree identity
-before touching anything and treats an unreadable journal as an error, not an
-uncommitted restore. The workspace is reserved through the commit so nothing
+and that the journal's root is still the workspace's repository root before
+touching anything; a journal that cannot be read is not an uncommitted restore:
+it is kept, nothing is rolled back, the error is shown on its thread and the
+daemon keeps booting. The workspace is reserved through the commit so nothing
 starts inside it mid-restore. A symlink is restored as a directory entry and
 never followed, a failed unlink stops the restore, and a failed `git` read
 refuses it rather than becoming a deletion.

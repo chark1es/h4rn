@@ -885,13 +885,15 @@ async fn a_failed_file_restore_leaves_the_history_unchanged() {
         .join("manifest.json");
     let mut value: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&manifest).expect("manifest")).expect("json");
+    value["ignored"] = serde_json::json!(["uncaptured.bin"]);
     let files = value["files"].as_object_mut().expect("files");
     for entry in files.values_mut() {
         entry["skipped"] = serde_json::json!(true);
         entry["blob"] = serde_json::Value::Null;
     }
-    // A file the checkpoint cannot cover and the capture could not keep: it
-    // refuses the restore even though the tracked files could be put back.
+    // A file the checkpoint cannot cover (it was ignored) and the capture
+    // could not keep: it refuses the restore even though the tracked files
+    // could be put back.
     files.insert(
         "uncaptured.bin".into(),
         serde_json::json!({
@@ -900,7 +902,9 @@ async fn a_failed_file_restore_leaves_the_history_unchanged() {
             "blob": serde_json::Value::Null,
             "etag": serde_json::Value::Null,
             "size_bytes": 99999999,
-            "skipped": true
+            "skipped": true,
+            "mode": 420,
+            "pre_turn": true
         }),
     );
     std::fs::write(&manifest, serde_json::to_vec(&value).expect("json")).expect("manifest");

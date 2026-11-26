@@ -117,23 +117,37 @@ before the turn's prompt reaches the agent: every tracked file and every
 untracked file git does not ignore. It covers files a shell command changed even
 when no tool call named them. The tree keeps git's own modes, so an executable
 bit and a symlink's target come back, and a rename becomes the old path restored
-plus the new path removed. Ignored files are outside the tree; one a tool named
-is still covered by that turn's captured bytes. A checkpoint recorded before
-checkpoints covered the whole worktree (a tracked-only tree) is not complete.
-Checkpoints are only captured while the Labs switch is on, so a turn sent while
-it was off has none; turning the switch on does not invent one for work that
-already ran. Turns recorded without a complete checkpoint — an older thread, or
-a harness that never recorded it — refuse **Revert files too** with a clear
-message rather than restoring a partial set.
+plus the new path removed — a staged rename included, because the plan never
+asks git to pair the two paths into one. Ignored files are outside the tree, so
+the checkpoint also records which ignored paths (or ignored folders) were
+present. A checkpoint whose ignored listing cannot be read is not complete. A
+checkpoint recorded before checkpoints covered the whole worktree (a
+tracked-only tree) is not complete. Checkpoints are only captured while the Labs
+switch is on, so a turn sent while it was off has none; turning the switch on
+does not invent one for work that already ran. Turns recorded without a complete
+checkpoint — an older thread, or a harness that never recorded it — refuse
+**Revert files too** with a clear message rather than restoring a partial set.
 
 The selected message's own checkpoint decides the restore. A later removed
 turn's checkpoint or captures never override it: rewinding to before the chosen
-message puts the whole removed range back to that one tree. For a path the tree
-does not contain, such as an ignored file a tool named, the bytes captured
-before the turn's first tool call are used. Captured bytes beat the checkpoint's
-absence, so a file that existed before the turn is put back rather than deleted.
-A path present now but absent from the checkpoint is removed, including an
-untracked file a shell command created.
+message puts the whole removed range back to that one tree. A path absent from a
+complete checkpoint is removed, including an untracked file a shell command
+created, even when a tool later named it and a mid-turn capture holds its bytes:
+the tree is the earlier, whole-worktree evidence. Captures only fill in paths
+the checkpoint could not see because git ignored them. An ignored path that
+existed when the checkpoint was taken is put back from a capture only when the
+capture really predates the turn's first write to it; otherwise the restore is
+refused and names the path, because the tree's silence about an ignored path
+proves nothing and a file that existed is never deleted.
+
+A restored file is written the way a checkout would write it, not as the raw
+stored object: end-of-line conversion and clean/smudge filters (a `text
+eol=crlf` rule, a filter driver) run, so a CRLF file comes back with CRLF and a
+filtered file comes back with its working-tree content instead of its stored
+pointer. A filter that cannot run refuses the restore. The permission bits on
+disk are kept — only the executable bit is set or cleared, and it comes from the
+checkpoint or from the capture taken before the turn — so a 0600 `.env` never
+becomes world-readable. A rollback puts back the exact bits each file had.
 
 Git paths are relative to the repository root. A thread created in a
 subdirectory of the repository resolves them there, and a change outside that
@@ -151,38 +165,47 @@ A symlink the turn added is removed itself, never its target, and a restore
 never writes through a symlinked parent.
 
 The restore writes a durable journal first: the intended changes and a blob of
-the bytes each path held before. The backup blobs, the journal and every
-restored file and folder are flushed to disk before the journal says the
-restore is committed. Then it applies the files, commits the cut and the
-journal changes together, and only then publishes the new in-memory state. If
-the commit fails, the files are put back from the journal and the conversation
-is unchanged; the journal is removed only once that rollback is on disk, so a
-failed one is retried at the next startup. If the daemon stops between the
-apply and the commit, the next startup rolls the restore back; a committed cut
-is kept and its journal removed. A missing blob, a file too large to capture, a
-failed `git` read, a path that now escapes the worktree, a target that is now a
-folder, a failed unlink and a failed write refuse or roll back the whole
-rewind. A failed `git` read is never read as a deletion.
+the bytes each path held before, with its permission bits. The backup blobs, the
+journal and every restored file and folder are flushed to disk before the
+journal says the restore is committed; a folder chain the restore creates is
+flushed one level at a time in its parent. Then it applies the files, commits
+the cut and the journal changes together, and only then publishes the new
+in-memory state. If the commit fails, the files are put back from the journal
+and the conversation is unchanged; the journal is removed only once that
+rollback is on disk, so a failed one is retried at the next startup. If the
+daemon stops between the apply and the commit, the next startup rolls the
+restore back; a committed cut is kept and its journal removed. A missing blob, a
+file too large to capture, a failed `git` read, a path that now escapes the
+worktree, a target that is now a folder, a failed unlink and a failed write
+refuse or roll back the whole rewind. A failed `git` read is never read as a
+deletion.
 
 The answer reports what the restore really did: it says files were restored only
-when it wrote or removed at least one path. A turn that changed nothing leaves
-the worktree as it was and says so.
+when it wrote or removed at least one path. A path that already holds the
+checkpoint's bytes and mode is neither rewritten nor counted, so a turn that
+changed nothing leaves the worktree as it was and says so.
 
 The worktree must still be the registration the thread was created with: the
 same git dir and common dir. A moved worktree whose old path now holds another
-checkout is refused. Startup recovery checks the same identity before it
-touches anything a journal recorded, and leaves the files and the journal alone
+checkout is refused. Startup recovery checks the same identity, and that the
+journal's saved root is still the workspace's own repository root, before it
+touches anything a journal recorded; it leaves the files and the journal alone
 when they do not match. A journal that cannot be read is not treated as an
-uncommitted restore: recovery refuses to roll anything back and reports the
-error. The workspace is reserved from the first file write through the commit,
-so a thread or agent session that would start there waits or is refused.
+uncommitted restore: recovery refuses to roll anything back, keeps the journal,
+shows the error on its thread (the journal's name carries the thread id, so it
+is still known) and carries on booting, so one bad journal never keeps the whole
+daemon down. The workspace is reserved from the first file write through the
+commit, so a thread or agent session that would start there waits or is
+refused.
 
 The switch stays off by default while the file restore is still being hardened.
-A restore carries bytes and git's executable bit only, so ownership and
-extended attributes are left as they are, an ignored file the turn changed is
-only restored when a tool named it, and a changed submodule pointer refuses the
-restore rather than half-restoring it. The conversation rewind never depends on
-any of that, which is why it is available without the Lab.
+A restore keeps the file's own permission bits and git's executable bit only, so
+ownership and extended attributes are left as they are; an ignored file the turn
+changed is only restored when a tool captured it before the turn wrote it, and a
+converted or filtered file is written through git's own checkout pipeline. A
+changed submodule pointer refuses the restore rather than half-restoring it. The
+conversation rewind never depends on any of that, which is why it is available
+without the Lab.
 
 ## Safety
 

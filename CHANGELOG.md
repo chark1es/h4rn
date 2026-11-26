@@ -814,15 +814,25 @@ All notable changes to h4rn are recorded here. The format follows
 - **Rewind files restores the right bytes or refuses.** The selected message's
   own checkpoint now decides the restore, so a later turn never overrides it;
   the checkpoint covers untracked files as well as tracked ones, and keeps
-  renames, symlinks and executable bits; captured bytes beat a checkpoint that
-  lacks the file instead of deleting a file that existed; git paths resolve from
-  the repository root and anything outside the thread's worktree is refused; a
-  failed `git` read aborts instead of deleting; a failed symlink unlink or write
-  rolls back instead of writing through the link; a rollback keeps its journal
-  until it is on disk; backups, restored files and folders are flushed; startup
-  recovery checks the journal's path is still the thread's worktree and treats
-  an unreadable journal as an error; and the answer says files were restored
-  only when the restore really wrote or removed one.
+  renames (a staged rename included), symlinks and executable bits; it also
+  records which ignored paths were present, so a turn that empties `.gitignore`
+  or forces an ignored file into the index never makes a restore delete that
+  file, and an ignored file a tool captured before the turn wrote it comes back
+  while one only captured mid-turn refuses and names the path; a path the
+  checkpoint proves absent is removed even when a mid-turn capture holds it;
+  git paths resolve from the repository root and anything outside the thread's
+  worktree is refused; a failed `git` read aborts instead of deleting; a
+  restored file is written the way a checkout writes it, so CRLF and filtered
+  files come back as real working-tree bytes, and its own permission bits are
+  kept (a 0600 `.env` stays private) with only the executable bit toggled; a
+  failed symlink unlink or write rolls back instead of writing through the
+  link; a rollback keeps its journal until it is on disk and restores the exact
+  mode; backups, restored files and folders are flushed, new folders one level
+  at a time; startup recovery checks the journal's path is still the thread's
+  worktree and that its root is the workspace's repository root, surfaces an
+  unreadable journal on its thread and keeps booting instead of stopping the
+  daemon; and the answer says files were restored only when the restore really
+  changed one.
 - **Rewind and fork stay honest about messages still being delivered.** An edit
   now waits for a steer's write to return instead of cutting the turn it was
   about to join, a queued steer is marked in flight before its `sending` write
