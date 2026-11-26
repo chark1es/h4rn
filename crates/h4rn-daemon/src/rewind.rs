@@ -3014,7 +3014,7 @@ mod tests {
             "secret\n",
             "a file the checkpoint could not read is never deleted"
         );
-        let refused = prepared.err().expect("the restore refuses");
+        let refused = prepared.expect_err("the restore refuses");
         assert!(refused.contains("no complete file checkpoint"), "{refused}");
         assert!(refused.contains("private.key"), "{refused}");
     }

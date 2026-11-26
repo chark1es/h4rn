@@ -120,6 +120,13 @@ bit and a symlink's target come back, and a rename becomes the old path restored
 plus the new path removed — a staged rename included, because the plan never
 asks git to pair the two paths into one. A checkpoint recorded before
 checkpoints covered the whole worktree (a tracked-only tree) is not complete.
+A file that is there but cannot be read when the checkpoint is taken (a
+`private.key` at mode 000, say) makes the checkpoint incomplete, and **Revert
+files too** refuses with that file named. Leaving it out would record it as
+absent, and the restore would then delete it once the turn made it readable. A
+file that disappeared while the checkpoint was being taken is left out, as git
+would record it removed. Each path keeps its own bytes even when it ends in a
+carriage return next to a path without one (`a.txt` and `a.txt\r`).
 Checkpoints are only captured while the Labs switch is on, so a turn sent while
 it was off has none; turning the switch on does not invent one for work that
 already ran. Turns recorded without a complete checkpoint — an older thread, or
@@ -224,7 +231,10 @@ its thread, so the restore refuses. One that begins after it is refused when its
 prompt is claimed — even on a session that is already live, such as an idle
 subagent's — or when its session starts, so no prompt reaches an agent in the
 tree while the restore writes it. A turn refused this way fails with a note to
-send the message again once the rewind finishes.
+send the message again once the rewind finishes. A known trade-off: the
+reservation comes first, so a turn on an overlapping checkout that starts in the
+moment before the check is refused even when the check then refuses the restore
+too. Sending it again works.
 
 The dialog warns that **Revert files too also undoes edits you made yourself**
 after the chosen message. The restore wants the whole tree at the checkpoint.
