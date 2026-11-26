@@ -118,36 +118,72 @@ untracked file git does not ignore. It covers files a shell command changed even
 when no tool call named them. The tree keeps git's own modes, so an executable
 bit and a symlink's target come back, and a rename becomes the old path restored
 plus the new path removed — a staged rename included, because the plan never
-asks git to pair the two paths into one. Ignored files are outside the tree, so
-the checkpoint also records which ignored paths (or ignored folders) were
-present. A checkpoint whose ignored listing cannot be read is not complete. A
-checkpoint recorded before checkpoints covered the whole worktree (a
-tracked-only tree) is not complete. Checkpoints are only captured while the Labs
-switch is on, so a turn sent while it was off has none; turning the switch on
-does not invent one for work that already ran. Turns recorded without a complete
-checkpoint — an older thread, or a harness that never recorded it — refuse
-**Revert files too** with a clear message rather than restoring a partial set.
+asks git to pair the two paths into one. A checkpoint recorded before
+checkpoints covered the whole worktree (a tracked-only tree) is not complete.
+Checkpoints are only captured while the Labs switch is on, so a turn sent while
+it was off has none; turning the switch on does not invent one for work that
+already ran. Turns recorded without a complete checkpoint — an older thread, or
+a harness that never recorded it — refuse **Revert files too** with a clear
+message rather than restoring a partial set.
 
 The selected message's own checkpoint decides the restore. A later removed
-turn's checkpoint or captures never override it: rewinding to before the chosen
-message puts the whole removed range back to that one tree. A path absent from a
+turn's checkpoint never overrides it: rewinding to before the chosen message
+puts the whole removed range back to that one tree. A path absent from a
 complete checkpoint is removed, including an untracked file a shell command
-created, even when a tool later named it and a mid-turn capture holds its bytes:
-the tree is the earlier, whole-worktree evidence. Captures only fill in paths
-the checkpoint could not see because git ignored them. An ignored path that
-existed when the checkpoint was taken is put back from a capture only when the
-capture really predates the turn's first write to it; otherwise the restore is
-refused and names the path, because the tree's silence about an ignored path
-proves nothing and a file that existed is never deleted.
+created, even when a tool later named it and a capture holds its bytes: the
+tree is the earlier, whole-worktree evidence, and a capture is never the base
+for restored bytes.
 
-A restored file is written the way a checkout would write it, not as the raw
-stored object: end-of-line conversion and clean/smudge filters (a `text
-eol=crlf` rule, a filter driver) run, so a CRLF file comes back with CRLF and a
-filtered file comes back with its working-tree content instead of its stored
-pointer. A filter that cannot run refuses the restore. The permission bits on
-disk are kept — only the executable bit is set or cleared, and it comes from the
-checkpoint or from the capture taken before the turn — so a 0600 `.env` never
-becomes world-readable. A rollback puts back the exact bits each file had.
+### Ignored files are out of scope
+
+**Revert files too** restores only what git could see at the checkpoint:
+tracked files and untracked files git does not ignore. It never writes,
+recreates or removes a path that was ignored then, nor anything inside an
+ignored folder. Build output, caches and secret `.env` files are not the turn's
+work to rewind, and their pre-turn bytes cannot be proved from timestamps: `cp
+-p`, `rsync -t`, `tar x` and `mv` keep old modification times, clocks skew, and
+a file deleted before a tool named it looks absent. Restoring one of them from a
+mid-turn capture would silently invent a state that never existed.
+
+The checkpoint still records which ignored paths (or ignored folders) were
+present when it was taken. That listing is how the restore recognises a path
+that was ignored then and is visible now — the turn emptied `.gitignore` or ran
+`git add -f` — and leaves it exactly as the turn left it. A recorded folder
+entry is checked with `git check-ignore`: `--directory` can collapse a folder
+whose files merely all matched an ignore rule, so a file the turn created there
+afterwards may not be ignored at all; such a path is restored like any other.
+Ignoring more than 10,000 paths makes the listing incomplete, so the checkpoint
+is incomplete and **Revert files too** refuses with that reason.
+
+The dialog and the answer name the ignored paths the turn touched (from the
+tool calls and captures that named them, and from recorded ignored files that
+are gone now) and were left as they are, so the person knows those were not
+rewound. This is a plain note, not an error.
+
+### Exact bytes
+
+A checkpoint is taken without conversion: `git add -A` runs with
+`core.autocrlf=false`, `core.safecrlf=false` and `--attr-source` pointing at an
+empty tree, so no `text`, `eol` or filter attribute changes what is stored. The
+index's stat cache is cleared first, so an unchanged CRLF or filtered file is
+read from disk rather than kept as the clean blob the real index holds. Restore
+reads the raw blob back, so a CRLF file comes back with its CRLF and a filtered
+file comes back with its working-tree bytes, whatever the rules say now.
+`--attr-source` needs git 2.40 or newer; on an older git the checkpoint is
+incomplete and the restore refuses with a message naming the version.
+
+The permission bits on disk are kept — only the executable bit is set or
+cleared, and it comes from the checkpoint. A file the restore has to recreate
+gets the bits a capture recorded before the turn, so a 0600 file is never
+recreated as 0644; with no recorded bits it gets the conventional 0644 or 0755.
+A rollback puts back the exact bits each file had, and never writes through a
+link: the bytes go to a temporary file and are renamed into place, so a path
+that is now a symlink is replaced rather than followed.
+
+An untracked nested git repository is left out of the plan: git records it as a
+gitlink the real index does not have, and it is not a file the restore can put
+back. A submodule the real index does name still refuses the restore when its
+pointer changed.
 
 Git paths are relative to the repository root. A thread created in a
 subdirectory of the repository resolves them there, and a change outside that
@@ -200,10 +236,10 @@ refused.
 
 The switch stays off by default while the file restore is still being hardened.
 A restore keeps the file's own permission bits and git's executable bit only, so
-ownership and extended attributes are left as they are; an ignored file the turn
-changed is only restored when a tool captured it before the turn wrote it, and a
-converted or filtered file is written through git's own checkout pipeline. A
-changed submodule pointer refuses the restore rather than half-restoring it. The
+ownership and extended attributes are left as they are; ignored files are never
+touched; and the checkpoint and the restore both use raw bytes, so conversion
+rules and filters do not alter what comes back. A changed submodule pointer
+refuses the restore, while an untracked nested repository is left alone. The
 conversation rewind never depends on any of that, which is why it is available
 without the Lab.
 

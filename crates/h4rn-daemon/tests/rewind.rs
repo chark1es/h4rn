@@ -264,6 +264,25 @@ fn git(dir: &Path, args: &[&str]) {
     assert!(status.success(), "git {args:?} failed");
 }
 
+/// One git command's trimmed stdout.
+fn git_output(dir: &Path, args: &[&str]) -> String {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .expect("git");
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout)
+        .expect("utf8")
+        .trim()
+        .to_owned()
+}
+
 /// A temporary repository and one linked worktree of it.
 fn git_worktree() -> (tempfile::TempDir, PathBuf, PathBuf) {
     let base = tempfile::tempdir().expect("repo");
@@ -850,7 +869,7 @@ async fn file_restore_is_refused_in_the_main_checkout_and_for_a_shared_worktree(
 
 #[tokio::test]
 async fn a_failed_file_restore_leaves_the_history_unchanged() {
-    let (_base, _repo, worktree) = git_worktree();
+    let (_base, repo, worktree) = git_worktree();
     let (_fake, _specs) = FakeHarness::new().with_native_rewind().with_rewind_specs();
     let fixture = make_fixture(FakeHarness::new().with_native_rewind()).await;
     let mut events = fixture.manager.subscribe();
@@ -874,8 +893,8 @@ async fn a_failed_file_restore_leaves_the_history_unchanged() {
     let (second_item, second_turn) = next_user_item(&mut events).await;
     wait_turn(&mut events).await;
 
-    // Make the pre-turn snapshot impossible to restore, the way a file beyond
-    // the capture cap is reported.
+    // Make the pre-turn checkpoint impossible to read: the blob the restore
+    // needs is gone, so the restore refuses rather than half-restoring.
     let manifest = fixture
         .data
         .path()
@@ -883,38 +902,23 @@ async fn a_failed_file_restore_leaves_the_history_unchanged() {
         .join(created.thread_id.as_str())
         .join(second_turn.as_str())
         .join("manifest.json");
-    let mut value: serde_json::Value =
+    let value: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&manifest).expect("manifest")).expect("json");
-    value["ignored"] = serde_json::json!(["uncaptured.bin"]);
-    let files = value["files"].as_object_mut().expect("files");
-    for entry in files.values_mut() {
-        entry["skipped"] = serde_json::json!(true);
-        entry["blob"] = serde_json::Value::Null;
-    }
-    // A file the checkpoint cannot cover (it was ignored) and the capture
-    // could not keep: it refuses the restore even though the tracked files
-    // could be put back.
-    files.insert(
-        "uncaptured.bin".into(),
-        serde_json::json!({
-            "path": "uncaptured.bin",
-            "existed": true,
-            "blob": serde_json::Value::Null,
-            "etag": serde_json::Value::Null,
-            "size_bytes": 99999999,
-            "skipped": true,
-            "mode": 420,
-            "pre_turn": true
-        }),
-    );
-    std::fs::write(&manifest, serde_json::to_vec(&value).expect("json")).expect("manifest");
+    let tree = value["checkpoint"].as_str().expect("checkpoint tree");
+    let blob = git_output(&worktree, &["rev-parse", &format!("{tree}:README.md")]);
+    std::fs::remove_file(repo.join(".git/objects").join(&blob[..2]).join(&blob[2..]))
+        .expect("remove the checkpoint blob");
 
     let refused = fixture
         .manager
         .rewind_thread(&created.thread_id, &second_item, true)
         .await
         .expect_err("restore failed");
-    assert!(refused.to_string().contains("too large"), "{refused}");
+    assert!(
+        refused.to_string().contains("unable to read")
+            || refused.to_string().contains("could not read"),
+        "the missing checkpoint blob is reported, not ignored: {refused}"
+    );
     let snapshot = fixture
         .manager
         .get_thread(&created.thread_id, 0)
@@ -2267,6 +2271,68 @@ async fn files_restored_reports_what_the_restore_did() {
 }
 
 #[tokio::test]
+async fn ignored_files_touched_by_the_turn_are_named_and_left_alone() {
+    let (_base, _repo, worktree) = git_worktree();
+    // The linked worktree is on its own branch, so its ignore rule is written
+    // there rather than committed on the main branch behind it.
+    std::fs::write(worktree.join(".gitignore"), ".env\n").expect("gitignore");
+    std::fs::write(worktree.join(".env"), "SECRET=1\n").expect("env");
+
+    let fixture = make_fixture(FakeHarness::new().with_native_rewind()).await;
+    let mut events = fixture.manager.subscribe();
+    let created = fixture
+        .manager
+        .create_thread(thread_request(&fixture.host, &worktree, "A"))
+        .await
+        .expect("create");
+    let mut first = events.resubscribe();
+    wait_turn(&mut first).await;
+    drain(&mut events);
+    fixture
+        .manager
+        .send_message(
+            &created.thread_id,
+            "B [[write:.env]]changed\n".into(),
+            Vec::new(),
+        )
+        .await
+        .expect("send B");
+    let (b_item, _) = next_user_item(&mut events).await;
+    wait_turn(&mut events).await;
+    assert_eq!(
+        std::fs::read_to_string(worktree.join(".env")).expect("env"),
+        "changed\n"
+    );
+
+    let plan = fixture
+        .manager
+        .rewind_plan(&created.thread_id, &b_item)
+        .await
+        .expect("plan");
+    assert_eq!(
+        plan.left_alone,
+        vec![".env".to_owned()],
+        "the dialog says which ignored paths stay as they are"
+    );
+
+    let prompt = fixture
+        .manager
+        .rewind_thread(&created.thread_id, &b_item, true)
+        .await
+        .expect("rewind");
+    assert_eq!(
+        prompt.left_alone,
+        vec![".env".to_owned()],
+        "the answer says which ignored paths stayed"
+    );
+    assert_eq!(
+        std::fs::read_to_string(worktree.join(".env")).expect("env"),
+        "changed\n",
+        "an ignored file the turn touched is never restored"
+    );
+}
+
+#[tokio::test]
 async fn file_restore_is_off_until_the_labs_switch_is_turned_on() {
     let (_base, _repo, worktree) = git_worktree();
     let fixture = make_fixture(FakeHarness::new().with_native_rewind()).await;
@@ -2310,6 +2376,22 @@ async fn file_restore_is_off_until_the_labs_switch_is_turned_on() {
         "the summary must not offer file restore while the Labs switch is off"
     );
 
+    for entry in std::fs::read_dir(
+        fixture
+            .data
+            .path()
+            .join("snapshots")
+            .join(created.thread_id.as_str()),
+    )
+    .unwrap()
+    {
+        let entry = entry.unwrap();
+        eprintln!("turn dir: {:?}", entry.file_name());
+        let manifest = entry.path().join("manifest.json");
+        if let Ok(text) = std::fs::read_to_string(&manifest) {
+            eprintln!("manifest: {text}");
+        }
+    }
     let plan = fixture
         .manager
         .rewind_plan(&created.thread_id, &b_item)

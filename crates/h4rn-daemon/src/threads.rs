@@ -6012,6 +6012,8 @@ impl ThreadManager {
         // What the restore really did, not what the request asked for: a turn
         // that changed nothing writes nothing and is reported as such.
         let mut restored_files = false;
+        // Ignored paths the turn touched that were left exactly as they are.
+        let mut left_alone: Vec<String> = Vec::new();
         if restore_files {
             // File restore is behind Settings → Labs and off by default: the
             // conversation rewind is ready, the file restore is still being
@@ -6064,8 +6066,7 @@ impl ThreadManager {
             for turn in &removed {
                 if store.checkpoint(thread_id, turn).is_none() {
                     return Err(ManagerError::Conflict(
-                        "this message has no complete file checkpoint, so its files cannot be restored"
-                            .into(),
+                        store.checkpoint_refusal(thread_id, turn),
                     ));
                 }
             }
@@ -6145,6 +6146,7 @@ impl ThreadManager {
                 }
             };
             restored_files = outcome.files + outcome.deleted > 0;
+            left_alone = outcome.left_alone;
             prepared = Some(prepared_restore);
         }
 
@@ -6229,6 +6231,7 @@ impl ThreadManager {
             prompt: target.text,
             attachments: target.attachments,
             files_restored: restored_files,
+            left_alone,
             method,
         })
     }
@@ -6265,6 +6268,7 @@ impl ThreadManager {
                 method: h4rn_protocol::RewindMethod::Unsupported,
                 files_enabled: self.file_rewind_enabled(),
                 files_available: false,
+                left_alone: Vec::new(),
             });
         }
         let events = self
@@ -6294,6 +6298,10 @@ impl ThreadManager {
         };
         let removed = crate::rewind::removed_turns(&prompts, index);
         let mut files_available = self.file_rewind_enabled() && record.linked_worktree;
+        // Ignored paths the removed turns touched. The dialog says plainly
+        // that they will stay as they are, because a restore never rewinds an
+        // ignored file.
+        let mut left_alone: Vec<String> = Vec::new();
         if files_available {
             let workspace = std::path::PathBuf::from(&record.meta.workspace_path);
             files_available = record.meta.worktree_identity.is_some()
@@ -6306,6 +6314,11 @@ impl ThreadManager {
                         files_available = removed
                             .iter()
                             .all(|turn| store.checkpoint(thread_id, turn).is_some());
+                        if files_available {
+                            left_alone = crate::rewind::ignored_paths_touched(
+                                store, &workspace, thread_id, &removed,
+                            );
+                        }
                     }
                     None => files_available = false,
                 }
@@ -6315,6 +6328,7 @@ impl ThreadManager {
             method,
             files_enabled: self.file_rewind_enabled(),
             files_available,
+            left_alone,
         })
     }
 
@@ -12874,14 +12888,26 @@ impl Inner {
             if let Some((workspace, thread)) = checkpoint {
                 let turn = dispatch.turn_id.clone();
                 let _ = tokio::task::spawn_blocking(move || {
-                    if let Some(checkpoint) = crate::worktrees::git::checkpoint_commit(&workspace) {
-                        let _ = store.record_checkpoint(
-                            &workspace,
-                            &thread,
-                            &turn,
-                            &checkpoint.tree,
-                            &checkpoint.ignored,
-                        );
+                    match crate::worktrees::git::checkpoint_commit(&workspace) {
+                        Ok(Some(checkpoint)) => {
+                            let _ = store.record_checkpoint(
+                                &workspace,
+                                &thread,
+                                &turn,
+                                &checkpoint.tree,
+                                &checkpoint.ignored,
+                            );
+                        }
+                        // The repository could not be captured at all: there is
+                        // no complete checkpoint, and the restore says so.
+                        Ok(None) => {}
+                        // The capture itself cannot be complete (an older git,
+                        // too many ignored paths). Keep the reason so the
+                        // restore names it instead of a generic refusal.
+                        Err(reason) => {
+                            let _ = store
+                                .record_checkpoint_incomplete(&workspace, &thread, &turn, &reason);
+                        }
                     }
                 })
                 .await;

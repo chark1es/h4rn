@@ -31,7 +31,14 @@ All notable changes to h4rn are recorded here. The format follows
   whole tracked worktree, so a shell command's edits are covered), warns that it
   also undoes the person's own later edits, and is refused when another thread
   or agent session shares the directory (finished subagents with nothing queued
-  or pending do not block it). Checkpoints are only captured while the switch
+  or pending do not block it). It restores exactly what git could see then:
+  ignored files and folders are never written, recreated or removed, and the
+  dialog and answer name the ignored paths the turn touched that stayed as they
+  were. Bytes go in and out raw, so a CRLF file or one under a filter attribute
+  comes back exactly as it was, and a recreated private file keeps its bits. A
+  checkpoint with more than 10,000 ignored paths, or one taken with a git older
+  than 2.40, is incomplete and refuses the restore with that reason. Checkpoints
+  are only captured while the switch
   is on, so a turn sent while it was off only rewinds its conversation. A
   rewind is refused while a turn runs, a message is
   queued or parked, a message's delivery is uncertain (resend or discard it

@@ -28,6 +28,11 @@ attachments: Array<Attachment>,
  */
 files_restored: boolean, 
 /**
+ * Paths the removed turns touched that git ignored when the checkpoint
+ * was taken. They were left exactly as they are, never rewound.
+ */
+left_alone: Array<string>, 
+/**
  * What the harness history did.
  */
 method: RewindMethod, };

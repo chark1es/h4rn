@@ -431,7 +431,7 @@ describe("planRewind", () => {
   it("asks the daemon what the selected prompt's rewind would do", async () => {
     fake.response.current = {
       type: "rewind_plan",
-      plan: { method: "handoff", files_enabled: false, files_available: false },
+      plan: { method: "handoff", files_enabled: false, files_available: false, left_alone: [] },
     };
     const plan = await planRewind("th_plan", "item_user_1");
     expect(fake.request).toHaveBeenCalledWith({
@@ -460,6 +460,7 @@ describe("rewindThread", () => {
         prompt: "try again",
         attachments: [],
         files_restored: false,
+        left_alone: [],
         method: "handoff",
       },
     };

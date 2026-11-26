@@ -25,8 +25,8 @@ use crate::journal::WireEvent;
 
 #[cfg(test)]
 thread_local! {
-    /// Test-only: make every durability flush in a restore fail.
-    static FAIL_SYNC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Test-only: make the next this-many durability flushes fail.
+    static FAIL_SYNC: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
     /// Test-only: every folder `sync_dir` has flushed, in order.
     static DIR_SYNCS: std::cell::RefCell<Vec<PathBuf>> = const { std::cell::RefCell::new(Vec::new()) };
 }
@@ -258,12 +258,15 @@ pub(crate) fn removed_turns(prompts: &[LivePrompt], index: usize) -> Vec<TurnId>
 }
 
 /// What a file restore did.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct FileRestore {
     /// Files written back or created.
     pub files: usize,
     /// Files deleted because the checkpoint had none.
     pub deleted: usize,
+    /// Paths ignored when the checkpoint was taken that the turn touched, left
+    /// exactly as the turn left them.
+    pub left_alone: Vec<String>,
 }
 
 /// One path the checkpoint puts back.
@@ -280,8 +283,13 @@ struct RestoreOp {
 /// What one path becomes.
 #[derive(Debug)]
 enum RestoreChange {
-    /// Write these bytes and set the executable bit.
-    File { bytes: Vec<u8>, executable: bool },
+    /// Write these bytes with this executable bit (and this mode, when the
+    /// captured pre-turn bits are known and the file has to be recreated).
+    File {
+        bytes: Vec<u8>,
+        executable: bool,
+        mode: Option<u32>,
+    },
     /// Replace the entry with this symlink.
     Symlink { target: PathBuf },
     /// Remove the entry: it did not exist at the checkpoint.
@@ -306,6 +314,7 @@ pub(crate) struct PreparedRestore {
     ops: Vec<RestoreOp>,
     backups: Vec<(PathBuf, Backup)>,
     record_path: PathBuf,
+    left_alone: Vec<String>,
 }
 
 /// One restore journal on disk, before its contents are read.
@@ -433,112 +442,92 @@ pub(crate) fn prepare_restore(
     let Some(first) = turns.first() else {
         return Err("there is no turn to restore files for".into());
     };
-    let checkpoint = store.checkpoint(thread_id, first).ok_or_else(|| {
-        format!(
-            "{} has no complete file checkpoint, so its files cannot be restored",
-            first.as_str()
-        )
-    })?;
+    let checkpoint = store
+        .checkpoint(thread_id, first)
+        .ok_or_else(|| store.checkpoint_refusal(thread_id, first))?;
     // The checkpoint tree cannot see ignored paths, so the paths it had to
     // ignore are recorded beside it. Their absence from the tree says nothing
-    // about whether they existed.
+    // about whether they existed, and the restore never writes, recreates or
+    // removes one: a path ignored then is left exactly as the turn left it.
     let ignored = store.ignored(thread_id, first);
-    let mut targets: BTreeMap<String, Option<crate::worktrees::git::CheckpointValue>> =
-        BTreeMap::new();
+    let index = IgnoredIndex::new(&ignored);
     // One checkpoint decides the whole restore: the pre-turn state of the
     // first removed turn. A later removed turn is after that message, so its
     // checkpoint can only describe work the person asked to undo.
-    for change in crate::worktrees::git::checkpoint_changes(&repo, &checkpoint)? {
+    let changes = crate::worktrees::git::checkpoint_changes(&repo, &checkpoint)?;
+    // Captures never decide restored bytes. They name the ignored paths the
+    // turn touched, so the answer can say what was left as it is, and they
+    // lend a recreated file the mode it had before the turn.
+    let mut captures: Vec<(String, String, crate::fs::SnapshotEntry)> = Vec::new();
+    for turn in turns {
+        for entry in store.entries(thread_id, turn) {
+            let relative = normalize_relative(&entry.path)
+                .map_err(|error| format!("{} cannot be restored: {error}", entry.path))?;
+            let absolute = root.join(&relative);
+            let Ok(repo_relative) = absolute.strip_prefix(&repo) else {
+                continue;
+            };
+            captures.push((
+                path_string(repo_relative)?,
+                display_path(&root, &absolute),
+                entry,
+            ));
+        }
+    }
+    // A path covered only by a recorded ignored folder is left alone only
+    // while the ignore rules still ignore it: `--directory` collapses a folder
+    // whose entries merely all matched a rule, and a file the turn created
+    // there afterwards matches none. Ask git once for all of them.
+    let mut candidates: Vec<String> = Vec::new();
+    for change in &changes {
+        if !index.covers_exactly(&change.path) && !index.folders_covering(&change.path).is_empty() {
+            candidates.push(change.path.clone());
+        }
+    }
+    for (path, _, _) in &captures {
+        if !index.covers_exactly(path) && !index.folders_covering(path).is_empty() {
+            candidates.push(path.clone());
+        }
+    }
+    candidates.sort();
+    candidates.dedup();
+    let still_ignored = crate::worktrees::git::ignored_paths_now(&repo, &candidates)
+        .map_err(|error| format!("could not ask git which paths are ignored: {error}"))?;
+    let covered = |path: &str| index.covers_exactly(path) || still_ignored.contains(path);
+
+    let mut targets: BTreeMap<String, Option<crate::worktrees::git::CheckpointValue>> =
+        BTreeMap::new();
+    let mut left_alone: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for change in changes {
+        if covered(&change.path) {
+            left_alone.insert(display_path(&root, &repo.join(&change.path)));
+            continue;
+        }
         targets.insert(change.path, change.value);
     }
-    // Captures only fill in ignored paths. For anything else, a complete
-    // checkpoint's absence is the earlier, whole-worktree evidence: a file the
-    // turn's own shell command created and a later tool named must be removed,
-    // not resurrected from a mid-turn capture.
-    let mut captured: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    for entry in store.entries(thread_id, first) {
-        let relative = normalize_relative(&entry.path)
-            .map_err(|error| format!("{} cannot be restored: {error}", entry.path))?;
-        let absolute = root.join(&relative);
-        let repo_relative = absolute.strip_prefix(&repo).map_err(|_| {
-            format!(
-                "{} is outside the worktree, so it cannot be restored",
-                entry.path
-            )
-        })?;
-        let path = path_string(repo_relative)?;
-        if matches!(targets.get(&path), Some(Some(_))) {
-            // The checkpoint tree has the path: it is the earlier, whole-tree
-            // evidence and wins over a later per-path capture.
+    let mut capture_modes: BTreeMap<String, u32> = BTreeMap::new();
+    for (path, display, entry) in &captures {
+        if covered(path) {
+            left_alone.insert(display.clone());
             continue;
         }
-        if !ignored_covers(&ignored, &path) {
-            // Not ignored at checkpoint time, so the tree's absence is
-            // authoritative: the path did not exist when the turn began.
-            continue;
-        }
-        if entry.existed {
-            if !entry.pre_turn {
-                // The turn had already written this ignored path before the
-                // capture, so the captured bytes are not the pre-turn state.
-                // Never remove it on the tree's word; refuse if that is what
-                // the plan would do.
-                if targets.contains_key(&path) {
-                    return Err(format!(
-                        "{} was ignored when this message's checkpoint was taken and the turn changed it before it could be captured, so its pre-message contents are not known",
-                        entry.path
-                    ));
-                }
-                continue;
-            }
-            let blob = entry.blob.as_deref().ok_or_else(|| {
-                if entry.skipped {
-                    format!(
-                        "{} was too large to capture before this message, so it cannot be restored",
-                        entry.path
-                    )
-                } else {
-                    format!(
-                        "{} has no captured contents, so it cannot be restored",
-                        entry.path
-                    )
-                }
-            })?;
-            let bytes = store.read_blob(blob).ok_or_else(|| {
-                format!(
-                    "the captured contents of {} are missing, so it cannot be restored",
-                    entry.path
-                )
-            })?;
-            // The executable bit comes from the capture, not from what the
-            // turn left on disk.
-            let executable = entry
-                .mode
-                .map(|mode| mode & 0o111 != 0)
-                .unwrap_or_else(|| current_is_executable(&absolute));
-            targets.insert(
-                path.clone(),
-                Some(crate::worktrees::git::CheckpointValue::File { bytes, executable }),
-            );
-            captured.insert(path);
-        } else if !targets.contains_key(&path) && absolute.symlink_metadata().is_ok() {
-            // Captured as absent before the turn and present now: the turn
-            // created it.
-            targets.insert(path.clone(), None);
-            captured.insert(path);
+        if let Some(mode) = entry.mode {
+            capture_modes.insert(path.clone(), mode);
         }
     }
-    // An ignored path the capture did not cover was never removed on the
-    // tree's word: the tree could not see it, so its absence is not evidence.
-    for (path, value) in &targets {
-        if value.is_none()
-            && ignored_covers(&ignored, path)
-            && !captured.contains(path)
-            && repo.join(path).symlink_metadata().is_ok()
-        {
-            return Err(format!(
-                "{path} was ignored when this message's checkpoint was taken, so the checkpoint cannot prove it was absent; refusing to remove it"
-            ));
+    // A recorded ignored path that is gone now was removed by the turn (or
+    // while it ran); it is named so the person knows it was not put back.
+    for entry in &ignored {
+        let relative = entry.trim_end_matches('/');
+        if relative.is_empty() {
+            continue;
+        }
+        let absolute = repo.join(relative);
+        if matches!(
+            absolute.symlink_metadata(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound
+        ) {
+            left_alone.insert(display_path(&root, &absolute));
         }
     }
 
@@ -560,7 +549,11 @@ pub(crate) fn prepare_restore(
             .unwrap_or(false);
         let change = match value {
             Some(crate::worktrees::git::CheckpointValue::File { bytes, executable }) => {
-                RestoreChange::File { bytes, executable }
+                RestoreChange::File {
+                    bytes,
+                    executable,
+                    mode: capture_modes.get(&path).copied(),
+                }
             }
             Some(crate::worktrees::git::CheckpointValue::Symlink { target }) => {
                 RestoreChange::Symlink { target }
@@ -616,12 +609,16 @@ pub(crate) fn prepare_restore(
         ops,
         backups,
         record_path,
+        left_alone: left_alone.into_iter().collect(),
     })
 }
 
 /// Applies the prepared changes, rolling them back if any write fails.
 pub(crate) fn apply_restore(prepared: &PreparedRestore) -> Result<FileRestore, String> {
-    let mut result = FileRestore::default();
+    let mut result = FileRestore {
+        left_alone: prepared.left_alone.clone(),
+        ..FileRestore::default()
+    };
     for (index, op) in prepared.ops.iter().enumerate() {
         if op.already_matches() {
             // The path already holds the checkpoint's bytes and mode: nothing
@@ -656,7 +653,9 @@ impl RestoreOp {
     /// Whether the path already is exactly what this op would make it.
     fn already_matches(&self) -> bool {
         match &self.change {
-            RestoreChange::File { bytes, executable } => {
+            RestoreChange::File {
+                bytes, executable, ..
+            } => {
                 let Ok(meta) = self.absolute.symlink_metadata() else {
                     return false;
                 };
@@ -688,15 +687,22 @@ fn apply_op(op: &RestoreOp) -> Result<(), String> {
         .ok_or_else(|| format!("{} has no parent folder", op.absolute.display()))?;
     create_dir_all_durable(parent)?;
     match &op.change {
-        RestoreChange::File { bytes, executable } => {
+        RestoreChange::File {
+            bytes,
+            executable,
+            mode,
+        } => {
             // Keep the permission bits the file has now (a 0600 file stays
-            // private) and only set the executable bit the checkpoint names.
+            // private). A file the restore has to recreate gets the bits it
+            // had before the turn when a capture recorded them, never a
+            // blanket 0644.
             let existing_mode = op
                 .absolute
                 .symlink_metadata()
                 .ok()
                 .filter(std::fs::Metadata::is_file)
-                .map(|meta| mode_of(&meta));
+                .map(|meta| mode_of(&meta))
+                .or(*mode);
             if op.leaf_symlink || op.absolute.is_dir() {
                 // A link is removed itself, never followed: a failed unlink
                 // must stop the restore instead of writing through the link
@@ -943,11 +949,10 @@ fn rollback_record(store: &SnapshotStore, record: &RestoreRecord) -> Result<(), 
                         entry.path
                     )
                 })?;
-                write_parented(&absolute, &bytes)
-                    .map_err(|error| format!("could not put {} back: {error}", entry.path))?;
-                // Put back the exact bits the file had, not a default mode.
+                // Put back the exact bits the file had, not a default mode,
+                // and never write through a link that now sits at the path.
                 let mode = mode.unwrap_or(if *executable { 0o755 } else { 0o644 });
-                set_mode(&absolute, mode)
+                write_replacing(&absolute, &bytes, mode)
                     .map_err(|error| format!("could not put {} back: {error}", entry.path))?;
             }
             BackupRecord::Symlink { target } => {
@@ -1029,20 +1034,6 @@ fn path_string(path: &Path) -> Result<String, String> {
     path.to_str()
         .map(str::to_owned)
         .ok_or_else(|| "a restored path is not valid UTF-8, so it cannot be recorded".to_owned())
-}
-
-/// Whether the file at `path` is executable right now.
-#[cfg(unix)]
-fn current_is_executable(path: &Path) -> bool {
-    fs::symlink_metadata(path)
-        .map(|meta| is_executable(&meta))
-        .unwrap_or(false)
-}
-
-/// Whether the file at `path` is executable right now.
-#[cfg(not(unix))]
-fn current_is_executable(_path: &Path) -> bool {
-    false
 }
 
 /// A file's Unix permission bits.
@@ -1127,12 +1118,51 @@ fn write_durable(path: &Path, bytes: &[u8]) -> Result<(), String> {
     sync_file(&mut file, path)
 }
 
-/// Writes bytes through a missing parent folder.
-fn write_parented(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        create_dir_all_durable(parent)?;
+/// Writes a file without ever following a link that now sits at its path.
+///
+/// The bytes go to a temporary file in the same folder and are renamed into
+/// place, so a symlink the restore created is replaced rather than written
+/// through into its target. A folder or another non-file at the path refuses.
+fn write_replacing(path: &Path, bytes: &[u8], mode: u32) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("{} has no parent folder", path.display()))?;
+    create_dir_all_durable(parent)?;
+    match path.symlink_metadata() {
+        Ok(meta) if meta.is_file() => {}
+        Ok(meta) if meta.is_dir() => {
+            return Err(format!(
+                "{} is now a folder, so it cannot be put back",
+                path.display()
+            ));
+        }
+        // A link (or any other non-file) is replaced by the rename below,
+        // never followed.
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(format!("could not inspect {}: {error}", path.display()));
+        }
     }
-    write_durable(path, bytes)
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("file");
+    let staged = parent.join(format!(
+        ".{name}.{}.h4rn-rollback.tmp",
+        uuid::Uuid::now_v7()
+    ));
+    let restored = write_durable(&staged, bytes)
+        .and_then(|()| set_mode(&staged, mode))
+        .and_then(|()| {
+            fs::rename(&staged, path)
+                .map_err(|error| format!("could not put {} back: {error}", path.display()))
+        })
+        .and_then(|()| sync_dir(parent));
+    if restored.is_err() {
+        let _ = fs::remove_file(&staged);
+    }
+    restored
 }
 
 /// Creates a folder chain one level at a time, flushing each new folder in its
@@ -1175,7 +1205,15 @@ fn create_dir_all_durable(dir: &Path) -> Result<(), String> {
 /// Flushes a file's contents to disk.
 fn sync_file(file: &mut fs::File, path: &Path) -> Result<(), String> {
     #[cfg(test)]
-    if FAIL_SYNC.with(|flag| flag.replace(false)) {
+    if FAIL_SYNC.with(|flag| {
+        let remaining = flag.get();
+        if remaining == 0 {
+            false
+        } else {
+            flag.set(remaining - 1);
+            true
+        }
+    }) {
         return Err(format!("could not flush {} (injected)", path.display()));
     }
     file.sync_all()
@@ -1235,9 +1273,7 @@ fn rollback(backups: &[(PathBuf, Backup)]) -> Result<(), String> {
     let mut first_error = None;
     for (path, backup) in backups {
         let restored = match backup {
-            Backup::File { bytes, mode } => {
-                write_parented(path, bytes).and_then(|()| set_mode(path, *mode))
-            }
+            Backup::File { bytes, mode } => write_replacing(path, bytes, *mode),
             Backup::Absent => match path.symlink_metadata() {
                 Ok(_) => remove_file_durable(path),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -1297,19 +1333,131 @@ fn canonical_or_lexical(path: &Path) -> PathBuf {
     })
 }
 
-/// Whether a path is one of the checkpoint's ignored entries, or inside one.
+/// The checkpoint's ignored listing, indexed for fast lookups.
 ///
-/// An entry with a trailing `/` is an ignored folder (`--directory` collapses
-/// it), so every path under it is ignored too.
-fn ignored_covers(ignored: &[String], path: &str) -> bool {
-    ignored.iter().any(|entry| {
-        let entry = entry.trim_end_matches('/');
-        !entry.is_empty()
-            && (path == entry
-                || path
-                    .strip_prefix(entry)
-                    .is_some_and(|rest| rest.starts_with('/')))
-    })
+/// An exact entry is an ignored file. An entry with a trailing `/` is a folder
+/// `--directory` collapsed, and covers every path beneath it. Looking a path up
+/// costs one hash lookup per ancestor, never a scan of the whole listing.
+#[derive(Debug, Default)]
+struct IgnoredIndex {
+    exact: std::collections::HashSet<String>,
+    folders: std::collections::HashSet<String>,
+}
+
+impl IgnoredIndex {
+    fn new(ignored: &[String]) -> Self {
+        let mut index = Self::default();
+        for entry in ignored {
+            match entry.strip_suffix('/') {
+                Some(folder) if !folder.is_empty() => {
+                    index.folders.insert(folder.to_owned());
+                }
+                Some(_) => {}
+                None => {
+                    index.exact.insert(entry.clone());
+                }
+            }
+        }
+        index
+    }
+
+    /// Whether the path itself was a recorded ignored file, or the folder
+    /// entry itself.
+    fn covers_exactly(&self, path: &str) -> bool {
+        self.exact.contains(path) || self.folders.contains(path)
+    }
+
+    /// The recorded ignored folders that contain `path`, deepest last.
+    fn folders_covering(&self, path: &str) -> Vec<String> {
+        let mut folders = Vec::new();
+        let mut rest = path;
+        while let Some((parent, _)) = rest.rsplit_once('/') {
+            if self.folders.contains(parent) {
+                folders.push(parent.to_owned());
+            }
+            rest = parent;
+        }
+        folders
+    }
+}
+
+/// A repository-relative path as the person's workspace sees it, when it is
+/// inside that workspace.
+fn display_path(root: &Path, absolute: &Path) -> String {
+    absolute
+        .strip_prefix(root)
+        .unwrap_or(absolute)
+        .display()
+        .to_string()
+}
+
+/// The ignored paths the removed turns touched, left exactly as they are.
+///
+/// This is what the dialog says before a restore, so it only uses what is
+/// already recorded: the captures a tool's path named, and a recorded ignored
+/// file that is gone now (the turn removed it). It writes nothing and needs no
+/// checkpoint plan.
+pub(crate) fn ignored_paths_touched(
+    store: &SnapshotStore,
+    workspace: &Path,
+    thread_id: &ThreadId,
+    turns: &[TurnId],
+) -> Vec<String> {
+    let Some(first) = turns.first() else {
+        return Vec::new();
+    };
+    let Ok(root) = workspace.canonicalize() else {
+        return Vec::new();
+    };
+    let Some(repo) = crate::worktrees::git::toplevel(&root) else {
+        return Vec::new();
+    };
+    let ignored = store.ignored(thread_id, first);
+    let index = IgnoredIndex::new(&ignored);
+    let mut touched: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut candidates: Vec<String> = Vec::new();
+    let mut captures: Vec<(String, String)> = Vec::new();
+    for turn in turns {
+        for entry in store.entries(thread_id, turn) {
+            let Ok(relative) = normalize_relative(&entry.path) else {
+                continue;
+            };
+            let absolute = root.join(&relative);
+            let Ok(repo_relative) = absolute.strip_prefix(&repo) else {
+                continue;
+            };
+            let Ok(path) = path_string(repo_relative) else {
+                continue;
+            };
+            if !index.covers_exactly(&path) && !index.folders_covering(&path).is_empty() {
+                candidates.push(path.clone());
+            }
+            captures.push((path, display_path(&root, &absolute)));
+        }
+    }
+    candidates.sort();
+    candidates.dedup();
+    let still_ignored =
+        crate::worktrees::git::ignored_paths_now(&repo, &candidates).unwrap_or_default();
+    for (path, display) in &captures {
+        if index.covers_exactly(path) || still_ignored.contains(path) {
+            touched.insert(display.clone());
+        }
+    }
+    for entry in &ignored {
+        let relative = entry.trim_end_matches('/');
+        if relative.is_empty() {
+            continue;
+        }
+        let absolute = repo.join(relative);
+        if matches!(
+            absolute.symlink_metadata(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound
+        ) {
+            touched.insert(display_path(&root, &absolute));
+        }
+    }
+    touched.into_iter().collect()
 }
 
 #[cfg(test)]
@@ -1506,8 +1654,9 @@ mod tests {
 
         /// Records the whole-worktree checkpoint a turn captured.
         fn checkpoint(&self, turn: &str) -> String {
-            let checkpoint =
-                crate::worktrees::git::checkpoint_commit(&self.repo).expect("checkpoint tree");
+            let checkpoint = crate::worktrees::git::checkpoint_commit(&self.repo)
+                .expect("checkpoint")
+                .expect("checkpoint tree");
             self.store
                 .record_checkpoint(
                     &self.repo,
@@ -1522,8 +1671,9 @@ mod tests {
 
         /// Records a checkpoint captured from a workspace inside the repo.
         fn checkpoint_in(&self, workspace: &Path, turn: &str) {
-            let checkpoint =
-                crate::worktrees::git::checkpoint_commit(workspace).expect("checkpoint tree");
+            let checkpoint = crate::worktrees::git::checkpoint_commit(workspace)
+                .expect("checkpoint")
+                .expect("checkpoint tree");
             self.store
                 .record_checkpoint(
                     workspace,
@@ -1587,31 +1737,23 @@ mod tests {
     }
 
     #[test]
-    fn captured_bytes_beat_a_checkpoint_that_lacks_the_file() {
+    fn a_force_added_ignored_file_is_left_as_it_is() {
         let fixture = Fixture::new(&[(".gitignore", "secret.log\n"), ("README.md", "hi\n")]);
-        write(&fixture.repo, "secret.log", "before");
+        write(&fixture.repo, "secret.log", "before\n");
         fixture.checkpoint("turn_1");
-        // The turn's tool named the ignored file before changing it.
-        fixture
-            .store
-            .capture(
-                &fixture.repo,
-                &fixture.thread,
-                &TurnId::new("turn_1"),
-                &["secret.log".into()],
-            )
-            .unwrap();
-        write(&fixture.repo, "secret.log", "after");
-        // The turn then tracked it, so the checkpoint has no entry for it.
+        write(&fixture.repo, "secret.log", "after\n");
+        // The turn forces it into the index, so git can see it now.
         git(&fixture.repo, &["add", "-f", "secret.log"]);
 
         let prepared = fixture.prepare(&["turn_1"]).expect("prepare");
-        run_restore(&prepared);
+        let outcome = run_restore(&prepared);
         assert_eq!(
             read(&fixture.repo, "secret.log"),
-            "before",
-            "captured pre-turn bytes beat the checkpoint's absence instead of deleting the file"
+            "after\n",
+            "a path ignored at checkpoint time is never written, recreated or removed"
         );
+        assert_eq!(outcome.files + outcome.deleted, 0);
+        assert_eq!(outcome.left_alone, vec!["secret.log".to_owned()]);
     }
 
     #[test]
@@ -1745,7 +1887,7 @@ mod tests {
     }
 
     #[test]
-    fn a_file_too_large_to_capture_refuses_when_the_checkpoint_lacks_it() {
+    fn an_ignored_file_too_large_to_capture_is_left_as_it_is() {
         let fixture = Fixture::new(&[(".gitignore", "big.bin\n"), ("README.md", "hi\n")]);
         write(&fixture.repo, "big.bin", "x");
         let tree = fixture.checkpoint("turn_1");
@@ -1779,13 +1921,18 @@ mod tests {
         .unwrap();
         write(&fixture.repo, "big.bin", "changed");
 
-        let error = fixture.prepare(&["turn_1"]).unwrap_err();
-        assert!(error.contains("too large"), "{error}");
-        assert_eq!(read(&fixture.repo, "big.bin"), "changed");
+        let prepared = fixture.prepare(&["turn_1"]).expect("prepare");
+        let outcome = run_restore(&prepared);
+        assert_eq!(
+            read(&fixture.repo, "big.bin"),
+            "changed",
+            "an ignored path is never restored from a capture"
+        );
+        assert_eq!(outcome.left_alone, vec!["big.bin".to_owned()]);
     }
 
     #[test]
-    fn a_missing_captured_blob_refuses_before_any_file_changes() {
+    fn a_missing_capture_blob_does_not_decide_restored_bytes() {
         let fixture = Fixture::new(&[(".gitignore", "keep.txt\n"), ("README.md", "hi\n")]);
         write(&fixture.repo, "keep.txt", "current");
         let tree = fixture.checkpoint("turn_1");
@@ -1818,9 +1965,14 @@ mod tests {
         )
         .unwrap();
 
-        let error = fixture.prepare(&["turn_1"]).unwrap_err();
-        assert!(error.contains("missing"), "{error}");
-        assert_eq!(read(&fixture.repo, "keep.txt"), "current");
+        let prepared = fixture.prepare(&["turn_1"]).expect("prepare");
+        let outcome = run_restore(&prepared);
+        assert_eq!(
+            read(&fixture.repo, "keep.txt"),
+            "current",
+            "a capture whose blob is gone never decides what an ignored path holds"
+        );
+        assert_eq!(outcome.left_alone, vec!["keep.txt".to_owned()]);
     }
 
     #[cfg(unix)]
@@ -1962,9 +2114,9 @@ mod tests {
         write(&fixture.repo, "a.txt", "after");
         let prepared = fixture.prepare(&["turn_1"]).expect("prepare");
 
-        FAIL_SYNC.with(|flag| flag.set(true));
+        FAIL_SYNC.with(|flag| flag.set(1));
         let result = apply_restore(&prepared);
-        FAIL_SYNC.with(|flag| flag.set(false));
+        FAIL_SYNC.with(|flag| flag.set(0));
 
         assert!(
             result.is_err(),
@@ -2074,7 +2226,7 @@ mod tests {
     }
 
     #[test]
-    fn emptying_gitignore_never_removes_an_ignored_file_that_existed() {
+    fn emptying_gitignore_leaves_an_ignored_file_in_place() {
         let fixture = Fixture::new(&[(".gitignore", ".env\n"), ("README.md", "hi\n")]);
         write(&fixture.repo, ".env", "SECRET=1\n");
         fixture.checkpoint("turn_1");
@@ -2082,30 +2234,33 @@ mod tests {
         // path. The tree cannot see it, but it existed all along.
         write(&fixture.repo, ".gitignore", "");
 
-        let error = fixture.prepare(&["turn_1"]).unwrap_err();
-        assert!(error.contains(".env"), "{error}");
+        let prepared = fixture.prepare(&["turn_1"]).expect("prepare");
+        let outcome = run_restore(&prepared);
         assert_eq!(
             read(&fixture.repo, ".env"),
             "SECRET=1\n",
-            "a file that was ignored at checkpoint time is never removed on the tree's word"
+            "a file that was ignored at checkpoint time is left exactly as it is"
         );
+        assert_eq!(outcome.deleted, 0);
+        assert_eq!(outcome.left_alone, vec![".env".to_owned()]);
     }
 
     #[test]
-    fn forcing_an_ignored_file_into_the_index_never_removes_it() {
+    fn forcing_an_ignored_file_into_the_index_leaves_it_in_place() {
         let fixture = Fixture::new(&[(".gitignore", "secret.log\n"), ("README.md", "hi\n")]);
         write(&fixture.repo, "secret.log", "before\n");
         fixture.checkpoint("turn_1");
         // `git add -f` makes the ignored file look new beside the tree.
         git(&fixture.repo, &["add", "-f", "secret.log"]);
 
-        let error = fixture.prepare(&["turn_1"]).unwrap_err();
-        assert!(error.contains("secret.log"), "{error}");
+        let prepared = fixture.prepare(&["turn_1"]).expect("prepare");
+        let outcome = run_restore(&prepared);
         assert_eq!(read(&fixture.repo, "secret.log"), "before\n");
+        assert_eq!(outcome.left_alone, vec!["secret.log".to_owned()]);
     }
 
     #[test]
-    fn a_subdirectory_workspace_recognises_its_ignored_paths() {
+    fn a_subdirectory_workspace_leaves_its_ignored_paths_alone() {
         let fixture = Fixture::new(&[(".gitignore", "sub/secret.log\n"), ("sub/a.txt", "one")]);
         write(&fixture.repo, "sub/secret.log", "before\n");
         // The checkpoint is captured where the thread runs, a subdirectory of
@@ -2114,9 +2269,16 @@ mod tests {
         git(&fixture.repo, &["add", "-f", "sub/secret.log"]);
 
         let workspace = fixture.repo.join("sub");
-        let error = fixture.prepare_in(&workspace, &["turn_1"]).unwrap_err();
-        assert!(error.contains("sub/secret.log"), "{error}");
+        let prepared = fixture
+            .prepare_in(&workspace, &["turn_1"])
+            .expect("prepare");
+        let outcome = run_restore(&prepared);
         assert_eq!(read(&fixture.repo, "sub/secret.log"), "before\n");
+        assert_eq!(
+            outcome.left_alone,
+            vec!["secret.log".to_owned()],
+            "the note names the path as the workspace sees it"
+        );
     }
 
     #[test]
@@ -2127,14 +2289,16 @@ mod tests {
         write(&fixture.repo, "build/new.o", "new\n");
         git(&fixture.repo, &["add", "-f", "build/new.o"]);
 
-        let error = fixture.prepare(&["turn_1"]).unwrap_err();
-        assert!(error.contains("build/new.o"), "{error}");
+        let prepared = fixture.prepare(&["turn_1"]).expect("prepare");
+        let outcome = run_restore(&prepared);
         assert_eq!(
             read(&fixture.repo, "build/keep.o"),
             "keep\n",
             "the ignored folder's existing content is never wiped"
         );
         assert_eq!(read(&fixture.repo, "build/new.o"), "new\n");
+        assert_eq!(outcome.deleted, 0);
+        assert_eq!(outcome.left_alone, vec!["build/new.o".to_owned()]);
     }
 
     #[test]
@@ -2166,16 +2330,28 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn an_ignored_file_changed_before_it_was_captured_refuses() {
+    fn a_cp_p_over_an_ignored_file_is_not_restored_to_mid_turn_bytes() {
         use std::time::{Duration, SystemTime};
 
         let fixture = Fixture::new(&[(".gitignore", "secret.log\n"), ("README.md", "hi\n")]);
         write(&fixture.repo, "secret.log", "before\n");
         fixture.checkpoint("turn_1");
-        // The turn rewrites the ignored file first; a later tool then names it,
-        // so the capture holds mid-turn bytes and is not the pre-turn state.
-        write(&fixture.repo, "secret.log", "mid-turn\n");
-        let stamp = SystemTime::now() + Duration::from_secs(3600);
+        // The turn copies another file over the ignored one with `cp -p`, so
+        // the ignored path keeps an older mtime while its bytes are new. A
+        // later tool then names it and the capture holds mid-turn bytes.
+        write(&fixture.repo, "copied.txt", "mid-turn\n");
+        let stamp = SystemTime::now() - Duration::from_secs(3600);
+        std::fs::File::options()
+            .write(true)
+            .open(fixture.repo.join("copied.txt"))
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(stamp))
+            .unwrap();
+        fs::copy(
+            fixture.repo.join("copied.txt"),
+            fixture.repo.join("secret.log"),
+        )
+        .unwrap();
         std::fs::File::options()
             .write(true)
             .open(fixture.repo.join("secret.log"))
@@ -2193,17 +2369,18 @@ mod tests {
             .unwrap();
         git(&fixture.repo, &["add", "-f", "secret.log"]);
 
-        let error = fixture.prepare(&["turn_1"]).unwrap_err();
-        assert!(error.contains("secret.log"), "{error}");
+        let prepared = fixture.prepare(&["turn_1"]).expect("prepare");
+        let outcome = run_restore(&prepared);
         assert_eq!(
             read(&fixture.repo, "secret.log"),
             "mid-turn\n",
-            "nothing was changed by a refused prepare"
+            "an old mtime is never proof of pre-turn bytes; the ignored file is left alone"
         );
+        assert_eq!(outcome.left_alone, vec!["secret.log".to_owned()]);
     }
 
     #[test]
-    fn a_crlf_file_comes_back_as_worktree_bytes() {
+    fn a_crlf_file_comes_back_as_its_exact_bytes() {
         let fixture = Fixture::new(&[(".gitattributes", "*.bat text eol=crlf\n")]);
         write(&fixture.repo, "script.bat", "a\r\nb\r\n");
         git(&fixture.repo, &["add", "-A"]);
@@ -2217,12 +2394,67 @@ mod tests {
         assert_eq!(
             fs::read(fixture.repo.join("script.bat")).unwrap(),
             b"a\r\nb\r\n",
-            "the restore writes what a checkout would write, not the clean blob"
+            "raw bytes go in and raw bytes come back"
         );
     }
 
     #[test]
-    fn a_filtered_file_comes_back_as_worktree_bytes() {
+    fn core_autocrlf_input_keeps_an_untracked_crlf_file() {
+        let fixture = Fixture::new(&[("README.md", "hi\n")]);
+        git(&fixture.repo, &["config", "core.autocrlf", "input"]);
+        write(&fixture.repo, "notes.txt", "one\r\ntwo\r\n");
+        fixture.checkpoint("turn_1");
+        // The turn rewrites the untracked file with bare newlines.
+        write(&fixture.repo, "notes.txt", "one\ntwo\nthree\n");
+
+        let prepared = fixture.prepare(&["turn_1"]).expect("prepare");
+        run_restore(&prepared);
+        assert_eq!(
+            fs::read(fixture.repo.join("notes.txt")).unwrap(),
+            b"one\r\ntwo\r\n",
+            "core.autocrlf never converts the checkpointed or restored bytes"
+        );
+    }
+
+    #[test]
+    fn text_auto_keeps_an_untracked_crlf_file() {
+        let fixture = Fixture::new(&[
+            (".gitattributes", "*.txt text=auto\n"),
+            ("README.md", "hi\n"),
+        ]);
+        write(&fixture.repo, "notes.txt", "one\r\ntwo\r\n");
+        fixture.checkpoint("turn_1");
+        write(&fixture.repo, "notes.txt", "one\ntwo\nthree\n");
+
+        let prepared = fixture.prepare(&["turn_1"]).expect("prepare");
+        run_restore(&prepared);
+        assert_eq!(
+            fs::read(fixture.repo.join("notes.txt")).unwrap(),
+            b"one\r\ntwo\r\n",
+            "a text=auto rule does not change the restored bytes"
+        );
+    }
+
+    #[test]
+    fn a_turn_adding_a_crlf_rule_does_not_change_the_restored_bytes() {
+        let fixture = Fixture::new(&[("build.sh", "#!/bin/sh\necho one\n")]);
+        fixture.checkpoint("turn_1");
+        // The turn adds an eol rule and rewrites the script with CRLF.
+        write(&fixture.repo, ".gitattributes", "*.sh text eol=crlf\n");
+        write(&fixture.repo, "build.sh", "#!/bin/sh\r\necho changed\r\n");
+
+        let prepared = fixture.prepare(&["turn_1"]).expect("prepare");
+        run_restore(&prepared);
+        assert_eq!(
+            fs::read(fixture.repo.join("build.sh")).unwrap(),
+            b"#!/bin/sh\necho one\n",
+            "the rule the turn added does not convert the pre-turn bytes"
+        );
+        assert!(!fixture.repo.join(".gitattributes").exists());
+    }
+
+    #[test]
+    fn a_filtered_file_comes_back_as_its_exact_bytes() {
         let fixture = Fixture::new(&[("README.md", "hi\n")]);
         git(
             &fixture.repo,
@@ -2244,7 +2476,7 @@ mod tests {
         assert_eq!(
             read(&fixture.repo, "data.bin"),
             "SMUDGED payload\n",
-            "the smudge filter runs, so the file is not restored as its stored pointer"
+            "the raw bytes are restored, not the clean form a filter would store"
         );
     }
 
@@ -2291,9 +2523,9 @@ mod tests {
         write(&fixture.repo, "secret.env", "after\n");
         let prepared = fixture.prepare(&["turn_1"]).expect("prepare");
 
-        FAIL_SYNC.with(|flag| flag.set(true));
+        FAIL_SYNC.with(|flag| flag.set(1));
         let result = apply_restore(&prepared);
-        FAIL_SYNC.with(|flag| flag.set(false));
+        FAIL_SYNC.with(|flag| flag.set(0));
 
         assert!(result.is_err());
         assert_eq!(read(&fixture.repo, "secret.env"), "after\n");
@@ -2310,14 +2542,13 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn a_captured_ignored_file_gets_its_pre_turn_exec_bit() {
+    fn a_recreated_file_keeps_its_captured_private_mode() {
         use std::os::unix::fs::PermissionsExt;
 
-        let fixture = Fixture::new(&[(".gitignore", "run.sh\n"), ("README.md", "hi\n")]);
-        write(&fixture.repo, "run.sh", "#!/bin/sh\necho one\n");
+        let fixture = Fixture::new(&[("secret.env", "one\n")]);
         fs::set_permissions(
-            fixture.repo.join("run.sh"),
-            fs::Permissions::from_mode(0o700),
+            fixture.repo.join("secret.env"),
+            fs::Permissions::from_mode(0o600),
         )
         .unwrap();
         fixture.checkpoint("turn_1");
@@ -2327,28 +2558,23 @@ mod tests {
                 &fixture.repo,
                 &fixture.thread,
                 &TurnId::new("turn_1"),
-                &["run.sh".into()],
+                &["secret.env".into()],
             )
             .unwrap();
-        // The turn rewrites the ignored script and drops the executable bit.
-        write(&fixture.repo, "run.sh", "changed\n");
-        fs::set_permissions(
-            fixture.repo.join("run.sh"),
-            fs::Permissions::from_mode(0o600),
-        )
-        .unwrap();
+        // The turn deletes the file, so the restore has to recreate it.
+        fs::remove_file(fixture.repo.join("secret.env")).unwrap();
 
         let prepared = fixture.prepare(&["turn_1"]).expect("prepare");
         run_restore(&prepared);
-        assert_eq!(read(&fixture.repo, "run.sh"), "#!/bin/sh\necho one\n");
+        assert_eq!(read(&fixture.repo, "secret.env"), "one\n");
         assert_eq!(
-            fs::metadata(fixture.repo.join("run.sh"))
+            fs::metadata(fixture.repo.join("secret.env"))
                 .unwrap()
                 .permissions()
                 .mode()
                 & 0o777,
-            0o700,
-            "the capture's pre-turn executable bit is back, and the file stays private"
+            0o600,
+            "a recreated file keeps the bits it had, never a blanket 0644"
         );
     }
 
@@ -2428,6 +2654,218 @@ mod tests {
             pending_restore_ids(&fixture.store),
             vec![restore_id],
             "the journal is kept"
+        );
+    }
+
+    // ---- council round 2: ignored files are out of scope -------------------
+
+    #[test]
+    fn an_ignored_env_the_turn_deleted_stays_deleted_and_is_named() {
+        let fixture = Fixture::new(&[(".gitignore", ".env\n"), ("README.md", "hi\n")]);
+        write(&fixture.repo, ".env", "SECRET=1\n");
+        fixture.checkpoint("turn_1");
+        fs::remove_file(fixture.repo.join(".env")).unwrap();
+
+        let prepared = fixture.prepare(&["turn_1"]).expect("prepare");
+        let outcome = run_restore(&prepared);
+        assert!(
+            !fixture.repo.join(".env").exists(),
+            "a restore never recreates an ignored path"
+        );
+        assert_eq!(outcome.files + outcome.deleted, 0);
+        assert_eq!(outcome.left_alone, vec![".env".to_owned()]);
+    }
+
+    #[test]
+    fn the_plan_names_an_ignored_path_a_tool_captured() {
+        let fixture = Fixture::new(&[(".gitignore", ".env\n"), ("README.md", "hi\n")]);
+        write(&fixture.repo, ".env", "SECRET=1\n");
+        fixture.checkpoint("turn_1");
+        fixture
+            .store
+            .capture(
+                &fixture.repo,
+                &fixture.thread,
+                &TurnId::new("turn_1"),
+                &[".env".into()],
+            )
+            .unwrap();
+        write(&fixture.repo, ".env", "changed\n");
+
+        assert_eq!(
+            ignored_paths_touched(
+                &fixture.store,
+                &fixture.repo,
+                &fixture.thread,
+                &[TurnId::new("turn_1")]
+            ),
+            vec![".env".to_owned()]
+        );
+    }
+
+    #[test]
+    fn an_ignored_folder_entry_does_not_swallow_a_new_unignored_file() {
+        let fixture = Fixture::new(&[(".gitignore", "build/\n"), ("README.md", "hi\n")]);
+        write(&fixture.repo, "build/old.log", "old\n");
+        // `--directory` collapses the ignored folder to one entry.
+        fixture.checkpoint("turn_1");
+        // The turn un-ignores the folder and creates its own file in it.
+        write(&fixture.repo, ".gitignore", "");
+        write(
+            &fixture.repo,
+            "build/notes.txt",
+            "the turn's own new file\n",
+        );
+
+        let prepared = fixture.prepare(&["turn_1"]).expect("prepare");
+        let outcome = run_restore(&prepared);
+        assert!(
+            !fixture.repo.join("build/notes.txt").exists(),
+            "a file the turn created inside a recorded folder is removed when the rules no longer ignore it"
+        );
+        assert_eq!(
+            outcome.deleted, 2,
+            "both visible paths were absent from the tree"
+        );
+    }
+
+    #[test]
+    fn more_ignored_paths_than_the_cap_refuse_the_restore() {
+        let fixture = Fixture::new(&[(".gitignore", "*.log\n"), ("README.md", "hi\n")]);
+        for index in 0..=crate::worktrees::git::MAX_CHECKPOINT_IGNORED {
+            fs::write(fixture.repo.join(format!("f{index:05}.log")), "x").unwrap();
+        }
+
+        let reason = crate::worktrees::git::checkpoint_commit(&fixture.repo).unwrap_err();
+        assert!(
+            reason.contains(&format!(
+                "more than the {}",
+                crate::worktrees::git::MAX_CHECKPOINT_IGNORED
+            )),
+            "{reason}"
+        );
+        fixture
+            .store
+            .record_checkpoint_incomplete(
+                &fixture.repo,
+                &fixture.thread,
+                &TurnId::new("turn_1"),
+                &reason,
+            )
+            .unwrap();
+        write(&fixture.repo, "a.txt", "changed");
+        let refused = fixture.prepare(&["turn_1"]).unwrap_err();
+        assert!(refused.contains("no complete file checkpoint"), "{refused}");
+        assert!(refused.contains("10000"), "{refused}");
+        assert_eq!(read(&fixture.repo, "a.txt"), "changed");
+    }
+
+    #[test]
+    fn an_untracked_nested_repository_is_left_out_of_the_plan() {
+        let fixture = Fixture::new(&[("README.md", "hi\n")]);
+        fixture.checkpoint("turn_1");
+        let nested = fixture.repo.join("nested");
+        fs::create_dir_all(&nested).unwrap();
+        git(&nested, &["init", "-q", "-b", "main"]);
+        git(&nested, &["config", "user.email", "t@example.invalid"]);
+        git(&nested, &["config", "user.name", "h4rn test"]);
+        write(&nested, "keep.txt", "nested\n");
+        git(&nested, &["add", "-A"]);
+        git(&nested, &["commit", "-q", "-m", "nested"]);
+
+        let prepared = fixture.prepare(&["turn_1"]).expect("prepare");
+        let outcome = run_restore(&prepared);
+        assert_eq!(outcome.files + outcome.deleted, 0);
+        assert_eq!(
+            read(&fixture.repo, "nested/keep.txt"),
+            "nested\n",
+            "a nested repository the turn did not touch is left alone"
+        );
+    }
+
+    /// A checkpoint with a link, and a turn that replaced the link with a file.
+    ///
+    /// The journal's backup for the link path is therefore a regular file,
+    /// while a restore puts the link back first: a rollback that writes the
+    /// backup must replace the link, never write through it.
+    #[cfg(unix)]
+    fn link_rollback_fixture() -> Fixture {
+        use std::os::unix::fs::symlink;
+
+        let fixture = Fixture::new(&[("target.txt", "outside bytes\n"), ("z.txt", "before z\n")]);
+        symlink("target.txt", fixture.repo.join("a_link")).unwrap();
+        git(&fixture.repo, &["add", "-A"]);
+        git(&fixture.repo, &["commit", "-q", "-m", "link"]);
+        fixture.checkpoint("turn_1");
+        fs::remove_file(fixture.repo.join("a_link")).unwrap();
+        write(&fixture.repo, "a_link", "turn wrote this\n");
+        write(&fixture.repo, "z.txt", "after z\n");
+        fixture
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_live_rollback_replaces_a_link_instead_of_writing_through_it() {
+        let fixture = link_rollback_fixture();
+        let prepared = fixture.prepare(&["turn_1"]).expect("prepare");
+        // The restore puts the link back first; the next write fails.
+        apply_op(&prepared.ops[0]).expect("restore the link first");
+        FAIL_SYNC.with(|flag| flag.set(1));
+        let result = apply_restore(&prepared);
+        FAIL_SYNC.with(|flag| flag.set(0));
+
+        assert!(result.is_err(), "the second write fails and rolls back");
+        assert_eq!(
+            read(&fixture.repo, "target.txt"),
+            "outside bytes\n",
+            "the rollback never wrote through the link into its target"
+        );
+        assert_eq!(
+            read(&fixture.repo, "a_link"),
+            "turn wrote this\n",
+            "the rollback replaced the link with the bytes the path held"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_startup_rollback_replaces_a_link_instead_of_writing_through_it() {
+        let fixture = link_rollback_fixture();
+        let prepared = fixture.prepare(&["turn_1"]).expect("prepare");
+        let restore_id = prepared.restore_id().to_owned();
+        apply_op(&prepared.ops[0]).expect("restore the link first");
+
+        let pending = read_pending_restore(&fixture.store, &restore_id).expect("read");
+        recover_restore(&fixture.store, &pending, false).expect("recover");
+
+        assert_eq!(
+            read(&fixture.repo, "target.txt"),
+            "outside bytes\n",
+            "startup recovery never wrote through the link into its target"
+        );
+        assert_eq!(read(&fixture.repo, "a_link"), "turn wrote this\n");
+        assert!(pending_restore_ids(&fixture.store).is_empty());
+    }
+
+    #[test]
+    fn a_failed_rollback_keeps_its_journal() {
+        let fixture = Fixture::new(&[("a.txt", "before")]);
+        fixture.checkpoint("turn_1");
+        write(&fixture.repo, "a.txt", "after");
+        let prepared = fixture.prepare(&["turn_1"]).expect("prepare");
+        let restore_id = prepared.restore_id().to_owned();
+
+        // The restored write and the rollback's write both fail to flush.
+        FAIL_SYNC.with(|flag| flag.set(2));
+        let result = apply_restore(&prepared);
+        FAIL_SYNC.with(|flag| flag.set(0));
+
+        let error = result.unwrap_err();
+        assert!(error.contains("restore record is kept"), "{error}");
+        assert_eq!(
+            pending_restore_ids(&fixture.store),
+            vec![restore_id],
+            "the journal stays until the rollback is on disk"
         );
     }
 }

@@ -80,6 +80,11 @@ struct Manifest {
     /// predates the completeness of this record and is refused by the restore.
     #[serde(default)]
     ignored: Vec<String>,
+    /// Why this turn's checkpoint cannot be complete, when the capture could
+    /// not be taken (an older git, too many ignored paths). The restore names
+    /// this instead of a generic refusal.
+    #[serde(default)]
+    checkpoint_reason: Option<String>,
     files: BTreeMap<String, SnapshotEntry>,
 }
 
@@ -124,6 +129,7 @@ impl SnapshotStore {
                 checkpoint: None,
                 checkpoint_complete: false,
                 ignored: Vec::new(),
+                checkpoint_reason: None,
                 files: BTreeMap::new(),
             });
         let mut added = 0;
@@ -330,6 +336,7 @@ impl SnapshotStore {
                 checkpoint: None,
                 checkpoint_complete: false,
                 ignored: Vec::new(),
+                checkpoint_reason: None,
                 files: BTreeMap::new(),
             });
         manifest.checkpoint = Some(commit.to_owned());
@@ -337,6 +344,7 @@ impl SnapshotStore {
         // included, so a recorded checkpoint is complete by construction.
         manifest.checkpoint_complete = true;
         manifest.ignored = ignored.to_vec();
+        manifest.checkpoint_reason = None;
         if let Some(parent) = manifest_path.parent() {
             fs::create_dir_all(parent).map_err(|error| FsError::Io(error.to_string()))?;
         }
@@ -344,6 +352,64 @@ impl SnapshotStore {
             serde_json::to_vec_pretty(&manifest).map_err(|error| FsError::Io(error.to_string()))?;
         fs::write(&manifest_path, json).map_err(|error| FsError::Io(error.to_string()))?;
         Ok(())
+    }
+
+    /// Records that one turn's checkpoint could not be taken completely.
+    ///
+    /// The reason is kept so a restore says why it refuses instead of only
+    /// that no complete checkpoint exists.
+    pub fn record_checkpoint_incomplete(
+        &self,
+        workspace: &Path,
+        thread_id: &ThreadId,
+        turn_id: &TurnId,
+        reason: &str,
+    ) -> Result<(), FsError> {
+        let manifest_path = self.manifest_path(thread_id, turn_id)?;
+        let mut manifest = self
+            .load_manifest(&manifest_path)
+            .unwrap_or_else(|| Manifest {
+                thread_id: thread_id.to_string(),
+                turn_id: turn_id.to_string(),
+                workspace: workspace.display().to_string(),
+                captured_at: Utc::now(),
+                checkpoint: None,
+                checkpoint_complete: false,
+                ignored: Vec::new(),
+                checkpoint_reason: None,
+                files: BTreeMap::new(),
+            });
+        manifest.checkpoint = None;
+        manifest.checkpoint_complete = false;
+        manifest.ignored.clear();
+        manifest.checkpoint_reason = Some(reason.to_owned());
+        if let Some(parent) = manifest_path.parent() {
+            fs::create_dir_all(parent).map_err(|error| FsError::Io(error.to_string()))?;
+        }
+        let json =
+            serde_json::to_vec_pretty(&manifest).map_err(|error| FsError::Io(error.to_string()))?;
+        fs::write(&manifest_path, json).map_err(|error| FsError::Io(error.to_string()))?;
+        Ok(())
+    }
+
+    /// Why a turn's files cannot be restored, naming the recorded reason when
+    /// the checkpoint itself could not be taken.
+    pub fn checkpoint_refusal(&self, thread_id: &ThreadId, turn_id: &TurnId) -> String {
+        let reason = self
+            .manifest_path(thread_id, turn_id)
+            .ok()
+            .and_then(|path| self.load_manifest(&path))
+            .and_then(|manifest| manifest.checkpoint_reason);
+        match reason {
+            Some(reason) => format!(
+                "{} has no complete file checkpoint: {reason}",
+                turn_id.as_str()
+            ),
+            None => format!(
+                "{} has no complete file checkpoint, so its files cannot be restored",
+                turn_id.as_str()
+            ),
+        }
     }
 
     /// The ignored paths the turn's checkpoint recorded, sorted.
