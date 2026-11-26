@@ -228,7 +228,9 @@ describe("the library pages in other languages", () => {
     render(<McpApprovalCard />);
     const card = screen.getByRole("region", { name: "Aprobación de herramienta compartida" });
     expect(card.textContent).toContain("atlas quiere ejecutar github__write_file");
-    expect(card.textContent).toContain("Servidor MCP compartido · la solicitud caduca dentro de 5 minutos");
+    expect(card.textContent).toContain(
+      "Servidor MCP compartido · la solicitud caduca dentro de 5 minutos",
+    );
     expect(card.textContent).toContain("Sin argumentos");
     expect(screen.getByRole("button", { name: "Aprobar una vez" })).toBeTruthy();
   });
