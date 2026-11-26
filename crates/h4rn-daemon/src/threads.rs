@@ -3317,7 +3317,10 @@ impl ThreadRecord {
                     self.meta.queued.insert(index, message);
                 }
                 // A `delivered` claim already has its transcript row, so
-                // nothing goes back to the queue.
+                // nothing goes back to the queue. No build parks an accepted
+                // prompt (a parked dispatch always comes from a failed or
+                // limited write, and `delivered` is marked only after
+                // acceptance), so this arm is defensive.
                 self.meta.parked = None;
                 restored = true;
                 continue;
@@ -31616,7 +31619,7 @@ mod tests {
         assert_eq!(
             parked.sends.get(),
             2,
-            "the parked prompt was written again before the restart"
+            "the fixture did not write the parked prompt exactly once before the restart"
         );
 
         parked.manager.shutdown().await;
