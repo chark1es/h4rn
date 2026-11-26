@@ -98,15 +98,16 @@ data class PushContent(
     }
 
     /**
-     * The tracked Live Updates whose thread is no longer running.
+     * The tracked Live Updates whose turn has ended.
      *
-     * [running] is every top-level thread with a turn in progress, from the
-     * thread list the shared UI received. A tracked id outside it is a turn
-     * that ended without replacing its entry: a Stop, a grouped finish, or one
-     * that ended while the app was closed.
+     * [stopped] is every thread the connected machine lists with no turn in
+     * progress. A tracked id in it is a turn that ended without replacing its
+     * entry: a Stop, a grouped finish, or one that ended while the app was
+     * closed. A tracked id the machine does not list may be another machine's
+     * running agent, so it stays.
      */
-    fun staleLiveThreads(tracked: Set<String>, running: Set<String>): Set<String> =
-      tracked - running
+    fun staleLiveThreads(tracked: Set<String>, stopped: Set<String>): Set<String> =
+      tracked intersect stopped
 
     /** The deep link a tap opens. */
     fun deepLink(threadId: String): String = "h4rn://thread/$threadId"

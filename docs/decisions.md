@@ -2523,12 +2523,20 @@ sends the update only to Android registrations whose app version is at least
 tell the person a turn ended when it had only begun. An Android build from
 before Live Updates would show `working` as an ordinary alert, so a row with an
 older, missing or unreadable `app_version` is skipped: a missed ongoing entry is
-quiet, a stray alert on every turn start is not. Deliveries for one account go
+quiet, a stray alert on every turn start is not. The repository's own phone
+app is still at 1.0.1, so Live Updates reach a phone only once a mobile release
+at 1.0.2 or later ships; this gate is deliberate and the version is not bumped
+with the feature. Deliveries for one account go
 out one at a time in the order Connect decided them, and a `working` frame
 first sends any collecting group that holds a transition for the same thread. A
 queued message starts the next turn the moment the previous one finishes, so
 without that the previous finish, still waiting out the group window, would
-arrive second and replace the new turn's ongoing entry.
+arrive second and replace the new turn's ongoing entry. That order is kept by
+one delivery worker per account: a queue drained in arrival order by its own
+task, which receives both the group flushes and the `working` frames. The
+relay's socket read loop only records the transition and enqueues it, so a slow
+FCM or APNs response never stops Connect reading a machine's socket. A worker
+exits, and its entry is removed, as soon as its queue is empty.
 
 The Android app shows a running turn, a waiting approval or a question as an
 ongoing notification: `setOngoing(true)`, the project and state words, and
@@ -2540,20 +2548,27 @@ promotion off). Otherwise, and on older releases, the same ongoing notification
 shows without promotion. The notification uses the thread's own id, the
 one the finished, failed or limit alert already uses, so the final alert
 replaces the ongoing entry rather than stacking a second one. Only the
-`working` frame is silent; an approval or a question still alerts. A grouped
+`working` frame is silent; an approval or a question still alerts. When the
+last open approval or question of a turn that is still running is answered,
+the daemon publishes `working` again under a new transition id, so the phone
+goes back from "Waiting for approval" to "Working" instead of keeping the
+waiting word for the rest of the turn; an answer that arrives after the turn
+ended publishes nothing. A grouped
 final alert names no thread and cannot replace each member's ongoing entry,
 and a Stop sends no alert at all. So the shared UI reconciles: every thread
 list it receives from the daemon over a live connection, the first one after a
-cold start included, goes to the phone as the set of top-level threads that are
-Working, and the phone cancels each tracked entry outside it. A list that has
-not arrived yet, or one from a connection that is down, is not used, because an
-empty or stale list would cancel entries for agents that are still running. The
-thread on screen clears its own entry when it opens and when the app returns to
-the foreground. With the app not running, an entry for a turn that ends without
-an alert stays until the app is next opened and connected; the docs state that
-limit rather than promising a removal no frame can request. The app only sees
-the connected machine's threads, so an entry for another machine's running
-thread is cleared then too; it comes back with that thread's next state.
+cold start included, goes to the phone as the set of threads that machine lists
+as not Working, and the phone cancels each tracked entry in that set. A tracked
+entry for a thread the list does not name is kept: the app sees only the
+connected machine's threads, and another machine's running agent sends
+`working` once per turn, so cancelling its entry would lose it for the rest of
+the turn. A list that has not arrived yet, or one from a connection that is
+down, is not used, because a stale list could name a thread as stopped that has
+started again since. The thread on screen clears its own entry when it opens
+and when the app returns to the foreground. With the app not running, an entry
+for a turn that ends without an alert stays until the app is next opened and
+connected to that thread's machine; the docs state that limit rather than
+promising a removal no frame can request.
 
 The whole feature is a separate opt-in, off by default: **Settings →
 Notifications → Phone alerts → Show running agents as live notifications**. It

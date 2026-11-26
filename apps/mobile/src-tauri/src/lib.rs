@@ -68,8 +68,8 @@ struct PushEnabledArgs {
 #[cfg(target_os = "android")]
 #[derive(serde::Serialize)]
 struct PushReconcileLiveArgs<'a> {
-    #[serde(rename = "threadIds")]
-    thread_ids: &'a [String],
+    #[serde(rename = "stoppedThreadIds")]
+    stopped_thread_ids: &'a [String],
 }
 
 #[cfg(any(target_os = "android", target_os = "ios"))]
@@ -333,10 +333,14 @@ fn push_set_live_updates(app: tauri::AppHandle, enabled: bool) -> Result<(), Str
     }
 }
 
-/// Cancels every Android Live Update whose thread is not in `thread_ids`, the
-/// top-level threads the daemon says are running (ADR-053).
+/// Cancels the Android Live Updates of `stopped_thread_ids`, the threads the
+/// connected machine lists with no turn running. Threads it does not list are
+/// left alone: another machine may be running them (ADR-053).
 #[tauri::command]
-fn push_reconcile_live(app: tauri::AppHandle, thread_ids: Vec<String>) -> Result<(), String> {
+fn push_reconcile_live(
+    app: tauri::AppHandle,
+    stopped_thread_ids: Vec<String>,
+) -> Result<(), String> {
     #[cfg(target_os = "android")]
     {
         let bridge = app.state::<PushBridge>();
@@ -345,7 +349,7 @@ fn push_reconcile_live(app: tauri::AppHandle, thread_ids: Vec<String>) -> Result
             .run_mobile_plugin::<()>(
                 "pushReconcileLive",
                 PushReconcileLiveArgs {
-                    thread_ids: &thread_ids,
+                    stopped_thread_ids: &stopped_thread_ids,
                 },
             )
             .map_err(|error| error.to_string())
@@ -353,7 +357,7 @@ fn push_reconcile_live(app: tauri::AppHandle, thread_ids: Vec<String>) -> Result
 
     #[cfg(not(target_os = "android"))]
     {
-        let _ = (app, thread_ids);
+        let _ = (app, stopped_thread_ids);
         Ok(())
     }
 }

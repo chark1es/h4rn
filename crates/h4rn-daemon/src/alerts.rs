@@ -14,7 +14,7 @@
 //! inside the turn, so an Android Live Update is not refreshed per token or
 //! tool call (ADR-053).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -297,6 +297,22 @@ struct ThreadAlerts {
     /// than once, so the id stops a repeat from resetting the phone's ongoing
     /// notification to "Working" (ADR-053).
     working_turn: Option<TurnId>,
+    /// A turn started and has not completed yet, as seen in event order.
+    running: bool,
+    /// Hands raised in the running turn that nobody has answered yet.
+    open_hands: HashSet<String>,
+    /// The phone was told this turn is waiting on the person, so answering
+    /// the last open hand must tell it the agent is working again.
+    told_waiting: bool,
+}
+
+impl ThreadAlerts {
+    /// Forgets the per-turn hand tracking at a turn boundary.
+    fn reset_turn(&mut self, running: bool) {
+        self.running = running;
+        self.open_hands.clear();
+        self.told_waiting = false;
+    }
 }
 
 /// Watches the thread stream and publishes while the switch is on.
@@ -402,6 +418,7 @@ impl AgentAlertService {
                 let first_start = {
                     let mut published = self.published.lock().await;
                     let alerts = published.entry(thread_id.clone()).or_default();
+                    alerts.reset_turn(true);
                     if alerts.working_turn.as_ref() == Some(&turn_id) {
                         false
                     } else {
@@ -419,18 +436,58 @@ impl AgentAlertService {
                     .await;
             }
             Event::ApprovalRequested {
-                thread_id, kind, ..
+                thread_id,
+                approval_id,
+                kind,
+                ..
             } => {
                 let Some(thread) = self.alertable_thread(&thread_id).await else {
                     return;
                 };
+                self.published
+                    .lock()
+                    .await
+                    .entry(thread_id.clone())
+                    .or_default()
+                    .open_hands
+                    .insert(approval_id);
                 let state = approval_state(kind);
-                self.publish(&thread, state, Utc::now()).await;
+                if self.publish(&thread, state, Utc::now()).await
+                    && let Some(alerts) = self.published.lock().await.get_mut(&thread_id)
+                {
+                    alerts.told_waiting = true;
+                }
             }
-            Event::ApprovalResolved { thread_id, .. } => {
+            Event::ApprovalResolved {
+                thread_id,
+                approval_id,
+                ..
+            } => {
                 // Once answered, the same hand can be raised again later in
-                // the same turn and should alert again.
-                self.published.lock().await.remove(&thread_id);
+                // the same turn and should alert again. The turn's own
+                // tracking stays, so a repeated start still publishes nothing.
+                let back_to_work = {
+                    let mut published = self.published.lock().await;
+                    let Some(alerts) = published.get_mut(&thread_id) else {
+                        return;
+                    };
+                    alerts.published = None;
+                    alerts.limit_alerted = false;
+                    alerts.open_hands.remove(&approval_id);
+                    let resume =
+                        alerts.running && alerts.told_waiting && alerts.open_hands.is_empty();
+                    if resume {
+                        alerts.told_waiting = false;
+                    }
+                    resume
+                };
+                // The phone still shows "Waiting for approval". While the turn
+                // runs on, a fresh `working` transition puts its Live Update
+                // back; a hand still open keeps it waiting (ADR-053).
+                if back_to_work && let Some(thread) = self.alertable_thread(&thread_id).await {
+                    self.publish(&thread, AgentAlertState::Working, Utc::now())
+                        .await;
+                }
             }
             Event::UsageLimitHit {
                 thread_id,
@@ -455,12 +512,18 @@ impl AgentAlertService {
             Event::TurnCompleted {
                 thread_id, status, ..
             } => {
-                let limit_stop = self
-                    .published
-                    .lock()
-                    .await
-                    .get(&thread_id)
-                    .is_some_and(|alerts| alerts.limit_alerted);
+                let limit_stop = {
+                    let mut published = self.published.lock().await;
+                    match published.get_mut(&thread_id) {
+                        Some(alerts) => {
+                            // An answer that arrives after the turn ended must
+                            // not restart its Live Update.
+                            alerts.reset_turn(false);
+                            alerts.limit_alerted
+                        }
+                        None => false,
+                    }
+                };
                 if limit_stop {
                     if let Some(alerts) = self.published.lock().await.get_mut(&thread_id) {
                         alerts.limit_alerted = false;
@@ -954,6 +1017,108 @@ mod tests {
         assert!(
             sent.iter()
                 .all(|activity| activity.state == AgentAlertState::Completed)
+        );
+    }
+
+    fn approval(id: &str) -> Event {
+        Event::ApprovalRequested {
+            thread_id: ThreadId::new("th_test"),
+            turn_id: h4rn_protocol::TurnId::new("turn_1"),
+            approval_id: id.into(),
+            subagent_id: None,
+            kind: h4rn_protocol::ApprovalKind::Command,
+            prompt: "Run the tests?".into(),
+            options: Vec::new(),
+        }
+    }
+
+    fn answered(id: &str) -> Event {
+        Event::ApprovalResolved {
+            thread_id: ThreadId::new("th_test"),
+            approval_id: id.into(),
+            option_id: None,
+            by_device: None,
+        }
+    }
+
+    async fn sent_states(recorder: &Recorder) -> Vec<AgentAlertState> {
+        recorder
+            .sent
+            .lock()
+            .await
+            .iter()
+            .map(|activity| activity.state)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn answering_a_hand_mid_turn_puts_the_phone_back_to_working() {
+        let recorder = Arc::new(Recorder::default());
+        let service = observing_service(Arc::clone(&recorder));
+        service.set_enabled(true).await.expect("enable");
+
+        observe(&service, turn_started("turn_1")).await;
+        observe(&service, approval_requested()).await;
+        observe(&service, approval_resolved()).await;
+
+        assert_eq!(
+            sent_states(&recorder).await,
+            vec![
+                AgentAlertState::Working,
+                AgentAlertState::Approval,
+                AgentAlertState::Working
+            ],
+            "the phone kept \"Waiting for approval\" after the hand was answered"
+        );
+        let sent = recorder.sent.lock().await;
+        assert_ne!(
+            sent[0].transition, sent[2].transition,
+            "Connect drops a repeated transition, so the return needs its own"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_hand_still_open_keeps_the_phone_waiting() {
+        let recorder = Arc::new(Recorder::default());
+        let service = observing_service(Arc::clone(&recorder));
+        service.set_enabled(true).await.expect("enable");
+
+        observe(&service, turn_started("turn_1")).await;
+        observe(&service, approval("approval_1")).await;
+        observe(&service, approval("approval_2")).await;
+        observe(&service, answered("approval_1")).await;
+        assert_eq!(
+            sent_states(&recorder).await.last(),
+            Some(&AgentAlertState::Approval),
+            "one answer of two cleared the wait"
+        );
+
+        observe(&service, answered("approval_2")).await;
+        assert_eq!(
+            sent_states(&recorder).await.last(),
+            Some(&AgentAlertState::Working)
+        );
+    }
+
+    #[tokio::test]
+    async fn an_answer_after_the_turn_ended_starts_nothing() {
+        let recorder = Arc::new(Recorder::default());
+        let service = observing_service(Arc::clone(&recorder));
+        service.set_enabled(true).await.expect("enable");
+
+        observe(&service, turn_started("turn_1")).await;
+        observe(&service, approval_requested()).await;
+        observe(&service, completion(TurnStatus::Completed)).await;
+        observe(&service, approval_resolved()).await;
+
+        assert_eq!(
+            sent_states(&recorder).await,
+            vec![
+                AgentAlertState::Working,
+                AgentAlertState::Approval,
+                AgentAlertState::Completed
+            ],
+            "a finished turn's late answer restarted its Live Update"
         );
     }
 

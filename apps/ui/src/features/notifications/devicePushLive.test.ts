@@ -2,7 +2,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { workingTopLevelThreads } from "./devicePush";
+import { stoppedThreads } from "./devicePush";
 
 const ANDROID_USER_AGENT = "Mozilla/5.0 (Linux; Android 16; Pixel 9)";
 
@@ -37,10 +37,11 @@ function receiveThreadList(store: Store, threads: Record<string, ReturnType<type
   });
 }
 
-function reconciles(invoke: Invoke): string[][] {
+/** The thread lists the shell was told to cancel, in order. */
+function cancellations(invoke: Invoke): string[][] {
   return invoke.mock.calls
     .filter(([command]) => command === "push_reconcile_live")
-    .map(([, args]) => (args as { threadIds: string[] }).threadIds);
+    .map(([, args]) => (args as { stoppedThreadIds: string[] }).stoppedThreadIds);
 }
 
 let invoke: Invoke;
@@ -57,15 +58,13 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe("the running threads a Live Update may stay for", () => {
-  it("lists only top-level threads that are working", () => {
+describe("the threads whose Live Update has ended", () => {
+  it("are the ones this machine lists as not working", () => {
     expect(
-      workingTopLevelThreads({
-        th_b: thread("working"),
-        th_a: thread("working"),
-        th_done: thread("done"),
-        th_settled: thread("settled"),
-        // A subagent's own turn has no Live Update of its own.
+      stoppedThreads({
+        th_b: thread("done"),
+        th_a: thread("settled"),
+        th_running: thread("working"),
         th_child: thread("working", "th_a"),
       }),
     ).toEqual(["th_a", "th_b"]);
@@ -77,9 +76,8 @@ describe("stale Live Updates are cleared", () => {
     const { store, startDevicePush } = await freshApp();
     startDevicePush();
 
-    // Before the daemon answers, the empty list says nothing: clearing now
-    // would remove entries for agents that are still running.
-    expect(reconciles(invoke)).toEqual([]);
+    // Before the daemon answers, the empty list says nothing.
+    expect(cancellations(invoke)).toEqual([]);
 
     // The phone still shows th_stopped from before the app was closed; it was
     // stopped from the desktop meanwhile, so the first list shows it Done.
@@ -88,14 +86,14 @@ describe("stale Live Updates are cleared", () => {
       th_running: thread("working"),
     });
 
-    expect(reconciles(invoke)).toEqual([["th_running"]]);
+    expect(cancellations(invoke)).toEqual([["th_stopped"]]);
   });
 
   it("after a grouped finish that named no thread", async () => {
     const { store, startDevicePush } = await freshApp();
     startDevicePush();
     receiveThreadList(store, { th_one: thread("working"), th_two: thread("working") });
-    expect(reconciles(invoke).at(-1)).toEqual(["th_one", "th_two"]);
+    expect(cancellations(invoke).at(-1)).toEqual([]);
 
     // Both finished in one "2 agents finished" alert, which replaced neither
     // thread's ongoing entry.
@@ -108,14 +106,33 @@ describe("stale Live Updates are cleared", () => {
       } as typeof state.threads,
     });
 
-    expect(reconciles(invoke).at(-1)).toEqual([]);
+    expect(cancellations(invoke).at(-1)).toEqual(["th_one", "th_two"]);
+  });
+
+  it("never for a thread this machine does not list", async () => {
+    const { store, startDevicePush } = await freshApp();
+    startDevicePush();
+
+    // th_elsewhere is running on another machine; its Live Update came once,
+    // at its turn start, and would never come back if cancelled here.
+    receiveThreadList(store, { th_here: thread("working") });
+    receiveThreadList(store, { th_here: thread("done") });
+
+    const cancelled = cancellations(invoke).flat();
+    expect(cancelled).toContain("th_here");
+    expect(cancelled).not.toContain("th_elsewhere");
+    // The shell is only ever handed the threads to cancel, never a list of
+    // the ones to keep, so it cannot treat a missing id as stopped.
+    for (const [, args] of invoke.mock.calls.filter(([c]) => c === "push_reconcile_live")) {
+      expect(Object.keys(args as object)).toEqual(["stoppedThreadIds"]);
+    }
   });
 
   it("keeps a queued turn that keeps its thread working", async () => {
     const { store, startDevicePush } = await freshApp();
     startDevicePush();
     receiveThreadList(store, { th_queue: thread("working") });
-    const before = reconciles(invoke).length;
+    const before = cancellations(invoke).length;
 
     // A new summary for the same thread, still Working: nothing to clear.
     const state = store.getState();
@@ -124,23 +141,24 @@ describe("stale Live Updates are cleared", () => {
       threads: { th_queue: { ...state.threads.th_queue } } as typeof state.threads,
     });
 
-    expect(reconciles(invoke)).toHaveLength(before);
+    expect(cancellations(invoke)).toHaveLength(before);
+    expect(cancellations(invoke).flat()).not.toContain("th_queue");
   });
 
   it("waits while the daemon is out of reach", async () => {
     const { store, startDevicePush } = await freshApp();
     startDevicePush();
     receiveThreadList(store, { th_one: thread("working") });
-    const before = reconciles(invoke).length;
+    const before = cancellations(invoke).length;
 
     const state = store.getState();
     store.setState({
       ...state,
       connection: { ...state.connection, status: "offline" },
-      threads: {} as typeof state.threads,
+      threads: { th_one: thread("done") } as unknown as typeof state.threads,
     });
 
-    expect(reconciles(invoke)).toHaveLength(before);
+    expect(cancellations(invoke)).toHaveLength(before);
   });
 });
 

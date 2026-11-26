@@ -113,21 +113,32 @@ phone app at version 1.0.2 or later: Connect never sends the `working` state to
 an Android registration from an older (or unversioned) build, because that build
 would show "Working" as an ordinary alert on every turn start.
 
+**The next mobile release must be 1.0.2 or later for Live Updates to arrive.**
+The phone app in this repository is still versioned 1.0.1, so a build made from
+it today registers as 1.0.1 and is never sent `working`: the switch is there,
+but no running turn appears until a release at 1.0.2 or later is installed.
+
 The daemon publishes `working` once when a turn starts, never per token, per
 tool call or per summary update. The next state for that thread updates the same
 notification: an approval or a question changes the state word and still gets
-the person's attention, while a turn that starts is silent. A finish, failure or
+the person's attention, while a turn that starts is silent. Once the last open
+approval or question is answered and the turn keeps running, the notification
+goes back to **Working**. A finish, failure or
 limit replaces the ongoing notification with the normal alert, because both use
 the thread's own notification id. When a queued message starts the next turn
 straight away, Connect sends the previous turn's finish before the new turn's
-`working` frame, so the finish never replaces the running turn's entry.
+`working` frame, so the finish never replaces the running turn's entry. Connect
+sends from a queue per account, so a slow push provider delays only that
+account's notifications, never Connect reading the machine's connection.
 
 A turn stopped by the person has no alert, and a grouped finish names no
 thread. Every time the app receives the daemon's thread list, the first one
-after a cold start included, it tells the phone which top-level threads are
-running, and the phone removes the ongoing notification of every other thread.
-So an entry left by a Stop, a grouped finish, or a turn that ended while the app
-was closed goes away as soon as the app is open and connected. Opening a thread,
+after a cold start included, it tells the phone which of that machine's threads
+are not running, and the phone removes their ongoing notifications. A thread
+the list does not name is left alone, since it may be running on another of
+your machines. So an entry left by a Stop, a grouped finish, or a turn that
+ended while the app was closed goes away as soon as the app is open and
+connected to that thread's machine. Opening a thread,
 or returning to the app while that thread is on screen, removes its entry too.
 
 The ongoing notification follows the same rules as an alert: none while the
@@ -315,10 +326,11 @@ never reached Connect.
 - An Android ongoing notification is removed by its final alert, by the app's
   thread list, or by the switch-off/sign-out cancel. If the app is not running
   and the turn ends without an alert (a Stop, or a grouped finish), the entry
-  stays until the app is next opened and has fetched the thread list; no frame
-  can remove it sooner. The app only knows the threads of the machine it is
-  connected to, so an entry for a thread on another machine of the same account
-  is removed then as well.
+  stays until the app is next opened and has fetched the thread list of that
+  thread's machine; no frame can remove it sooner. An entry for a thread the
+  connected machine does not list (another machine's, or one deleted since) is
+  kept, and goes away with that thread's next final alert, with the switch, or
+  on sign-out.
 - Android needs Google Play services. A device without them cannot receive FCM.
 - iOS needs a signed build with the push entitlement, installed on a real
   device, and an operator-configured APNs key on the relay. A simulator cannot

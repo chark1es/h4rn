@@ -17,9 +17,9 @@ import {
   type DevicePushPermission,
   deviceAlertsPlatform,
   deviceAlertsShell,
+  nativeCancelStoppedLiveThreads,
   nativePushStatus,
   nativePushToken,
-  nativeReconcileLiveThreads,
   nativeRequestPushPermission,
   nativeSetLiveUpdates,
   nativeSetPushEnabled,
@@ -147,25 +147,22 @@ export async function setDeviceLiveUpdates(enabled: boolean): Promise<void> {
 }
 
 /**
- * The top-level threads running a turn in one thread snapshot, sorted.
+ * The threads one machine's snapshot lists with no turn running, sorted.
  *
- * Every Live Update for a thread outside this list is stale: the turn ended
- * by a Stop, a grouped finish that names no thread, or while the app was
- * closed. A queued turn that keeps the thread Working stays, and a subagent's
- * own turn has no Live Update of its own.
+ * A Live Update for one of these is stale: the turn ended by a Stop, a grouped
+ * finish that names no thread, or while the app was closed. A queued turn that
+ * keeps the thread Working is not listed. Neither is any thread this machine
+ * does not know: it may be another machine's agent, still running, and its
+ * `working` frame comes once per turn, so cancelling it would lose it for good.
  */
-export function workingTopLevelThreads(threads: Record<string, ThreadTurnState>): string[] {
+export function stoppedThreads(threads: Record<string, ThreadTurnState>): string[] {
   return Object.entries(threads)
-    .filter(([, thread]) => isWorkingTurn(thread))
+    .filter(([, thread]) => thread.tab !== "working")
     .map(([threadId]) => threadId)
     .sort();
 }
 
-type ThreadTurnState = { tab: string; parent_thread_id?: string | null };
-
-function isWorkingTurn(thread: ThreadTurnState): boolean {
-  return thread.tab === "working" && !thread.parent_thread_id;
-}
+type ThreadTurnState = { tab: string };
 
 /** Whether this install is signed in to Connect right now. */
 function signedIn(): boolean {
@@ -436,8 +433,9 @@ export function startDevicePush(): void {
   // replaces a thread's ongoing entry. A turn with no alert (the person's own
   // Stop, a grouped finish that names no thread, or one that ended while the
   // app was closed) leaves its entry behind, so every thread list the daemon
-  // sends, the first one included, tells the phone which turns are really
-  // running and it cancels the rest.
+  // sends, the first one included, tells the phone which of its turns have
+  // ended and it cancels those. Entries for threads the list does not name
+  // stay: they may belong to another machine.
   let lastThreads: unknown = null;
   let lastSync: number | null = null;
   let lastReconciled: string | null = null;
@@ -448,16 +446,16 @@ export function startDevicePush(): void {
     // and every other UI state.
     if (threads === lastThreads && lastSyncAt === lastSync) return;
     // Before the first list arrives, or while the daemon is out of reach, the
-    // snapshot says nothing about which turns run: an empty or stale list
-    // would cancel Live Updates for agents that are still working.
+    // snapshot says nothing about which turns run: a stale list could name a
+    // thread as stopped that has started a new turn since.
     if (lastSyncAt === null || connection.status !== "online") return;
     lastThreads = threads;
     lastSync = lastSyncAt;
-    const working = workingTopLevelThreads(threads);
-    const key = `${lastSyncAt}\n${working.join("\n")}`;
+    const stopped = stoppedThreads(threads);
+    const key = `${lastSyncAt}\n${stopped.join("\n")}`;
     if (key === lastReconciled) return;
     lastReconciled = key;
-    void nativeReconcileLiveThreads(working);
+    void nativeCancelStoppedLiveThreads(stopped);
   };
   syncTurns();
   store.subscribe(syncTurns);

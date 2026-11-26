@@ -32,7 +32,7 @@ internal class PushLiveUpdatesArgs {
 
 @InvokeArg
 internal class PushReconcileLiveArgs {
-  var threadIds: Array<String>? = null
+  var stoppedThreadIds: Array<String>? = null
 }
 
 /**
@@ -181,18 +181,19 @@ class PushPlugin(private val activity: android.app.Activity) : Plugin(activity) 
   }
 
   /**
-   * Keeps only the Live Updates of threads the daemon says are running.
+   * Cancels the Live Updates of threads the connected machine says stopped.
    *
    * A grouped finish names no thread and a Stop sends no alert, so the shared
-   * UI passes every thread list it gets, the first one after a cold start
-   * included, and each tracked entry outside it is cancelled.
+   * UI passes, from every thread list it gets (the first one after a cold
+   * start included), the threads that machine lists as not working. A tracked
+   * entry for a thread it does not list is kept: another machine may be
+   * running it, and its `working` frame is sent only once per turn.
    */
   @Command
   fun pushReconcileLive(invoke: Invoke) {
     val args = invoke.parseArgs(PushReconcileLiveArgs::class.java)
-    val running = args.threadIds?.map { it.trim() }?.filter { it.isNotEmpty() }?.toSet()
-    // A missing list is a malformed call, not "nothing is running".
-    if (running != null) H4rnLiveNotifications.retainOnly(activity, running)
+    val stopped = args.stoppedThreadIds?.map { it.trim() }?.filter { it.isNotEmpty() }?.toSet()
+    if (stopped != null) H4rnLiveNotifications.cancelStopped(activity, stopped)
     invoke.resolve()
   }
 }

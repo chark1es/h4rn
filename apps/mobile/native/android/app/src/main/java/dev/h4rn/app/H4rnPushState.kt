@@ -57,13 +57,14 @@ object H4rnLiveNotifications {
   }
 
   /**
-   * Cancels every tracked Live Update whose thread is not [running].
+   * Cancels every tracked Live Update whose thread is in [stopped].
    *
-   * [running] is the shared UI's list of top-level threads with a turn in
-   * progress; an entry for any other thread outlived its turn.
+   * [stopped] is the threads the connected machine lists with no turn in
+   * progress. A thread it does not list is left alone: it may be running on
+   * another machine.
    */
-  fun retainOnly(context: Context, running: Set<String>) {
-    for (threadId in PushContent.staleLiveThreads(ids(context), running)) {
+  fun cancelStopped(context: Context, stopped: Set<String>) {
+    for (threadId in PushContent.staleLiveThreads(ids(context), stopped)) {
       cancel(context, threadId)
     }
   }

@@ -18,12 +18,12 @@
 //! are tested without a database or a network.
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use h4rn_protocol::{AgentActivity, AgentAlertState};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, mpsc, oneshot};
 use uuid::Uuid;
 
 use crate::apns::ApnsClient;
@@ -314,6 +314,18 @@ pub fn platform_has_sender(platform: PushPlatform, fcm: bool, apns: bool) -> boo
     }
 }
 
+/// One piece of work for an account's delivery worker.
+enum DeliveryJob {
+    /// Send whatever group is collecting for the account.
+    ///
+    /// `done` is signalled once the group (and every job queued before it) has
+    /// been delivered, so a caller can wait for the queue to drain.
+    Flush(Option<oneshot::Sender<()>>),
+    /// Send one turn-start update, after any collecting group that holds the
+    /// same thread.
+    Working(AgentActivity),
+}
+
 /// The relay-side alert service.
 pub struct AlertService {
     store: Store,
@@ -322,13 +334,16 @@ pub struct AlertService {
     group_window: Duration,
     max_age: Duration,
     pending: Mutex<HashMap<Uuid, PendingGroup>>,
-    /// One delivery at a time per account, in the order Connect decided them.
+    /// Each account's delivery worker, while it has work.
     ///
-    /// A deferred group and a turn-start update for the same thread must reach
-    /// the phone in arrival order: the finish of a turn sent after the next
-    /// turn's `working` frame would replace the ongoing entry while the agent
-    /// is still running (ADR-053).
-    delivery: Mutex<HashMap<Uuid, Arc<Mutex<()>>>>,
+    /// A worker drains its queue in arrival order, so a deferred group and a
+    /// turn-start update for the same thread reach the phone in the order
+    /// Connect saw them: the finish of a turn sent after the next turn's
+    /// `working` frame would replace the ongoing entry while the agent is still
+    /// running (ADR-053). Senders only enqueue, so nothing on the relay loop
+    /// waits for FCM or APNs. A worker removes its own entry once its queue is
+    /// empty, so the map holds only accounts with deliveries in flight.
+    workers: StdMutex<HashMap<Uuid, mpsc::UnboundedSender<DeliveryJob>>>,
     /// How many transitions reached `ingest`, so a relay test can prove a
     /// gated frame never got this far.
     #[cfg(test)]
@@ -351,17 +366,19 @@ impl AlertService {
             group_window,
             max_age,
             pending: Mutex::new(HashMap::new()),
-            delivery: Mutex::new(HashMap::new()),
+            workers: StdMutex::new(HashMap::new()),
             #[cfg(test)]
             ingested: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
-    /// Records one transition and schedules a grouped flush.
+    /// Records one transition and queues its delivery.
     ///
-    /// Runs after the sender is dropped as a fire-and-forget task; callers on
-    /// the relay loop never wait for FCM. The baseline is written first, so a
-    /// duplicate published while the group is still collecting is dropped.
+    /// The relay's read loop awaits this, so it only writes the baseline and
+    /// enqueues: FCM and APNs are called from the account's delivery worker,
+    /// and a slow push provider never stops Connect reading a machine's socket.
+    /// The baseline is written first, so a duplicate published while the group
+    /// is still collecting is dropped.
     pub async fn ingest(self: &Arc<Self>, user_id: Uuid, activity: AgentActivity) {
         #[cfg(test)]
         self.ingested
@@ -394,16 +411,7 @@ impl AlertService {
         // claimed transition above already makes a replay of this frame a
         // no-op, so each state change updates the phone at most once.
         if activity.state == AgentAlertState::Working {
-            let lock = self.delivery_lock(user_id).await;
-            let _delivering = lock.lock().await;
-            // A queued message starts its turn the moment the previous one
-            // finishes, so that finish is usually still waiting out the group
-            // window. Send it first: delivered later, it would reuse the
-            // thread's notification and replace the new turn's Live Update.
-            if let Some(activities) = self.take_pending_with(user_id, &activity).await {
-                self.deliver_group(user_id, &activities).await;
-            }
-            self.deliver_working(user_id, &activity).await;
+            self.enqueue(user_id, DeliveryJob::Working(activity));
             return;
         }
         let schedule = {
@@ -422,31 +430,107 @@ impl AlertService {
             let window = self.group_window;
             tokio::spawn(async move {
                 tokio::time::sleep(window).await;
-                service.flush(user_id).await;
+                service.enqueue(user_id, DeliveryJob::Flush(None));
             });
         }
     }
 
-    /// Sends the alerts for everything collected for one user.
+    /// Sends the collecting group now and waits until the account's queue,
+    /// including everything enqueued before this call, has been delivered.
     ///
     /// Public so tests can drain without waiting for the window.
-    pub async fn flush(&self, user_id: Uuid) {
-        let lock = self.delivery_lock(user_id).await;
-        let _delivering = lock.lock().await;
-        let activities = {
-            let mut pending = self.pending.lock().await;
-            match pending.remove(&user_id) {
-                Some(group) => group.activities,
-                None => return,
-            }
-        };
-        self.deliver_group(user_id, &activities).await;
+    pub async fn flush(self: &Arc<Self>, user_id: Uuid) {
+        let (done, finished) = oneshot::channel();
+        self.enqueue(user_id, DeliveryJob::Flush(Some(done)));
+        let _ = finished.await;
     }
 
-    /// This account's delivery lock; see [`AlertService::delivery`].
-    async fn delivery_lock(&self, user_id: Uuid) -> Arc<Mutex<()>> {
-        let mut locks = self.delivery.lock().await;
-        Arc::clone(locks.entry(user_id).or_default())
+    /// Hands a job to the account's delivery worker, starting one if needed.
+    ///
+    /// The send happens under the map lock, and a worker only removes itself
+    /// under the same lock after finding its queue empty, so a job is never
+    /// left in a queue nobody drains.
+    fn enqueue(self: &Arc<Self>, user_id: Uuid, job: DeliveryJob) {
+        let mut workers = self
+            .workers
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let job = match workers.get(&user_id) {
+            Some(sender) => match sender.send(job) {
+                Ok(()) => return,
+                // The worker stopped without removing itself (a panic in a
+                // delivery); start a fresh one below.
+                Err(mpsc::error::SendError(job)) => job,
+            },
+            None => job,
+        };
+        let (sender, receiver) = mpsc::unbounded_channel();
+        // A new channel's receiver is alive, so this send cannot fail.
+        let _ = sender.send(job);
+        workers.insert(user_id, sender);
+        drop(workers);
+        let service = Arc::clone(self);
+        tokio::spawn(async move { service.run_worker(user_id, receiver).await });
+    }
+
+    /// Drains one account's queue in order, then removes its own entry.
+    ///
+    /// While this worker holds its receiver, a send to its entry cannot fail,
+    /// so no other worker can have replaced it: the entry it removes is its own.
+    async fn run_worker(&self, user_id: Uuid, mut queue: mpsc::UnboundedReceiver<DeliveryJob>) {
+        loop {
+            let job = {
+                let mut workers = self
+                    .workers
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner());
+                match queue.try_recv() {
+                    Ok(job) => job,
+                    Err(_) => {
+                        workers.remove(&user_id);
+                        return;
+                    }
+                }
+            };
+            self.run_job(user_id, job).await;
+        }
+    }
+
+    async fn run_job(&self, user_id: Uuid, job: DeliveryJob) {
+        match job {
+            DeliveryJob::Flush(done) => {
+                let activities = {
+                    let mut pending = self.pending.lock().await;
+                    pending.remove(&user_id).map(|group| group.activities)
+                };
+                if let Some(activities) = activities {
+                    self.deliver_group(user_id, &activities).await;
+                }
+                if let Some(done) = done {
+                    let _ = done.send(());
+                }
+            }
+            DeliveryJob::Working(activity) => {
+                // A queued message starts its turn the moment the previous one
+                // finishes, so that finish is usually still waiting out the
+                // group window. Send it first: delivered later, it would reuse
+                // the thread's notification and replace the new turn's Live
+                // Update.
+                if let Some(activities) = self.take_pending_with(user_id, &activity).await {
+                    self.deliver_group(user_id, &activities).await;
+                }
+                self.deliver_working(user_id, &activity).await;
+            }
+        }
+    }
+
+    /// Whether the account has a delivery worker, that is, deliveries queued
+    /// or in flight. An idle account has no entry.
+    pub fn delivery_in_flight(&self, user_id: Uuid) -> bool {
+        self.workers
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .contains_key(&user_id)
     }
 
     /// Takes the account's collecting group when it holds this thread.

@@ -160,16 +160,17 @@ class PushContentTest {
   }
 
   @Test
-  fun aTrackedLiveUpdateOutsideTheRunningThreadsIsStale() {
+  fun onlyATrackedLiveUpdateTheMachineListsAsStoppedIsStale() {
     // A cold start: th_stopped was stopped while the app was closed and
-    // th_grouped finished in a grouped alert; only th_running still runs.
-    val tracked = setOf("th_running", "th_stopped", "th_grouped")
+    // th_grouped finished in a grouped alert. th_elsewhere runs on another
+    // machine, which this list knows nothing about, so it stays.
+    val tracked = setOf("th_stopped", "th_grouped", "th_elsewhere")
     assertEquals(
       setOf("th_stopped", "th_grouped"),
-      PushContent.staleLiveThreads(tracked, setOf("th_running", "th_untracked")),
+      PushContent.staleLiveThreads(tracked, setOf("th_stopped", "th_grouped", "th_untracked")),
     )
-    // Nothing running clears everything; nothing tracked clears nothing.
-    assertEquals(tracked, PushContent.staleLiveThreads(tracked, emptySet()))
-    assertTrue(PushContent.staleLiveThreads(emptySet(), setOf("th_running")).isEmpty())
+    // A list that names none of them clears nothing; nothing tracked, nothing.
+    assertTrue(PushContent.staleLiveThreads(tracked, emptySet()).isEmpty())
+    assertTrue(PushContent.staleLiveThreads(emptySet(), setOf("th_stopped")).isEmpty())
   }
 }
