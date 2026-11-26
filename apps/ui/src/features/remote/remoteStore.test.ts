@@ -3,11 +3,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const host = vi.hoisted(() => ({
   status: "offline" as "connecting" | "online" | "offline" | "error",
   restarts: 0,
-  toasts: [] as { title?: string }[],
+  toasts: [] as { title?: string; description?: string }[],
 }));
 
 vi.mock("@/lib/store/appStore", () => ({
-  pushToast: (toast: { title?: string }) => host.toasts.push(toast),
+  pushToast: (toast: { title?: string; description?: string }) => host.toasts.push(toast),
   restartConnection: () => {
     host.restarts += 1;
   },
@@ -16,8 +16,10 @@ vi.mock("@/lib/store/appStore", () => ({
 }));
 
 import type { MachineSummary, PairingInfo } from "@/gen";
+import { setLocalePreference } from "@/lib/i18n";
 
 import {
+  activateMachine,
   confirmPairingSas,
   getRemoteState,
   pairByCode,
@@ -268,5 +270,27 @@ describe("account refresh", () => {
 
     expect(getRemoteState().linkedMachines).toEqual([MACHINE]);
     expect(getRemoteState().linkedSupported).toBe(true);
+  });
+});
+
+describe("selecting a machine", () => {
+  afterEach(() => setLocalePreference("system"));
+
+  it("explains a missing host key in the active language, keeping the command", async () => {
+    await setLocalePreference("ja");
+    // The account lists the machine, but its daemon has not published a key.
+    setConnectClient(fakeClient() as never);
+
+    const selected = await activateMachine(MACHINE.id);
+
+    expect(selected).toBe(false);
+    const expected =
+      "atlas はまだ接続用の鍵を公開していません。そのマシンで h4rnd login をもう一度実行してください。";
+    expect(getRemoteState().error).toBe(expected);
+    expect(host.toasts.at(-1)).toEqual({
+      variant: "error",
+      title: "そのマシンを選択できませんでした。",
+      description: expected,
+    });
   });
 });

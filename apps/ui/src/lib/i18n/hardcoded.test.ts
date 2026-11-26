@@ -24,11 +24,21 @@ import { describe, expect, it } from "vitest";
  *     A join that feeds data rather than display (an editable field's value,
  *     a request body) opts out with `// i18n-ignore-next-line: <why>` on the
  *     line above it. The reason is required, and the escape covers only that
- *     one join, never other text.
+ *     one join, never other text;
+ *   - prose the client writes into an error (`throw new Error("…")`): its
+ *     message reaches a store's `error` or a toast as is, so it is
+ *     translated where it is thrown. An internal check that can only fail
+ *     on a bug (a reply of the wrong type) opts out the same way, with
+ *     `// i18n-ignore-next-line: <why>` above the line that builds the error.
  * Values that are not prose are let through: URLs, paths, e-mail addresses,
  * identifiers such as `NAME` or `gpt-5.4-mini`, and the product names below.
  */
 const CONVERTED = [
+  "src/features/remote/remoteStore.ts",
+  "src/features/remote/QrCode.tsx",
+  "src/components/shell/PhoneNav.tsx",
+  "src/components/pages/PairingPage.tsx",
+  "src/components/hosts/HostsPane.tsx",
   "src/components/agent/AgentGlyph.tsx",
   "src/components/dialogs/CommandPalette.tsx",
   "src/components/dialogs/ShortcutsDialog.tsx",
@@ -179,6 +189,18 @@ function literalText(node: ts.Node): string | null {
   return null;
 }
 
+/** `new Error(…)`, `Error(…)`, `new TypeError(…)` and the like. */
+function isErrorConstruction(
+  node: ts.Node | undefined,
+): node is ts.NewExpression | ts.CallExpression {
+  return (
+    !!node &&
+    (ts.isNewExpression(node) || ts.isCallExpression(node)) &&
+    ts.isIdentifier(node.expression) &&
+    /Error$/.test(node.expression.text)
+  );
+}
+
 /** Walks up through `a ? b : c`, `a ?? b`, `a || b` and parentheses. */
 function renderedParent(node: ts.Node): ts.Node {
   let current = node.parent;
@@ -281,8 +303,10 @@ function findHardcoded(file: string, source: string): Finding[] {
           parent && ts.isPropertyAssignment(parent) && ts.isIdentifier(parent.name)
             ? parent.name.text
             : null;
+        const thrown = isErrorConstruction(parent) && !ignored(parent) && !ignored(node);
         if (
           inChild ||
+          thrown ||
           (attribute && READ_ATTRIBUTES.has(attribute.name.getText(sourceFile))) ||
           (property && isReadProperty(property))
         ) {
@@ -383,6 +407,42 @@ export function A({ label }: { label: string }) {
     ].join("\n");
     const texts = findHardcoded("sample.ts", sample).map((finding) => finding.text);
     expect(texts).toEqual(["names.join(', ')", "names.join(', ')", "Saved the labels."]);
+  });
+
+  it("flags prose the client writes into an error", () => {
+    const sample = [
+      "if (!a) throw new Error('This shell cannot open a sign-in window.');",
+      `if (!b) throw new Error(\`\${name} has no key yet. Run it again.\`);`,
+      "if (!c) throw new TypeError(on ? 'Turned on wrongly' : 'off');",
+      "if (!d) throw Error('Something broke here');",
+      "if (!e) throw new Error(i18n.t('settings:connect.errors.noSignInWindow'));",
+      `if (!f) throw new Error(\`expected_\${type}\`);`,
+      "if (!g) throw new Error(message);",
+      "const h = new ErrorBoundary('Not an error at all');",
+    ].join("\n");
+    const texts = findHardcoded("sample.ts", sample).map((finding) => finding.text);
+    expect(texts).toEqual([
+      "This shell cannot open a sign-in window.",
+      "has no key yet. Run it again.",
+      "Turned on wrongly",
+      "Something broke here",
+    ]);
+  });
+
+  it("lets an internal check's error opt out with a reasoned i18n-ignore-next-line", () => {
+    const sample = [
+      "// i18n-ignore-next-line: a reply of the wrong type is a bug, not a state",
+      `throw new Error(\`expected \${type}, got \${response.type}\`);`,
+      "// i18n-ignore-next-line",
+      "throw new Error('No reason given here');",
+      "// i18n-ignore-next-line: a bug",
+      "throw new Error(",
+      "  'Multi-line but exempt',",
+      ");",
+      "throw new Error('Still flagged here');",
+    ].join("\n");
+    const texts = findHardcoded("sample.ts", sample).map((finding) => finding.text);
+    expect(texts).toEqual(["No reason given here", "Still flagged here"]);
   });
 
   for (const file of CONVERTED) {

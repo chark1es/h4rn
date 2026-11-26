@@ -299,6 +299,7 @@ export function commandGroupName(group: CommandGroup): string {
 
 export function commandSpec(id: CommandId): CommandSpec {
   const spec = SPEC.get(id);
+  // i18n-ignore-next-line: CommandId is typed, so an unknown one is a bug
   if (!spec) throw new Error(`Unknown command ${id}`);
   return spec;
 }

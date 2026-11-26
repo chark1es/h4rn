@@ -1,4 +1,6 @@
 import { ServerIcon, SmartphoneIcon } from "lucide-react";
+import { useTranslation } from "react-i18next";
+
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
 import { EmptyState } from "@/components/common/EmptyState";
 import { PresenceDot } from "@/components/common/PresenceDot";
@@ -6,10 +8,11 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { useNow } from "@/hooks/use-now";
 import { harnessLabel, hostPlatformLabel, machineSeed } from "@/lib/entities";
-import { relativeAge } from "@/lib/format";
+import { formatAge, formatRelativeTime } from "@/lib/i18n";
 import { useApp } from "@/lib/store/appStore";
 
 export function HostsPane() {
+  const { t } = useTranslation(["pairing", "sidebar"]);
   const hosts = useApp((state) => state.hosts);
   const loading = useApp((state) => state.loadingThreads);
   const now = useNow();
@@ -21,17 +24,22 @@ export function HostsPane() {
   return (
     <main className="flex h-full min-h-0 flex-1 flex-col bg-bg">
       <header className="flex h-12 shrink-0 items-center justify-between border-b border-line px-4">
-        <h1 className="text-headline">Hosts</h1>
-        <Button variant="secondary" size="sm" disabled title="Pairing arrives in Phase 2">
+        <h1 className="text-headline">{t("sidebar:hosts.title")}</h1>
+        <Button variant="secondary" size="sm" disabled title={t("hostsPane.pairingLater")}>
           <SmartphoneIcon aria-hidden />
-          Pair a device
+          {t("hostsPane.pairDevice")}
         </Button>
       </header>
 
       <div className="min-h-0 flex-1 overflow-y-auto">
         <div className="mx-auto w-full max-w-[760px] px-4 py-4">
           {loading && list.length === 0 ? (
-            <div className="space-y-2" role="status" aria-busy="true" aria-label="Loading hosts">
+            <div
+              className="space-y-2"
+              role="status"
+              aria-busy="true"
+              aria-label={t("hostsPane.loading")}
+            >
               {["a", "b", "c", "d"].map((key) => (
                 <div
                   key={key}
@@ -42,11 +50,11 @@ export function HostsPane() {
           ) : list.length === 0 ? (
             <EmptyState
               icon={ServerIcon}
-              title="No hosts yet."
-              description="A host is a machine running the h4rn daemon. Pair this device or add a host on your tailnet to give agents somewhere to run."
+              title={t("hostsPane.emptyTitle")}
+              description={t("hostsPane.emptyBody")}
               action={
                 <Button variant="secondary" disabled>
-                  Pair a device
+                  {t("hostsPane.pairDevice")}
                 </Button>
               }
             />
@@ -71,8 +79,10 @@ export function HostsPane() {
                     <p className="text-small text-fg-2">
                       {hostPlatformLabel(host.platform)} ·{" "}
                       {host.online
-                        ? "online"
-                        : `last seen ${relativeAge(host.last_seen ?? "", now)} ago`}
+                        ? t("sidebar:hosts.dot.online")
+                        : t("hostsPane.lastSeen", {
+                            when: formatRelativeTime(host.last_seen, now),
+                          })}
                     </p>
                   </div>
                   <div className="hidden flex-wrap items-center gap-1 sm:flex">
@@ -84,20 +94,17 @@ export function HostsPane() {
                   </div>
                   <span className="flex w-16 items-center justify-end gap-1.5 text-small text-fg-2">
                     <PresenceDot online={host.online} />
-                    {host.online ? "online" : "offline"}
+                    {host.online ? t("sidebar:hosts.dot.online") : t("sidebar:hosts.dot.offline")}
                   </span>
                   <span className="ml-1 text-small tabular text-fg-3">
-                    {host.online ? relativeAge(host.last_seen ?? "", now) : "—"}
+                    {host.online ? formatAge(host.last_seen ?? "", now) : "—"}
                   </span>
                 </li>
               ))}
             </ul>
           )}
 
-          <p className="mt-4 text-small leading-relaxed text-fg-2">
-            Presence is a dot plus a word. A WSL distribution is its own host, so pairing the
-            Windows host does not grant the distribution.
-          </p>
+          <p className="mt-4 text-small leading-relaxed text-fg-2">{t("hostsPane.note")}</p>
         </div>
       </div>
     </main>
