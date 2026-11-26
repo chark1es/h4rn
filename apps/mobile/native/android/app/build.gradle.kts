@@ -143,8 +143,10 @@ tasks.withType<Test>().configureEach {
     inputs.dir("src/main/res")
         .withPropertyName("pushResources")
         .withPathSensitivity(PathSensitivity.RELATIVE)
+    // Every test is listed, so a green CI log shows the tests really ran;
+    // a failure also prints its assertion message.
     testLogging {
-        events("failed")
+        events("passed", "skipped", "failed")
         exceptionFormat = TestExceptionFormat.FULL
     }
 }

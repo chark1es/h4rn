@@ -246,13 +246,19 @@ gradle_flavor() {
 
 run_unit_tests() {
   setup_env
-  # Copy the overlay again so the tests and resources under test are the
-  # checked-in ones, even if they changed since the last build.
-  ensure_android_project
   # `tauri.settings.gradle` (the Tauri Android library and plugin projects)
   # is written by the Rust build, so the project cannot configure before one.
+  # Check it first: `test` never generates or deletes the project, whatever
+  # H4RN_ANDROID_REINIT says.
   [[ -f "${GEN_DIR}/tauri.settings.gradle" ]] \
     || die "the Android project has not been built yet; run scripts/mobile-android.sh build first"
+  # Copy the overlay again so the tests and resources under test are the
+  # checked-in ones, even if they changed since the last build.
+  apply_native_overlay
+  # Gradle passes a unit-test task with no test sources (NO-SOURCE), so a
+  # broken overlay copy must fail here instead of passing with nothing run.
+  [[ -f "${GEN_DIR}/app/src/test/java/dev/h4rn/app/PushResourcesTest.kt" ]] \
+    || die "the unit tests did not reach ${GEN_DIR}/app/src/test; check the native overlay"
 
   local -a targets
   read -r -a targets <<<"${TARGETS}"

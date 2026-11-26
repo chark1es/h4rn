@@ -66,7 +66,8 @@ scripts/mobile-android.sh build
 H4RN_ANDROID_TARGETS=x86_64 scripts/mobile-android.sh build
 
 # Run the app's JVM unit tests (app/src/test) after a build. Use the same
-# H4RN_ANDROID_TARGETS as the build so Gradle reuses what it compiled.
+# H4RN_ANDROID_TARGETS as the build so Gradle reuses what it compiled. It never
+# generates or deletes the project: without a build it stops and says so.
 H4RN_ANDROID_TARGETS=x86_64 scripts/mobile-android.sh test
 
 # Start the emulator if needed, start a fake-harness daemon, wire adb reverse,
