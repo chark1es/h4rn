@@ -325,6 +325,12 @@ struct CodexCatalog {
     default_effort: Option<String>,
     /// Whether this model has a fast service tier.
     fast: bool,
+    /// Which catalogue models offer a fast tier.
+    ///
+    /// The reply names each model's options, so the answer for every listed
+    /// model is kept, not just the thread's: the daemon persists them and can
+    /// then answer a model switch made while no session is live.
+    fast_by_model: BTreeMap<String, bool>,
 }
 
 /// The thread settings a Codex session applies to each turn.
@@ -749,13 +755,15 @@ impl HarnessSession for CodexSession {
     fn controls(&self) -> Option<crate::SessionControls> {
         let catalog = self.catalog.as_ref()?;
         let base = crate::thread_controls(self.kind);
-        // A model the catalogue does not list leaves its efforts and fast tier
-        // unknown; the harness-wide list stands in, exactly as it does before
-        // the first session, instead of claiming the model offers neither.
+        // A model the catalogue does not list leaves its efforts unknown; the
+        // harness-wide list stands in, exactly as it does before the first
+        // session, instead of claiming the model offers none. Its fast tier is
+        // not guessed from the harness: `None` says the catalogue does not
+        // know this model, so the daemon neither offers Fast nor refuses it.
         let (efforts, fast) = if catalog.listed {
-            (catalog.efforts.clone(), catalog.fast)
+            (catalog.efforts.clone(), Some(catalog.fast))
         } else {
-            (base.efforts, base.fast)
+            (base.efforts, None)
         };
         Some(crate::SessionControls {
             modes: base.modes,
@@ -768,6 +776,7 @@ impl HarnessSession for CodexSession {
             default_models: vec!["default".to_string()],
             efforts,
             fast,
+            fast_by_model: catalog.fast_by_model.clone(),
             switch_mode: true,
             switch_model: true,
             switch_effort: true,
@@ -1331,6 +1340,16 @@ fn catalog_from_model_list(result: &Value, requested: Option<&str>) -> Option<Co
         .filter_map(|entry| entry["id"].as_str())
         .map(str::to_string)
         .collect();
+    // Every entry names its own options, so the fast answer for each listed
+    // model is kept: the daemon persists them and can then answer a switch to
+    // a model no live session runs.
+    let fast_by_model: BTreeMap<String, bool> = entries
+        .iter()
+        .filter_map(|entry| {
+            let id = entry["id"].as_str()?;
+            Some((id.to_string(), entry_offers_fast(entry)))
+        })
+        .collect();
     let entry = match requested {
         Some(id) => entries
             .iter()
@@ -1344,6 +1363,7 @@ fn catalog_from_model_list(result: &Value, requested: Option<&str>) -> Option<Co
             efforts: Vec::new(),
             default_effort: None,
             fast: false,
+            fast_by_model,
         });
     };
     let efforts = entry["supportedReasoningEfforts"]
@@ -1356,12 +1376,7 @@ fn catalog_from_model_list(result: &Value, requested: Option<&str>) -> Option<Co
                 .collect()
         })
         .unwrap_or_default();
-    let fast = entry["serviceTiers"]
-        .as_array()
-        .is_some_and(|tiers| tiers.iter().any(|tier| tier["id"] == FAST_SERVICE_TIER))
-        || entry["additionalSpeedTiers"]
-            .as_array()
-            .is_some_and(|tiers| tiers.iter().any(|tier| tier == "fast"));
+    let fast = entry_offers_fast(entry);
     let default_effort = entry["defaultReasoningEffort"].as_str().map(str::to_string);
     Some(CodexCatalog {
         models,
@@ -1369,7 +1384,18 @@ fn catalog_from_model_list(result: &Value, requested: Option<&str>) -> Option<Co
         efforts,
         default_effort,
         fast,
+        fast_by_model,
     })
+}
+
+/// Whether one `model/list` entry names a fast service tier.
+fn entry_offers_fast(entry: &Value) -> bool {
+    entry["serviceTiers"]
+        .as_array()
+        .is_some_and(|tiers| tiers.iter().any(|tier| tier["id"] == FAST_SERVICE_TIER))
+        || entry["additionalSpeedTiers"]
+            .as_array()
+            .is_some_and(|tiers| tiers.iter().any(|tier| tier == "fast"))
 }
 
 /// The `turn/start` parameters for one prompt.
@@ -2099,6 +2125,39 @@ done
             !missing.listed,
             "no entry means the per-model options are unknown, not empty"
         );
+        // Every entry's tier is kept, so the daemon can answer a switch to a
+        // model no live session runs.
+        assert_eq!(catalog.fast_by_model.get("gpt-6.2-sol"), Some(&true));
+        assert_eq!(catalog.fast_by_model.get("gpt-plain"), Some(&false));
+        assert_eq!(missing.fast_by_model.get("gpt-plain"), Some(&false));
+        assert_eq!(
+            missing.fast_by_model.get("gpt-6.2-sol"),
+            Some(&true),
+            "an unlisted thread model does not drop the other answers"
+        );
+    }
+
+    #[test]
+    fn an_unlisted_model_leaves_its_fast_tier_unknown() {
+        let mut session = closed_session();
+        let result = json!({
+            "data": [
+                {"id": "gpt-a", "isDefault": true, "serviceTiers": [{"id": "priority"}]},
+                {"id": "gpt-b", "isDefault": false, "serviceTiers": []}
+            ]
+        });
+        session.catalog = catalog_from_model_list(&result, Some("gpt-a"));
+        let controls = session.controls().expect("catalogue");
+        assert_eq!(controls.fast, Some(true));
+        assert_eq!(controls.fast_by_model.get("gpt-b"), Some(&false));
+
+        // The thread's model is not in the catalogue: its tier is unknown, not
+        // the harness-wide "Codex has Fast", while the listed models keep the
+        // answers their entries gave.
+        session.catalog = catalog_from_model_list(&result, Some("gpt-retired"));
+        let controls = session.controls().expect("catalogue");
+        assert_eq!(controls.fast, None);
+        assert_eq!(controls.fast_by_model.get("gpt-a"), Some(&true));
     }
 
     #[test]
