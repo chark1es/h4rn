@@ -88,8 +88,8 @@
     "back": "一覧に戻る",
     "breadcrumb": "パンくずリスト",
     "commits_other": "{{count, number}} 件のコミット",
-    "openedBy": "{{author}} が {{when}}に作成",
-    "openedByNow": "{{author}} がたった今作成",
+    "openedBy": "{{author}} が作成（{{when}}）",
+    "openedByNow": "{{author}} が作成（たった今）",
     "onForge": "{{forge}} の {{repo}}",
     "openOn": "{{forge}} で開く"
   },
