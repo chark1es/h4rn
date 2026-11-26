@@ -48,6 +48,11 @@ pub struct PushAlert {
     /// instead of one thread, and the phone never treats the group as an alert
     /// for whichever thread happens to be on screen.
     pub thread_id: String,
+    /// Project name from the record, or empty for a grouped alert.
+    ///
+    /// Android composes a Live Update's text itself, so it needs the project
+    /// on its own rather than folded into the alert body (ADR-053).
+    pub project: String,
     /// Number of threads represented.
     pub count: usize,
 }
@@ -61,6 +66,7 @@ impl PushAlert {
             ("thread_id".to_string(), self.thread_id.clone()),
             ("title".to_string(), self.title.clone()),
             ("body".to_string(), self.body.clone()),
+            ("project".to_string(), self.project.clone()),
             ("count".to_string(), self.count.to_string()),
         ])
     }
@@ -94,6 +100,15 @@ fn clean(value: &str, fallback: &str) -> String {
 fn single(activity: &AgentActivity, project: &str) -> PushAlert {
     let title = clean(&activity.thread_title, "A thread");
     let body = match activity.state {
+        // Only Android shows this state, as the ongoing Live Update's first
+        // frame; the words are what the phone displays while the turn runs.
+        AgentAlertState::Working => {
+            if project.is_empty() {
+                "Working".to_string()
+            } else {
+                format!("{project} · Working")
+            }
+        }
         AgentAlertState::Completed => {
             if project.is_empty() {
                 "Finished".to_string()
@@ -117,6 +132,7 @@ fn single(activity: &AgentActivity, project: &str) -> PushAlert {
         body,
         state: activity.state,
         thread_id: activity.thread_id.to_string(),
+        project: project.to_string(),
         count: 1,
     }
 }
@@ -176,6 +192,7 @@ fn grouped(activities: &[AgentActivity]) -> PushAlert {
         // Naming the first thread would let a phone that has that thread open
         // drop the whole group, losing the other threads' alerts.
         thread_id: String::new(),
+        project: String::new(),
         count,
     }
 }
@@ -205,7 +222,12 @@ fn latest_per_thread(activities: &[AgentActivity]) -> Vec<AgentActivity> {
 /// window. A group of one keeps that thread's own title and link, and a thread
 /// that raised several transitions contributes only its latest one.
 pub fn group_activities(activities: &[AgentActivity]) -> Vec<PushAlert> {
-    let activities = latest_per_thread(activities);
+    // `working` is an ongoing update per thread, never part of an alert group:
+    // counting a turn that just started as "finished" would be wrong.
+    let activities: Vec<AgentActivity> = latest_per_thread(activities)
+        .into_iter()
+        .filter(|activity| activity.state != AgentAlertState::Working)
+        .collect();
     let mut attention: Vec<AgentActivity> = Vec::new();
     let mut finished: Vec<AgentActivity> = Vec::new();
     for activity in &activities {
@@ -318,6 +340,14 @@ impl AlertService {
         if !self.fcm.configured() && !self.apns.configured() {
             return;
         }
+        // A turn that started is an ongoing Live Update for its own thread on
+        // Android, not an alert to group with finishing ones (ADR-053). The
+        // claimed transition above already makes a replay of this frame a
+        // no-op, so each state change updates the phone at most once.
+        if activity.state == AgentAlertState::Working {
+            self.deliver_working(user_id, &activity).await;
+            return;
+        }
         let schedule = {
             let mut pending = self.pending.lock().await;
             let group = pending.entry(user_id).or_default();
@@ -362,45 +392,70 @@ impl AlertService {
             }
         };
         for alert in alerts {
-            let data = alert.data();
             for device in &devices {
-                let platform = device_platform(device);
-                if !platform_has_sender(platform, self.fcm.configured(), self.apns.configured()) {
-                    // This phone's platform has no sender on this relay. The
-                    // other platform's phones still get their alert.
-                    continue;
+                self.send_to(device, &alert).await;
+            }
+        }
+    }
+
+    /// Sends one turn-start update to this account's Android phones.
+    ///
+    /// iOS has no Live Update equivalent here, so an iPhone is not sent this
+    /// record at all: its `working` state would otherwise become a visible
+    /// alert for a turn that has not finished (ADR-053).
+    async fn deliver_working(self: &Arc<Self>, user_id: Uuid, activity: &AgentActivity) {
+        if !self.fcm.configured() {
+            return;
+        }
+        let alert = single(activity, &activity.project_name);
+        let devices = match self.store.push_devices(user_id).await {
+            Ok(devices) => devices,
+            Err(error) => {
+                tracing::warn!(%error, "could not list push devices");
+                return;
+            }
+        };
+        for device in &devices {
+            if device_platform(device) != PushPlatform::Android {
+                continue;
+            }
+            self.send_to(device, &alert).await;
+        }
+    }
+
+    /// Delivers one alert to one phone over its own platform's transport.
+    async fn send_to(&self, device: &PushDeviceRow, alert: &PushAlert) {
+        let platform = device_platform(device);
+        if !platform_has_sender(platform, self.fcm.configured(), self.apns.configured()) {
+            // This phone's platform has no sender on this relay. The other
+            // platform's phones still get their alert.
+            return;
+        }
+        let message = PushMessage {
+            token: &device.token,
+            platform,
+            package_name: device.package_name.as_deref(),
+            data: alert.data(),
+        };
+        let result = match platform {
+            PushPlatform::Android => self.fcm.send(&message).await,
+            PushPlatform::Ios => self.apns.send(message.token, &message.apns_payload()).await,
+        };
+        match result {
+            Ok(()) => {}
+            Err(SendError::Unregistered) => {
+                if let Err(error) = self.store.delete_push_device_by_token(&device.token).await {
+                    tracing::warn!(%error, "could not delete an unregistered token");
                 }
-                let message = PushMessage {
-                    token: &device.token,
-                    platform,
-                    package_name: device.package_name.as_deref(),
-                    data: data.clone(),
-                };
-                let result = match platform {
-                    PushPlatform::Android => self.fcm.send(&message).await,
-                    PushPlatform::Ios => {
-                        self.apns.send(message.token, &message.apns_payload()).await
-                    }
-                };
-                match result {
-                    Ok(()) => {}
-                    Err(SendError::Unregistered) => {
-                        if let Err(error) =
-                            self.store.delete_push_device_by_token(&device.token).await
-                        {
-                            tracing::warn!(%error, "could not delete an unregistered token");
-                        }
-                    }
-                    Err(SendError::Disabled) => continue,
-                    Err(SendError::Failed(error)) => {
-                        tracing::warn!(
-                            %error,
-                            device = %device.id,
-                            platform = platform.as_str(),
-                            "push delivery failed"
-                        );
-                    }
-                }
+            }
+            Err(SendError::Disabled) => {}
+            Err(SendError::Failed(error)) => {
+                tracing::warn!(
+                    %error,
+                    device = %device.id,
+                    platform = platform.as_str(),
+                    "push delivery failed"
+                );
             }
         }
     }
@@ -602,9 +657,43 @@ mod tests {
         let keys: Vec<&str> = data.keys().map(String::as_str).collect();
         assert_eq!(
             keys,
-            vec!["body", "count", "h4rn_alert", "state", "thread_id", "title"]
+            vec![
+                "body",
+                "count",
+                "h4rn_alert",
+                "project",
+                "state",
+                "thread_id",
+                "title"
+            ]
         );
         assert_eq!(data["h4rn_alert"], "agent");
         assert_eq!(data["state"], "completed");
+        assert_eq!(data["project"], "proj");
+    }
+
+    #[test]
+    fn a_turn_start_is_a_working_update_for_its_own_thread() {
+        let activity = activity(AgentAlertState::Working, "one");
+        let expected_thread = activity.thread_id.to_string();
+        let alert = single(&activity, "proj");
+        assert_eq!(alert.state, AgentAlertState::Working);
+        assert_eq!(alert.title, "one");
+        assert_eq!(alert.body, "proj · Working");
+        assert_eq!(alert.project, "proj");
+        assert_eq!(alert.thread_id, expected_thread);
+        assert_eq!(alert.data()["state"], "working");
+    }
+
+    #[test]
+    fn a_working_update_is_never_grouped_with_finishing_threads() {
+        let alerts = group_activities(&[
+            activity(AgentAlertState::Working, "one"),
+            activity(AgentAlertState::Completed, "two"),
+        ]);
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(alerts[0].title, "two");
+        assert_eq!(alerts[0].body, "proj · Finished");
+        assert_eq!(alerts[0].count, 1);
     }
 }

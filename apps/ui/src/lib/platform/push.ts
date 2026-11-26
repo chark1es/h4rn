@@ -147,6 +147,39 @@ export async function nativeSetPushEnabled(enabled: boolean): Promise<void> {
 }
 
 /**
+ * Mirrors the Android Live Updates switch to the notification service.
+ *
+ * The service runs without the WebView, so it reads this persisted flag before
+ * showing a running turn as an ongoing notification. Off cancels what is
+ * already showing; Android is the only platform with this switch (ADR-053).
+ */
+export async function nativeSetLiveUpdates(enabled: boolean): Promise<void> {
+  const api = internals();
+  if (!api || deviceAlertsPlatform() !== "android") return;
+  try {
+    await api.invoke<null>("push_set_live_updates", { enabled });
+  } catch {
+    // An older shell has no Live Updates; the setting is simply inert.
+  }
+}
+
+/**
+ * Removes a thread's ongoing Live Update once the app sees its turn end.
+ *
+ * A grouped finish names no thread, so it cannot replace each thread's
+ * ongoing notification; the shared UI clears the ones it can see finish.
+ */
+export async function nativeClearLiveThread(threadId: string): Promise<void> {
+  const api = internals();
+  if (!api || deviceAlertsPlatform() !== "android") return;
+  try {
+    await api.invoke<null>("push_clear_live", { threadId });
+  } catch {
+    // Nothing is showing for an older shell; nothing to clear.
+  }
+}
+
+/**
  * Names the thread currently on screen, or null.
  *
  * The notification service suppresses an alert only when this thread matches

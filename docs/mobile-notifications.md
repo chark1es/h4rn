@@ -2,9 +2,11 @@
 
 Your phone can alert you when an agent finishes, fails, waits for an approval,
 asks a question or stops at a limit. Tap the alert to open that thread. Android
-and iOS carry the same record and alert on the same transitions. Their
-lock-screen behaviour differs where iOS cannot run app code; the limits below
-say exactly where. Delivery goes through
+and iOS carry the same record and alert on the same transitions. Android can
+additionally keep a running turn on screen as an ongoing **Live Update**; iOS
+cannot without an ActivityKit widget extension, which this repository does not
+build. Their lock-screen behaviour differs where iOS cannot run app code; the
+limits below say exactly where. Delivery goes through
 Connect only: a direct or Tailscale pairing is not enough, because the daemon
 does not hold a phone's push token and a push provider cannot reach a LAN
 address.
@@ -25,6 +27,13 @@ address.
    account did), and whether the Connect server has a push sender for this
    phone's platform. A status call that fails is reported as unknown, not as a
    missing sender.
+4. On Android you can also turn on **Show running agents as live
+   notifications**. It is a separate switch, off by default, for an ongoing
+   notification that names a running thread, its project and what the agent is
+   doing (Working, Waiting for approval, Asked a question). It still needs
+   **Device notifications** on and the phone signed in. See [While an agent is
+   running](#while-an-agent-is-running-android-live-updates) below. iOS is not
+   offered this switch.
 
 Alerts are quiet only when the app is in the foreground **and** that exact
 thread is on screen. Every other thread still alerts, as does the same thread
@@ -64,7 +73,7 @@ Each alert carries exactly this record:
 | thread id | `th_0192f0…` | Opens the thread on tap |
 | thread title | `Fix the flaky login test` | As shown in the sidebar |
 | project name | `h4rn` | Folder name, not the full path |
-| state | `completed`, `failed`, `approval`, `input`, `limit` | One of five transitions |
+| state | `working`, `completed`, `failed`, `approval`, `input`, `limit` | `working` is Android's ongoing update; the rest alert |
 | transition id | `0192f0a1-…` | Identity of this transition; only used to tell a replay from a new event |
 | timestamp | RFC 3339 | When the daemon observed it |
 
@@ -86,6 +95,33 @@ attention** alert, and two or more finishing become one **N agents finished**
 alert. The count is of threads, not raw transitions, so one agent that raises the
 same hand twice inside the group window is still one agent.
 
+## While an agent is running (Android Live Updates)
+
+With **Show running agents as live notifications** on, an Android phone keeps
+one ongoing notification for each running thread. It shows the thread title, the
+project name and a state word: **Working**, **Waiting for approval** or **Asked
+a question**. Tapping it opens the thread. Android 16 promotes it to the status
+bar's Live Update surface with an indeterminate progress style; older releases
+show the same ongoing notification without promotion.
+
+The daemon publishes `working` once when a turn starts, never per token, per
+tool call or per summary update. The next state for that thread updates the same
+notification: an approval or a question changes the state word and still gets
+the person's attention, while a turn that starts is silent. A finish, failure or
+limit replaces the ongoing notification with the normal alert, because both use
+the thread's own notification id. A turn stopped by the person has no alert; the
+phone removes its ongoing notification when the app sees the thread leave
+Working, and opening that thread removes it too. With the app not running, an
+ongoing notification for a turn that ends without an alert can stay until the
+app is next opened.
+
+The ongoing notification follows the same rules as an alert: none while the
+switch is off or the phone is signed out, and none for the thread on screen in
+the foreground. A grouped alert names no thread, so it is never an ongoing
+update; each thread's own entry stays until its turn ends. Turning the switch
+off, turning **Device notifications** off or signing out removes what is already
+showing.
+
 ## How each phone is told
 
 Connect records the platform on each phone's registration row and sends that
@@ -93,9 +129,11 @@ phone the shape its OS needs. Both shapes are built from the same record and are
 sent to one phone at a time.
 
 **Android** receives an FCM data message with the display strings under
-`data` (`h4rn_alert`, `state`, `thread_id`, `title`, `body`, `count`). The app
-composes the notification itself, which is what lets a foreground alert for the
-thread already on screen never appear in the tray at all.
+`data` (`h4rn_alert`, `state`, `thread_id`, `title`, `body`, `project`,
+`count`). The app composes the notification itself, which is what lets a
+foreground alert for the thread already on screen never appear in the tray at
+all, and lets a running turn become an ongoing Live Update. `working` is sent to
+Android phones only; iOS is never sent it.
 
 **iOS** receives an APNs alert. The `aps` block carries the same title and body
 Android composes locally, `sound`, and `mutable-content: 1`; the only custom keys
@@ -256,6 +294,13 @@ never reached Connect.
 
 ## Limits
 
+- Live Updates are Android only. iOS would need an ActivityKit widget extension
+  with its own Xcode target, which the generated iOS project cannot gain here,
+  so the iPhone app offers no equivalent and is not sent the `working` record.
+- An Android ongoing notification is removed by its final alert, by the app
+  seeing the turn end, or by the switch-off/sign-out cancel. If the app is not
+  running and the turn ends without an alert (a Stop, or a grouped finish), the
+  entry can stay until the app is opened.
 - Android needs Google Play services. A device without them cannot receive FCM.
 - iOS needs a signed build with the push entitlement, installed on a real
   device, and an operator-configured APNs key on the relay. A simulator cannot

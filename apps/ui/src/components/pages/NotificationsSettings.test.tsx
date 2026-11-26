@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { act, cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -9,6 +9,28 @@ import {
 } from "@/features/notifications/channel";
 
 import { SettingsPage } from "./SettingsPage";
+
+const ANDROID_USER_AGENT =
+  "Mozilla/5.0 (Linux; Android 16; Pixel 9) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0 Mobile Safari/537.36";
+
+/** An Android Tauri shell with notifications granted and a cached FCM token. */
+function stubAndroidShell(): ReturnType<typeof vi.fn> {
+  vi.spyOn(window.navigator, "userAgent", "get").mockReturnValue(ANDROID_USER_AGENT);
+  const invoke = vi.fn(async (command: string) => {
+    if (command === "push_status") {
+      return {
+        available: true,
+        permission: "granted",
+        token: "fcm-token",
+        channel: true,
+        appVersion: "1.2.3",
+      };
+    }
+    return null;
+  });
+  vi.stubGlobal("__TAURI_INTERNALS__", { invoke });
+  return invoke;
+}
 
 function stubBrowserNotifications(): void {
   // The OS permission is granted; only the constructor fails, which is a
@@ -69,5 +91,32 @@ describe("notification settings", () => {
     // jsdom is neither Android nor a Tauri shell, so there is no device toggle
     // to promise an alert this build cannot receive.
     expect(screen.queryByText("Device notifications")).toBeNull();
+    // iOS has no Live Update surface here, so the switch is not offered either.
+    expect(screen.queryByText("Show running agents as live notifications")).toBeNull();
+  });
+
+  it("offers the Live Updates switch on Android and mirrors it to the shell", async () => {
+    const invoke = stubAndroidShell();
+    render(<SettingsPage section="notifications" />);
+
+    const toggle = await screen.findByRole("switch", {
+      name: "Show running agents as live notifications",
+    });
+    // Off by default: running turns stay ordinary until the person opts in.
+    expect(toggle.getAttribute("aria-checked")).toBe("false");
+
+    fireEvent.click(toggle);
+
+    expect(toggle.getAttribute("aria-checked")).toBe("true");
+    expect(window.localStorage.getItem("h4rn.push.liveUpdates")).toBe("1");
+    await vi.waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith("push_set_live_updates", { enabled: true }),
+    );
+
+    fireEvent.click(toggle);
+    expect(window.localStorage.getItem("h4rn.push.liveUpdates")).toBeNull();
+    await vi.waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith("push_set_live_updates", { enabled: false }),
+    );
   });
 });

@@ -17,15 +17,18 @@ import {
   type DevicePushPermission,
   deviceAlertsPlatform,
   deviceAlertsShell,
+  nativeClearLiveThread,
   nativePushStatus,
   nativePushToken,
   nativeRequestPushPermission,
+  nativeSetLiveUpdates,
   nativeSetPushEnabled,
   setForegroundThread,
 } from "@/lib/platform/push";
 import { store } from "@/lib/store/appStore";
 
 const ENABLED_KEY = "h4rn.push.deviceAlerts";
+const LIVE_UPDATES_KEY = "h4rn.push.liveUpdates";
 const DEREGISTER_PENDING_KEY = "h4rn.push.deregisterPending";
 const PACKAGE_NAME = "dev.h4rn.app";
 
@@ -101,6 +104,63 @@ export function devicePushEnabled(): boolean {
   } catch {
     return false;
   }
+}
+
+/** Whether this phone can show an ongoing Live Update (Android only). */
+export function deviceLiveUpdatesSupported(): boolean {
+  return deviceAlertsPlatform() === "android";
+}
+
+/** The separate Live Updates switch; off by default. */
+export function deviceLiveUpdatesEnabled(): boolean {
+  try {
+    return window.localStorage.getItem(LIVE_UPDATES_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Saves the Live Updates switch and mirrors it to the notification service.
+ *
+ * The service runs without the WebView, so it reads the persisted flag before
+ * showing a running turn; turning it off also cancels what is showing.
+ */
+export async function setDeviceLiveUpdates(enabled: boolean): Promise<void> {
+  try {
+    if (enabled) window.localStorage.setItem(LIVE_UPDATES_KEY, "1");
+    else window.localStorage.removeItem(LIVE_UPDATES_KEY);
+  } catch {
+    // Without storage the setting applies to this session only.
+  }
+  await nativeSetLiveUpdates(enabled);
+}
+
+/**
+ * The threads whose running turn ended between two thread snapshots.
+ *
+ * A grouped finish names no thread, so Connect cannot replace each thread's
+ * ongoing notification; the app clears the ones it sees finish. A queued turn
+ * that keeps the thread Working is not an end, and a subagent's own turn has
+ * no Live Update of its own.
+ */
+export function endedWorkingTurns(
+  before: Record<string, ThreadTurnState>,
+  after: Record<string, ThreadTurnState>,
+): string[] {
+  const ended: string[] = [];
+  for (const [threadId, previous] of Object.entries(before)) {
+    if (!isWorkingTurn(previous)) continue;
+    const next = after[threadId];
+    if (next === undefined || !isWorkingTurn(next)) ended.push(threadId);
+  }
+  return ended;
+}
+
+type ThreadTurnState = { tab: string; parent_thread_id?: string | null };
+
+function isWorkingTurn(thread: ThreadTurnState): boolean {
+  return thread.tab === "working" && !thread.parent_thread_id;
 }
 
 /** Whether this install is signed in to Connect right now. */
@@ -364,6 +424,31 @@ export function startDevicePush(): void {
   };
   syncRoute();
   store.subscribe(syncRoute);
+
+  // The daemon publishes the finish, failure or limit itself, and that alert
+  // replaces a thread's ongoing entry. A turn with no alert (the person's own
+  // Stop, or a grouped finish that names no thread) is cleared here, when the
+  // app sees the thread leave Working.
+  let lastTurns: Record<string, ThreadTurnState> = {};
+  let lastThreads: unknown = null;
+  const syncTurns = (): void => {
+    if (deviceAlertsPlatform() !== "android") return;
+    const threads = store.getState().threads;
+    // Only a thread change matters; the store also notifies for route, theme
+    // and every other UI state.
+    if (threads === lastThreads) return;
+    lastThreads = threads;
+    const current: Record<string, ThreadTurnState> = {};
+    for (const [threadId, thread] of Object.entries(threads)) {
+      current[threadId] = { tab: thread.tab, parent_thread_id: thread.parent_thread_id };
+    }
+    for (const threadId of endedWorkingTurns(lastTurns, current)) {
+      void nativeClearLiveThread(threadId);
+    }
+    lastTurns = current;
+  };
+  syncTurns();
+  store.subscribe(syncTurns);
 
   let lastPhase = "";
   const syncAccount = (): void => {

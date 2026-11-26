@@ -3,13 +3,16 @@
 //! The switch is off until the person turns it on in Settings → Notifications.
 //! While it is on, and only while the relay socket is attached, this service
 //! observes the thread event stream and publishes a fixed transition for the
-//! moments a phone should know about: a turn finished, a turn failed, an
-//! approval is waiting, an agent asked a question, or a turn stopped at a limit
-//! that will not resume by itself.
+//! moments a phone should know about: a turn started, a turn finished, a turn
+//! failed, an approval is waiting, an agent asked a question, or a turn stopped
+//! at a limit that will not resume by itself.
 //!
 //! Nothing else leaves the machine. The payload has fields for the thread id,
 //! its title, the project name, the state, a transition id and the time — no
-//! prompt text, tool output, file path or credential can be carried.
+//! prompt text, tool output, file path or credential can be carried. The
+//! `working` transition is published once per turn start, not for the events
+//! inside the turn, so an Android Live Update is not refreshed per token or
+//! tool call (ADR-053).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -18,7 +21,7 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use h4rn_protocol::{
     AgentActivity, AgentAlertSettings, AgentAlertState, Event, ThreadId, ThreadSummary, ThreadTab,
-    TurnStatus,
+    TurnId, TurnStatus,
 };
 use tokio::sync::{Mutex, RwLock, broadcast};
 use tokio::task::JoinHandle;
@@ -288,6 +291,12 @@ struct ThreadAlerts {
     /// A usage limit was published for the turn now finishing, so its Failed
     /// completion is the same stop and must not alert again.
     limit_alerted: bool,
+    /// The turn whose start already published `working`.
+    ///
+    /// A turn start is one transition even when the daemon sees the event more
+    /// than once, so the id stops a repeat from resetting the phone's ongoing
+    /// notification to "Working" (ADR-053).
+    working_turn: Option<TurnId>,
 }
 
 /// Watches the thread stream and publishes while the switch is on.
@@ -375,9 +384,39 @@ impl AgentAlertService {
             Event::ThreadUpserted(summary) => {
                 if summary.tab == ThreadTab::Working {
                     // A new turn is a new set of transitions: its result can
-                    // alert even when it repeats the previous one.
-                    self.published.lock().await.remove(&summary.thread_id);
+                    // alert even when it repeats the previous one. The turn id
+                    // stays: it is what keeps one turn start from publishing
+                    // `working` twice.
+                    let mut published = self.published.lock().await;
+                    if let Some(alerts) = published.get_mut(&summary.thread_id) {
+                        alerts.published = None;
+                        alerts.limit_alerted = false;
+                    }
                 }
+            }
+            Event::TurnStarted {
+                thread_id, turn_id, ..
+            } => {
+                // A Live Update is published once per turn start, not for the
+                // many thread summaries, deltas and tool calls inside it.
+                let first_start = {
+                    let mut published = self.published.lock().await;
+                    let alerts = published.entry(thread_id.clone()).or_default();
+                    if alerts.working_turn.as_ref() == Some(&turn_id) {
+                        false
+                    } else {
+                        alerts.working_turn = Some(turn_id.clone());
+                        true
+                    }
+                };
+                if !first_start {
+                    return;
+                }
+                let Some(thread) = self.alertable_thread(&thread_id).await else {
+                    return;
+                };
+                self.publish(&thread, AgentAlertState::Working, Utc::now())
+                    .await;
             }
             Event::ApprovalRequested {
                 thread_id, kind, ..
@@ -628,6 +667,15 @@ mod tests {
         Event::ThreadUpserted(summary(&thread_id, None))
     }
 
+    fn turn_started(turn_id: &str) -> Event {
+        Event::TurnStarted {
+            thread_id: ThreadId::new("th_test"),
+            turn_id: h4rn_protocol::TurnId::new(turn_id),
+            started_at: Utc::now(),
+            harness: None,
+        }
+    }
+
     fn completion(status: TurnStatus) -> Event {
         Event::TurnCompleted {
             thread_id: ThreadId::new("th_test"),
@@ -810,6 +858,77 @@ mod tests {
         assert_eq!(
             approval_state(ApprovalKind::Plan),
             AgentAlertState::Approval
+        );
+    }
+
+    #[tokio::test]
+    async fn a_turn_start_publishes_working_once_and_never_per_event() {
+        let recorder = Arc::new(Recorder::default());
+        let service = observing_service(Arc::clone(&recorder));
+        service.set_enabled(true).await.expect("enable");
+
+        // The same start seen again — even after a summary reset the published
+        // baseline — plus the work inside the turn, must not publish another
+        // Live Update. The turn id, not the last state, is what remembers it.
+        observe(&service, turn_started("turn_1")).await;
+        observe(&service, working_event()).await;
+        observe(&service, turn_started("turn_1")).await;
+        observe(&service, working_event()).await;
+        observe(&service, working_event()).await;
+
+        let sent = recorder.sent.lock().await;
+        assert_eq!(sent.len(), 1, "one turn start published more than once");
+        assert_eq!(sent[0].state, AgentAlertState::Working);
+        assert_eq!(sent[0].thread_id, ThreadId::new("th_test"));
+        assert_eq!(sent[0].thread_title, "Fix the thing");
+        assert_eq!(sent[0].project_name, "h4rn");
+    }
+
+    #[tokio::test]
+    async fn a_later_turn_publishes_working_again() {
+        let recorder = Arc::new(Recorder::default());
+        let service = observing_service(Arc::clone(&recorder));
+        service.set_enabled(true).await.expect("enable");
+
+        observe(&service, turn_started("turn_1")).await;
+        observe(&service, completion(TurnStatus::Completed)).await;
+        observe(&service, turn_started("turn_2")).await;
+
+        let sent = recorder.sent.lock().await;
+        let states: Vec<AgentAlertState> = sent.iter().map(|activity| activity.state).collect();
+        assert_eq!(
+            states,
+            vec![
+                AgentAlertState::Working,
+                AgentAlertState::Completed,
+                AgentAlertState::Working
+            ],
+            "the second turn's start was not its own transition"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_turn_start_in_a_subagent_thread_publishes_nothing() {
+        let recorder = Arc::new(Recorder::default());
+        let thread_id = ThreadId::new("th_test");
+        let mut lookup = Lookup::default();
+        lookup
+            .summaries
+            .insert(thread_id.clone(), summary(&thread_id, Some("th_parent")));
+        let store = Arc::new(AgentAlertSettingsStore::in_memory());
+        let service = Arc::new(AgentAlertService::new(
+            store,
+            Some(Arc::new(lookup) as Arc<dyn ThreadLookup>),
+            Arc::clone(&recorder) as Arc<dyn ActivityPublisher>,
+            None,
+        ));
+        service.set_enabled(true).await.expect("enable");
+
+        observe(&service, turn_started("turn_1")).await;
+
+        assert!(
+            recorder.sent.lock().await.is_empty(),
+            "a subagent's own thread named itself instead of its parent"
         );
     }
 

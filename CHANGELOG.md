@@ -7,6 +7,12 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Added
 
+- **Android Live Updates show a running agent.** A separate switch under
+  Settings → Notifications → Phone alerts shows each running thread as an
+  ongoing notification with its project and whether it is working, waiting for
+  an approval or asking a question. The finish, failure or limit alert replaces
+  it; the daemon publishes the new `working` state once per turn start, and iOS
+  is not offered the switch because it needs an ActivityKit widget extension.
 - **Edit an earlier prompt to rewind a thread.** Every turn's first sent
   message has an **Edit from here** action; a message steered into a running
   turn cannot be edited on its own, because that would also remove the message

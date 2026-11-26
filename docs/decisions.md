@@ -2456,3 +2456,48 @@ reverse) for a token that is still valid on the other host, and deleting every
 row on that would silence a phone because of an operator misconfiguration. Only
 `410` and an explicit `Unregistered` reason remove the row, the same caution
 ADR-051 applies to FCM's 404.
+
+## ADR-053: A running turn is an Android Live Update built from the same record
+
+**Status:** Accepted
+
+The alert record gains one state, `working`, published once when a turn
+starts. Nothing else changes about the record: the same thread id, title,
+project name, state, transition id and timestamp, and no field for a prompt, a
+reply, tool output, a file path or a credential. The daemon publishes it on
+`TurnStarted` only, so a turn's deltas, tool calls and summary churn never
+produce another frame. A turn start seen twice is one transition, because the
+daemon remembers the turn id it already announced.
+
+Connect treats `working` differently from an alert. It still claims the
+transition id, so a replay is dropped and each state change is delivered at
+most once per thread (ADR-051's dedupe). It does not put it in a group with
+finishing threads: a turn that just started is not an agent that finished. It
+sends the update only to Android registrations; iOS has no Live Update surface
+here, and an APNs `working` alert would tell the person a turn ended when it had
+only begun.
+
+The Android app shows a running turn, a waiting approval or a question as an
+ongoing notification: `setOngoing(true)`, the project and state words, and
+Android 16's promoted ongoing notification with an indeterminate
+`ProgressStyle` where the release has it. Older releases get the same ongoing
+notification without promotion. The notification uses the thread's own id, the
+one the finished, failed or limit alert already uses, so the final alert
+replaces the ongoing entry rather than stacking a second one. Only the
+`working` frame is silent; an approval or a question still alerts. A grouped
+final alert names no thread and cannot replace each member's ongoing entry, so
+the app clears per-thread entries when it sees the turn leave Working, and the
+thread on screen clears its own entry when it opens. With the app not running,
+an ongoing entry for a turn that ends without an alert can outlive the turn
+until the app is opened; the docs state that limit rather than promising a
+removal no frame can request.
+
+The whole feature is a separate opt-in, off by default: **Settings →
+Notifications → Phone alerts → Show running agents as live notifications**. It
+needs the existing alert switch and a signed-in phone as well. The flag is
+mirrored to the Android notification service, which shows no ongoing entry
+while it is off, while the phone is signed out, or for the thread already on
+screen in the foreground. Turning the switch off, turning alerts off and
+signing out cancel what is already showing. iOS is not offered the switch:
+showing a running turn there needs an ActivityKit widget extension, which this
+repository does not build.

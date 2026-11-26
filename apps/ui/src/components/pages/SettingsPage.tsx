@@ -21,11 +21,14 @@ import {
 import {
   type DeviceAlertsState,
   deviceAvailabilityNote,
+  deviceLiveUpdatesEnabled,
+  deviceLiveUpdatesSupported,
   deviceStatusLine,
   deviceToggleUsable,
   disableDeviceAlerts,
   enableDeviceAlerts,
   readDeviceAlerts,
+  setDeviceLiveUpdates,
 } from "@/features/notifications/devicePush";
 import {
   displayedNotificationSetting,
@@ -472,7 +475,9 @@ function NotificationsForm() {
   const daemonPaired = daemonMachineId !== null;
   const [device, setDevice] = useState<DeviceAlertsState | null>(null);
   const [deviceBusy, setDeviceBusy] = useState(false);
+  const [liveUpdates, setLiveUpdates] = useState(deviceLiveUpdatesEnabled);
   const alertsShell = deviceAlertsShell();
+  const liveShell = deviceLiveUpdatesSupported();
 
   useEffect(() => {
     void loadAgentAlertSettings();
@@ -538,6 +543,11 @@ function NotificationsForm() {
   const changeAgentAlerts = async (next: boolean) => {
     if (next && !signedIn && !daemonPaired) return;
     await setAgentAlertsEnabled(next);
+  };
+
+  const changeLiveUpdates = (next: boolean) => {
+    setLiveUpdates(next);
+    void setDeviceLiveUpdates(next);
   };
 
   const changeDeviceAlerts = async (next: boolean) => {
@@ -661,6 +671,25 @@ function NotificationsForm() {
                 />
               </div>
             </div>
+            {liveShell ? (
+              <div className="q-field">
+                <div className="lab">
+                  <div className="t">Show running agents as live notifications</div>
+                  <div className="s">
+                    An ongoing notification names the thread and project while an agent works, waits
+                    for an approval or asks you something. The finish, failure or limit alert
+                    replaces it.
+                  </div>
+                </div>
+                <div className="ctl">
+                  <Toggle
+                    checked={liveUpdates}
+                    label="Show running agents as live notifications"
+                    onChange={changeLiveUpdates}
+                  />
+                </div>
+              </div>
+            ) : null}
             {device?.permission === "denied" ? (
               <p className="s q-muted">
                 Blocked in system settings. Allow notifications for h4rn there, then reopen this

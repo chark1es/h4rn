@@ -136,6 +136,10 @@ dependencies {
     // Present in every build so the Kotlin compiles without a Firebase
     // project; without google-services.json nothing initialises at runtime.
     implementation("com.google.firebase:firebase-messaging:24.1.1")
+    // 1.18 is the first core release with NotificationCompat's Android 16
+    // Live Update wrappers (`setRequestPromotedOngoing`, `ProgressStyle`),
+    // which ADR-053 uses behind an API check so older releases stay plain.
+    implementation("androidx.core:core-ktx:1.18.0")
     implementation("androidx.webkit:webkit:1.14.0")
     implementation("androidx.appcompat:appcompat:1.7.1")
     implementation("androidx.activity:activity-ktx:1.10.1")
