@@ -9,7 +9,7 @@ import type {
 } from "@/gen";
 import type { H4rnClient } from "@/lib/client/client";
 import { toProtoError } from "@/lib/client/errors";
-import { i18n } from "@/lib/i18n";
+import { formatList, i18n } from "@/lib/i18n";
 import { getClient } from "@/lib/store/appStore";
 
 /**
@@ -144,7 +144,7 @@ const ORIGIN_KEY = {
 export function worktreeSubline(row: TrackedWorktree): string {
   const users = [...new Set(row.accessed_by.map((access) => access.title).filter(Boolean))];
   const parts: string[] = [i18n.t(ORIGIN_KEY[row.origin])];
-  if (users.length > 0) parts.push(users.join(", "));
+  if (users.length > 0) parts.push(formatList(users, "conjunction", "narrow"));
   if (row.status === "orphaned") parts.push(i18n.t("settings:worktrees.orphaned"));
   else if (!row.exists)
     parts.push(
@@ -383,7 +383,7 @@ export async function clearWorktrees(
     state.source !== client ||
     (expectedClient !== undefined && client !== expectedClient)
   ) {
-    patch({ clearError: "This list belongs to another connection. Refresh it first." });
+    patch({ clearError: i18n.t("settings:worktrees.otherConnection.list") });
     return;
   }
   patch({ clearing: true, clearError: null, outcome: null, outcomeSource: null });
@@ -482,7 +482,7 @@ export async function saveWorktreeSettings(
     patch({
       settingsError: {
         code: "conflict",
-        message: "These settings belong to another connection. Reload them first.",
+        message: i18n.t("settings:worktrees.otherConnection.settings"),
         hint: null,
       },
     });

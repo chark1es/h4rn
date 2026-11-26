@@ -108,12 +108,12 @@
       },
       "finishedTurns": {
         "title": "完了したターン",
-        "subtitle": "スレッドが「完了」に入りました",
+        "subtitle": "スレッドが「完了」になったとき",
         "label": "ターン完了の通知"
       },
       "hostOffline": {
         "title": "ホストのオフライン",
-        "subtitle": "ホストに接続できなくなりました",
+        "subtitle": "ホストに接続できなくなったとき",
         "label": "ホストのオフライン通知"
       }
     },
@@ -173,7 +173,83 @@
     "resetTitle": "{{shortcut}} にリセット",
     "recordingLabel": "{{command}} のショートカットを記録中",
     "changeLabel": "{{command}} のショートカットを変更（現在は {{shortcut}}）",
-    "pressKeys": "キーを押してください…"
+    "pressKeys": "キーを押してください…",
+    "groups": {
+      "General": "一般",
+      "Navigate": "ナビゲーション",
+      "Thread": "スレッド",
+      "Panels": "パネル"
+    },
+    "commands": {
+      "palette": {
+        "toggle": "検索または実行"
+      },
+      "shortcuts": {
+        "open": "キーボードショートカット"
+      },
+      "thread": {
+        "new": "新しいスレッド",
+        "next": "次のスレッド",
+        "previous": "前のスレッド",
+        "reply": "コンポーザーにフォーカス",
+        "permissions": "スレッドの権限",
+        "settle": "スレッドを整理",
+        "acknowledge": "確認（完了）",
+        "snooze": "1 時間スヌーズ",
+        "pin": "「作業中」に残す",
+        "reopen": "整理済みのスレッドを再開",
+        "steerQueuedMessage": "最も古いキューのメッセージをステア",
+        "editQueuedMessage": "最新のキューのメッセージを編集"
+      },
+      "settings": {
+        "open": "設定"
+      },
+      "theme": {
+        "toggle": "ライトとダークを切り替え"
+      },
+      "nav": {
+        "inbox": "スレッドへ移動",
+        "pulls": "プルリクエストへ移動",
+        "issues": "Issue へ移動",
+        "usage": "使用量へ移動",
+        "tools": "MCP サーバーとスキルへ移動"
+      },
+      "tab": {
+        "working": "「作業中」を表示",
+        "done": "「完了」を表示",
+        "settled": "「整理済み」を表示"
+      },
+      "approval": {
+        "approve": "保留中の操作を承認",
+        "deny": "保留中の操作を拒否"
+      },
+      "turn": {
+        "interrupt": "ターンを中断",
+        "previous": "前のメッセージ",
+        "next": "次のメッセージ"
+      },
+      "guest": {
+        "share": "ゲストと共有"
+      },
+      "composer": {
+        "attach": "ファイルを添付"
+      },
+      "sidebar": {
+        "toggle": "サイドバーを切り替え"
+      },
+      "panel": {
+        "toggle": "右パネルを切り替え",
+        "changes": "変更を表示",
+        "subagents": "サブエージェントを表示",
+        "files": "ファイルを検索"
+      },
+      "view": {
+        "toggle": "スレッドと IDE を切り替え"
+      },
+      "terminal": {
+        "toggle": "ターミナルを切り替え"
+      }
+    }
   },
   "threads": {
     "newThreads": "新しいスレッド",
@@ -303,7 +379,7 @@
       "webhook": "URL が呼び出されたときに実行",
       "paused": "一時停止中",
       "none": "以降の実行はありません",
-      "due": "実行予定（{{when}}）",
+      "due": "実行待ち（{{when}}）",
       "next": "次回 {{when}}"
     },
     "describe": {
@@ -562,7 +638,7 @@
     "title": "アカウントとリレー",
     "lead": "リレーは、あなたのネットワーク外にあるホストに接続します。許可するまで何もルーティングされません。",
     "relay": "リレー",
-    "pathTo": "{{host}} への{{path}}",
+    "pathTo": "{{path}}（{{host}}）",
     "relayUrl": "リレー URL",
     "pairedMachines": "ペアリング済みのマシン",
     "pairedMachinesHint": "h4rn-connect 経由で接続",
@@ -593,7 +669,21 @@
     "signInWith": "{{provider}} でサインイン",
     "otherDevice": "別のデバイスでサインイン",
     "failed": "サインインに失敗しました",
-    "forgetDevice": "このデバイスの登録を解除しますか？"
+    "forgetDevice": "このデバイスの登録を解除しますか？",
+    "busy": {
+      "openingSignIn": "サインインを開いています…",
+      "completingSignIn": "サインインを完了しています…",
+      "requestingCode": "コードをリクエストしています…",
+      "waitingForApproval": "承認を待っています…",
+      "connecting": "{{name}} に接続しています…",
+      "claimingPairing": "ペアリングを確定しています…",
+      "generatingCode": "コードを生成しています…"
+    },
+    "errors": {
+      "callbackState": "サインインのコールバックに state がありません。",
+      "denied": "サインインが拒否されました。",
+      "expired": "コードの有効期限が切れました。"
+    }
   },
   "localMachine": {
     "disconnect": "接続を切る",
@@ -736,6 +826,10 @@
       "title_other": "最大 {{count}} 件の worktree を削除しますか？",
       "description": "チェックアウトはディスクから削除され、h4rn が作成した h4rn/sa-* ブランチも削除されます。コミットされていない変更やマージされていない作業がある worktree はスキップされます。スレッドが作業中の worktree は保持されます。ビルド成果物などの無視されたファイルは、各チェックアウトと一緒に削除されます。",
       "kept_other": "スレッドのワークスペース {{count}} 件は保持されます。1 件ずつ削除してください。"
+    },
+    "otherConnection": {
+      "list": "このリストは別の接続のものです。先に更新してください。",
+      "settings": "この設定は別の接続のものです。先に再読み込みしてください。"
     }
   },
   "proxy": {

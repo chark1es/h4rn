@@ -751,6 +751,7 @@ function ShortcutRow({
   const { t } = useTranslation(["settings", "common"]);
   const [error, setError] = useState<string | null>(null);
   const customized = isCustomized(command.id);
+  const name = t(`shortcuts.commands.${command.id}`);
 
   useEffect(() => {
     if (!recording) return;
@@ -788,7 +789,7 @@ function ShortcutRow({
     <div className="q-field">
       <div className="lab">
         <div className="t" style={{ fontWeight: 400 }}>
-          {command.label}
+          {name}
         </div>
         {error ? (
           <div className="s" role="alert" style={{ color: "var(--danger)" }}>
@@ -806,7 +807,7 @@ function ShortcutRow({
             style={{ height: 24 }}
             onClick={() => resetBinding(command.id)}
             aria-label={t("shortcuts.resetLabel", {
-              command: command.label,
+              command: name,
               shortcut: chordText(command.binding),
             })}
             title={t("shortcuts.resetTitle", { shortcut: chordText(command.binding) })}
@@ -819,9 +820,9 @@ function ShortcutRow({
           className={`q-keybind${recording ? " on" : ""}`}
           aria-label={
             recording
-              ? t("shortcuts.recordingLabel", { command: command.label })
+              ? t("shortcuts.recordingLabel", { command: name })
               : t("shortcuts.changeLabel", {
-                  command: command.label,
+                  command: name,
                   shortcut: shortcutText(command.id),
                 })
           }
@@ -863,7 +864,7 @@ function ShortcutsForm() {
       </div>
       {COMMAND_GROUPS.map((group) => (
         <div className="q-group" key={group}>
-          <h2>{group}</h2>
+          <h2>{t(`shortcuts.groups.${group}`)}</h2>
           {COMMANDS.filter((command) => command.group === group).map((command) => (
             <ShortcutRow
               key={command.id}

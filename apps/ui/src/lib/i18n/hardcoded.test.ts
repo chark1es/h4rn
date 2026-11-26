@@ -12,7 +12,15 @@ import { describe, expect, it } from "vitest";
  *   - string or template literals rendered as a JSX child, or given to an
  *     attribute a person reads (`aria-label`, `title`, `placeholder`, …);
  *   - string literals in an object's `title`, `description`, `label`,
- *     `hint`, `sub` or `subtitle` (toasts, picker options).
+ *     `hint`, `sub`, `subtitle` or `message` (toasts, picker options, error
+ *     objects), or in a store field named `error`, `…Error` or `notice`;
+ *   - template literals rendered the same way that interpolate a value read
+ *     from a store as is (`const busy = useRemote((s) => s.busy)` then
+ *     `` `${busy}…` ``): a store keeps kinds, and the component translates
+ *     them. A field of a store value (`${error.hint}`, a daemon error's own
+ *     text) is let through;
+ *   - lists joined with a hard-coded `", "`: use `formatList`, which joins
+ *     the way the active language does ("a、b、c" in Chinese and Japanese).
  * Values that are not prose are let through: URLs, paths, e-mail addresses,
  * identifiers such as `NAME` or `gpt-5.4-mini`, and the product names below.
  */
@@ -29,6 +37,7 @@ const CONVERTED = [
   "src/features/remote/LocalMachineAction.tsx",
   "src/features/remote/NetworkAccess.tsx",
   "src/features/remote/SettingsRemote.tsx",
+  "src/features/remote/pairingScopes.ts",
   "src/features/schedules/SchedulesSettings.tsx",
   "src/features/schedules/scheduleForm.ts",
   "src/features/source-control/SourceControlSettings.tsx",
@@ -37,6 +46,7 @@ const CONVERTED = [
   "src/features/updates/AboutSettings.tsx",
   "src/features/usage/AutoResumeSettings.tsx",
   "src/features/worktrees/WorktreeSettings.tsx",
+  "src/features/worktrees/worktreeStore.ts",
   "src/lib/settings.ts",
 ];
 
@@ -63,7 +73,20 @@ const READ_ATTRIBUTES = new Set([
   "sub",
 ]);
 
-const READ_PROPERTIES = new Set(["title", "description", "label", "hint", "sub", "subtitle"]);
+const READ_PROPERTIES = new Set([
+  "title",
+  "description",
+  "label",
+  "hint",
+  "sub",
+  "subtitle",
+  "message",
+]);
+
+/** A store field a component shows as is: `error`, `clearError`, `notice`. */
+function isReadProperty(name: string): boolean {
+  return READ_PROPERTIES.has(name) || /(^e|E)rror$/.test(name) || name === "notice";
+}
 
 /** True for text a person reads as words rather than a value or a name. */
 function isProse(text: string): boolean {
@@ -109,6 +132,29 @@ function renderedParent(node: ts.Node): ts.Node {
   return current;
 }
 
+/** Names bound to a store selection: `const x = useStore((state) => state.x)`. */
+function storeSelections(sourceFile: ts.SourceFile): Set<string> {
+  const names = new Set<string>();
+  const visit = (node: ts.Node) => {
+    if (
+      ts.isVariableDeclaration(node) &&
+      ts.isIdentifier(node.name) &&
+      node.initializer &&
+      ts.isCallExpression(node.initializer) &&
+      ts.isIdentifier(node.initializer.expression) &&
+      /^use[A-Z]/.test(node.initializer.expression.text)
+    ) {
+      const [selector] = node.initializer.arguments;
+      if (selector && (ts.isArrowFunction(selector) || ts.isFunctionExpression(selector))) {
+        names.add(node.name.text);
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  return names;
+}
+
 function findHardcoded(file: string, source: string): Finding[] {
   const sourceFile = ts.createSourceFile(
     file,
@@ -118,17 +164,33 @@ function findHardcoded(file: string, source: string): Finding[] {
     file.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
   );
   const findings: Finding[] = [];
+  const selections = storeSelections(sourceFile);
   const report = (node: ts.Node, text: string) => {
     const { line } = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile));
     findings.push({ file, line: line + 1, text: text.trim() });
   };
 
   const visit = (node: ts.Node) => {
+    if (
+      ts.isCallExpression(node) &&
+      ts.isPropertyAccessExpression(node.expression) &&
+      node.expression.name.text === "join" &&
+      node.arguments.length === 1 &&
+      ts.isStringLiteralLike(node.arguments[0] as ts.Expression) &&
+      /^\s*,\s+$/.test((node.arguments[0] as ts.StringLiteralLike).text)
+    ) {
+      report(node, node.getText(sourceFile));
+    }
     if (ts.isJsxText(node)) {
       if (isProse(node.text)) report(node, node.text);
     } else {
       const text = literalText(node);
-      if (text !== null && isProse(text)) {
+      const storeText =
+        ts.isTemplateExpression(node) &&
+        node.templateSpans.some(
+          (span) => ts.isIdentifier(span.expression) && selections.has(span.expression.text),
+        );
+      if (text !== null && (isProse(text) || storeText)) {
         const parent = renderedParent(node);
         const inChild =
           parent && ts.isJsxExpression(parent) && !ts.isJsxAttribute(parent.parent ?? parent);
@@ -148,9 +210,9 @@ function findHardcoded(file: string, source: string): Finding[] {
         if (
           inChild ||
           (attribute && READ_ATTRIBUTES.has(attribute.name.getText(sourceFile))) ||
-          (property && READ_PROPERTIES.has(property))
+          (property && isReadProperty(property))
         ) {
-          report(node, text);
+          report(node, storeText ? node.getText(sourceFile) : text);
         }
       }
     }
@@ -183,6 +245,8 @@ describe("hard-coded strings in converted files", () => {
     const sample = [
       "export function A({ on }: { on: boolean }) {",
       "  pushToast({ title: 'Added the account.' });",
+      "  patch({ clearError: 'Refresh it first.', kind: 'Plain words' });",
+      "  patch({ settingsError: { code: 'conflict', message: 'Reload them first.' } });",
       "  return (",
       "    <div title='A title' data-kind='plain words are fine here'>",
       "      Hello there",
@@ -195,11 +259,42 @@ describe("hard-coded strings in converted files", () => {
     const texts = findHardcoded("sample.tsx", sample).map((finding) => finding.text);
     expect(texts).toEqual([
       "Added the account.",
+      "Refresh it first.",
+      "Reload them first.",
       "A title",
       "Hello there",
       "Turned on",
       "Turned off",
     ]);
+  });
+
+  it("flags a rendered template that interpolates a store value", () => {
+    const sample = `
+export function A({ label }: { label: string }) {
+  const busy = useRemote((state) => state.busy);
+  const error = useRemote((state) => state.error);
+  return (
+    <div title={\`\${busy} now\`}>
+      {busy ? \`\${busy}…\` : null}
+      {\`\${label}…\`}
+      {error?.hint ? \` \${error.hint}\` : ""}
+      <span data-kind={\`\${busy}\`} />
+    </div>
+  );
+}`;
+    const texts = findHardcoded("sample.tsx", sample).map((finding) => finding.text);
+    expect(texts).toEqual([`\`\${busy} now\``, `\`\${busy}…\``]);
+  });
+
+  it("flags a list joined with a hard-coded comma", () => {
+    const sample = [
+      "const a = names.join(', ');",
+      "const b = keys.join(',');",
+      "const c = lines.join('\\n');",
+      "const d = parts.join(' · ');",
+    ].join("\n");
+    const texts = findHardcoded("sample.ts", sample).map((finding) => finding.text);
+    expect(texts).toEqual(["names.join(', ')"]);
   });
 
   for (const file of CONVERTED) {

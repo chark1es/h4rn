@@ -5,7 +5,7 @@ import { Trans, useTranslation } from "react-i18next";
 import { ChipSelect } from "@/components/common/ChipSelect";
 import type { AcpAgent, HarnessKind, HarnessVersionInfo } from "@/gen";
 import { HARNESS_LABELS } from "@/lib/entities";
-import { i18n } from "@/lib/i18n";
+import { formatList, i18n } from "@/lib/i18n";
 import { useApp } from "@/lib/store/appStore";
 
 import {
@@ -115,7 +115,13 @@ function AgentProbeLine({ id }: { id: string }) {
     probe.models.length > 0
       ? t("harnesses.acp.models", { count: probe.models.length })
       : t("harnesses.acp.noModels"),
-    probe.modes.length > 0 ? probe.modes.map((mode) => mode.name).join(", ") : null,
+    probe.modes.length > 0
+      ? formatList(
+          probe.modes.map((mode) => mode.name),
+          "conjunction",
+          "narrow",
+        )
+      : null,
   ].filter(Boolean);
   return <p className="q-harness-manual">{parts.join(" · ")}</p>;
 }

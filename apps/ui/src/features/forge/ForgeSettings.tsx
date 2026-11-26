@@ -13,7 +13,7 @@ import type {
   ForgeRemote,
   ForgeRepoRef,
 } from "@/gen";
-import { formatRelativeTime, i18n } from "@/lib/i18n";
+import { formatList, formatRelativeTime, i18n } from "@/lib/i18n";
 import { getClient, pushToast, useApp } from "@/lib/store/appStore";
 
 const api = () => new ForgeApi((request) => getClient().request(request));
@@ -110,12 +110,14 @@ function AccountsTable({
                 ) : broad.length > 0 ? (
                   <span
                     className="q-warn"
-                    title={t("forges.broadScopesTitle", { scopes: broad.join(", ") })}
+                    title={t("forges.broadScopesTitle", { scopes: formatList(broad) })}
                   >
-                    {broad.join(", ")} · {t("forges.broaderThanNeeded")}
+                    {formatList(broad, "conjunction", "narrow")} · {t("forges.broaderThanNeeded")}
                   </span>
                 ) : (
-                  <span className="q-muted">{account.scopes.join(", ")}</span>
+                  <span className="q-muted">
+                    {formatList(account.scopes, "conjunction", "narrow")}
+                  </span>
                 )}
               </td>
               <td className="q-muted">

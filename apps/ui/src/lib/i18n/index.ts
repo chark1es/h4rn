@@ -41,11 +41,13 @@ const STORAGE_KEY = "h4rn.locale";
 /**
  * Lazily loaded catalogues for every language but English. Vite turns each
  * JSON file into its own chunk, so a person who never leaves English never
- * downloads the others.
+ * downloads the others. English is imported above and left out here, so it is
+ * not also offered as a dynamic chunk.
  */
-const catalogueLoaders = import.meta.glob<{ default: ResourceLanguage[string] }>(
+const catalogueLoaders = import.meta.glob<{ default: ResourceLanguage[string] }>([
   "./locales/*/*.json",
-);
+  "!./locales/en/*.json",
+]);
 
 /**
  * The supported language for a BCP 47 tag, or null when h4rn has none.
@@ -289,9 +291,17 @@ export function formatDuration(ms: number): string {
   return new Intl.ListFormat(activeLocale(), { style: "narrow", type: "unit" }).format(units);
 }
 
-/** A list joined the way the active language joins one ("a, b and c"). */
-export function formatList(items: readonly string[], type: Intl.ListFormatType = "conjunction") {
-  return new Intl.ListFormat(activeLocale(), { style: "long", type }).format(items);
+/**
+ * A list joined the way the active language joins one ("a, b and c").
+ * `narrow` suits a table cell of names: "a, b, c" in English, "a、b、c" in
+ * Chinese and Japanese.
+ */
+export function formatList(
+  items: readonly string[],
+  type: Intl.ListFormatType = "conjunction",
+  style: Intl.ListFormatStyle = "long",
+) {
+  return new Intl.ListFormat(activeLocale(), { style, type }).format(items);
 }
 
 export { i18n };

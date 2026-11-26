@@ -310,6 +310,15 @@ export const COMMAND_GROUPS: readonly CommandGroup[] = ["General", "Navigate", "
 
 const SPEC = new Map(COMMANDS.map((command) => [command.id, command]));
 
+/**
+ * The command's name in the active language, as Settings → Shortcuts shows it.
+ * The command palette still shows the English `label` until its own area is
+ * translated.
+ */
+export function commandName(id: CommandId): string {
+  return i18n.t(`settings:shortcuts.commands.${id}`);
+}
+
 export function commandSpec(id: CommandId): CommandSpec {
   const spec = SPEC.get(id);
   if (!spec) throw new Error(`Unknown command ${id}`);
@@ -478,7 +487,7 @@ export function rebind(id: CommandId, binding: string): RebindResult {
   if (taken) {
     return {
       ok: false,
-      reason: i18n.t("settings:shortcuts.alreadyUsed", { command: commandSpec(taken).label }),
+      reason: i18n.t("settings:shortcuts.alreadyUsed", { command: commandName(taken) }),
     };
   }
   const next = { ...overrides };

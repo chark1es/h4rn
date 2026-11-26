@@ -173,7 +173,83 @@
     "resetTitle": "重置为 {{shortcut}}",
     "recordingLabel": "正在为 {{command}} 录制快捷键",
     "changeLabel": "修改 {{command}} 的快捷键，当前为 {{shortcut}}",
-    "pressKeys": "请按键…"
+    "pressKeys": "请按键…",
+    "groups": {
+      "General": "通用",
+      "Navigate": "导航",
+      "Thread": "对话",
+      "Panels": "面板"
+    },
+    "commands": {
+      "palette": {
+        "toggle": "搜索或运行"
+      },
+      "shortcuts": {
+        "open": "键盘快捷键"
+      },
+      "thread": {
+        "new": "新建对话",
+        "next": "下一个对话",
+        "previous": "上一个对话",
+        "reply": "聚焦输入框",
+        "permissions": "对话权限",
+        "settle": "了结对话",
+        "acknowledge": "确认（已完成）",
+        "snooze": "一小时后提醒",
+        "pin": "保留在“进行中”",
+        "reopen": "重新打开已了结的对话",
+        "steerQueuedMessage": "引导最早排队的消息",
+        "editQueuedMessage": "编辑最新排队的消息"
+      },
+      "settings": {
+        "open": "设置"
+      },
+      "theme": {
+        "toggle": "切换浅色和深色"
+      },
+      "nav": {
+        "inbox": "前往对话",
+        "pulls": "前往拉取请求",
+        "issues": "前往议题",
+        "usage": "前往用量",
+        "tools": "前往 MCP 服务器和技能"
+      },
+      "tab": {
+        "working": "显示“进行中”",
+        "done": "显示“已完成”",
+        "settled": "显示“已了结”"
+      },
+      "approval": {
+        "approve": "批准待处理的操作",
+        "deny": "拒绝待处理的操作"
+      },
+      "turn": {
+        "interrupt": "中断回合",
+        "previous": "上一条消息",
+        "next": "下一条消息"
+      },
+      "guest": {
+        "share": "与访客共享"
+      },
+      "composer": {
+        "attach": "附加文件"
+      },
+      "sidebar": {
+        "toggle": "切换侧边栏"
+      },
+      "panel": {
+        "toggle": "切换右侧面板",
+        "changes": "显示更改",
+        "subagents": "显示子智能体",
+        "files": "查找文件"
+      },
+      "view": {
+        "toggle": "在对话和 IDE 之间切换"
+      },
+      "terminal": {
+        "toggle": "切换终端"
+      }
+    }
   },
   "threads": {
     "newThreads": "新对话",
@@ -478,7 +554,7 @@
     "scan": "在另一台设备上用 h4rn 应用扫描，或复制链接。",
     "generateNew": "生成新配对码以进行配对。",
     "oneDevice": "仅限一台设备、一次使用。<countdown>{{time}}</countdown> 后过期。",
-    "adminNote": "“管理”权限允许该设备更改 {{host}} 上的主机、设备和此设置。",
+    "adminNote": "“管理员”权限允许该设备更改 {{host}} 上的主机、设备和此设置。",
     "thisComputerLower": "这台电脑",
     "deviceName": "设备 {{id}}",
     "connected": "已连接",
@@ -593,7 +669,21 @@
     "signInWith": "使用 {{provider}} 登录",
     "otherDevice": "在另一台设备上登录",
     "failed": "登录失败",
-    "forgetDevice": "要忘记此设备吗？"
+    "forgetDevice": "要忘记此设备吗？",
+    "busy": {
+      "openingSignIn": "正在打开登录页…",
+      "completingSignIn": "正在完成登录…",
+      "requestingCode": "正在请求授权码…",
+      "waitingForApproval": "正在等待授权…",
+      "connecting": "正在连接 {{name}}…",
+      "claimingPairing": "正在认领配对…",
+      "generatingCode": "正在生成配对码…"
+    },
+    "errors": {
+      "callbackState": "登录回调缺少 state 参数。",
+      "denied": "登录被拒绝。",
+      "expired": "该授权码已过期。"
+    }
   },
   "localMachine": {
     "disconnect": "断开连接",
@@ -698,11 +788,11 @@
     "branchPrefixHint": "守护进程生成的分支名以此开头。无效字符会变为连字符；末尾斜杠可省略。",
     "saved": "已保存在这台机器上。",
     "inUse": "使用中",
-    "settled": "已归档",
+    "settled": "已了结",
     "offline": "离线",
     "removed_other": "已移除 {{count}} 个。",
     "empty": "还没有 worktree。使用 worktree 隔离运行的子智能体，以及在 worktree 中工作的对话，都会显示在这里。",
-    "nothingSettled": "没有已归档的项目。",
+    "nothingSettled": "没有已了结的项目。",
     "removeLabel": "移除 {{name}}",
     "sentenceSeparator": "",
     "origin": {
@@ -736,6 +826,10 @@
       "title_other": "最多移除 {{count}} 个 worktree？",
       "description": "检出目录会从磁盘删除，h4rn 创建的 h4rn/sa-* 分支也会删除。有未提交更改或未合并工作的 worktree 会被跳过。对话正在使用的 worktree 会保留。构建产物等被忽略的文件会随检出目录一并删除。",
       "kept_other": "保留 {{count}} 个对话工作区；请逐个移除。"
+    },
+    "otherConnection": {
+      "list": "此列表属于另一个连接。请先刷新。",
+      "settings": "这些设置属于另一个连接。请先重新加载。"
     }
   },
   "proxy": {
@@ -757,7 +851,7 @@
     "noTrouble": "未发现问题。h4rn 可以从此配置读取模型和用量。",
     "build": {
       "notTested": "未测试",
-      "fork": "分支构建",
+      "fork": "Fork 构建",
       "upstream": "上游构建",
       "unknown": "无法识别构建"
     },
@@ -1066,7 +1160,7 @@
     "guestLinksHint": "让一位队友在浏览器中跟进一段对话，无需账户。他们写的每条消息都会等待你处理。",
     "guestSees": "访客能看到的内容",
     "guestSeesHint": "一段对话的消息、智能体的回复、推理、计划和工具输出，包括智能体打印出的任何内容（例如文件中的某个值）。绝不包括差异、其他对话、文件、终端或设置。",
-    "guestOffNote": "关闭访客链接会结束这台机器上所有现有的访客链接，并删除等待你处理的消息；重新开启不会恢复它们。归档对话、创建新链接或选择“停止共享”也会永久结束链接。",
+    "guestOffNote": "关闭访客链接会结束这台机器上所有现有的访客链接，并删除等待你处理的消息；重新开启不会恢复它们。了结对话、创建新链接或选择“停止共享”也会永久结束链接。",
     "outsideAgents": "外部智能体",
     "outsideAgentsOAuth": "外部智能体（OAuth）",
     "outsideAgentsHint": "允许 Claude Code、Codex 或其他本地 MCP 客户端通过 OAuth 登录，并操作你的项目和对话。默认关闭。关闭后会撤销所有授权，并丢弃所有等待你处理的登录请求。",

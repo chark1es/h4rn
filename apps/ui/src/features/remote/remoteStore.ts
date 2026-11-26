@@ -10,6 +10,7 @@ import { useSyncExternalStore } from "react";
 import { deregisterDeviceAlertsOnSignOut } from "@/features/notifications/devicePush";
 import type { ConnectDevice, ConnectUser, MachineSummary, PairingInfo, PairScope } from "@/gen";
 import { MOCK_ALLOWED, readBootConfig } from "@/lib/client/config";
+import { i18n } from "@/lib/i18n";
 import { takeConnectPair, takeOidcCallback } from "@/lib/platform/pending";
 import {
   readSessionState,
@@ -66,6 +67,22 @@ export type DeviceCodeLogin = {
 
 export type { PairingOffer } from "./pairingOffer";
 
+/**
+ * What the store is doing right now. The UI turns the kind into words in the
+ * reader's language (`settings:connect.busy.*`).
+ */
+export type RemoteBusy =
+  | {
+      kind:
+        | "openingSignIn"
+        | "completingSignIn"
+        | "requestingCode"
+        | "waitingForApproval"
+        | "claimingPairing"
+        | "generatingCode";
+    }
+  | { kind: "connecting"; machineId: string; machineName: string };
+
 export type RemoteState = {
   phase: RemotePhase;
   connectUrl: string;
@@ -92,7 +109,7 @@ export type RemoteState = {
   pairing: PairingOffer | null;
   /** A typed-code pairing awaiting the person's check of the code on the host. */
   sasConfirm: SasConfirm | null;
-  busy: string | null;
+  busy: RemoteBusy | null;
   error: string | null;
   lastSyncAt: number | null;
 };
@@ -464,10 +481,10 @@ async function finishCallback(params: URLSearchParams): Promise<string | null> {
   const state = params.get("state");
   const pending = readPendingLogin();
   if (!code || !state || !pending || pending.state !== state) {
-    patch({ phase: "error", error: "The sign-in callback is missing its state." });
+    patch({ phase: "error", error: i18n.t("settings:connect.errors.callbackState") });
     return null;
   }
-  patch({ phase: "signing_in", busy: "Completing sign-in" });
+  patch({ phase: "signing_in", busy: { kind: "completingSignIn" } });
   try {
     const result = await completeLogin(
       pending.connectUrl,
@@ -592,7 +609,7 @@ function redirectUriForShell(): string {
 export async function signIn(provider: string): Promise<void> {
   const state = remoteStore.getState();
   const shell = shellKind();
-  patch({ phase: "signing_in", busy: "Opening sign-in", error: null });
+  patch({ phase: "signing_in", busy: { kind: "openingSignIn" }, error: null });
   try {
     const device = await deviceRegistration(
       shell === "web" ? "web" : shell === "mobile" ? "mobile" : "desktop",
@@ -651,7 +668,7 @@ export async function signIn(provider: string): Promise<void> {
 export async function signInWithDeviceCode(provider: string): Promise<DeviceCodeLogin | null> {
   const state = remoteStore.getState();
   const shell = shellKind();
-  patch({ phase: "signing_in", busy: "Requesting a code", error: null });
+  patch({ phase: "signing_in", busy: { kind: "requestingCode" }, error: null });
   try {
     const device = await deviceRegistration(
       shell === "web" ? "web" : shell === "mobile" ? "mobile" : "desktop",
@@ -665,7 +682,7 @@ export async function signInWithDeviceCode(provider: string): Promise<DeviceCode
       verificationUriComplete: start.verification_uri_complete,
       expiresAt: Date.now() + Number(start.expires_in) * 1_000,
     };
-    patch({ login, busy: "Waiting for approval" });
+    patch({ login, busy: { kind: "waitingForApproval" } });
     void pollLogin(login, Number(start.interval));
     return login;
   } catch (error) {
@@ -693,10 +710,20 @@ async function pollLogin(login: DeviceCodeLogin, intervalSecs: number): Promise<
         }
         return;
       case "denied":
-        patch({ phase: "signed_out", login: null, busy: null, error: "Sign-in was denied." });
+        patch({
+          phase: "signed_out",
+          login: null,
+          busy: null,
+          error: i18n.t("settings:connect.errors.denied"),
+        });
         return;
       case "expired":
-        patch({ phase: "signed_out", login: null, busy: null, error: "That code expired." });
+        patch({
+          phase: "signed_out",
+          login: null,
+          busy: null,
+          error: i18n.t("settings:connect.errors.expired"),
+        });
         return;
       case "slow_down":
         interval = Math.max(1, Number(result.retry_after ?? interval + 1));
@@ -705,7 +732,12 @@ async function pollLogin(login: DeviceCodeLogin, intervalSecs: number): Promise<
         break;
     }
   }
-  patch({ phase: "signed_out", login: null, busy: null, error: "That code expired." });
+  patch({
+    phase: "signed_out",
+    login: null,
+    busy: null,
+    error: i18n.t("settings:connect.errors.expired"),
+  });
 }
 
 function delay(ms: number): Promise<void> {
@@ -796,7 +828,7 @@ export async function activateMachine(machineId: string): Promise<boolean> {
     pushToast({ variant: "error", title: "That machine is no longer available." });
     return false;
   }
-  patch({ busy: `Connecting to ${machine.name}` });
+  patch({ busy: { kind: "connecting", machineId, machineName: machine.name } });
   try {
     const me = await client.me();
     const active = activeFor(client.connectUrl, machine, me.devices);
@@ -927,7 +959,7 @@ export async function pairMachine(raw: string): Promise<boolean> {
 
   const client = await loadConnectClient();
   if (!client) return false;
-  patch({ busy: "Claiming pairing", error: null });
+  patch({ busy: { kind: "claimingPairing" }, error: null });
   try {
     const claimed = await client.claimPairing(raw, defaultDeviceName());
     const machine = claimed.machine;
@@ -981,7 +1013,7 @@ export async function createPairing(
   const client = await loadConnectClient();
   if (!client) return;
   const previous = getRemoteState().pairing;
-  patch({ busy: "Generating a code" });
+  patch({ busy: { kind: "generatingCode" } });
   try {
     const created = await client.createPairing(machineId, orderedScopes(scopes));
     patch({ pairing: offerFromCreate(created, ttlMs), busy: null });
@@ -1036,7 +1068,7 @@ export async function pairByCode(code: string): Promise<boolean> {
     patch({ error: "Sign in to h4rn-connect first, then enter the code again." });
     return false;
   }
-  patch({ busy: "Claiming pairing", error: null });
+  patch({ busy: { kind: "claimingPairing" }, error: null });
   try {
     const claimed = await client.claimPairingCode(code, defaultDeviceName());
     const machine = claimed.machine;

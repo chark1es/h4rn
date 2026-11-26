@@ -25,7 +25,7 @@ import type {
 } from "@/gen";
 import { useNow } from "@/hooks/use-now";
 import { harnessLabel, machineSeed } from "@/lib/entities";
-import { formatNumber, formatRelativeTime, i18n } from "@/lib/i18n";
+import { formatList, formatNumber, formatRelativeTime, i18n } from "@/lib/i18n";
 import { getClient, navigate, pushToast, useApp } from "@/lib/store/appStore";
 import { cn } from "@/lib/utils";
 
@@ -48,6 +48,7 @@ import {
   createPairing,
   dismissPairing,
   forgetMachine,
+  type RemoteBusy,
   refresh,
   renameDevice,
   revokeDevice,
@@ -119,7 +120,7 @@ function MachineRows({
   machines: MachineSummary[];
   activeId: string | null;
   connection: { status: string; latencyMs: number | null; transport: string };
-  busy: string | null;
+  busy: RemoteBusy | null;
   now: number;
 }) {
   const { t } = useTranslation(["settings", "common"]);
@@ -168,7 +169,11 @@ function MachineRows({
                 <td className="q-muted">
                   {machine.hosts.length === 0
                     ? t("hosts.noHosts")
-                    : machine.hosts.map((host) => host.name).join(", ")}
+                    : formatList(
+                        machine.hosts.map((host) => host.name),
+                        "conjunction",
+                        "narrow",
+                      )}
                 </td>
                 <td className="q-muted">
                   {active
@@ -207,7 +212,7 @@ function MachineRows({
                       disabled={!machine.online || busy !== null}
                       onClick={() => void activateMachine(machine.id)}
                     >
-                      {busy === `Connecting to ${machine.name}` ? (
+                      {busy?.kind === "connecting" && busy.machineId === machine.id ? (
                         <LoaderIcon className="q-icon s14 q-spin" strokeWidth={1.5} aria-hidden />
                       ) : null}
                       {t("hosts.connect")}
@@ -432,7 +437,7 @@ export function LiveHostsForm({ pairing: pairFirst = false }: { pairing?: boolea
                 <td className="q-muted">
                   {host.harnesses.length === 0
                     ? t("hosts.noneInstalled")
-                    : host.harnesses.map(harnessLabel).join(", ")}
+                    : formatList(host.harnesses.map(harnessLabel), "conjunction", "narrow")}
                 </td>
                 <td className="r q-num q-muted">
                   {online

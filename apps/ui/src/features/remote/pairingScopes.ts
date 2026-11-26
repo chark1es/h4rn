@@ -8,22 +8,21 @@
  */
 
 import type { PairScope } from "@/gen";
-import { i18n } from "@/lib/i18n";
+import { formatList, i18n } from "@/lib/i18n";
 
+/** A scope's words come from `scopeLabel` and `scopeSub`. */
 export type ScopeOption = {
   id: PairScope;
-  label: string;
-  sub: string;
   /** `view` is always held. */
   locked: boolean;
 };
 
 export const SCOPE_OPTIONS: readonly ScopeOption[] = [
-  { id: "view", label: "View threads", sub: "Always included", locked: true },
-  { id: "approve", label: "Approve and reply", sub: "", locked: false },
-  { id: "terminal", label: "Terminal", sub: "Type into shells", locked: false },
-  { id: "files", label: "Files and edits", sub: "", locked: false },
-  { id: "admin", label: "Manage hosts and devices", sub: "Admin", locked: false },
+  { id: "view", locked: true },
+  { id: "approve", locked: false },
+  { id: "terminal", locked: false },
+  { id: "files", locked: false },
+  { id: "admin", locked: false },
 ];
 
 const ALL_SCOPES: readonly PairScope[] = SCOPE_OPTIONS.map((option) => option.id);
@@ -64,7 +63,9 @@ export function scopesLabel(scopes: readonly PairScope[] | undefined): string {
   const names = scopes
     .filter((scope) => scope !== "view")
     .map((scope) => (ALL_SCOPES.includes(scope) ? scopeLabel(scope) : scope));
-  return names.length === 0 ? i18n.t("settings:devices.scopes.viewOnly") : names.join(", ");
+  return names.length === 0
+    ? i18n.t("settings:devices.scopes.viewOnly")
+    : formatList(names, "conjunction", "narrow");
 }
 
 /** Shows an 8-character code as `ABCD-EFGH`. */

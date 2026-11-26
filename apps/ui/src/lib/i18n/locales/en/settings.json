@@ -175,7 +175,83 @@
     "resetTitle": "Reset to {{shortcut}}",
     "recordingLabel": "Recording a shortcut for {{command}}",
     "changeLabel": "Change shortcut for {{command}}, now {{shortcut}}",
-    "pressKeys": "Press keys…"
+    "pressKeys": "Press keys…",
+    "groups": {
+      "General": "General",
+      "Navigate": "Navigate",
+      "Thread": "Thread",
+      "Panels": "Panels"
+    },
+    "commands": {
+      "palette": {
+        "toggle": "Search or run"
+      },
+      "shortcuts": {
+        "open": "Keyboard shortcuts"
+      },
+      "thread": {
+        "new": "New thread",
+        "next": "Next thread",
+        "previous": "Previous thread",
+        "reply": "Focus the composer",
+        "permissions": "Thread permissions",
+        "settle": "Settle thread",
+        "acknowledge": "Acknowledge (Done)",
+        "snooze": "Snooze for an hour",
+        "pin": "Keep in Working",
+        "reopen": "Reopen a settled thread",
+        "steerQueuedMessage": "Steer the oldest queued message",
+        "editQueuedMessage": "Edit the newest queued message"
+      },
+      "settings": {
+        "open": "Settings"
+      },
+      "theme": {
+        "toggle": "Toggle light and dark"
+      },
+      "nav": {
+        "inbox": "Go to threads",
+        "pulls": "Go to pull requests",
+        "issues": "Go to issues",
+        "usage": "Go to usage",
+        "tools": "Go to MCP servers and skills"
+      },
+      "tab": {
+        "working": "Show Working",
+        "done": "Show Done",
+        "settled": "Show Settled"
+      },
+      "approval": {
+        "approve": "Approve pending action",
+        "deny": "Deny pending action"
+      },
+      "turn": {
+        "interrupt": "Interrupt turn",
+        "previous": "Previous message",
+        "next": "Next message"
+      },
+      "guest": {
+        "share": "Share with guest"
+      },
+      "composer": {
+        "attach": "Attach files"
+      },
+      "sidebar": {
+        "toggle": "Toggle sidebar"
+      },
+      "panel": {
+        "toggle": "Toggle right panel",
+        "changes": "Show changes",
+        "subagents": "Show subagents",
+        "files": "Find a file"
+      },
+      "view": {
+        "toggle": "Switch thread and IDE"
+      },
+      "terminal": {
+        "toggle": "Toggle terminal"
+      }
+    }
   },
   "threads": {
     "newThreads": "New threads",
@@ -598,7 +674,21 @@
     "signInWith": "Sign in with {{provider}}",
     "otherDevice": "Sign in on another device",
     "failed": "Sign-in failed",
-    "forgetDevice": "Forget this device?"
+    "forgetDevice": "Forget this device?",
+    "busy": {
+      "openingSignIn": "Opening sign-in…",
+      "completingSignIn": "Completing sign-in…",
+      "requestingCode": "Requesting a code…",
+      "waitingForApproval": "Waiting for approval…",
+      "connecting": "Connecting to {{name}}…",
+      "claimingPairing": "Claiming pairing…",
+      "generatingCode": "Generating a code…"
+    },
+    "errors": {
+      "callbackState": "The sign-in callback is missing its state.",
+      "denied": "Sign-in was denied.",
+      "expired": "That code expired."
+    }
   },
   "localMachine": {
     "disconnect": "Disconnect",
@@ -747,6 +837,10 @@
       "description": "Checkouts are deleted from disk and h4rn/sa-* branches h4rn created are deleted. Worktrees with uncommitted changes or unmerged work are skipped. Worktrees a thread is working in are kept. Ignored files such as build output are deleted with each checkout.",
       "kept_one": "One thread workspace is kept; remove it one at a time.",
       "kept_other": "{{count}} thread workspaces are kept; remove them one at a time."
+    },
+    "otherConnection": {
+      "list": "This list belongs to another connection. Refresh it first.",
+      "settings": "These settings belong to another connection. Reload them first."
     }
   },
   "proxy": {

@@ -10,10 +10,12 @@ import { useEffect, useState } from "react";
 import { Trans, useTranslation } from "react-i18next";
 
 import type { ProviderInfo } from "@/gen";
+import { i18n } from "@/lib/i18n";
 import { listProviders } from "./connect";
 import {
   cancelLogin,
   DEFAULT_CONNECT_URL,
+  type RemoteBusy,
   setConnectUrl,
   signIn,
   signInWithDeviceCode,
@@ -26,6 +28,13 @@ function relayHost(url: string): string {
   } catch {
     return url;
   }
+}
+
+/** The store's current step, in the reader's language. */
+export function busyText(busy: RemoteBusy): string {
+  return busy.kind === "connecting"
+    ? i18n.t("settings:connect.busy.connecting", { name: busy.machineName })
+    : i18n.t(`settings:connect.busy.${busy.kind}`);
 }
 
 function providerLabel(provider: ProviderInfo): string {
@@ -147,7 +156,7 @@ export function ConnectSignIn({ compact = false }: { compact?: boolean }) {
               </button>
             </div>
             <div className="q-faint" style={{ fontSize: 12, marginTop: 8 }}>
-              {busy ? `${busy}…` : t("connect.waiting")}
+              {busy ? busyText(busy) : t("connect.waiting")}
             </div>
           </div>
         </div>

@@ -54,7 +54,7 @@
   "startup": {
     "title": "Inicio",
     "openAtLogin": "Abrir al iniciar sesión",
-    "openAtLoginHint": "Inicia h4rn cuando inicias sesión en este equipo",
+    "openAtLoginHint": "h4rn se abre al iniciar sesión en este equipo",
     "keepInTray": "Seguir en la bandeja",
     "trayMissing": "No se creó ningún icono en la bandeja, así que cerrar la ventana cierra h4rn",
     "trayKeeps": "Cerrar la ventana deja h4rn en la bandeja; abre h4rn de nuevo para mostrarlo",
@@ -67,7 +67,7 @@
     "mobileUpdates": "En el móvil, las actualizaciones llegan por App Store y Google Play.",
     "webUpdates": "La versión web se actualiza cuando su host sirve una versión nueva.",
     "available": "h4rn {{version}} está disponible",
-    "upToDate": "Está actualizado",
+    "upToDate": "Tienes la última versión",
     "notChecked": "Aún no se ha comprobado",
     "version": "Versión",
     "checkForUpdates": "Buscar actualizaciones",
@@ -177,7 +177,83 @@
     "resetTitle": "Restablecer a {{shortcut}}",
     "recordingLabel": "Grabando un atajo para {{command}}",
     "changeLabel": "Cambiar el atajo de {{command}}, ahora {{shortcut}}",
-    "pressKeys": "Pulsa las teclas…"
+    "pressKeys": "Pulsa las teclas…",
+    "groups": {
+      "General": "General",
+      "Navigate": "Navegación",
+      "Thread": "Hilo",
+      "Panels": "Paneles"
+    },
+    "commands": {
+      "palette": {
+        "toggle": "Buscar o ejecutar"
+      },
+      "shortcuts": {
+        "open": "Atajos de teclado"
+      },
+      "thread": {
+        "new": "Nuevo hilo",
+        "next": "Hilo siguiente",
+        "previous": "Hilo anterior",
+        "reply": "Ir al compositor",
+        "permissions": "Permisos del hilo",
+        "settle": "Resolver el hilo",
+        "acknowledge": "Confirmar (Terminado)",
+        "snooze": "Posponer una hora",
+        "pin": "Mantener en En curso",
+        "reopen": "Reabrir un hilo resuelto",
+        "steerQueuedMessage": "Dirigir el mensaje en cola más antiguo",
+        "editQueuedMessage": "Editar el mensaje en cola más reciente"
+      },
+      "settings": {
+        "open": "Ajustes"
+      },
+      "theme": {
+        "toggle": "Alternar claro y oscuro"
+      },
+      "nav": {
+        "inbox": "Ir a los hilos",
+        "pulls": "Ir a los pull requests",
+        "issues": "Ir a los issues",
+        "usage": "Ir al uso",
+        "tools": "Ir a servidores MCP y skills"
+      },
+      "tab": {
+        "working": "Mostrar En curso",
+        "done": "Mostrar Terminado",
+        "settled": "Mostrar Resueltos"
+      },
+      "approval": {
+        "approve": "Aprobar la acción pendiente",
+        "deny": "Denegar la acción pendiente"
+      },
+      "turn": {
+        "interrupt": "Interrumpir el turno",
+        "previous": "Mensaje anterior",
+        "next": "Mensaje siguiente"
+      },
+      "guest": {
+        "share": "Compartir con un invitado"
+      },
+      "composer": {
+        "attach": "Adjuntar archivos"
+      },
+      "sidebar": {
+        "toggle": "Alternar barra lateral"
+      },
+      "panel": {
+        "toggle": "Alternar panel derecho",
+        "changes": "Mostrar cambios",
+        "subagents": "Mostrar subagentes",
+        "files": "Buscar un archivo"
+      },
+      "view": {
+        "toggle": "Cambiar entre hilo e IDE"
+      },
+      "terminal": {
+        "toggle": "Alternar terminal"
+      }
+    }
   },
   "threads": {
     "newThreads": "Hilos nuevos",
@@ -311,15 +387,15 @@
       "next": "Siguiente {{when}}"
     },
     "describe": {
-      "once": "Una vez el {{date}} a las {{time}}",
+      "once": "Una vez el {{date}} · {{time}}",
       "everyMinutes_one": "Cada {{count}} minuto",
       "everyMinutes_many": "Cada {{count}} minutos",
       "everyMinutes_other": "Cada {{count}} minutos",
       "everyHours_one": "Cada {{count}} hora",
       "everyHours_many": "Cada {{count}} horas",
       "everyHours_other": "Cada {{count}} horas",
-      "daily": "A diario a las {{time}}",
-      "weekly": "Cada semana, {{days}} a las {{time}}",
+      "daily": "A diario · {{time}}",
+      "weekly": "Cada semana, {{days}} · {{time}}",
       "cron": "Cron {{expression}}",
       "webhook": "Con webhook"
     },
@@ -603,7 +679,21 @@
     "signInWith": "Iniciar sesión con {{provider}}",
     "otherDevice": "Iniciar sesión en otro dispositivo",
     "failed": "Error al iniciar sesión",
-    "forgetDevice": "¿Olvidar este dispositivo?"
+    "forgetDevice": "¿Olvidar este dispositivo?",
+    "busy": {
+      "openingSignIn": "Abriendo el inicio de sesión…",
+      "completingSignIn": "Completando el inicio de sesión…",
+      "requestingCode": "Solicitando un código…",
+      "waitingForApproval": "Esperando la aprobación…",
+      "connecting": "Conectando con {{name}}…",
+      "claimingPairing": "Reclamando el emparejamiento…",
+      "generatingCode": "Generando un código…"
+    },
+    "errors": {
+      "callbackState": "A la respuesta del inicio de sesión le falta su parámetro state.",
+      "denied": "Se denegó el inicio de sesión.",
+      "expired": "Ese código ha caducado."
+    }
   },
   "localMachine": {
     "disconnect": "Desconectar",
@@ -710,13 +800,13 @@
     "branchPrefixHint": "Inicia los nombres de rama que genera el daemon. Los caracteres no válidos se convierten en guiones; la barra final es opcional.",
     "saved": "Guardado en esta máquina.",
     "inUse": "En uso",
-    "settled": "Archivados",
+    "settled": "Resueltos",
     "offline": "Sin conexión",
     "removed_one": "Se quitó {{count}}.",
     "removed_many": "Se quitaron {{count}}.",
     "removed_other": "Se quitaron {{count}}.",
     "empty": "Aún no hay worktrees. Aquí aparecen los subagentes que se ejecutan con aislamiento de worktree y los hilos que trabajan en un worktree.",
-    "nothingSettled": "No hay nada archivado.",
+    "nothingSettled": "No hay nada resuelto.",
     "removeLabel": "Quitar {{name}}",
     "sentenceSeparator": " ",
     "origin": {
@@ -758,6 +848,10 @@
       "kept_one": "Se conserva un espacio de trabajo de hilo; quítalo por separado.",
       "kept_many": "Se conservan {{count}} espacios de trabajo de hilo; quítalos uno a uno.",
       "kept_other": "Se conservan {{count}} espacios de trabajo de hilo; quítalos uno a uno."
+    },
+    "otherConnection": {
+      "list": "Esta lista pertenece a otra conexión. Actualízala primero.",
+      "settings": "Estos ajustes pertenecen a otra conexión. Vuelve a cargarlos primero."
     }
   },
   "proxy": {
@@ -774,7 +868,7 @@
     "storedOn": "Guardada en {{host}}",
     "noKeyStored": "No hay clave guardada",
     "newKey": "Clave nueva",
-    "newKeyLabel": "Nueva {{label}}",
+    "newKeyLabel": "Nuevo valor: {{label}}",
     "replace": "Sustituir",
     "noTrouble": "No hay problemas. h4rn puede leer modelos y uso de este perfil.",
     "build": {
@@ -851,7 +945,7 @@
       "save": "Guardar perfil"
     },
     "harness": {
-      "title": "Ajuste por harness",
+      "title": "Sustitución por harness",
       "hint": "Desactivado significa que el harness conserva su propia credencial. No cambia nada en un harness que no actives.",
       "routed": "Enrutado",
       "own": "Credencial propia",
@@ -875,7 +969,7 @@
       "restarting": "Reiniciando…"
     },
     "probe": {
-      "title": "Sondear",
+      "title": "Sondeo",
       "when": "{{when}} desde {{host}}",
       "never": "aún sin sondear",
       "probing": "Sondeando…",
@@ -1099,8 +1193,8 @@
     "guestLinks": "Enlaces de invitado",
     "guestLinksHint": "Permite que un compañero siga un hilo en un navegador, sin cuenta. Cada mensaje que escriba te espera a ti.",
     "guestSees": "Qué ve un invitado",
-    "guestSeesHint": "Los mensajes de un hilo, las respuestas del agente, su razonamiento, sus planes y la salida de las herramientas, incluido cualquier cosa que el agente haya mostrado, como un valor de un archivo. Nunca diffs, otros hilos, archivos, terminales ni ajustes.",
-    "guestOffNote": "Desactivar los enlaces de invitado termina todos los enlaces de invitado de esta máquina y elimina los mensajes que te esperan; volver a activarlo no los recupera. Archivar un hilo, crear un enlace nuevo o elegir Dejar de compartir también termina un enlace para siempre.",
+    "guestSeesHint": "Los mensajes de un hilo, las respuestas del agente, su razonamiento, sus planes y la salida de las herramientas, incluida cualquier cosa que el agente haya mostrado, como un valor de un archivo. Nunca diffs, otros hilos, archivos, terminales ni ajustes.",
+    "guestOffNote": "Desactivar los enlaces de invitado termina todos los enlaces de invitado de esta máquina y elimina los mensajes que te esperan; volver a activarlo no los recupera. Resolver un hilo, crear un enlace nuevo o elegir Dejar de compartir también termina un enlace para siempre.",
     "outsideAgents": "Agentes externos",
     "outsideAgentsOAuth": "Agentes externos (OAuth)",
     "outsideAgentsHint": "Permite que Claude Code, Codex u otro cliente MCP local inicie sesión por OAuth y trabaje con tus proyectos e hilos. Desactivado de forma predeterminada. Desactivarlo revoca todas las autorizaciones y descarta los inicios de sesión que te esperan.",

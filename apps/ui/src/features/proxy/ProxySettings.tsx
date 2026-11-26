@@ -21,7 +21,7 @@ import type {
   ProxyProfileId,
 } from "@/gen";
 import { HARNESS_LABELS } from "@/lib/entities";
-import { formatNumber, formatRelativeTime, i18n } from "@/lib/i18n";
+import { formatList, formatNumber, formatRelativeTime, i18n } from "@/lib/i18n";
 import { useApp } from "@/lib/store/appStore";
 import { cn } from "@/lib/utils";
 
@@ -80,7 +80,7 @@ function summaryRows(capabilities: ProxyCapabilities | null): ProbeRow[] {
     capabilities.claude_models ? "Claude" : null,
     capabilities.openai_models ? "OpenAI" : null,
     capabilities.gemini_models ? "Gemini" : null,
-  ].filter(Boolean);
+  ].filter((shape): shape is string => shape !== null);
   const usageKnown = capabilities.usage_queue || capabilities.legacy_usage;
   return [
     {
@@ -100,7 +100,8 @@ function summaryRows(capabilities: ProxyCapabilities | null): ProbeRow[] {
     },
     {
       label: t("summary.modelShape"),
-      value: shapes.length > 0 ? shapes.join(", ") : t("summary.noneDetected"),
+      value:
+        shapes.length > 0 ? formatList(shapes, "conjunction", "narrow") : t("summary.noneDetected"),
       ok: shapes.length > 0,
     },
     {
