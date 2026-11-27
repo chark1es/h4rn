@@ -1377,7 +1377,7 @@ fieldset.q-seg-fs {
 .q-bubble {
   background: var(--fill);
   padding: 9px 14px;
-  border-radius: 14px;
+  border-radius: 12px;
   font-size: 14px;
   line-height: 21px;
   max-width: 84%;
@@ -1504,7 +1504,7 @@ fieldset.q-seg-fs {
   max-width: 260px;
   min-width: 0;
   padding: 0 30px 0 6px;
-  border-radius: 9px;
+  border-radius: 8px;
   background: var(--bg);
   box-shadow: inset 0 0 0 1px var(--line);
   overflow: hidden;
@@ -1564,7 +1564,7 @@ fieldset.q-seg-fs {
   width: 20px;
   height: 20px;
   margin-top: -10px;
-  border-radius: 999px;
+  border-radius: 9999px;
   color: var(--fg-3);
   transition:
     background var(--duration-micro),
@@ -1639,7 +1639,7 @@ fieldset.q-seg-fs {
   height: 22px;
   display: inline-grid;
   place-items: center;
-  border-radius: 5px;
+  border-radius: 6px;
   color: var(--fg-3);
   opacity: 0;
   transition:
@@ -2186,7 +2186,7 @@ fieldset.q-seg-fs {
   display: flex;
   gap: 10px;
   padding: 12px;
-  border-radius: 10px;
+  border-radius: 8px;
   border: 1px solid var(--line);
   background: var(--bg-sunk);
   color: var(--fg-2);
@@ -2388,7 +2388,7 @@ fieldset.q-seg-fs {
   height: 22px;
   padding: 0 6px;
   margin-left: -6px;
-  border-radius: 5px;
+  border-radius: 6px;
   color: var(--fg-2);
   font-size: 12px;
   font-weight: 500;
@@ -2478,7 +2478,7 @@ fieldset.q-seg-fs {
   display: inline-block;
   width: 36px;
   height: 4px;
-  border-radius: 2px;
+  border-radius: 4px;
   background: var(--fill-2);
   vertical-align: 2px;
   margin-right: 6px;
@@ -2575,7 +2575,7 @@ fieldset.q-seg-fs {
 }
 .q-node .prog {
   height: 3px;
-  border-radius: 2px;
+  border-radius: 4px;
   background: var(--fill-2);
   margin-top: 8px;
   overflow: hidden;
@@ -2583,20 +2583,20 @@ fieldset.q-seg-fs {
 .q-legend i {
   width: 8px;
   height: 8px;
-  border-radius: 2px;
+  border-radius: 4px;
   display: inline-block;
 }
 .q-meter i {
   display: block;
   height: 100%;
   background: var(--fg-2);
-  border-radius: 3px;
+  border-radius: 4px;
 }
 .q-node .prog i {
   display: block;
   height: 100%;
   background: var(--fg-2);
-  border-radius: 2px;
+  border-radius: 4px;
 }
 .q-node .t {
   font-weight: 500;
@@ -2627,7 +2627,7 @@ fieldset.q-seg-fs {
 }
 .q-node .prog {
   height: 3px;
-  border-radius: 2px;
+  border-radius: 4px;
   background: var(--fill-2);
   margin-top: 8px;
   overflow: hidden;
@@ -2636,7 +2636,7 @@ fieldset.q-seg-fs {
   display: block;
   height: 100%;
   background: var(--fg-2);
-  border-radius: 2px;
+  border-radius: 4px;
 }
 .q-insp-sec {
   border-top: 1px solid var(--line);
@@ -2767,7 +2767,7 @@ fieldset.q-seg-fs {
 }
 .terminal-surface .xterm-viewport::-webkit-scrollbar-thumb {
   background: var(--fill);
-  border-radius: 3px;
+  border-radius: 4px;
 }
 .terminal-surface .xterm .scrollbar.vertical {
   width: 6px !important;
@@ -2775,7 +2775,7 @@ fieldset.q-seg-fs {
 .terminal-surface .xterm .scrollbar.vertical .slider {
   width: 6px !important;
   left: 0 !important;
-  border-radius: 3px;
+  border-radius: 4px;
   background: var(--fill) !important;
 }
 .terminal-surface .xterm-viewport::-webkit-scrollbar-thumb:hover {
@@ -3438,13 +3438,13 @@ fieldset.q-seg-fs {
 .q-tip .r i {
   width: 8px;
   height: 8px;
-  border-radius: 2px;
+  border-radius: 4px;
   display: inline-block;
   margin-right: 6px;
 }
 .q-meter {
   height: 6px;
-  border-radius: 3px;
+  border-radius: 4px;
   background: var(--fill-2);
   overflow: hidden;
 }
@@ -3658,7 +3658,7 @@ fieldset.q-seg-fs {
   bottom: -1px;
   height: 2px;
   background: var(--fg);
-  border-radius: 1px;
+  border-radius: 4px;
 }
 .q-cmt {
   padding: 16px 0;
@@ -4560,7 +4560,7 @@ fieldset.q-seg-fs {
   flex: 1;
   min-width: 0;
   min-height: 40px;
-  border-radius: 20px;
+  border-radius: 12px;
   box-shadow: inset 0 0 0 1px var(--line-2);
   display: flex;
   align-items: center;
@@ -4601,7 +4601,7 @@ fieldset.q-seg-fs {
   max-height: 46vh;
   flex-direction: column;
   padding: 8px 0;
-  border-radius: 14px;
+  border-radius: 12px;
 }
 .q-comp-sheet-head {
   display: flex;
@@ -4648,7 +4648,7 @@ fieldset.q-seg-fs {
   min-width: 0;
 }
 .q-ph-ask {
-  border-radius: 14px;
+  border-radius: 12px;
   background: var(--bg-raised);
   box-shadow: inset 0 0 0 1px var(--line-2);
   padding: 12px 14px;
@@ -4707,7 +4707,7 @@ fieldset.q-seg-fs {
   bottom: 0;
   z-index: 22;
   background: var(--bg-raised);
-  border-radius: 14px 14px 0 0;
+  border-radius: 12px 12px 0 0;
   box-shadow: var(--shadow-modal);
   padding: 8px 0 max(34px, env(safe-area-inset-bottom, 0px));
   animation: q-rise var(--duration-modal) var(--ease-enter);
@@ -4724,7 +4724,7 @@ fieldset.q-seg-fs {
 .q-grab {
   width: 36px;
   height: 5px;
-  border-radius: 3px;
+  border-radius: 4px;
   background: var(--line-2);
   margin: 0 auto 10px;
 }
@@ -4736,7 +4736,7 @@ fieldset.q-seg-fs {
   top: auto;
   bottom: calc(100% + 8px);
   padding: 8px 0;
-  border-radius: 14px;
+  border-radius: 12px;
   max-height: 46vh;
 }
 .q-ph-sheet.q-comp-sheet .q-grab {
@@ -4800,7 +4800,7 @@ fieldset.q-seg-fs {
 .q-ph .q-switch {
   width: 51px;
   height: 31px;
-  border-radius: 16px;
+  border-radius: 12px;
 }
 .q-ph .q-switch::after {
   width: 27px;
@@ -5033,7 +5033,7 @@ fieldset.q-seg-fs {
   right: 0;
   bottom: -1px;
   height: 2px;
-  border-radius: 1px;
+  border-radius: 4px;
   background: var(--fg);
 }
 .q-rp-bar {
@@ -5410,7 +5410,7 @@ fieldset.q-seg-fs {
 .q-ph-pg-h .q-pmono {
   width: 20px;
   height: 20px;
-  border-radius: 5px;
+  border-radius: 6px;
   font-size: 12px;
 }
 .q-ph-pg-h .hn {
@@ -5917,7 +5917,7 @@ fieldset.q-seg-fs {
   flex: none;
   width: 72px;
   height: 4px;
-  border-radius: 2px;
+  border-radius: 4px;
   background: var(--fill-2);
   overflow: hidden;
 }
@@ -5970,7 +5970,7 @@ fieldset.q-seg-fs {
 }
 .q-pg.q-pg-drop {
   box-shadow: 0 -2px 0 var(--accent);
-  border-radius: 2px;
+  border-radius: 4px;
 }
 .q-pg-tail {
   height: 28px;
@@ -6156,7 +6156,7 @@ fieldset.q-seg-fs {
 
 .q-imp-link {
   padding: 2px 4px;
-  border-radius: 5px;
+  border-radius: 6px;
   color: var(--fg-2);
   font-size: 12px;
 }
@@ -6246,7 +6246,7 @@ fieldset.q-seg-fs {
 
 .q-imp-progress {
   height: 2px;
-  border-radius: 2px;
+  border-radius: 4px;
   background: var(--line);
   overflow: hidden;
 }

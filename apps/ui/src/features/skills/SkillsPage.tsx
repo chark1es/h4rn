@@ -260,7 +260,7 @@ function SkillRow({
   return (
     <div className="q-li" style={{ flexWrap: isPhone ? "wrap" : undefined }}>
       <span
-        className="grid place-items-center rounded-[6px] bg-[var(--fill)]"
+        className="grid place-items-center rounded-md bg-[var(--fill)]"
         style={{ width: 26, height: 26, color: "var(--fg-2)" }}
       >
         <BlocksIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />

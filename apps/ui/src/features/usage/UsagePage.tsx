@@ -308,7 +308,7 @@ function UsageChart({ report, metric }: { report: UsageReport; metric: ChartMetr
                       style={{
                         height: Math.max(1, (value / max) * 186),
                         background: seriesColor(series.key, seriesIndex),
-                        borderRadius: reverseIndex === 0 ? "3px 3px 0 0" : 0,
+                        borderRadius: reverseIndex === 0 ? "4px 4px 0 0" : 0,
                       }}
                     />
                   );

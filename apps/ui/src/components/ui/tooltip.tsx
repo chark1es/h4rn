@@ -34,7 +34,7 @@ function TooltipContent({
       sideOffset={sideOffset}
       collisionPadding={collisionPadding}
       className={cn(
-        "pointer-events-none inline-flex max-w-72 items-center gap-2 rounded-md border border-border bg-popover px-2 py-1 text-xs text-popover-foreground shadow-popup",
+        "pointer-events-none inline-flex max-w-72 items-center gap-2 rounded-lg border border-border bg-popover px-2 py-1 text-xs text-popover-foreground shadow-popup",
         popupMotionClassName,
         "data-instant:transition-none",
         className,

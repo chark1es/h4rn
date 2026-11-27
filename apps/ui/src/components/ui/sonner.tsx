@@ -49,7 +49,7 @@ const ICONS: ToastIcons = {
 
 const CLASS_NAMES: ToastClassnames = {
   toast: cn(
-    "group/toast flex w-(--width) items-start gap-2.5 rounded-xl border border-border bg-popover py-3 pr-10 pl-3 font-sans text-sm text-popover-foreground shadow-popup",
+    "group/toast flex w-(--width) items-start gap-2.5 rounded-lg border border-border bg-popover py-3 pr-10 pl-3 font-sans text-sm text-popover-foreground shadow-popup",
     "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring",
   ),
   icon: "relative flex h-4.5 w-4 shrink-0 items-center justify-center",

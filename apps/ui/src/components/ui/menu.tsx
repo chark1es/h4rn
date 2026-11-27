@@ -40,7 +40,7 @@ type WithClassName<P> = Omit<P, "className" | "children" | "disabled"> & {
  * shadow and hairline, scaled from the trigger side, with a faster exit.
  */
 const popupSurface = [
-  "min-w-40 max-w-80 overflow-y-auto overscroll-contain rounded-md border border-border bg-popover p-1 text-sm text-popover-foreground shadow-popup outline-none",
+  "min-w-40 max-w-80 overflow-y-auto overscroll-contain rounded-lg border border-border bg-popover p-1 text-sm text-popover-foreground shadow-popup outline-none",
   "max-h-[min(var(--available-height),--spacing(120))]",
   "origin-(--transform-origin) transition-[opacity,scale] duration-popup ease-enter",
   "data-starting-style:scale-96 data-starting-style:opacity-0",

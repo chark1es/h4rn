@@ -276,7 +276,7 @@ export function SkillAddDialog({ open, onClose }: { open: boolean; onClose: () =
                   return (
                     <label
                       key={harness}
-                      className="flex flex-wrap items-center gap-x-2 rounded-[6px] bg-bg-raised px-2 py-1.5 text-sm text-fg shadow-[inset_0_0_0_1px_var(--line-2)]"
+                      className="flex flex-wrap items-center gap-x-2 rounded-md bg-bg-raised px-2 py-1.5 text-sm text-fg shadow-[inset_0_0_0_1px_var(--line-2)]"
                     >
                       <input
                         type="checkbox"

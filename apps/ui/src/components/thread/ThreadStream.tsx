@@ -280,7 +280,7 @@ export function ThreadStreamSkeleton() {
     <div className="q-stream" role="status" aria-busy="true" aria-label={t("pane.loading")}>
       <div className="q-col">
         <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 32 }}>
-          <div className="q-skel" style={{ width: "58%", height: 62, borderRadius: 14 }} />
+          <div className="q-skel" style={{ width: "58%", height: 62, borderRadius: 12 }} />
         </div>
         <div className="q-skel" style={{ width: 240, height: 12, marginBottom: 10 }} />
         <div className="q-skel" style={{ width: "92%", height: 10, marginBottom: 10 }} />
