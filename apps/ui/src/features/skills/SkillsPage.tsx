@@ -352,12 +352,10 @@ export function SkillsPage() {
     <>
       <main className="q-main" aria-label={t("settings:nav.skills")}>
         <div className="q-page">
-          <div className="q-wrap" style={{ maxWidth: 920 }}>
+          <div className="q-form wide">
             <div className="mb-5 flex flex-wrap items-start gap-3">
               <div className="grow basis-0">
-                <h1 className="text-xl font-semibold">
-                  {t("settings:nav.skills")}
-                </h1>
+                <h1 className="text-xl font-semibold">{t("settings:nav.skills")}</h1>
                 <div className="q-muted mt-1">
                   {loading && !inventory
                     ? t("skills.loadingRegistry")

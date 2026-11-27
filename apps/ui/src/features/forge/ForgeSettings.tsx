@@ -646,7 +646,7 @@ export function ForgeSettings() {
   const deviceFlow = supportsDeviceFlow(data, DEFAULT_BASE.github);
 
   return (
-    <div className="q-form" style={{ maxWidth: 940 }}>
+    <div className="q-form wide">
       <div className="q-form-head">
         <div style={{ flex: 1 }}>
           <h1>{t("forges.title")}</h1>

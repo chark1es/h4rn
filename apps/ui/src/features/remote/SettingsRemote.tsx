@@ -262,7 +262,7 @@ export function LiveHostsForm({ pairing: pairFirst = false }: { pairing?: boolea
   useEffect(() => setPairOpen(pairFirst), [pairFirst]);
 
   return (
-    <div className="q-form" style={{ maxWidth: 880 }}>
+    <div className="q-form wide">
       <div className="q-form-head">
         <div style={{ flex: 1 }}>
           <h1>{t("hosts.title")}</h1>

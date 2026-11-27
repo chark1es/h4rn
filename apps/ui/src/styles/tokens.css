@@ -276,6 +276,11 @@
 
 /* 13 px is the default UI size; line heights are fixed so rows don't drift. */
 @theme static {
+  /* Settings: one column edge; form pages cap their content narrower inside it. */
+  --container-settings: 58.75rem;
+  --container-form: 43.5rem;
+  --header-height: 60px;
+
   --text-xs: 12px;
   --text-xs--line-height: 16px;
   --text-sm: 13px;

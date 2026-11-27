@@ -207,9 +207,7 @@ export function SkillAddDialog({ open, onClose }: { open: boolean; onClose: () =
                   spellCheck={false}
                   autoComplete="off"
                 />
-                <span className="text-xs text-[var(--fg-3)]">
-                  {t("skills.add.folderHint")}
-                </span>
+                <span className="text-xs text-[var(--fg-3)]">{t("skills.add.folderHint")}</span>
               </div>
             ) : (
               <>

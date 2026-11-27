@@ -2804,9 +2804,6 @@ fieldset.q-seg-fs {
   margin: 0 auto;
   padding: 24px 32px 48px;
 }
-.q-wrap.q-wrap-phone {
-  padding: 16px 16px 32px;
-}
 .q-sec {
   margin-bottom: 36px;
 }
@@ -3713,11 +3710,16 @@ fieldset.q-seg-fs {
   justify-content: space-between;
 }
 
-/* Settings */
+/* Settings: every page shares one centred column, so titles sit at one x.
+   Label/control pages cap their content at the form width inside it; pages
+   built around tables (.wide) use the whole column. */
 .q-form {
-  max-width: 760px;
+  max-width: var(--container-settings);
   margin: 0 auto;
   padding: 24px 32px 64px;
+}
+.q-form:not(.wide) > * {
+  max-width: var(--container-form);
 }
 .q-form h1 {
   font-size: 20px;
@@ -5611,8 +5613,11 @@ fieldset.q-seg-fs {
 /* Phone Settings: one column, grouped rows, one 2-line row per table item. */
 @media (max-width: 639px) {
   .q-form {
-    max-width: 100% !important;
+    max-width: 100%;
     padding: 16px 16px 32px;
+  }
+  .q-form:not(.wide) > * {
+    max-width: none;
   }
   .q-form-head {
     flex-wrap: wrap;

@@ -517,13 +517,7 @@ function Activity({ server }: { server: McpServerView }) {
 
 function SkeletonDetail({ label }: { label: string }) {
   return (
-    <div
-      className="q-wrap"
-      style={{ maxWidth: 860 }}
-      role="status"
-      aria-busy="true"
-      aria-label={label}
-    >
+    <div className="q-form wide" role="status" aria-busy="true" aria-label={label}>
       <div className="q-skel" style={{ width: 180, height: 22, marginBottom: 8 }} />
       <div className="q-skel" style={{ width: 420, height: 12, marginBottom: 28 }} />
       <div className="q-skel" style={{ width: "100%", height: 48, marginBottom: 8 }} />
@@ -570,16 +564,10 @@ function ServerList({
   return (
     <main className="q-main" aria-label={t("settings:nav.mcpServers")}>
       <div className="q-page">
-        <div className={cn("q-wrap", isPhone && "q-wrap-phone")} style={{ maxWidth: 860 }}>
+        <div className="q-form wide">
           <div className="mb-5 flex flex-wrap items-start gap-3">
             <div className="grow basis-0">
-              <h1
-                className={
-                  isPhone
-                    ? "text-2xl font-semibold"
-                    : "text-xl font-semibold"
-                }
-              >
+              <h1 className={isPhone ? "text-2xl font-semibold" : "text-xl font-semibold"}>
                 {t("settings:nav.mcpServers")}
               </h1>
               <div className="q-muted mt-1">{t("mcp.summary", { count: servers.length })}</div>
@@ -783,9 +771,7 @@ export function McpPage() {
       <>
         <main className="q-main" aria-label={t("mcp.detail")}>
           <div className="q-page">
-            <div className="q-wrap" style={{ maxWidth: 860 }}>
-              {errorBanner}
-            </div>
+            <div className="q-form wide">{errorBanner}</div>
             <EmptyState onAdd={openAdd} onImport={openImport} />
           </div>
         </main>
@@ -824,7 +810,7 @@ export function McpPage() {
     <>
       <main className="q-main" aria-label={t("mcp.detail")}>
         <div className="q-page">
-          <div className="q-wrap" style={{ maxWidth: 860 }}>
+          <div className="q-form wide">
             {errorBanner}
 
             {isPhone ? (
@@ -839,9 +825,7 @@ export function McpPage() {
 
             <div className="mb-5 flex items-start gap-4">
               <div className="min-w-0 flex-1">
-                <h1 className="text-xl font-semibold">
-                  {server.name}
-                </h1>
+                <h1 className="text-xl font-semibold">{server.name}</h1>
                 <div className="q-muted mt-1 flex flex-wrap items-center gap-1.5">
                   <span>{transportKind(server.transport)}</span>
                   <span>·</span>

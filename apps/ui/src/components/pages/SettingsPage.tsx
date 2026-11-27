@@ -894,7 +894,7 @@ const FORMS: Record<string, () => React.ReactNode> = {
   providers: () => (
     <>
       <ProxySettings />
-      <div className="q-form" style={{ paddingTop: 0 }}>
+      <div className="q-form pt-0">
         <TextGeneratorsSettings />
       </div>
     </>
