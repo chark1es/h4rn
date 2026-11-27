@@ -11,7 +11,6 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-
 import { AgentGlyph } from "@/components/agent/AgentGlyph";
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
 import { ChipSelect } from "@/components/common/ChipSelect";
@@ -29,6 +28,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { MOD, SHIFT } from "@/components/ui/kbd";
+import { Tip } from "@/components/ui/tooltip";
 import { TerminalPanel } from "@/features/terminal/TerminalPanel";
 import type { ThreadSummary } from "@/gen";
 import { useIsPhone } from "@/hooks/use-media-query";
@@ -38,7 +38,6 @@ import { readThreadDraft, writeThreadDraft } from "@/lib/drafts";
 import { machineSeed } from "@/lib/entities";
 import { monogram } from "@/lib/grouping";
 import { formatNumber, i18n } from "@/lib/i18n";
-import { titleWithShortcut } from "@/lib/keybindings";
 import {
   ensureThread,
   navigate,
@@ -446,18 +445,15 @@ export function IdePane() {
             </div>
           </div>
           {thread ? (
-            <button
-              type="button"
-              className="q-tchip"
-              title={titleWithShortcut(t("header.backToThread"), "view.toggle")}
-              onClick={backToThread}
-            >
-              <AgentGlyph glyph={glyph} size={14} />
-              <span className="t">{thread.title}</span>
-              {thread.needs_attention ? (
-                <span className="s">{t("header.needsApproval")}</span>
-              ) : null}
-            </button>
+            <Tip label={t("header.backToThread")} command="view.toggle">
+              <button type="button" className="q-tchip" onClick={backToThread}>
+                <AgentGlyph glyph={glyph} size={14} />
+                <span className="t">{thread.title}</span>
+                {thread.needs_attention ? (
+                  <span className="s">{t("header.needsApproval")}</span>
+                ) : null}
+              </button>
+            </Tip>
           ) : null}
           <div className="q-th-actions">
             <span className="q-vsep" />
@@ -582,16 +578,17 @@ export function IdePane() {
             />
           ) : null}
           {active ? (
-            <button
-              type="button"
-              className="q-btn ghost"
-              style={{ height: 24 }}
-              onClick={() => openNewThread()}
-              title={t("bar.handToAgentHint")}
-            >
-              <HandIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-              {t("bar.handToAgent")}
-            </button>
+            <Tip label={t("bar.handToAgentHint")}>
+              <button
+                type="button"
+                className="q-btn ghost"
+                style={{ height: 24 }}
+                onClick={() => openNewThread()}
+              >
+                <HandIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
+                {t("bar.handToAgent")}
+              </button>
+            </Tip>
           ) : null}
         </div>
 

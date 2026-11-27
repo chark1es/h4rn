@@ -2,6 +2,7 @@ import { CaseSensitiveIcon, Loader2Icon, RegexIcon, SearchIcon } from "lucide-re
 import { type CSSProperties, useEffect, useMemo, useRef } from "react";
 import { useTranslation } from "react-i18next";
 
+import { Tip } from "@/components/ui/tooltip";
 import type { FsSearchMatch } from "@/gen";
 import { formatNumber } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
@@ -99,28 +100,28 @@ export function SearchPanel({ search, onQuery, onOption, onRun, onOpen }: Search
           ) : null}
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 4, marginTop: 8 }}>
-          <button
-            type="button"
-            aria-pressed={search.caseSensitive}
-            onClick={() => onOption({ caseSensitive: !search.caseSensitive })}
-            title={t("search.matchCase")}
-            className={cn("q-ibtn", search.caseSensitive && "on")}
-            style={{ width: 24, height: 24 }}
-          >
-            <CaseSensitiveIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-            <span className="sr-only">{t("search.matchCase")}</span>
-          </button>
-          <button
-            type="button"
-            aria-pressed={search.regex}
-            onClick={() => onOption({ regex: !search.regex })}
-            title={t("search.regex")}
-            className={cn("q-ibtn", search.regex && "on")}
-            style={{ width: 24, height: 24 }}
-          >
-            <RegexIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-            <span className="sr-only">{t("search.regex")}</span>
-          </button>
+          <Tip label={t("search.matchCase")}>
+            <button
+              type="button"
+              aria-pressed={search.caseSensitive}
+              onClick={() => onOption({ caseSensitive: !search.caseSensitive })}
+              className={cn("q-ibtn", search.caseSensitive && "on")}
+              style={{ width: 24, height: 24 }}
+            >
+              <CaseSensitiveIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
+            </button>
+          </Tip>
+          <Tip label={t("search.regex")}>
+            <button
+              type="button"
+              aria-pressed={search.regex}
+              onClick={() => onOption({ regex: !search.regex })}
+              className={cn("q-ibtn", search.regex && "on")}
+              style={{ width: 24, height: 24 }}
+            >
+              <RegexIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
+            </button>
+          </Tip>
           <input
             value={search.glob ?? ""}
             onChange={(event) => onOption({ glob: event.target.value || null })}

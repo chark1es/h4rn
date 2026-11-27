@@ -10,6 +10,7 @@ import { Fragment, type ReactNode, useEffect, useMemo, useRef, useState } from "
 import { Trans, useTranslation } from "react-i18next";
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
 import { ChipSelect } from "@/components/common/ChipSelect";
+import { Tip } from "@/components/ui/tooltip";
 import type {
   FsDiff,
   FsDiffCommitList,
@@ -819,17 +820,18 @@ export function DiffView({
         </span>
         <span className="grow" />
         {source === "branch" || source === "commit" ? (
-          <button
-            type="button"
-            className="q-btn ghost"
-            style={{ height: 24 }}
-            title={t("diff.refreshHint")}
-            aria-label={t("diff.refreshLabel")}
-            onClick={onRefresh}
-          >
-            <RefreshCwIcon className="q-icon s12" aria-hidden />
-            {isPhone ? null : t("common:refresh")}
-          </button>
+          <Tip label={t("diff.refreshHint")}>
+            <button
+              type="button"
+              className="q-btn ghost"
+              style={{ height: 24 }}
+              aria-label={t("diff.refreshLabel")}
+              onClick={onRefresh}
+            >
+              <RefreshCwIcon className="q-icon s12" aria-hidden />
+              {isPhone ? null : t("common:refresh")}
+            </button>
+          </Tip>
         ) : null}
         {range ? (
           <button
