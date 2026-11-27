@@ -930,78 +930,6 @@ fieldset.q-seg-fs {
   background: var(--fill);
   color: var(--fg);
 }
-.q-hostpop {
-  position: absolute;
-  left: 8px;
-  right: 8px;
-  bottom: 50px;
-  padding: 6px;
-  z-index: 15;
-  background: var(--bg-raised);
-  border-radius: 12px;
-  box-shadow:
-    var(--shadow-popup),
-    inset 0 0 0 1px var(--line);
-}
-.q-hp-h {
-  display: flex;
-  justify-content: space-between;
-  align-items: baseline;
-  padding: 6px 8px;
-  font-weight: 600;
-}
-.q-hp-h .q-faint {
-  font-size: 12px;
-  font-weight: 400;
-}
-.q-hp-empty {
-  padding: 8px;
-  font-size: 12px;
-  color: var(--fg-2);
-  line-height: 17px;
-}
-.q-hp-conn {
-  font-size: 12px;
-  color: var(--fg-3);
-  padding: 6px 8px 4px;
-}
-.q-hp-sep {
-  height: 1px;
-  background: var(--line);
-  margin: 6px 2px;
-}
-.q-host {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  height: 28px;
-  padding: 0 8px;
-  border-radius: 6px;
-  color: var(--fg-2);
-  width: 100%;
-  text-align: left;
-}
-.q-host .q-host-on {
-  color: var(--fg-2);
-  flex: none;
-}
-.q-host:hover {
-  background: var(--hover);
-  color: var(--fg);
-}
-.q-host .lbl {
-  flex: 1;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.q-host.sub {
-  padding-left: 22px;
-}
-.q-host .meta {
-  font-size: 12px;
-  color: var(--fg-3);
-}
 .q-resizer {
   position: absolute;
   top: 0;
@@ -5906,13 +5834,6 @@ fieldset.q-seg-fs {
 }
 
 /* Remote account + live subagent additions */
-.q-host.on {
-  background: var(--sel);
-  color: var(--fg);
-}
-.q-host:disabled {
-  opacity: 0.6;
-}
 .q-account-name {
   font-size: 12.5px;
   font-weight: 500;
