@@ -17,6 +17,7 @@ import { H4rnRequestError, protoError } from "@/lib/client/errors";
 import type { EventEnvelope } from "@/lib/client/types";
 import { drafts, flushDrafts, readThreadDraft } from "@/lib/drafts";
 import { setLocalePreference } from "@/lib/i18n";
+import { lastToast, shownToasts } from "@/test/toasts";
 import {
   applyEvent,
   createThread,
@@ -378,7 +379,7 @@ describe("forkThread", () => {
 
     expect(await forkThread("thread_source", "turn_1")).toBe(false);
 
-    const toast = getState().toasts.at(-1);
+    const toast = lastToast();
     expect(toast?.variant).toBe("error");
     expect(toast?.title).toBe("Couldn't fork that turn.");
     expect(toast?.description).toContain("still running");
@@ -410,7 +411,7 @@ describe("createThread worktrees", () => {
     expect(created).toBe(false);
     const sent = fake.request.mock.calls[0]?.[0] as { worktree?: unknown } | undefined;
     expect(sent?.worktree).toBe("busy");
-    const toast = getState().toasts.at(-1);
+    const toast = lastToast();
     expect(toast?.variant).toBe("error");
     expect(toast?.description).toContain("already checked out");
   });
@@ -457,7 +458,7 @@ describe("thread action failures", () => {
 
     fake.request.mockRejectedValueOnce(new Error("the host is unreachable"));
     await setThreadTab("thread_tab", "done");
-    expect(getState().toasts.at(-1)?.title).toBe("Moving to Done failed on atlas.");
+    expect(lastToast()?.title).toBe("Moving to Done failed on atlas.");
 
     await setLocalePreference("es");
     fake.request.mockRejectedValueOnce(new Error("the host is unreachable"));
@@ -465,7 +466,7 @@ describe("thread action failures", () => {
     // What is in flight is a kind; nothing stores English words.
     expect(getState().pendingActions.thread_tab).toBe("moveToSettled");
     await pending;
-    const toast = getState().toasts.at(-1);
+    const toast = lastToast();
     expect(toast?.title).toBe("No se pudo resolver el hilo en atlas.");
     expect(toast?.description).toBe(
       "Vuelve a intentarlo. Si sigue ocurriendo, abre los detalles de la conexión en la barra de estado.",
@@ -487,11 +488,11 @@ describe("thread action failures", () => {
 
     fake.request.mockRejectedValueOnce(new Error("the host is unreachable"));
     await settleThread("thread_settle");
-    expect(getState().toasts.at(-1)?.title).toBe("No se pudo resolver el hilo en atlas.");
+    expect(lastToast()?.title).toBe("No se pudo resolver el hilo en atlas.");
 
     fake.request.mockRejectedValueOnce(new Error("the host is unreachable"));
     await togglePin("thread_settle");
-    expect(getState().toasts.at(-1)?.title).toBe("No se pudo fijar el hilo en atlas.");
+    expect(lastToast()?.title).toBe("No se pudo fijar el hilo en atlas.");
   });
 });
 
@@ -540,7 +541,7 @@ describe("rewindThread", () => {
     };
     const prompt = await rewindThread("th_rewind", "item_user_1", false);
     expect(prompt?.method).toBe("handoff");
-    expect(getState().toasts.at(-1)?.description).toContain("fresh session");
+    expect(lastToast()?.description).toContain("fresh session");
   });
 
   it("words a generic agent's native rewind without a name slot", async () => {
@@ -569,9 +570,7 @@ describe("rewindThread", () => {
     };
     await setLocalePreference("zh-CN");
     await rewindThread("th_rewind_acp", "item_user_1", false);
-    expect(getState().toasts.at(-1)?.description).toBe(
-      "该智能体已从自己的历史中删除被移除的回合。",
-    );
+    expect(lastToast()?.description).toBe("该智能体已从自己的历史中删除被移除的回合。");
   });
 
   it("lists the files it left alone the way the dialog did", async () => {
@@ -588,7 +587,7 @@ describe("rewindThread", () => {
       },
     };
     await rewindThread("th_rewind", "item_user_1", true);
-    expect(getState().toasts.at(-1)?.description).toContain(
+    expect(lastToast()?.description).toContain(
       "Ignored files left as they are: .env, a.log, b.log, c.log, and 1 more.",
     );
   });
@@ -607,14 +606,14 @@ describe("rewind fallback notice", () => {
 
   it("says a live fallback once and stays quiet when it is replayed", () => {
     noticeRewindFallback(envelope(false));
-    const live = getState().toasts.at(-1);
+    const live = lastToast();
     expect(live?.title).toBe("The rewind fell back to a fresh session");
     expect(live?.description).toBe(
       "The recorded rewind point could not be used. The next turn continues from a handoff of the kept conversation.",
     );
 
     noticeRewindFallback(envelope(true));
-    expect(getState().toasts.at(-1)?.id).toBe(live?.id);
+    expect(lastToast()?.id).toBe(live?.id);
   });
 });
 
@@ -969,7 +968,7 @@ describe("queued messages", () => {
     });
 
     expect(outcome).toBe("unclear");
-    const toasts = getState().toasts;
+    const toasts = shownToasts();
     expect(toasts.at(-1)?.title).toBe("Delivered, or maybe not.");
     expect(toasts.at(-1)?.variant).toBe("info");
     const pending = getState().logs.queue_thread?.pending ?? [];
@@ -988,7 +987,7 @@ describe("queued messages", () => {
     const ok = await sendQueuedNow("queue_thread", "qm_two");
 
     expect(ok).toBe(false);
-    const toast = getState().toasts.at(-1);
+    const toast = lastToast();
     expect(toast?.title).toBe("Delivered, or maybe not.");
     expect(toast?.variant).toBe("info");
   });

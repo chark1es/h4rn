@@ -222,6 +222,21 @@ button {
   }
 }
 
+/* Sonner's own stylesheet is unlayered, so its motion is retimed here with a
+   more specific selector rather than with utilities. */
+[data-sonner-toaster] [data-sonner-toast] {
+  transition:
+    transform var(--duration-popup) var(--ease-enter),
+    opacity var(--duration-popup) var(--ease-enter),
+    height var(--duration-popup) var(--ease-enter),
+    box-shadow var(--duration-micro);
+}
+
+[data-sonner-toaster] [data-sonner-toast][data-removed="true"] {
+  transition-duration: var(--duration-popup-exit);
+  transition-timing-function: var(--ease-exit);
+}
+
 @keyframes h4rn-fade-in {
   from {
     opacity: 0;

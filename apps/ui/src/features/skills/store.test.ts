@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ResponseBody, SkillConflict, SkillInventory, SkillSource, SkillSummary } from "@/gen";
 import { H4rnRequestError, protoError } from "@/lib/client/errors";
 import { getState, store } from "@/lib/store/appStore";
+import { lastToast } from "@/test/toasts";
 import {
   addSkill,
   applySkillEvent,
@@ -194,7 +195,7 @@ describe("Skills store", () => {
       getSkillsState().inventory?.skills[0]?.installs.find((entry) => entry.harness === "codex")
         ?.enabled,
     ).toBe(true);
-    const toast = getState().toasts.at(-1);
+    const toast = lastToast();
     expect(toast?.title).toBe("Couldn't disable review for Codex.");
     expect(toast?.description).toContain("The switch is back where it was.");
   });
@@ -222,7 +223,7 @@ describe("Skills store", () => {
 
     expect(added).toBeNull();
     expect(getSkillsState().inventory?.skills).toHaveLength(0);
-    const toast = getState().toasts.at(-1);
+    const toast = lastToast();
     expect(toast?.title).toBe("Couldn't add that skill.");
     expect(toast?.description).toContain("h4rn will not install it");
   });
@@ -242,7 +243,7 @@ describe("Skills store", () => {
 
     expect(removed).toBe(false);
     expect(getSkillsState().inventory?.skills.map((entry) => entry.name)).toEqual(["review"]);
-    expect(getState().toasts.at(-1)?.description).toContain("still in the registry");
+    expect(lastToast()?.description).toContain("still in the registry");
   });
 
   it("names the skill whose conflict could not be resolved", async () => {
@@ -257,7 +258,7 @@ describe("Skills store", () => {
     );
 
     expect(await resolveSkillConflict("cnf_1", "keep_local")).toBe(false);
-    expect(getState().toasts.at(-1)?.title).toBe("Couldn't resolve the conflict for review.");
+    expect(lastToast()?.title).toBe("Couldn't resolve the conflict for review.");
   });
 
   it("records a sync status event as-is", () => {

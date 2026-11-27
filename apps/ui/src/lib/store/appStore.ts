@@ -33,6 +33,7 @@ import { i18n } from "@/lib/i18n";
 import { joinSentences } from "@/lib/i18n/sentences";
 import { pushRoute, type Route, readRoute, replaceRoute, routePath } from "@/lib/router";
 import { applyTerminalTheme } from "@/lib/terminalTheme";
+import { pushToast } from "@/lib/toast";
 import { createThreadLog, foldEvent, isRealTurn, type ThreadLog } from "./projection";
 
 export type Theme = "light" | "dark" | "system";
@@ -165,15 +166,6 @@ function writeLayout(layout: LayoutState): void {
   }
 }
 
-export type ToastVariant = "error" | "info" | "success";
-
-export type Toast = {
-  id: number;
-  title: string;
-  description?: string;
-  variant: ToastVariant;
-};
-
 export type PendingCreate = {
   tempId: ThreadId;
   prompt: string;
@@ -230,7 +222,6 @@ export type AppState = {
   pendingCreates: PendingCreate[];
   /** What is in flight on a thread, as a kind (`shell:threadActions.*`). */
   pendingActions: Record<ThreadId, ThreadActionKind | undefined>;
-  toasts: Toast[];
   ui: UiState;
 };
 
@@ -273,7 +264,6 @@ function createInitialState(): AppState {
     daemonMachineId: null,
     pendingCreates: [],
     pendingActions: {},
-    toasts: [],
     ui: {
       route,
       tab: "working",
@@ -388,30 +378,7 @@ export function toggleTheme(): void {
 // Toasts
 // ---------------------------------------------------------------------------
 
-let toastId = 0;
-
-export function pushToast(input: {
-  title: string;
-  description?: string;
-  variant?: ToastVariant;
-  ttlMs?: number;
-}): void {
-  const toast: Toast = {
-    id: ++toastId,
-    title: input.title,
-    variant: input.variant ?? "info",
-    ...(input.description ? { description: input.description } : {}),
-  };
-  const state = getState();
-  setState({ ...state, toasts: [...state.toasts.slice(-2), toast] });
-  const ttl = input.ttlMs ?? 4_500;
-  setTimeout(() => dismissToast(toast.id), ttl);
-}
-
-export function dismissToast(id: number): void {
-  const state = getState();
-  setState({ ...state, toasts: state.toasts.filter((toast) => toast.id !== id) });
-}
+export { dismissToast, promiseToast, pushToast, type ToastVariant } from "@/lib/toast";
 
 // ---------------------------------------------------------------------------
 // UI actions

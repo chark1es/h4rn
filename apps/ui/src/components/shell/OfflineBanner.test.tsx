@@ -9,27 +9,22 @@ const mock = vi.hoisted(() => ({
   state: {
     connection: { status: "offline", attempt: 0, error: null as ProtoError | null },
     lastSyncAt: null as number | null,
-    toasts: [] as Array<{ id: number; title: string; description?: string; variant?: string }>,
   },
   reconnectNow: vi.fn(),
-  dismissToast: vi.fn(),
 }));
 
 vi.mock("@/lib/store/appStore", () => ({
   useApp: (selector: (state: unknown) => unknown) => selector(mock.state),
   getClient: () => ({ reconnectNow: mock.reconnectNow }),
-  dismissToast: mock.dismissToast,
 }));
 
 import { clientProto, protoError } from "@/lib/client/errors";
 import { setLocalePreference } from "@/lib/i18n";
 import { OfflineBanner } from "./OfflineBanner";
-import { Toasts } from "./Toasts";
 
 beforeEach(() => {
   mock.state.connection = { status: "offline", attempt: 0, error: null };
   mock.state.lastSyncAt = null;
-  mock.state.toasts = [];
 });
 
 afterEach(async () => {
@@ -96,19 +91,5 @@ describe("connection banner", () => {
     expect(screen.getByRole("status").textContent).toBe("Reconectando · intento 1200Reconectar");
     await act(() => setLocalePreference("ja"));
     expect(screen.getByRole("status").textContent).toBe("再接続中 · 1,200 回目再接続");
-  });
-});
-
-describe("toasts", () => {
-  it("names the region and the dismiss button in the active language", async () => {
-    mock.state.toasts = [{ id: 1, title: "Saved." }];
-    render(<Toasts />);
-    expect(screen.getByRole("region", { name: "Notifications" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Dismiss" })).toBeTruthy();
-
-    await act(() => setLocalePreference("ja"));
-    expect(screen.getByRole("region", { name: "通知" })).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "閉じる" }));
-    expect(mock.dismissToast).toHaveBeenCalledWith(1);
   });
 });

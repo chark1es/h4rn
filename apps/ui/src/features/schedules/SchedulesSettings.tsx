@@ -22,7 +22,7 @@ import { onScheduleFrame } from "@/lib/client/frames";
 import { HARNESS_LABELS, harnessLabel } from "@/lib/entities";
 import { i18n } from "@/lib/i18n";
 import { HARNESS_MODELS } from "@/lib/models";
-import { openThread, useApp } from "@/lib/store/appStore";
+import { openThread, pushToast, useApp } from "@/lib/store/appStore";
 import { MODE_CHOICES } from "@/lib/threadControls";
 
 import {
@@ -266,7 +266,6 @@ function WebhookPanel({ task }: { task: ScheduleTask | null }) {
       ? state.webhookPathError.message
       : null,
   );
-  const [copied, setCopied] = useState<string | null>(null);
   const [rotating, setRotating] = useState(false);
   const hasPath = live?.webhook_path_set ?? false;
 
@@ -281,9 +280,9 @@ function WebhookPanel({ task }: { task: ScheduleTask | null }) {
     if (!path) return;
     try {
       await navigator.clipboard.writeText(path);
-      setCopied(i18n.t("settings:schedules.webhook.copied"));
+      pushToast({ title: i18n.t("settings:schedules.webhook.copied"), variant: "success" });
     } catch {
-      setCopied(i18n.t("settings:schedules.webhook.copyFailed"));
+      pushToast({ title: i18n.t("settings:schedules.webhook.copyFailed"), variant: "error" });
     }
   };
   return (
@@ -341,11 +340,6 @@ function WebhookPanel({ task }: { task: ScheduleTask | null }) {
       {revealError ? (
         <p className="q-muted" role="alert">
           {revealError}
-        </p>
-      ) : null}
-      {copied ? (
-        <p className="q-muted" role="status" aria-live="polite">
-          {copied}
         </p>
       ) : null}
       <div className="q-field q-field-block">

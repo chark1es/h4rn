@@ -23,7 +23,6 @@ import { RightPanel } from "@/components/panel/RightPanel";
 import { OfflineBanner } from "@/components/shell/OfflineBanner";
 import { PhoneNav } from "@/components/shell/PhoneNav";
 import { Sidebar } from "@/components/shell/Sidebar";
-import { Toasts } from "@/components/shell/Toasts";
 import { HarnessSwitchCommand } from "@/components/thread/HarnessSwitch";
 import { ThreadPane } from "@/components/thread/ThreadPane";
 import {
@@ -34,6 +33,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { Toaster } from "@/components/ui/sonner";
 import { AttachmentTray } from "@/features/attachments/AttachmentTray";
 import { FILE_ACCEPT } from "@/features/attachments/picker";
 import { useAttachmentDrafts, useAttachShortcut } from "@/features/attachments/use-attachments";
@@ -819,7 +819,7 @@ export function AppShell() {
           onClose={closeLinkPullRequest}
         />
         <ShortcutsDialog />
-        <Toasts />
+        <Toaster />
       </div>
     );
   }
@@ -873,7 +873,7 @@ export function AppShell() {
         onClose={closeLinkPullRequest}
       />
       <ShortcutsDialog />
-      <Toasts />
+      <Toaster />
     </div>
   );
 }

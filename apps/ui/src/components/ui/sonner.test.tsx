@@ -1,0 +1,124 @@
+// @vitest-environment jsdom
+
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { toast } from "sonner";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+import { setLocalePreference } from "@/lib/i18n";
+import { promiseToast, pushToast } from "@/lib/toast";
+import { Toaster } from "./sonner";
+
+function stubViewport(phone: boolean) {
+  window.matchMedia = ((query: string) => ({
+    matches: query.includes("max-width: 639px") ? phone : false,
+    media: query,
+    onchange: null,
+    addEventListener: () => undefined,
+    removeEventListener: () => undefined,
+    addListener: () => undefined,
+    removeListener: () => undefined,
+    dispatchEvent: () => false,
+  })) as typeof window.matchMedia;
+}
+
+beforeEach(() => stubViewport(false));
+
+afterEach(async () => {
+  act(() => {
+    toast.dismiss();
+  });
+  cleanup();
+  document.documentElement.className = "";
+  await act(() => setLocalePreference("system"));
+});
+
+function toaster() {
+  return document.querySelector("[data-sonner-toaster]") as HTMLElement | null;
+}
+
+describe("Toaster", () => {
+  it("names the region and the dismiss button in the active language", async () => {
+    render(<Toaster />);
+    act(() => {
+      pushToast({ title: "Saved." });
+    });
+    expect(await screen.findByRole("region", { name: "Notifications" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Dismiss" })).toBeTruthy();
+
+    await act(() => setLocalePreference("ja"));
+    expect(screen.getByRole("region", { name: "通知" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "閉じる" }));
+    await waitFor(() => expect(screen.queryByText("Saved.")).toBeNull());
+  });
+
+  it("announces toasts politely and marks their kind", async () => {
+    render(<Toaster />);
+    act(() => {
+      pushToast({ title: "Couldn't send.", description: "The relay closed.", variant: "error" });
+    });
+    const title = await screen.findByText("Couldn't send.");
+    const item = title.closest("[data-sonner-toast]");
+    expect(item?.getAttribute("data-type")).toBe("error");
+    expect(screen.getByText("The relay closed.")).toBeTruthy();
+    expect(screen.getByRole("region", { name: "Notifications" }).getAttribute("aria-live")).toBe(
+      "polite",
+    );
+  });
+
+  it("runs a toast's action", async () => {
+    const undo = vi.fn();
+    render(<Toaster />);
+    act(() => {
+      pushToast({ title: "Thread archived.", action: { label: "Undo", onClick: undo } });
+    });
+    fireEvent.click(await screen.findByRole("button", { name: "Undo" }));
+    expect(undo).toHaveBeenCalledTimes(1);
+  });
+
+  it("turns a loading toast into the outcome of the operation", async () => {
+    render(<Toaster />);
+    let finish: (value: string) => void = () => undefined;
+    const operation = new Promise<string>((resolve) => {
+      finish = resolve;
+    });
+    let result: Promise<string> | undefined;
+    act(() => {
+      result = promiseToast(operation, {
+        loading: "Pushing…",
+        success: (branch) => `Pushed ${branch}.`,
+        error: "Couldn't push.",
+      });
+    });
+    expect(await screen.findByText("Pushing…")).toBeTruthy();
+    await act(async () => {
+      finish("main");
+      await result;
+    });
+    expect(await screen.findByText("Pushed main.")).toBeTruthy();
+    await expect(result).resolves.toBe("main");
+  });
+
+  it("follows the app's theme and sits at the top on the phone", async () => {
+    document.documentElement.classList.add("dark");
+    stubViewport(true);
+    render(<Toaster />);
+    act(() => {
+      pushToast({ title: "Saved." });
+    });
+    await screen.findByText("Saved.");
+    expect(toaster()?.getAttribute("data-sonner-theme")).toBe("dark");
+    expect(toaster()?.getAttribute("data-y-position")).toBe("top");
+    expect(toaster()?.getAttribute("data-x-position")).toBe("center");
+  });
+
+  it("sits at the bottom right on desktop", async () => {
+    render(<Toaster />);
+    act(() => {
+      pushToast({ title: "Saved." });
+    });
+    await screen.findByText("Saved.");
+    expect(toaster()?.getAttribute("data-sonner-theme")).toBe("light");
+    expect(toaster()?.getAttribute("data-y-position")).toBe("bottom");
+    expect(toaster()?.getAttribute("data-x-position")).toBe("right");
+  });
+});
