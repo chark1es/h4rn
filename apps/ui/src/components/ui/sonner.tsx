@@ -53,7 +53,7 @@ const CLASS_NAMES: ToastClassnames = {
     "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring",
   ),
   error: "border-danger/35",
-  icon: "flex h-4.5 w-4 shrink-0 items-center justify-center",
+  icon: "relative flex h-4.5 w-4 shrink-0 items-center justify-center",
   content: "flex min-w-0 flex-1 flex-col gap-0.5",
   title: cn("font-medium text-foreground"),
   description: cn("text-xs text-muted-foreground"),
@@ -61,7 +61,7 @@ const CLASS_NAMES: ToastClassnames = {
   cancelButton: cn(buttonVariants({ variant: "ghost", size: "sm" }), "self-center"),
   closeButton: cn(
     buttonVariants({ variant: "ghost", size: "icon-sm" }),
-    "absolute top-2.5 right-2.5 text-fg-3",
+    "absolute top-2.5 right-2.5",
   ),
 };
 

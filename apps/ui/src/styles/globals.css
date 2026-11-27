@@ -237,6 +237,31 @@ button {
   transition-timing-function: var(--ease-exit);
 }
 
+[data-sonner-toaster] [data-sonner-toast] > * {
+  transition: opacity var(--duration-popup) var(--ease-enter);
+}
+
+/* Sonner only hides the content of toasts stacked behind on styled toasts. */
+[data-sonner-toaster] [data-sonner-toast][data-expanded="false"][data-front="false"] > * {
+  opacity: 0;
+}
+
+/* Sonner paints its dark-theme close button even on unstyled toasts. */
+[data-sonner-toaster]
+  [data-sonner-toast]
+  [data-close-button][data-close-button][data-close-button] {
+  border-color: transparent;
+  background: transparent;
+  color: var(--fg-3);
+}
+
+[data-sonner-toaster]
+  [data-sonner-toast]
+  [data-close-button][data-close-button][data-close-button]:hover {
+  background: var(--accent-surface);
+  color: var(--fg);
+}
+
 @keyframes h4rn-fade-in {
   from {
     opacity: 0;
