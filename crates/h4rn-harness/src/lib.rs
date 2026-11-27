@@ -35,6 +35,7 @@ mod codex;
 mod controls;
 mod fake;
 mod homes;
+mod model_probe;
 mod opencode;
 pub mod registry;
 pub mod stats;
@@ -859,6 +860,15 @@ pub trait Harness: Send + Sync {
 
     /// Detects an installation on this host.
     fn detect(&self) -> Option<HarnessInstall>;
+
+    /// Lists selectable model IDs using the installed CLI and its host configuration.
+    async fn list_models(
+        &self,
+        _install: &HarnessInstall,
+        _cwd: &std::path::Path,
+    ) -> Result<Vec<String>, std::io::Error> {
+        Ok(Vec::new())
+    }
 
     /// How this harness drops rewound turns from its own history.
     ///

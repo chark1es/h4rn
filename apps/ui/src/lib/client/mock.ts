@@ -3230,6 +3230,18 @@ class MockDaemon {
         this.ok(frame.id, { type: "directories", listing });
         return;
       }
+      case "list_harness_models":
+        this.ok(frame.id, {
+          type: "harness_models",
+          models: {
+            claude_code: ["opus", "sonnet", "haiku"],
+            codex: ["gpt-5.1-codex"],
+            opencode: ["anthropic/claude-sonnet-5-5"],
+            acp: [],
+            antigravity: ["gemini-4-argon-medium"],
+          }[body.harness],
+        });
+        return;
       case "list_harness_versions":
         this.ok(frame.id, { type: "harness_versions", harnesses: this.harnessVersions });
         return;

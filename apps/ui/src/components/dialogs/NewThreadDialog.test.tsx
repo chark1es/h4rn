@@ -59,6 +59,7 @@ const mock = vi.hoisted(() => {
     attachments,
     createThread: vi.fn<(input: Record<string, unknown>) => Promise<boolean>>(),
     closeNewThread: vi.fn(),
+    request: vi.fn(async (_body: unknown): Promise<unknown> => undefined),
   };
 });
 
@@ -68,6 +69,7 @@ vi.mock("@/features/projects/store", () => ({
 }));
 
 vi.mock("@/lib/store/appStore", () => ({
+  getClient: () => ({ request: mock.request }),
   useApp: (selector: (state: unknown) => unknown) => selector(mock.state),
   createThread: mock.createThread,
   closeNewThread: mock.closeNewThread,
@@ -897,6 +899,28 @@ describe("NewThreadDialog drafts", () => {
     expect(mock.createThread.mock.calls[0]?.[0]).toMatchObject({
       worktree: "feature/login",
     });
+  });
+
+  it("lists only the selected harness's live models before any thread exists", async () => {
+    mock.state.hosts = {
+      host_a: { ...host("host_a", "atlas"), harnesses: ["codex"] },
+    };
+    mock.state.localHostId = "host_a";
+    mock.harness.loaded = true;
+    mock.harness.rows = [{ harness: "codex", installed: "0.171.0" }];
+    mock.request.mockResolvedValueOnce({ type: "harness_models", models: ["live-codex"] });
+
+    render(<NewThreadDialog />);
+    await waitFor(() => expect(modelField().value).toBe("default"));
+    expect(mock.request).toHaveBeenCalledWith(
+      { type: "list_harness_models", host: "host_a", harness: "codex" },
+      expect.anything(),
+    );
+    const options = Array.from(
+      document.querySelectorAll<HTMLOptionElement>("#h4rn-models-codex option"),
+      (option) => option.value,
+    );
+    expect(options).toEqual(["default", "live-codex"]);
   });
 
   it("starts a new Codex thread on the model the host's live catalogue lists", async () => {

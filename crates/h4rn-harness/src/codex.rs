@@ -145,6 +145,62 @@ impl Harness for CodexHarness {
         RewindMethod::Native
     }
 
+    async fn list_models(
+        &self,
+        install: &HarnessInstall,
+        cwd: &std::path::Path,
+    ) -> Result<Vec<String>, std::io::Error> {
+        let mut command = cli_command(&install.path);
+        command.current_dir(cwd).arg("app-server");
+        for key in SCRUBBED_ENV {
+            command.env_remove(key);
+        }
+        let mut probe = crate::model_probe::ModelProbe::spawn(command)?;
+        probe
+            .send(json!({
+                "id": 0, "method": "initialize",
+                "params": { "clientInfo": { "name": "h4rn", "version": env!("CARGO_PKG_VERSION") } }
+            }))
+            .await?;
+        let initialized = probe.receive(|frame| frame["id"] == 0).await?;
+        if initialized.get("result").is_none() {
+            return Err(std::io::Error::other(
+                "Codex model probe failed to initialize",
+            ));
+        }
+        probe.send(json!({ "method": "initialized" })).await?;
+
+        let mut models = Vec::new();
+        let mut cursor = Value::Null;
+        let mut id = 1;
+        loop {
+            probe
+                .send(json!({
+                    "id": id, "method": "model/list", "params": { "cursor": cursor }
+                }))
+                .await?;
+            let frame = probe.receive(|frame| frame["id"] == id).await?;
+            let result = &frame["result"];
+            if !result["data"].is_array() {
+                return Err(std::io::Error::other(
+                    "Codex did not return a model catalog",
+                ));
+            }
+            models.extend(crate::model_probe::model_ids(&result["data"], "model"));
+            let next = &result["nextCursor"];
+            if !next.is_string() {
+                return Ok(models);
+            }
+            if *next == cursor {
+                return Err(std::io::Error::other(
+                    "Codex repeated a model catalog cursor",
+                ));
+            }
+            cursor = next.clone();
+            id += 1;
+        }
+    }
+
     async fn start_session(
         &self,
         spec: SessionSpec,
@@ -1680,7 +1736,7 @@ fn candidate_names() -> Vec<&'static str> {
 }
 
 fn probe_version(path: &Path) -> Option<String> {
-    let output = version_command(path).output().ok()?;
+    let output = cli_command(path).arg("--version").output().ok()?;
     if !output.status.success() {
         return None;
     }
@@ -1691,7 +1747,7 @@ fn probe_version(path: &Path) -> Option<String> {
     parse_version(&String::from_utf8_lossy(&output.stderr))
 }
 
-fn version_command(path: &Path) -> std::process::Command {
+fn cli_command(path: &Path) -> std::process::Command {
     #[cfg(windows)]
     {
         let extension = path
@@ -1700,13 +1756,11 @@ fn version_command(path: &Path) -> std::process::Command {
             .map(str::to_ascii_lowercase);
         if matches!(extension.as_deref(), Some("cmd" | "bat")) {
             let mut command = std::process::Command::new("cmd");
-            command.arg("/C").arg(path).arg("--version");
+            command.arg("/C").arg(path);
             return command;
         }
     }
-    let mut command = std::process::Command::new(path);
-    command.arg("--version");
-    command
+    std::process::Command::new(path)
 }
 
 fn parse_version(text: &str) -> Option<String> {

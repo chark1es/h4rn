@@ -25,6 +25,7 @@ import {
   useHarnesses,
   useHarnessVersions,
 } from "@/features/harnesses/harnessStore";
+import { useThreadModels } from "@/features/harnesses/use-thread-models";
 import { useProjects } from "@/features/projects/store";
 import {
   proxyDefaultModel,
@@ -273,15 +274,23 @@ export function NewThreadDialog() {
   const proxyProfileId = proxyActive?.profile.id ?? null;
   const proxyDefault = proxyDefaultModel(harness);
   const harnessDefault = newThreadModel(harness, boundHost, threadValues);
-  const defaultModel = proxyDefault ?? harnessDefault;
+  const nativeModels = useThreadModels(
+    boundHost,
+    harness,
+    open && connection === "online" && !proxyActive,
+  );
+  const defaultModel =
+    proxyDefault ??
+    (nativeModels && !nativeModels.includes(harnessDefault) ? "default" : harnessDefault);
   useEffect(() => {
     if (!open) return;
     setModel((current) =>
-      current === DEFAULT_MODELS[harness] || (proxyProfileId !== null && current === harnessDefault)
+      current === DEFAULT_MODELS[harness] ||
+      ((proxyProfileId !== null || nativeModels !== null) && current === harnessDefault)
         ? defaultModel
         : current,
     );
-  }, [open, harness, harnessDefault, defaultModel, proxyProfileId]);
+  }, [open, harness, harnessDefault, defaultModel, proxyProfileId, nativeModels]);
 
   const selectedHost = boundHost ? hosts[boundHost] : undefined;
   const harnessChoices = detectedHarnesses(HARNESSES, installed, selectedHost?.harnesses);
@@ -413,8 +422,13 @@ export function NewThreadDialog() {
   const offline = connection !== "online";
   const modelChoices = [
     ...new Set([
-      ...(harness === "acp" ? agentModels : modelInfo.models),
-      ...(harness === "acp" ? [] : proxyModels.map((candidate) => candidate.id)),
+      ...(harness === "acp"
+        ? agentModels
+        : proxyActive
+          ? [defaultModel, ...proxyModels.map((candidate) => candidate.id)]
+          : nativeModels
+            ? ["default", ...nativeModels]
+            : modelInfo.models),
     ]),
   ];
   const attachments = useAttachmentDrafts("new-thread", {

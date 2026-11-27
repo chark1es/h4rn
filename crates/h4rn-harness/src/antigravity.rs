@@ -114,7 +114,7 @@ impl AntigravityHarness {
         install: &HarnessInstall,
         spec: &SessionSpec,
     ) -> Result<StartedAcpSession, HarnessError> {
-        let client = AcpClient::spawn(acp_config(install, spec))
+        let client = AcpClient::spawn(acp_config(install, &spec.workspace, &spec.env_overrides))
             .map_err(|error| map_acp_error(error, HarnessKind::Antigravity))?;
         match crate::acp::session_start(&client, spec, antigravity_policy(), &spec.workspace).await
         {
@@ -127,6 +127,16 @@ impl AntigravityHarness {
     }
 }
 
+// The ACP transport owns background tasks, so dropping its handle alone
+// doesn't stop the child if model discovery is cancelled or times out.
+struct AcpModelProbe(AcpClient);
+
+impl Drop for AcpModelProbe {
+    fn drop(&mut self) {
+        self.0.kill();
+    }
+}
+
 #[async_trait]
 impl Harness for AntigravityHarness {
     fn kind(&self) -> HarnessKind {
@@ -135,6 +145,34 @@ impl Harness for AntigravityHarness {
 
     fn detect(&self) -> Option<HarnessInstall> {
         self.install.clone().or_else(detect_agy)
+    }
+
+    async fn list_models(
+        &self,
+        install: &HarnessInstall,
+        cwd: &std::path::Path,
+    ) -> Result<Vec<String>, std::io::Error> {
+        let probe = AcpModelProbe(
+            AcpClient::spawn(acp_config(install, cwd, &Default::default()))
+                .map_err(|_| std::io::Error::other("Antigravity model probe failed to start"))?,
+        );
+        let client = &probe.0;
+        let info = client
+            .initialize()
+            .await
+            .map_err(|_| std::io::Error::other("Antigravity model probe failed to initialize"))?;
+        let session = client
+            .new_session(cwd, &[])
+            .await
+            .map_err(|_| std::io::Error::other("Antigravity did not return session metadata"))?;
+        if info.capabilities.close_session {
+            let _ = client.close_session(&session.session_id).await;
+        }
+        Ok(session
+            .models
+            .into_iter()
+            .map(|model| model.model_id)
+            .collect())
     }
 
     async fn start_session(
@@ -309,8 +347,12 @@ fn is_h4rn_only_env(key: &str) -> bool {
     key.starts_with("H4RN_")
 }
 
-fn acp_config(install: &HarnessInstall, spec: &SessionSpec) -> AcpClientConfig {
-    let mut config = AcpClientConfig::new(&install.path, &spec.workspace).args([
+fn acp_config(
+    install: &HarnessInstall,
+    cwd: &Path,
+    env_overrides: &std::collections::BTreeMap<String, String>,
+) -> AcpClientConfig {
+    let mut config = AcpClientConfig::new(&install.path, cwd).args([
         "acp",
         "--process-per-session",
         "--sandbox",
@@ -318,28 +360,25 @@ fn acp_config(install: &HarnessInstall, spec: &SessionSpec) -> AcpClientConfig {
     for key in SCRUBBED_ENV {
         config = config.scrub(*key);
     }
-    if let Some(dir) = spec
-        .env_overrides
+    if let Some(dir) = env_overrides
         .get(ENV_APP_DATA_DIR)
         .filter(|dir| !dir.trim().is_empty())
     {
         config = config.arg("--app-data-dir").arg(dir.trim());
     }
-    if let Some(dir) = spec
-        .env_overrides
+    if let Some(dir) = env_overrides
         .get(ENV_GEMINI_DIR)
         .filter(|dir| !dir.trim().is_empty())
     {
         config = config.arg("--gemini-dir").arg(dir.trim());
     }
-    if let Some(endpoint) = spec
-        .env_overrides
+    if let Some(endpoint) = env_overrides
         .get(ENV_CLOUD_CODE_ENDPOINT)
         .filter(|endpoint| !endpoint.trim().is_empty())
     {
         config = config.arg("--cloud_code_endpoint").arg(endpoint.trim());
     }
-    for (key, value) in &spec.env_overrides {
+    for (key, value) in env_overrides {
         if !is_h4rn_only_env(key) {
             config = config.env(key, value);
         }

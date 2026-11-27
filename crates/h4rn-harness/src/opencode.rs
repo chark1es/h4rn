@@ -175,6 +175,37 @@ impl Harness for OpenCodeHarness {
         self.install.clone().or_else(detect_opencode)
     }
 
+    async fn list_models(
+        &self,
+        install: &HarnessInstall,
+        cwd: &std::path::Path,
+    ) -> Result<Vec<String>, std::io::Error> {
+        let mut command = cli_command(&install.path);
+        command.current_dir(cwd).arg("models");
+        for key in SCRUBBED_ENV {
+            command.env_remove(key);
+        }
+        let output = tokio::process::Command::from(command)
+            .kill_on_drop(true)
+            .stderr(std::process::Stdio::null())
+            .output()
+            .await?;
+        if !output.status.success() {
+            return Err(std::io::Error::other("OpenCode model listing failed"));
+        }
+        Ok(String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(str::trim)
+            .filter(|line| {
+                !line.contains(char::is_whitespace)
+                    && line
+                        .split_once('/')
+                        .is_some_and(|(provider, model)| !provider.is_empty() && !model.is_empty())
+            })
+            .map(str::to_owned)
+            .collect())
+    }
+
     async fn start_session(
         &self,
         spec: SessionSpec,
@@ -1348,7 +1379,7 @@ fn candidate_names() -> Vec<&'static str> {
 }
 
 fn probe_version(path: &Path) -> Option<String> {
-    let output = version_command(path).output().ok()?;
+    let output = cli_command(path).arg("--version").output().ok()?;
     if !output.status.success() {
         return None;
     }
@@ -1359,7 +1390,7 @@ fn probe_version(path: &Path) -> Option<String> {
     parse_version(&String::from_utf8_lossy(&output.stderr))
 }
 
-fn version_command(path: &Path) -> std::process::Command {
+fn cli_command(path: &Path) -> std::process::Command {
     #[cfg(windows)]
     {
         let extension = path
@@ -1368,13 +1399,11 @@ fn version_command(path: &Path) -> std::process::Command {
             .map(str::to_ascii_lowercase);
         if matches!(extension.as_deref(), Some("cmd" | "bat")) {
             let mut command = std::process::Command::new("cmd");
-            command.arg("/C").arg(path).arg("--version");
+            command.arg("/C").arg(path);
             return command;
         }
     }
-    let mut command = std::process::Command::new(path);
-    command.arg("--version");
-    command
+    std::process::Command::new(path)
 }
 
 /// Extracts `2.2.7` from `opencode v2.2.7`.

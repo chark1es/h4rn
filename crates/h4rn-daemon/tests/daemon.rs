@@ -3085,6 +3085,35 @@ async fn skills_list_returns_the_install_matrix_and_conflicts() {
 }
 
 #[tokio::test]
+async fn model_discovery_is_scoped_to_the_selected_host_and_harness() {
+    let daemon = boot_isolated().await;
+    let host = host_id_for(&daemon).await;
+    let mut client = Client::connect(&daemon).await;
+    client.hello().await;
+
+    let response = client
+        .request(ClientRequest::ListHarnessModels {
+            host: host.clone(),
+            harness: HarnessKind::ClaudeCode,
+        })
+        .await
+        .expect("list models for registered harness");
+    assert!(matches!(response, ResponseBody::HarnessModels { models } if models.is_empty()));
+
+    for (host, harness) in [
+        (host, HarnessKind::Codex),
+        (HostId::new("other-host"), HarnessKind::ClaudeCode),
+    ] {
+        let error = client
+            .request(ClientRequest::ListHarnessModels { host, harness })
+            .await
+            .expect_err("catalog is unavailable outside the installed host and harness");
+        assert_eq!(error.code, h4rn_protocol::ProtoErrorCode::NotFound);
+    }
+    daemon.stop().await;
+}
+
+#[tokio::test]
 async fn harness_versions_list_every_harness_and_treat_offline_as_unknown() {
     let daemon = boot_isolated().await;
     let mut client = Client::connect(&daemon).await;

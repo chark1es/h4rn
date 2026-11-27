@@ -950,6 +950,11 @@ pub enum ResponseBody {
         #[ts(type = "number")]
         replay_through: u64,
     },
+    /// Selectable model IDs reported by the requested harness.
+    HarnessModels {
+        /// Model IDs accepted by the harness at launch.
+        models: Vec<String>,
+    },
     /// A request with no payload completed successfully.
     Ack,
 }

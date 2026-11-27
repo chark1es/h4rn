@@ -1,6 +1,6 @@
-//! Harness CLI version listing and update requests (ADR-043).
+//! Harness model discovery, CLI versions and updates (ADR-043).
 
-use h4rn_protocol::{ClientRequest, ProtoError, ResponseBody, ServerFrame, Topic};
+use h4rn_protocol::{ClientRequest, ProtoError, ProtoErrorCode, ResponseBody, ServerFrame, Topic};
 use tokio::task::JoinHandle;
 
 use crate::server::Connection;
@@ -12,11 +12,13 @@ use crate::server::forward::{
 pub(super) fn matches(request: &ClientRequest) -> bool {
     matches!(
         request,
-        ClientRequest::ListHarnessVersions | ClientRequest::UpdateHarness { .. }
+        ClientRequest::ListHarnessVersions
+            | ClientRequest::ListHarnessModels { .. }
+            | ClientRequest::UpdateHarness { .. }
     )
 }
 
-/// Handles one harness version request.
+/// Handles one harness discovery or update request.
 pub(super) async fn handle(
     conn: &Connection,
     request: ClientRequest,
@@ -25,6 +27,17 @@ pub(super) async fn handle(
         ClientRequest::ListHarnessVersions => Ok(ResponseBody::HarnessVersions {
             harnesses: conn.state.harness_versions.list().await,
         }),
+        ClientRequest::ListHarnessModels { host, harness } => {
+            if host != conn.state.hosts.local_id() {
+                return Err(ProtoError::plain(
+                    ProtoErrorCode::NotFound,
+                    "Host is not served by this daemon",
+                ));
+            }
+            Ok(ResponseBody::HarnessModels {
+                models: conn.state.manager.list_harness_models(harness).await?,
+            })
+        }
         ClientRequest::UpdateHarness { harness } => conn
             .state
             .harness_versions

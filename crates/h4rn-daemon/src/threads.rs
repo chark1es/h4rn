@@ -8214,6 +8214,50 @@ impl ThreadManager {
         self.send_message(thread_id, text, Vec::new()).await
     }
 
+    /// Queries the installed adapter using the host's home directory for discovery.
+    pub async fn list_harness_models(&self, kind: HarnessKind) -> Result<Vec<String>, ProtoError> {
+        let unavailable = || {
+            ProtoError::plain(
+                ProtoErrorCode::NotFound,
+                "Harness is not installed on this host",
+            )
+        };
+        let adapter = self.inner.harnesses.get(kind).ok_or_else(unavailable)?;
+        let home = dirs::home_dir().ok_or_else(|| {
+            ProtoError::plain(
+                ProtoErrorCode::Internal,
+                "Could not locate the host home directory",
+            )
+        })?;
+        let models = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let detector = adapter.clone();
+            let install = tokio::task::spawn_blocking(move || detector.detect())
+                .await
+                .ok()
+                .flatten()
+                .ok_or_else(unavailable)?;
+            adapter.list_models(&install, &home).await.map_err(|error| {
+                tracing::debug!(?kind, %error, "harness model discovery failed");
+                ProtoError::plain(
+                    ProtoErrorCode::Internal,
+                    "Could not read the harness model catalog",
+                )
+            })
+        })
+        .await
+        .map_err(|_| {
+            ProtoError::plain(
+                ProtoErrorCode::Internal,
+                "Harness model discovery timed out",
+            )
+        })??;
+        let mut seen = std::collections::HashSet::new();
+        Ok(models
+            .into_iter()
+            .filter(|id| !id.trim().is_empty() && seen.insert(id.clone()))
+            .collect())
+    }
+
     /// Whether any thread on `kind` has a turn in flight.
     ///
     /// Updating a harness CLI replaces the binary a live session is running, so

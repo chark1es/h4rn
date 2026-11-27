@@ -39,6 +39,7 @@ import { FILE_ACCEPT } from "@/features/attachments/picker";
 import { useAttachmentDrafts, useAttachShortcut } from "@/features/attachments/use-attachments";
 import { LinkPullRequestDialog } from "@/features/forge/LinkPullRequestDialog";
 import { GuestShareDialog } from "@/features/guest/GuestShareDialog";
+import { useThreadModels } from "@/features/harnesses/use-thread-models";
 import { IdePane } from "@/features/ide/IdePane";
 import { McpApprovalCard } from "@/features/mcp/McpApprovalCard";
 import { ensureMcpEvents } from "@/features/mcp/store";
@@ -48,6 +49,7 @@ import { shortPath, useProjects } from "@/features/projects/store";
 import {
   proxyDefaultModel,
   proxyModelsFor,
+  proxyOverrideFor,
   useProxy,
   useProxyCatalog,
 } from "@/features/proxy/proxyStore";
@@ -65,6 +67,7 @@ import {
 import { HARNESS_LABELS, harnessLabel, harnessSeed, machineSeed } from "@/lib/entities";
 import { projectName } from "@/lib/grouping";
 import { titleWithShortcut } from "@/lib/keybindings";
+import { HARNESS_MODELS } from "@/lib/models";
 import { NewThreadDraftSession } from "@/lib/newThreadDraft";
 import {
   closeLinkPullRequest,
@@ -76,14 +79,6 @@ import {
 } from "@/lib/store/appStore";
 import { defaultThreadHostId, localOnlyHostOptions } from "@/lib/thread-hosts";
 import { activeThread } from "@/lib/thread-selection";
-
-const START_MODELS: Record<HarnessKind, string> = {
-  claude_code: "claude-sonnet-5-5",
-  codex: "gpt-5.1-codex",
-  opencode: "claude-sonnet-5-5",
-  antigravity: "gemini-4-argon-medium",
-  acp: "default",
-};
 
 const HARNESSES: HarnessKind[] = ["claude_code", "codex", "opencode", "antigravity"];
 
@@ -105,7 +100,7 @@ export function InboxDetailEmpty() {
   );
   const [host, setHost] = useState("");
   const [harness, setHarness] = useState<HarnessKind>("claude_code");
-  const [model, setModel] = useState(START_MODELS.claude_code);
+  const [modelChoice, setModel] = useState<string | null>(null);
   const [workspace, setWorkspace] = useState("~/code");
   const [customFolder, setCustomFolder] = useState(false);
   const projects = useProjects((state) => state.projects);
@@ -131,6 +126,7 @@ export function InboxDetailEmpty() {
   const dialogWasOpen = useRef(false);
   useProxyCatalog();
   useProxy((state) => state.profiles);
+  useProxy((state) => state.catalogs);
   const newThreadOpen = useApp((state) => state.ui.newThreadOpen);
 
   useEffect(() => {
@@ -140,7 +136,9 @@ export function InboxDetailEmpty() {
     // The dialog's session: no folder option, so a folder the person used on
     // this host before is restored here with its draft.
     const draft = draftSession().adoptHost(first);
+    const available = onlineHosts.find((entry) => entry.host_id === first)?.harnesses ?? [];
     setHost(first);
+    setHarness(HARNESSES.find((kind) => available.includes(kind)) ?? "claude_code");
     setWorkspace(draft.workspace);
     setPrompt(draft.text);
   }, [host, onlineHosts, localHostId, draftSession]);
@@ -219,6 +217,11 @@ export function InboxDetailEmpty() {
   const hostName = selectedHost?.name ?? null;
   const offline = connection !== "online";
   const writable = !offline && Boolean(host);
+  const proxy = proxyOverrideFor(harness);
+  const nativeModels = useThreadModels(host, harness, writable && !proxy);
+  const defaultModel =
+    proxyDefaultModel(harness) ?? (nativeModels ? "default" : HARNESS_MODELS[harness].default);
+  const model = modelChoice ?? defaultModel;
 
   const attachments = useAttachmentDrafts("start-thread", {
     enabled: writable,
@@ -302,13 +305,13 @@ export function InboxDetailEmpty() {
     const nextHarness = hosts[nextHostId]?.harnesses.find((kind) => kind !== "acp");
     if (nextHarness) {
       setHarness(nextHarness);
-      setModel(START_MODELS[nextHarness]);
+      setModel(null);
     }
   };
 
   const pickHarness = (nextHarness: HarnessKind) => {
     setHarness(nextHarness);
-    setModel(proxyDefaultModel(nextHarness) ?? START_MODELS[nextHarness]);
+    setModel(null);
   };
 
   const canSend =
@@ -318,7 +321,12 @@ export function InboxDetailEmpty() {
     (prompt.trim().length > 0 || attachments.attachments.length > 0);
 
   const modelChoices = Array.from(
-    new Set([...Object.values(START_MODELS), ...proxyModelsFor(harness).map((model) => model.id)]),
+    new Set([
+      defaultModel,
+      ...(proxy
+        ? proxyModelsFor(harness).map((model) => model.id)
+        : (nativeModels ?? HARNESS_MODELS[harness].models)),
+    ]),
   );
 
   return (
@@ -603,7 +611,10 @@ export function InboxDetailEmpty() {
                     <ChevronDownIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
                   </button>
                 </DropdownMenuTrigger>
-                <DropdownMenuContent align="end" className="w-60">
+                <DropdownMenuContent
+                  align="end"
+                  className="max-h-[var(--radix-dropdown-menu-content-available-height)] w-60 overflow-y-auto"
+                >
                   <DropdownMenuLabel>{t("composer:controls.model")}</DropdownMenuLabel>
                   {modelChoices.map((option) => (
                     <DropdownMenuItem key={option} onSelect={() => setModel(option)}>
