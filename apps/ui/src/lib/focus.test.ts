@@ -75,6 +75,34 @@ describe("rememberNeighbours", () => {
     expect(document.activeElement).toBe(remounted);
   });
 
+  it("returns focus to a trigger that survived once it is enabled again", async () => {
+    const { before, trigger } = page();
+    trigger.focus();
+    const restore = rememberNeighbours(trigger);
+    const dialog = openDialog();
+    trigger.disabled = true;
+    dialog.remove();
+    before.focus();
+    trigger.disabled = false;
+    await restore();
+    expect(document.activeElement).toBe(trigger);
+  });
+
+  it("leaves focus where the person moved it while a failing action ran", async () => {
+    const { before, trigger, after } = page();
+    trigger.focus();
+    const restore = rememberNeighbours(trigger);
+    const dialog = openDialog();
+    trigger.disabled = true;
+    dialog.remove();
+    before.focus();
+    // The person Tabs on while the request is still out.
+    after.focus();
+    trigger.disabled = false;
+    await restore();
+    expect(document.activeElement).toBe(after);
+  });
+
   it("falls back to the control before when nothing follows the row", async () => {
     const { before, row, trigger, after } = page();
     trigger.focus();

@@ -51,7 +51,8 @@ function watchFallback() {
  * it (and the row around it). Call the result once the action has finished.
  * If the trigger is still there (the action failed or kept the row), focus
  * goes back to it: it was disabled while the action ran, so the dialog closing
- * put focus somewhere else. If the trigger is gone and focus went with it (or
+ * put focus somewhere else. That only happens while focus is still nowhere or
+ * where the dialog fell back to, never after the person moved it. If the trigger is gone and focus went with it (or
  * only to where the dialog fell back to), focus moves to the control that now follows the row in tab order, or else
  * the one before. The neighbours are looked up again after the update, since
  * it may have replaced them.
@@ -72,7 +73,9 @@ export function rememberNeighbours(trigger: HTMLElement): () => Promise<void> {
       for (let frame = 0; frame < 5 && trigger.matches(":disabled"); frame++) {
         await new Promise((resolve) => requestAnimationFrame(resolve));
       }
-      if (trigger.isConnected && !trigger.matches(":disabled")) trigger.focus();
+      if (!trigger.isConnected || trigger.matches(":disabled")) return;
+      // Leave focus alone if the person moved it while the action ran.
+      if (focus.unclaimed()) trigger.focus();
       return;
     }
     if (!focus.unclaimed()) return;
