@@ -1,20 +1,29 @@
+import { Input as InputPrimitive } from "@ui-sdk/react/input";
 import type * as React from "react";
 
 import { cn } from "@/lib/utils";
 
-function Input({ className, type, ...props }: React.ComponentProps<"input">) {
+const fieldClasses = [
+  "w-full min-w-0 rounded-md border border-input bg-card text-sm text-foreground",
+  "transition-[border-color,box-shadow] duration-micro ease-enter",
+  "outline-none selection:bg-sel placeholder:text-fg-3",
+  "focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/25",
+  "aria-invalid:border-destructive aria-invalid:focus-visible:ring-destructive/20",
+  "data-disabled:cursor-not-allowed data-disabled:opacity-45 data-readonly:bg-muted",
+  "phone:text-lg",
+];
+
+type InputProps = Omit<React.ComponentProps<typeof InputPrimitive>, "className"> & {
+  className?: string;
+};
+
+function Input({ className, ...props }: InputProps) {
   return (
-    <input
-      type={type}
-      data-slot="input"
-      className={cn(
-        "h-7 w-full min-w-0 rounded-[6px] border-0 bg-bg-raised px-2 text-[12.5px] text-fg shadow-[inset_0_0_0_1px_var(--line-2)] outline-none transition-[box-shadow] duration-micro selection:bg-[var(--sel)] placeholder:text-fg-3 focus-visible:shadow-[inset_0_0_0_1px_var(--accent)] disabled:pointer-events-none disabled:opacity-45",
-        "aria-invalid:shadow-[inset_0_0_0_1px_var(--danger)]",
-        className,
-      )}
+    <InputPrimitive
+      className={cn(fieldClasses, "h-7 px-2.5 phone:h-11 phone:px-3", className)}
       {...props}
     />
   );
 }
 
-export { Input };
+export { fieldClasses, Input, type InputProps };
