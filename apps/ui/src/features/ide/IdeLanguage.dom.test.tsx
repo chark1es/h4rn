@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 
 import { cleanup, render, screen } from "@testing-library/react";
+import { Tree } from "@ui-sdk/react/tree";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-
 import { WorkspaceFileRow } from "@/components/panel/WorkspaceFiles";
 import {
   describePreviewFailure,
@@ -272,22 +272,20 @@ describe("the IDE in another language", () => {
   it("words the Files tab's preview action in Spanish", async () => {
     await setLocalePreference("es");
     render(
-      <WorkspaceFileRow
-        entry={{
-          name: "report.html",
-          path: "out/report.html",
-          kind: "file",
-          size_bytes: 10,
-          modified_at: null,
-          git_status: null,
-        }}
-        depth={1}
-        open={false}
-        active={false}
-        onToggle={() => undefined}
-        onOpenFile={() => undefined}
-        onOpenPreview={() => undefined}
-      />,
+      <Tree aria-label="Files">
+        <WorkspaceFileRow
+          entry={{
+            name: "report.html",
+            path: "out/report.html",
+            kind: "file",
+            size_bytes: 10,
+            modified_at: null,
+            git_status: null,
+          }}
+          depth={1}
+          onOpenPreview={() => undefined}
+        />
+      </Tree>,
     );
     expect(
       screen.getByRole("button", { name: "Abrir la vista previa de report.html" }),

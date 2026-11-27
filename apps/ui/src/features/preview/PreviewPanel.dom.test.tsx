@@ -1,8 +1,9 @@
 // @vitest-environment jsdom
+
+import { Tree } from "@ui-sdk/react/tree";
 import { act, type ReactElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-
 import { WorkspaceFileRow } from "@/components/panel/WorkspaceFiles";
 import type { FileEntry } from "@/gen";
 import { closePreview, getState, openPreview, useApp } from "@/lib/store/appStore";
@@ -55,15 +56,13 @@ function Harness() {
   const preview = useApp((state) => state.ui.preview);
   return (
     <>
-      <WorkspaceFileRow
-        entry={entry}
-        depth={1}
-        open={false}
-        active={false}
-        onToggle={() => undefined}
-        onOpenFile={() => undefined}
-        onOpenPreview={(path) => openPreview(path, "thread_1")}
-      />
+      <Tree aria-label="Files">
+        <WorkspaceFileRow
+          entry={entry}
+          depth={1}
+          onOpenPreview={(path) => openPreview(path, "thread_1")}
+        />
+      </Tree>
       <p data-testid="tab">{tab}</p>
       <p data-testid="file">{preview?.path ?? ""}</p>
     </>
