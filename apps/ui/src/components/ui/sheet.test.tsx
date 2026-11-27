@@ -3,7 +3,6 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { backdropClassName } from "./dialog";
 import { Sheet, SheetBody, SheetClose, SheetContent, SheetFooter, SheetTitle } from "./sheet";
 
 afterEach(cleanup);
@@ -33,11 +32,11 @@ describe("Sheet", () => {
     expect(dialog.querySelector('[data-slot="sheet-grabber"]')).not.toBeNull();
   });
 
-  it("fades its backdrop like a dialog's", async () => {
+  it("leaves its backdrop's fade to the drawer", async () => {
     render(<Example onClosed={() => undefined} onApprove={() => undefined} />);
     await screen.findByRole("dialog");
     const backdrop = document.querySelector('[data-slot="drawer-backdrop"]');
-    expect(backdrop?.className).toBe(backdropClassName);
+    expect(backdrop?.className).toBe("fixed inset-0 bg-scrim");
   });
 
   it("closes on Escape and reports it once the exit finishes", async () => {
