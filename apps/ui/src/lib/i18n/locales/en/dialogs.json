@@ -71,7 +71,7 @@
     "proxyModels_one": "{{count, number}} model from {{profile}}; the harness routes through it.",
     "proxyModels_other": "{{count, number}} models from {{profile}}; the harness routes through it.",
     "effort": "Reasoning effort",
-    "effortHint": "the harness default when unset",
+    "effortHint": "Uses the harness default when unset.",
     "speed": "Speed",
     "fastMode": "Fast mode",
     "fastHint": "Priority service tier. Higher usage.",
@@ -81,8 +81,6 @@
     "agentDecides": "The agent decides its own approvals.",
     "modeLater": "Can be changed later from the composer.",
     "where": "Where",
-    "whereFixed": "fixed by the agent",
-    "whereHost": "on the host",
     "whereNote": {
       "fixed": "This agent always runs in its configured directory.",
       "git": "The agent works here, or in its own checkout when you ask for one.",

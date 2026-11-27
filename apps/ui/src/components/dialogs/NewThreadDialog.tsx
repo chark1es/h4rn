@@ -6,6 +6,7 @@ import { ChipSelect } from "@/components/common/ChipSelect";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
+  DialogBody,
   DialogContent,
   DialogDescription,
   DialogFooter,
@@ -36,7 +37,6 @@ import {
 } from "@/features/proxy/proxyStore";
 import { useThreadSettings } from "@/features/threads/settings";
 import type { HarnessKind, HostId, RuntimeMode } from "@/gen";
-import { useIsPhone } from "@/hooks/use-media-query";
 import { DEFAULT_NEW_THREAD_WORKSPACE, drafts } from "@/lib/drafts";
 import { HARNESS_LABELS, HARNESS_SLUGS, threadHarnessLabel } from "@/lib/entities";
 import { detectedHarnesses, HARNESS_MODELS } from "@/lib/models";
@@ -83,21 +83,29 @@ function expandHome(path: string, home: string | null): string {
   return trimmed;
 }
 
-function FieldLabel({
-  children,
-  hint,
+function Field({
+  label,
   htmlFor,
+  className,
+  children,
 }: {
-  children: React.ReactNode;
-  hint?: string | undefined;
+  label: React.ReactNode;
   htmlFor: string;
+  className?: string;
+  children: React.ReactNode;
 }) {
   return (
-    <label htmlFor={htmlFor} className="flex items-baseline justify-between">
-      <span className="text-[12px] text-[var(--fg-3)]">{children}</span>
-      {hint ? <span className="text-[11.5px] text-[var(--fg-3)]">{hint}</span> : null}
-    </label>
+    <div className={cn("flex min-w-0 flex-col gap-1.5", className)}>
+      <label htmlFor={htmlFor} className="text-xs font-medium text-fg-2">
+        {label}
+      </label>
+      {children}
+    </div>
   );
+}
+
+function FieldNote({ className, ...props }: React.ComponentProps<"span">) {
+  return <span className={cn("text-xs text-muted-foreground", className)} {...props} />;
 }
 
 export function NewThreadDialog() {
@@ -106,7 +114,6 @@ export function NewThreadDialog() {
   const hosts = useApp((state) => state.hosts);
   const localHostId = useApp((state) => state.localHostId);
   const connection = useApp((state) => state.connection.status);
-  const isPhone = useIsPhone();
   useProxyCatalog();
   useHarnessVersions();
   useAcpAgents();
@@ -497,141 +504,134 @@ export function NewThreadDialog() {
 
   return (
     <Dialog open={open} onOpenChange={(value) => (value ? undefined : closeNewThread())}>
-      <DialogContent
-        className={cn(
-          "gap-3 sm:max-w-[640px]",
-          isPhone &&
-            "top-0 left-0 h-dvh max-h-dvh w-full max-w-none translate-x-0 translate-y-0 rounded-none border-0",
-        )}
-        showCloseButton={!isPhone}
-      >
+      <DialogContent size="lg">
         <DialogHeader>
           <DialogTitle>{t("newThread.title")}</DialogTitle>
           <DialogDescription>{t("newThread.description")}</DialogDescription>
         </DialogHeader>
 
-        <div className="grid gap-3 sm:grid-cols-3">
-          <div className="flex flex-col gap-1">
-            <FieldLabel htmlFor="new-thread-host">{t("fields.host")}</FieldLabel>
-            <ChipSelect
-              id="new-thread-host"
-              block
-              label={t("fields.host")}
-              placeholder={t("fields.noOnlineHosts")}
-              value={host}
-              options={localOnlyHostOptions(onlineHosts, localHostId, t("newThread.hostLocalOnly"))}
-              onChange={(value) => {
-                if (value === "") return;
-                const nextHost = hosts[value];
-                const nextHarness = detectedHarnesses(HARNESSES, installed, nextHost?.harnesses)[0];
-                // Reselecting the host that is already bound changes nothing:
-                // ChipSelect fires on every pick, including the current one, and
-                // the harness and model the person chose there (even one that
-                // is not the host's first harness) must survive it. A real host
-                // change starts from what that host's live catalogue offers,
-                // never the static table.
-                const hostChanged = value !== boundHost;
-                hostChosen.current = true;
-                showDraft(draftSession().selectHost(value));
-                if (nextHarness && harness !== "acp" && hostChanged) {
-                  setHarness(nextHarness);
+        <DialogBody className="gap-4">
+          <div className="grid gap-x-3 gap-y-4 sm:grid-cols-2">
+            <Field htmlFor="new-thread-host" label={t("fields.host")}>
+              <ChipSelect
+                id="new-thread-host"
+                block
+                label={t("fields.host")}
+                placeholder={t("fields.noOnlineHosts")}
+                value={host}
+                options={localOnlyHostOptions(
+                  onlineHosts,
+                  localHostId,
+                  t("newThread.hostLocalOnly"),
+                )}
+                onChange={(value) => {
+                  if (value === "") return;
+                  const nextHost = hosts[value];
+                  const nextHarness = detectedHarnesses(
+                    HARNESSES,
+                    installed,
+                    nextHost?.harnesses,
+                  )[0];
+                  // Reselecting the host that is already bound changes nothing:
+                  // ChipSelect fires on every pick, including the current one, and
+                  // the harness and model the person chose there (even one that
+                  // is not the host's first harness) must survive it. A real host
+                  // change starts from what that host's live catalogue offers,
+                  // never the static table.
+                  const hostChanged = value !== boundHost;
+                  hostChosen.current = true;
+                  showDraft(draftSession().selectHost(value));
+                  if (nextHarness && harness !== "acp" && hostChanged) {
+                    setHarness(nextHarness);
+                    setAgentId(null);
+                    setModel(
+                      proxyDefaultModel(nextHarness) ??
+                        newThreadModel(nextHarness, value, threadValues),
+                    );
+                  }
+                }}
+              />
+            </Field>
+
+            <Field htmlFor="new-thread-harness" label={t("fields.harness")}>
+              <ChipSelect
+                id="new-thread-harness"
+                block
+                label={t("fields.harness")}
+                placeholder={t("newThread.noHarness")}
+                value={
+                  harnessValue === harness && !harnessChoices.includes(harness) ? "" : harnessValue
+                }
+                options={acpPickerOptions(
+                  harnessChoices.map((option) => ({
+                    value: option as string,
+                    label: HARNESS_LABELS[option],
+                  })),
+                  agents,
+                )}
+                onChange={(next) => {
+                  if (next.startsWith("acp:")) {
+                    const id = next.slice(4);
+                    setHarness("acp");
+                    setAgentId(id);
+                    setModel("default");
+                    return;
+                  }
+                  const kind = next as HarnessKind;
+                  setHarness(kind);
                   setAgentId(null);
                   setModel(
-                    proxyDefaultModel(nextHarness) ??
-                      newThreadModel(nextHarness, value, threadValues),
+                    proxyDefaultModel(kind) ?? newThreadModel(kind, boundHost, threadValues),
                   );
-                }
-              }}
-            />
-          </div>
+                }}
+              />
+            </Field>
 
-          <div className="flex flex-col gap-1">
-            <FieldLabel htmlFor="new-thread-harness">{t("fields.harness")}</FieldLabel>
-            <ChipSelect
-              id="new-thread-harness"
-              block
-              label={t("fields.harness")}
-              placeholder={t("newThread.noHarness")}
-              value={
-                harnessValue === harness && !harnessChoices.includes(harness) ? "" : harnessValue
-              }
-              options={acpPickerOptions(
-                harnessChoices.map((option) => ({
-                  value: option as string,
-                  label: HARNESS_LABELS[option],
-                })),
-                agents,
-              )}
-              onChange={(next) => {
-                if (next.startsWith("acp:")) {
-                  const id = next.slice(4);
-                  setHarness("acp");
-                  setAgentId(id);
-                  setModel("default");
-                  return;
-                }
-                const kind = next as HarnessKind;
-                setHarness(kind);
-                setAgentId(null);
-                setModel(proxyDefaultModel(kind) ?? newThreadModel(kind, boundHost, threadValues));
-              }}
-            />
-          </div>
+            <Field htmlFor="new-thread-model" label={t("fields.model")} className="sm:col-span-2">
+              <Input
+                id="new-thread-model"
+                value={model}
+                onChange={(event) => setModel(event.target.value)}
+                list={`h4rn-models-${harness}`}
+                className="font-mono"
+              />
+              <datalist id={`h4rn-models-${harness}`}>
+                {modelChoices.map((option) => (
+                  <option key={option} value={option} />
+                ))}
+              </datalist>
+              {harness === "acp" ? (
+                <FieldNote>
+                  {probing
+                    ? t("newThread.agent.readingModels")
+                    : probe?.error
+                      ? probe.error
+                      : probeError
+                        ? t("newThread.agent.probeFailed", { error: probeError })
+                        : agentModels.length > 0
+                          ? t("newThread.agent.models", {
+                              count: agentModels.length,
+                              agent: selectedAgent?.name ?? t("newThread.agent.theAgent"),
+                            })
+                          : selectedAgent && !selectedAgent.installed
+                            ? t("newThread.agent.notInstalled")
+                            : t("newThread.agent.noModels")}
+                </FieldNote>
+              ) : modelInfo.thinking && efforts.length === 0 && harness in THINKING_KEYS ? (
+                <FieldNote>{t(THINKING_KEYS[harness as keyof typeof THINKING_KEYS])}</FieldNote>
+              ) : null}
+              {proxyActive ? (
+                <FieldNote>
+                  {t("newThread.proxyModels", {
+                    count: proxyModels.length,
+                    profile: proxyActive.profile.name,
+                  })}
+                </FieldNote>
+              ) : null}
+            </Field>
 
-          <div className="flex flex-col gap-1">
-            <FieldLabel htmlFor="new-thread-model">{t("fields.model")}</FieldLabel>
-            <Input
-              id="new-thread-model"
-              value={model}
-              onChange={(event) => setModel(event.target.value)}
-              list={`h4rn-models-${harness}`}
-              className="font-mono"
-            />
-            <datalist id={`h4rn-models-${harness}`}>
-              {modelChoices.map((option) => (
-                <option key={option} value={option} />
-              ))}
-            </datalist>
-            {harness === "acp" ? (
-              <span className="text-small text-fg-3">
-                {probing
-                  ? t("newThread.agent.readingModels")
-                  : probe?.error
-                    ? probe.error
-                    : probeError
-                      ? t("newThread.agent.probeFailed", { error: probeError })
-                      : agentModels.length > 0
-                        ? t("newThread.agent.models", {
-                            count: agentModels.length,
-                            agent: selectedAgent?.name ?? t("newThread.agent.theAgent"),
-                          })
-                        : selectedAgent && !selectedAgent.installed
-                          ? t("newThread.agent.notInstalled")
-                          : t("newThread.agent.noModels")}
-              </span>
-            ) : modelInfo.thinking && harness in THINKING_KEYS ? (
-              <span className="text-small text-fg-3">
-                {t(THINKING_KEYS[harness as keyof typeof THINKING_KEYS])}
-              </span>
-            ) : null}
-            {proxyActive ? (
-              <span className="text-small text-fg-3">
-                {t("newThread.proxyModels", {
-                  count: proxyModels.length,
-                  profile: proxyActive.profile.name,
-                })}
-              </span>
-            ) : null}
-          </div>
-        </div>
-
-        {efforts.length > 0 || fastAvailable ? (
-          <div className="grid gap-3 sm:grid-cols-2">
             {efforts.length > 0 ? (
-              <div className="flex flex-col gap-1">
-                <FieldLabel htmlFor="new-thread-effort" hint={t("newThread.effortHint")}>
-                  {t("newThread.effort")}
-                </FieldLabel>
+              <Field htmlFor="new-thread-effort" label={t("newThread.effort")}>
                 <ChipSelect
                   id="new-thread-effort"
                   block
@@ -643,11 +643,11 @@ export function NewThreadDialog() {
                   ]}
                   onChange={setReasoningEffort}
                 />
-              </div>
+                <FieldNote>{t("newThread.effortHint")}</FieldNote>
+              </Field>
             ) : null}
             {fastAvailable ? (
-              <div className="flex flex-col gap-1">
-                <FieldLabel htmlFor="new-thread-fast">{t("newThread.speed")}</FieldLabel>
+              <Field htmlFor="new-thread-fast" label={t("newThread.speed")}>
                 <button
                   type="button"
                   id="new-thread-fast"
@@ -657,269 +657,258 @@ export function NewThreadDialog() {
                   aria-label={t("newThread.fastMode")}
                   onClick={() => setFast((value) => !value)}
                 />
-                <span className="text-small text-fg-3">{t("newThread.fastHint")}</span>
-              </div>
+                <FieldNote>{t("newThread.fastHint")}</FieldNote>
+              </Field>
             ) : null}
-          </div>
-        ) : null}
 
-        <div className="grid gap-3 sm:grid-cols-[1fr_1.2fr]">
-          <div className="flex flex-col gap-1">
-            <FieldLabel htmlFor="new-thread-mode">{t("newThread.mode")}</FieldLabel>
-            {modeManagedByAgent ? (
-              <>
-                <span id="new-thread-mode" className="py-1.5 text-small text-fg-2">
-                  {t("newThread.modeManaged")}
-                </span>
-                <span className="text-small text-fg-3">
-                  {probing ? t("newThread.readingModes") : t("newThread.agentDecides")}
-                </span>
-              </>
-            ) : (
-              <>
-                <ChipSelect
-                  id="new-thread-mode"
-                  block
-                  label={t("newThread.mode")}
-                  value={runtimeMode}
-                  options={runtimeModeChoices}
-                  onChange={setRuntimeMode}
+            <Field htmlFor="new-thread-mode" label={t("newThread.mode")}>
+              {modeManagedByAgent ? (
+                <>
+                  <span id="new-thread-mode" className="flex h-7 items-center text-sm text-fg-2">
+                    {t("newThread.modeManaged")}
+                  </span>
+                  <FieldNote>
+                    {probing ? t("newThread.readingModes") : t("newThread.agentDecides")}
+                  </FieldNote>
+                </>
+              ) : (
+                <>
+                  <ChipSelect
+                    id="new-thread-mode"
+                    block
+                    label={t("newThread.mode")}
+                    value={runtimeMode}
+                    options={runtimeModeChoices}
+                    onChange={setRuntimeMode}
+                  />
+                  <FieldNote>{t("newThread.modeLater")}</FieldNote>
+                </>
+              )}
+            </Field>
+
+            <Field htmlFor="new-thread-workspace" label={t("newThread.where")}>
+              <Input
+                id="new-thread-workspace"
+                value={effectiveWorkspace}
+                disabled={fixedWorkspace !== null}
+                onChange={(event) => setWorkspace(event.target.value)}
+                onBlur={() => {
+                  // Pressing Start blurs this field on the way to the button.
+                  // Start sends what is on screen to the folder as typed; it
+                  // must not swap the box to that folder's draft first.
+                  if (startPressed.current) return;
+                  commitWorkspace();
+                }}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    commitWorkspace();
+                  }
+                }}
+                className="font-mono"
+                placeholder="~/code/api"
+              />
+              <FieldNote className="inline-flex items-center gap-1.5">
+                <GitBranchIcon className="size-3" aria-hidden />
+                {fixedWorkspace
+                  ? t("newThread.whereNote.fixed")
+                  : gitProject
+                    ? t("newThread.whereNote.git")
+                    : t("newThread.whereNote.plain")}
+              </FieldNote>
+            </Field>
+          </div>
+
+          {gitProject ? (
+            <div className="flex flex-col gap-1.5">
+              <label className="q-addp-check">
+                <input
+                  type="checkbox"
+                  className="sr-only"
+                  checked={worktreeEnabled}
+                  onChange={(event) => {
+                    setWorktreeEnabled(event.target.checked);
+                    if (!event.target.checked) setWorktreeBranch("");
+                  }}
                 />
-                <span className="text-small text-fg-3">{t("newThread.modeLater")}</span>
-              </>
-            )}
-          </div>
+                <span className={cn("q-check", worktreeEnabled && "on")} aria-hidden>
+                  {worktreeEnabled ? <CheckIcon className="q-icon s12" strokeWidth={2} /> : null}
+                </span>
+                {t("newThread.worktree.toggle")}
+              </label>
+              {worktreeEnabled ? (
+                <Input
+                  id="new-thread-worktree-branch"
+                  value={worktreeBranch}
+                  onChange={(event) => setWorktreeBranch(event.target.value)}
+                  placeholder={t("newThread.worktree.branchPlaceholder")}
+                  className="max-w-[360px] font-mono"
+                  spellCheck={false}
+                  aria-label={t("newThread.worktree.branchLabel")}
+                />
+              ) : null}
+              <FieldNote>
+                {worktreeEnabled
+                  ? worktreeBranch.trim()
+                    ? t("newThread.worktree.named", {
+                        branch: worktreeBranch.trim(),
+                        workspace: effectiveWorkspace,
+                      })
+                    : t("newThread.worktree.daemonNames")
+                  : t("newThread.worktree.off")}
+              </FieldNote>
+            </div>
+          ) : null}
 
           <div className="flex flex-col gap-1">
-            <FieldLabel
-              htmlFor="new-thread-workspace"
-              hint={fixedWorkspace ? t("newThread.whereFixed") : t("newThread.whereHost")}
-            >
-              {t("newThread.where")}
-            </FieldLabel>
-            <Input
-              id="new-thread-workspace"
-              value={effectiveWorkspace}
-              disabled={fixedWorkspace !== null}
-              onChange={(event) => setWorkspace(event.target.value)}
-              onBlur={() => {
-                // Pressing Start blurs this field on the way to the button.
-                // Start sends what is on screen to the folder as typed; it
-                // must not swap the box to that folder's draft first.
-                if (startPressed.current) return;
-                commitWorkspace();
+            <div className="flex items-center justify-between">
+              <label htmlFor="new-thread-task" className="text-xs font-medium text-fg-2">
+                {t("fields.task")}
+                {prompt.trim() ? (
+                  <span className="ml-2 font-normal text-muted-foreground tabular-nums">
+                    {t("newThread.chars", { count: prompt.trim().length })}
+                  </span>
+                ) : null}
+              </label>
+              <button
+                type="button"
+                disabled={offline || !boundHost}
+                onClick={attachments.openPicker}
+                aria-label={t("newThread.attachFiles")}
+                title={offline ? t("newThread.reconnectToAttach") : t("newThread.attachTitle")}
+                className="hit-area relative -my-1 inline-flex h-6 items-center gap-1.5 rounded-md px-1.5 text-xs text-fg-2 transition-colors duration-micro hover:bg-accent hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+              >
+                <PaperclipIcon className="size-3.5" aria-hidden />
+                {attachments.attachments.length > 0
+                  ? t("newThread.attached", { count: attachments.attachments.length })
+                  : t("newThread.attach")}
+              </button>
+            </div>
+
+            <input
+              ref={attachments.inputRef}
+              type="file"
+              multiple
+              accept={FILE_ACCEPT}
+              aria-label={t("newThread.attachFiles")}
+              className="sr-only"
+              tabIndex={-1}
+              onChange={(event) => attachments.onInputChange(event.target.files)}
+            />
+
+            <AttachmentTray
+              tasks={attachments.tasks}
+              onRemove={attachments.remove}
+              onRetry={attachments.retry}
+            />
+
+            <Textarea
+              id="new-thread-task"
+              autoFocus
+              disabled={!boundHost}
+              value={prompt}
+              onChange={(event) => {
+                const value = event.target.value;
+                setPrompt(value);
+                draftSession().setText(value);
+              }}
+              onPaste={(event) => {
+                const files = Array.from(event.clipboardData.files);
+                if (files.length > 0) {
+                  event.preventDefault();
+                  attachments.addFiles(files);
+                  return;
+                }
+                const pasted = event.clipboardData.getData("text/plain");
+                if (attachments.addPastedText(pasted)) event.preventDefault();
               }}
               onKeyDown={(event) => {
-                if (event.key === "Enter") {
+                if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
                   event.preventDefault();
-                  commitWorkspace();
+                  void submit();
                 }
               }}
-              className="font-mono"
-              placeholder="~/code/api"
+              placeholder={boundHost ? t("newThread.placeholder") : t("newThread.connecting")}
+              className="min-h-32"
             />
-            <span className="flex items-center gap-1 text-small text-fg-3">
-              <GitBranchIcon className="size-3" aria-hidden />
-              {fixedWorkspace
-                ? t("newThread.whereNote.fixed")
-                : gitProject
-                  ? t("newThread.whereNote.git")
-                  : t("newThread.whereNote.plain")}
-            </span>
           </div>
-        </div>
 
-        {gitProject ? (
-          <div className="flex flex-col gap-1.5">
-            <label className="q-addp-check">
-              <input
-                type="checkbox"
-                className="sr-only"
-                checked={worktreeEnabled}
-                onChange={(event) => {
-                  setWorktreeEnabled(event.target.checked);
-                  if (!event.target.checked) setWorktreeBranch("");
+          <p className="m-0 rounded-md border border-border bg-bg-side px-2.5 py-2 text-xs text-fg-2">
+            {selectedHost ? (
+              <Trans
+                t={t}
+                i18nKey={harness === "acp" ? "newThread.startsAgent" : "newThread.starts"}
+                values={{
+                  command:
+                    harness === "acp"
+                      ? (selectedAgent?.command ?? HARNESS_SLUGS.acp)
+                      : HARNESS_SLUGS[harness],
+                  agent: threadHarnessLabel(harness, agentId),
+                  host: selectedHost.name,
+                  path: effectiveWorkspace || DEFAULT_NEW_THREAD_WORKSPACE,
+                }}
+                components={{
+                  cmd: <span className="font-mono" />,
+                  host: <span className="font-medium text-fg" />,
+                  path: <span className="font-mono" />,
                 }}
               />
-              <span className={cn("q-check", worktreeEnabled && "on")} aria-hidden>
-                {worktreeEnabled ? <CheckIcon className="q-icon s12" strokeWidth={2} /> : null}
-              </span>
-              {t("newThread.worktree.toggle")}
-            </label>
-            {worktreeEnabled ? (
-              <Input
-                id="new-thread-worktree-branch"
-                value={worktreeBranch}
-                onChange={(event) => setWorktreeBranch(event.target.value)}
-                placeholder={t("newThread.worktree.branchPlaceholder")}
-                className="max-w-[360px] font-mono"
-                spellCheck={false}
-                aria-label={t("newThread.worktree.branchLabel")}
-              />
-            ) : null}
-            <span className="text-small text-fg-3">
-              {worktreeEnabled
-                ? worktreeBranch.trim()
-                  ? t("newThread.worktree.named", {
-                      branch: worktreeBranch.trim(),
-                      workspace: effectiveWorkspace,
-                    })
-                  : t("newThread.worktree.daemonNames")
-                : t("newThread.worktree.off")}
-            </span>
-          </div>
-        ) : null}
+            ) : (
+              t("newThread.pairHost")
+            )}
+          </p>
+        </DialogBody>
 
-        <div className="flex flex-col gap-1">
-          <div className="flex items-center justify-between">
-            <FieldLabel
-              htmlFor="new-thread-task"
-              hint={
-                prompt.trim() ? t("newThread.chars", { count: prompt.trim().length }) : undefined
-              }
-            >
-              {t("fields.task")}
-            </FieldLabel>
-            <button
-              type="button"
-              disabled={offline || !boundHost}
-              onClick={attachments.openPicker}
-              aria-label={t("newThread.attachFiles")}
-              title={offline ? t("newThread.reconnectToAttach") : t("newThread.attachTitle")}
-              className="flex h-8 items-center gap-1 rounded-md px-1.5 text-small text-fg-2 transition-colors duration-micro hover:bg-bg-side hover:text-fg focus-visible:ring-2 focus-visible:ring-focus focus-visible:outline-none"
-            >
-              <PaperclipIcon className="size-3.5" aria-hidden />
-              {attachments.attachments.length > 0
-                ? t("newThread.attached", { count: attachments.attachments.length })
-                : t("newThread.attach")}
-            </button>
-          </div>
-
-          <input
-            ref={attachments.inputRef}
-            type="file"
-            multiple
-            accept={FILE_ACCEPT}
-            aria-label={t("newThread.attachFiles")}
-            className="sr-only"
-            tabIndex={-1}
-            onChange={(event) => attachments.onInputChange(event.target.files)}
-          />
-
-          <AttachmentTray
-            tasks={attachments.tasks}
-            onRemove={attachments.remove}
-            onRetry={attachments.retry}
-          />
-
-          <Textarea
-            id="new-thread-task"
-            autoFocus
-            disabled={!boundHost}
-            value={prompt}
-            onChange={(event) => {
-              const value = event.target.value;
-              setPrompt(value);
-              draftSession().setText(value);
-            }}
-            onPaste={(event) => {
-              const files = Array.from(event.clipboardData.files);
-              if (files.length > 0) {
-                event.preventDefault();
-                attachments.addFiles(files);
-                return;
-              }
-              const pasted = event.clipboardData.getData("text/plain");
-              if (attachments.addPastedText(pasted)) event.preventDefault();
-            }}
-            onKeyDown={(event) => {
-              if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
-                event.preventDefault();
-                void submit();
-              }
-            }}
-            placeholder={boundHost ? t("newThread.placeholder") : t("newThread.connecting")}
-            className="min-h-32"
-          />
-        </div>
-
-        <p className="rounded-md border border-line bg-bg-side px-2.5 py-1.5 text-small text-fg-2">
-          {selectedHost ? (
-            <Trans
-              t={t}
-              i18nKey={harness === "acp" ? "newThread.startsAgent" : "newThread.starts"}
-              values={{
-                command:
-                  harness === "acp"
-                    ? (selectedAgent?.command ?? HARNESS_SLUGS.acp)
-                    : HARNESS_SLUGS[harness],
-                agent: threadHarnessLabel(harness, agentId),
-                host: selectedHost.name,
-                path: effectiveWorkspace || DEFAULT_NEW_THREAD_WORKSPACE,
-              }}
-              components={{
-                cmd: <span className="font-mono" />,
-                host: <span className="font-medium text-fg" />,
-                path: <span className="font-mono" />,
-              }}
-            />
-          ) : (
-            t("newThread.pairHost")
-          )}
-        </p>
-
-        <DialogFooter className="items-center sm:justify-between">
-          <span className="hidden items-center gap-1 text-small text-fg-3 sm:flex">
+        <DialogFooter>
+          <span className="mr-auto hidden items-center gap-1.5 text-xs text-muted-foreground sm:inline-flex">
             <Kbd>
               {MOD} {ENTER}
             </Kbd>{" "}
             {t("newThread.startShortcut")}
           </span>
-          <div className="flex items-center gap-2">
-            <Button variant="ghost" onClick={closeNewThread}>
-              {t("common:cancel")}
-            </Button>
-            <Button
-              disabled={
-                offline ||
-                !boundHost ||
-                !hostEligible(boundHost) ||
-                starting ||
-                Boolean(attachments.blockedReason) ||
-                (!prompt.trim() && attachments.attachments.length === 0)
-              }
-              onPointerDown={() => {
-                startPressed.current = true;
-              }}
-              onPointerUp={() => {
-                startPressed.current = false;
-              }}
-              onPointerCancel={() => {
-                startPressed.current = false;
-              }}
-              onPointerLeave={() => {
-                startPressed.current = false;
-              }}
-              onClick={() => void submit()}
-              title={
-                attachments.blockedReason ??
-                (offline
-                  ? t("newThread.reconnectToStart")
-                  : !boundHost || !hostEligible(boundHost)
-                    ? t("newThread.noHostAvailable")
-                    : !prompt.trim() && attachments.attachments.length === 0
-                      ? t("newThread.describeFirst")
-                      : undefined)
-              }
-            >
-              {starting ? <PlusIcon aria-hidden /> : <ArrowRightIcon aria-hidden />}
-              {offline
-                ? t("newThread.offline")
-                : starting
-                  ? t("newThread.starting")
-                  : t("newThread.start")}
-            </Button>
-          </div>
+          <Button variant="ghost" onClick={closeNewThread}>
+            {t("common:cancel")}
+          </Button>
+          <Button
+            disabled={
+              offline ||
+              !boundHost ||
+              !hostEligible(boundHost) ||
+              starting ||
+              Boolean(attachments.blockedReason) ||
+              (!prompt.trim() && attachments.attachments.length === 0)
+            }
+            onPointerDown={() => {
+              startPressed.current = true;
+            }}
+            onPointerUp={() => {
+              startPressed.current = false;
+            }}
+            onPointerCancel={() => {
+              startPressed.current = false;
+            }}
+            onPointerLeave={() => {
+              startPressed.current = false;
+            }}
+            onClick={() => void submit()}
+            title={
+              attachments.blockedReason ??
+              (offline
+                ? t("newThread.reconnectToStart")
+                : !boundHost || !hostEligible(boundHost)
+                  ? t("newThread.noHostAvailable")
+                  : !prompt.trim() && attachments.attachments.length === 0
+                    ? t("newThread.describeFirst")
+                    : undefined)
+            }
+          >
+            {starting ? <PlusIcon aria-hidden /> : <ArrowRightIcon aria-hidden />}
+            {offline
+              ? t("newThread.offline")
+              : starting
+                ? t("newThread.starting")
+                : t("newThread.start")}
+          </Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

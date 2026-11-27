@@ -68,7 +68,7 @@
     },
     "proxyModels_other": "{{profile}} のモデル {{count, number}} 件。harness はこれを経由します。",
     "effort": "推論の強度",
-    "effortHint": "未設定なら harness の既定値",
+    "effortHint": "未設定なら harness の既定値を使います。",
     "speed": "速度",
     "fastMode": "高速モード",
     "fastHint": "優先サービス階層。使用量が増えます。",
@@ -78,8 +78,6 @@
     "agentDecides": "承認はエージェントが自分で判断します。",
     "modeLater": "後からコンポーザーで変更できます。",
     "where": "場所",
-    "whereFixed": "エージェントが固定",
-    "whereHost": "ホスト上",
     "whereNote": {
       "fixed": "このエージェントは常に設定済みのディレクトリで実行されます。",
       "git": "エージェントはここで作業します。依頼すれば専用のチェックアウトで作業します。",
