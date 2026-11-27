@@ -432,12 +432,22 @@ fieldset.q-seg-fs {
 }
 
 /* Linked pull requests: the header badge and its quiet panel. */
-.q-pr-badge {
+/* Sized and outlined like the small secondary buttons beside it (Stop,
+   Snooze); the state keeps its tone in the text only. */
+.q-badge.q-pr-badge {
+  height: 28px;
+  padding: 0 8px;
+  gap: 6px;
   border: 0;
+  border-radius: 6px;
+  background: var(--bg-raised);
+  box-shadow: inset 0 0 0 1px var(--line-2);
   cursor: pointer;
   font: inherit;
+  font-size: 12px;
+  font-weight: 500;
 }
-.q-pr-badge:hover {
+.q-badge.q-pr-badge:hover {
   background: var(--hover);
 }
 .q-pr-more {
