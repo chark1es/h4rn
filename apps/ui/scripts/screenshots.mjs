@@ -17,7 +17,9 @@ import { fileURLToPath } from "node:url";
 import { chromium } from "playwright-core";
 
 const BASE = process.argv[2] ?? "http://127.0.0.1:1420";
-const OUT = fileURLToPath(new URL("../screenshots/", import.meta.url));
+const OUT = process.env.H4RN_SHOTS_OUT
+  ? `${process.env.H4RN_SHOTS_OUT.replace(/\/$/, "")}/`
+  : fileURLToPath(new URL("../screenshots/", import.meta.url));
 const EXECUTABLE =
   process.env.H4RN_CHROMIUM ??
   `${process.env.HOME}/.cache/ms-playwright/chromium_headless_shell-1248/chrome-headless-shell-linux64/chrome-headless-shell`;
@@ -503,6 +505,181 @@ const SHOTS = [
   },
 ];
 
+/** Raise a toast through the dev server's own store module (mock mode only). */
+const raiseToast = async (page, input) => {
+  await page.evaluate(async (toast) => {
+    const store = await import("/src/lib/store/appStore.ts");
+    store.pushToast(toast);
+  }, input);
+  await page.waitForTimeout(450);
+};
+
+/** Surfaces the UI audit adds on top of the design shots (`H4RN_AUDIT=1`). */
+const AUDIT_SHOTS = [
+  {
+    name: "a-new-thread",
+    device: "desktop",
+    path: "/t/thr_a",
+    wait: '[aria-label="Thread stream"]',
+    action: async (page) => {
+      await page.getByRole("button", { name: "New thread", exact: true }).first().click();
+      await page.getByRole("dialog").waitFor({ state: "visible" });
+      await page.waitForTimeout(400);
+    },
+  },
+  {
+    name: "a-shortcuts",
+    device: "desktop",
+    path: "/t/thr_a",
+    wait: '[aria-label="Thread stream"]',
+    action: async (page) => {
+      await page.keyboard.press("Shift+?");
+      await page.getByRole("dialog").waitFor({ state: "visible" });
+      await page.waitForTimeout(400);
+    },
+  },
+  {
+    name: "a-thread-actions",
+    device: "desktop",
+    path: "/t/thr_a",
+    wait: '[aria-label="Thread stream"]',
+    action: async (page) => {
+      await page.getByRole("button", { name: "Thread actions" }).click();
+      await page.getByRole("menu").first().waitFor({ state: "visible" });
+      await page.waitForTimeout(350);
+    },
+  },
+  {
+    name: "a-row-actions",
+    device: "desktop",
+    path: "/t/thr_a",
+    wait: '[aria-label="Thread stream"]',
+    action: async (page) => {
+      await page.getByRole("button", { name: "Actions for Migrate session store to Redis" }).click();
+      await page.getByRole("menu").first().waitFor({ state: "visible" });
+      await page.waitForTimeout(350);
+    },
+  },
+  {
+    name: "a-model-select",
+    device: "desktop",
+    path: "/t/thr_a",
+    wait: '[aria-label="Thread stream"]',
+    action: async (page) => {
+      await page.getByRole("button", { name: "Harness and model" }).click();
+      await page.waitForTimeout(450);
+    },
+  },
+  {
+    name: "a-tooltip",
+    device: "desktop",
+    path: "/t/thr_a",
+    wait: '[aria-label="Thread stream"]',
+    action: async (page) => {
+      await page.getByRole("button", { name: "Right panel" }).hover();
+      await page.waitForTimeout(1200);
+    },
+  },
+  {
+    name: "a-toasts",
+    device: "desktop",
+    path: "/t/thr_a",
+    wait: '[aria-label="Thread stream"]',
+    action: async (page) => {
+      await raiseToast(page, { variant: "success", title: "Delegated to codex." });
+      await raiseToast(page, {
+        variant: "error",
+        title: "Couldn't send the reply to atlas.",
+        description: "The relay closed the stream. Your draft is still in the composer.",
+      });
+    },
+  },
+  {
+    name: "a-settings-appearance",
+    device: "desktop",
+    path: "/settings/appearance",
+    wait: 'main[aria-label="Settings"]',
+    settle: 1200,
+  },
+  {
+    name: "a-add-mcp",
+    device: "desktop",
+    path: "/library",
+    wait: "text=playwright",
+    settle: 1200,
+    action: async (page) => {
+      await page.getByRole("button", { name: "Add MCP server" }).first().click();
+      await page.getByRole("dialog").waitFor({ state: "visible" });
+      await page.waitForTimeout(400);
+    },
+  },
+  {
+    name: "a-settings-autoresume",
+    device: "desktop",
+    path: "/settings/resume",
+    wait: 'main[aria-label="Settings"]',
+    settle: 1200,
+  },
+  {
+    name: "a-settings-forges",
+    device: "desktop",
+    path: "/settings/forges",
+    wait: "text=Forges",
+    settle: 1200,
+  },
+  {
+    name: "a-settings-account",
+    device: "desktop",
+    path: "/settings/account",
+    wait: "text=Account",
+    settle: 1200,
+  },
+  {
+    name: "a-p-new-thread",
+    device: "phone",
+    path: "/",
+    wait: "text=Fix flaky auth test",
+    action: async (page) => {
+      await page.getByRole("button", { name: "New thread" }).first().click();
+      await page.getByRole("dialog").waitFor({ state: "visible" });
+      await page.waitForTimeout(450);
+    },
+  },
+  {
+    name: "a-p-thread-actions",
+    device: "phone",
+    path: "/t/thr_a",
+    wait: '[aria-label="Thread stream"]',
+    action: async (page) => {
+      await page.getByRole("button", { name: "Thread actions" }).click();
+      await page.getByRole("menu").first().waitFor({ state: "visible" });
+      await page.waitForTimeout(350);
+    },
+  },
+  {
+    name: "a-p-settings",
+    device: "phone",
+    path: "/settings/appearance",
+    wait: "main",
+    settle: 1200,
+  },
+  {
+    name: "a-p-toasts",
+    device: "phone",
+    path: "/t/thr_a",
+    wait: '[aria-label="Thread stream"]',
+    action: async (page) => {
+      await raiseToast(page, {
+        variant: "error",
+        title: "Couldn't send the reply to atlas.",
+        description: "The relay closed the stream. Your draft is still in the composer.",
+      });
+    },
+  },
+];
+
+if (process.env.H4RN_AUDIT === "1") SHOTS.push(...AUDIT_SHOTS);
+
 const browser = await chromium.launch({ executablePath: EXECUTABLE, args: ["--no-sandbox"] });
 await mkdir(OUT, { recursive: true });
 
@@ -514,7 +691,9 @@ const selected = only?.length ? SHOTS.filter((shot) => only.includes(shot.name))
 
 let failures = 0;
 for (const shot of selected) {
-  const sizes = shot.device === "phone" ? [PHONE, PHONE_SMALL] : [DESKTOP];
+  // H4RN_PHONE_FLOOR=0 skips the 360 px floor (the audit only needs 390).
+  const phones = process.env.H4RN_PHONE_FLOOR === "0" ? [PHONE] : [PHONE, PHONE_SMALL];
+  const sizes = shot.device === "phone" ? phones : [DESKTOP];
   for (const size of sizes) {
     const sizeName = String(size.width);
     for (const theme of ["light", "dark"]) {
