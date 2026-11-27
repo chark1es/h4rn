@@ -298,11 +298,10 @@
 
 /*
  * A hit area of at least 32 px (44 px on touch or the phone layout) around
- * a smaller control, without changing how it looks or lays out.
+ * a smaller control, without changing how it looks or lays out. The control
+ * must be positioned (`relative`, `absolute`…).
  */
 @utility hit-area {
-  position: relative;
-
   &::after {
     content: "";
     position: absolute;
