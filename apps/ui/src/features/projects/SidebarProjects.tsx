@@ -69,15 +69,16 @@ export function ProjectsHeader() {
       <span>{t("projects.title")}</span>
       <span className="q-proj-acts">
         <Menu>
-          <MenuTrigger
-            className="q-ibtn s22"
-            aria-label={t("projects.sortLabel", {
-              sort: t(`projects.projectSort.${projectSort}`),
-            })}
-            title={t("projects.sortTitle")}
-          >
-            <ArrowUpDownIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-          </MenuTrigger>
+          <Tip label={t("projects.sortTitle")}>
+            <MenuTrigger
+              className="q-ibtn s22"
+              aria-label={t("projects.sortLabel", {
+                sort: t(`projects.projectSort.${projectSort}`),
+              })}
+            >
+              <ArrowUpDownIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
+            </MenuTrigger>
+          </Tip>
           <MenuContent align="end" className="w-56">
             <MenuRadioGroup
               value={projectSort}
@@ -221,13 +222,14 @@ export function ProjectGroupSection({
         {renaming ? null : (
           <>
             <Menu>
-              <MenuTrigger
-                className="q-ibtn q-pg-more"
-                aria-label={t("projects.actionsLabel", { name: group.name })}
-                title={t("projects.actionsTitle")}
-              >
-                <EllipsisIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-              </MenuTrigger>
+              <Tip label={t("projects.actionsTitle")}>
+                <MenuTrigger
+                  className="q-ibtn q-pg-more"
+                  aria-label={t("projects.actionsLabel", { name: group.name })}
+                >
+                  <EllipsisIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
+                </MenuTrigger>
+              </Tip>
               <MenuContent align="end" className="w-56">
                 <MenuItem icon={<SquarePenIcon />} onSelect={newThreadHere}>
                   {t("projects.newThreadHere")}

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type {
@@ -131,7 +131,7 @@ describe("linked pull request badge and panel", () => {
 
     openBadge();
 
-    expect(screen.getByText("Linked items")).toBeTruthy();
+    expect(within(screen.getByRole("menu")).getByText("Linked items")).toBeTruthy();
     expect(screen.getByText("Add PR watch")).toBeTruthy();
     expect(screen.getByText("Old experiment")).toBeTruthy();
     expect(screen.getByText("Draft")).toBeTruthy();

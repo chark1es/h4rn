@@ -4,6 +4,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import "@/lib/i18n";
+import { Menu, MenuContent, MenuItem, MenuTrigger } from "./menu";
 import { Tip } from "./tooltip";
 
 afterEach(() => {
@@ -74,5 +75,39 @@ describe("Tip", () => {
       vi.advanceTimersByTime(150);
     });
     expect(screen.getByRole("tooltip", { hidden: true }).hasAttribute("data-open")).toBe(true);
+  });
+
+  it("composes with a menu trigger: the menu still opens and the tooltip still shows", async () => {
+    render(
+      <Menu>
+        <Tip label="Sort projects">
+          <MenuTrigger aria-label="Sort">
+            <svg aria-hidden="true" />
+          </MenuTrigger>
+        </Tip>
+        <MenuContent>
+          <MenuItem>By name</MenuItem>
+        </MenuContent>
+      </Menu>,
+    );
+    const trigger = screen.getByRole("button", { name: "Sort" });
+    expect(trigger.getAttribute("aria-describedby")).toBe(
+      screen.getByRole("tooltip", { hidden: true }).id,
+    );
+    vi.useFakeTimers();
+    fireEvent.pointerEnter(trigger, { pointerType: "mouse" });
+    fireEvent.pointerMove(trigger, { pointerType: "mouse" });
+    await act(async () => {
+      vi.advanceTimersByTime(350);
+    });
+    const tooltip = screen.getByRole("tooltip", { hidden: true });
+    expect(tooltip.hasAttribute("data-open")).toBe(true);
+    expect(tooltip.textContent).toContain("Sort projects");
+    vi.useRealTimers();
+    await act(async () => {
+      fireEvent.click(trigger);
+    });
+    expect(await screen.findByRole("menuitem", { name: "By name" })).toBeTruthy();
+    expect(trigger.getAttribute("aria-haspopup")).toBe("menu");
   });
 });

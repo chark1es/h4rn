@@ -12,6 +12,7 @@ import {
   MenuSeparator,
   MenuTrigger,
 } from "@/components/ui/menu";
+import { Tip } from "@/components/ui/tooltip";
 import { IssueApi, issueStateLabel } from "@/features/issues/store";
 import { notifyThreadIssueLinks, useThreadIssues } from "@/features/issues/threadLinks";
 import type { ThreadIssue, ThreadPullRequest } from "@/gen";
@@ -182,21 +183,22 @@ export function LinkedPullRequestsMenu({
 
   return (
     <Menu onOpenChange={(open) => open && onOpen?.()}>
-      <MenuTrigger
-        className={cn("q-badge q-pr-badge", primary ? linkedPullTone(primary) : "")}
-        aria-label={t("linked.items")}
-        title={t("linked.items")}
-      >
-        {primary ? (
-          <GitPullRequestIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
-        ) : (
-          <CircleDotIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
-        )}
-        <span>
-          {primary ? linkedPullLabel(primary) : primaryIssue ? issueLabel(primaryIssue) : ""}
-        </span>
-        {extra > 0 ? <span className="q-pr-more">+{extra}</span> : null}
-      </MenuTrigger>
+      <Tip label={t("linked.items")}>
+        <MenuTrigger
+          className={cn("q-badge q-pr-badge", primary ? linkedPullTone(primary) : "")}
+          aria-label={t("linked.items")}
+        >
+          {primary ? (
+            <GitPullRequestIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+          ) : (
+            <CircleDotIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+          )}
+          <span>
+            {primary ? linkedPullLabel(primary) : primaryIssue ? issueLabel(primaryIssue) : ""}
+          </span>
+          {extra > 0 ? <span className="q-pr-more">+{extra}</span> : null}
+        </MenuTrigger>
+      </Tip>
       <MenuContent align="end" className="w-80">
         {pulls.map((pull, index) => {
           const url = pull.summary?.web_url || prWebUrl(pull.repo, pull.number);

@@ -487,30 +487,29 @@ function SidebarFooter({
   return (
     <div className="q-side-ft">
       <Menu open={popoverOpen} onOpenChange={setPopoverOpen}>
-        <MenuTrigger
-          className={cn("q-hostbtn", popoverOpen && "on")}
-          title={t("footer.hostsButton")}
-        >
-          {hostLine.icon === "orb" ? (
-            <AgentGlyph
-              glyph={{
-                kind: "orb",
-                state: "breathing",
-                speed: 0.35,
-                label: t("footer.connecting"),
-              }}
-              size={14}
-            />
-          ) : hostLine.icon === "off" ? (
-            <span className="q-faint" style={{ display: "inline-flex" }}>
-              <WifiOffIcon className="q-icon s14" aria-hidden />
-            </span>
-          ) : (
-            <span className="q-dot on" />
-          )}
-          <span>{hostLine.text}</span>
-          <ChevronDownIcon className="q-icon s12 q-faint" strokeWidth={1.5} aria-hidden />
-        </MenuTrigger>
+        <Tip label={t("footer.hostsButton")}>
+          <MenuTrigger className={cn("q-hostbtn", popoverOpen && "on")}>
+            {hostLine.icon === "orb" ? (
+              <AgentGlyph
+                glyph={{
+                  kind: "orb",
+                  state: "breathing",
+                  speed: 0.35,
+                  label: t("footer.connecting"),
+                }}
+                size={14}
+              />
+            ) : hostLine.icon === "off" ? (
+              <span className="q-faint" style={{ display: "inline-flex" }}>
+                <WifiOffIcon className="q-icon s14" aria-hidden />
+              </span>
+            ) : (
+              <span className="q-dot on" />
+            )}
+            <span>{hostLine.text}</span>
+            <ChevronDownIcon className="q-icon s12 q-faint" strokeWidth={1.5} aria-hidden />
+          </MenuTrigger>
+        </Tip>
         <HostsMenuContent
           rows={rows}
           connection={connection}
