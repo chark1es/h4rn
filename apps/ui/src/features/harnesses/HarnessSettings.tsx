@@ -553,8 +553,8 @@ export function HarnessSettings() {
         ) : agentsError ? (
           <p className="q-muted">{agentsError.message}</p>
         ) : agents.length === 0 ? (
-          <p className="q-muted">
-            <UnplugIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />{" "}
+          <p className="q-muted flex items-center gap-2">
+            <UnplugIcon className="q-icon s14 shrink-0" strokeWidth={1.5} aria-hidden />
             {t("harnesses.acp.empty")}
           </p>
         ) : (
