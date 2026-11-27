@@ -9,8 +9,8 @@ import {
 } from "lucide-react";
 import { Fragment, useEffect, useMemo, useState } from "react";
 import { Trans, useTranslation } from "react-i18next";
-
 import { ChipSelect } from "@/components/common/ChipSelect";
+import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Switch } from "@/components/ui/switch";
 import type {
   AgentState,
@@ -797,29 +797,33 @@ function ProfileDetail({ profile }: { profile: ProxyProfile }) {
               </div>
             ) : null}
             {details.length > 0 || report ? (
-              <details className="q-details">
-                <summary>{t("proxy.probe.details")}</summary>
-                {details.length > 0 ? (
-                  <div className="q-probe">
-                    {details.map((row) => (
-                      <Fragment key={row.label}>
-                        <span className={row.ok ? "q-ok" : "q-faint"}>
-                          {row.ok ? (
-                            <CheckIcon className="q-icon s12" strokeWidth={2} aria-hidden />
-                          ) : null}
-                        </span>
-                        <div className="k">{row.label}</div>
-                        <div className={cn("v", !row.ok && "q-faint")}>{row.value}</div>
-                      </Fragment>
-                    ))}
-                  </div>
-                ) : null}
-                {report ? (
-                  <div style={{ marginTop: 12 }}>
-                    <Diagnostics diagnostics={report.diagnostics} />
-                  </div>
-                ) : null}
-              </details>
+              <Collapsible className="mt-2 text-xs">
+                <CollapsibleTrigger className="text-xs">
+                  {t("proxy.probe.details")}
+                </CollapsibleTrigger>
+                <CollapsiblePanel className="mt-2">
+                  {details.length > 0 ? (
+                    <div className="q-probe">
+                      {details.map((row) => (
+                        <Fragment key={row.label}>
+                          <span className={row.ok ? "q-ok" : "q-faint"}>
+                            {row.ok ? (
+                              <CheckIcon className="q-icon s12" strokeWidth={2} aria-hidden />
+                            ) : null}
+                          </span>
+                          <div className="k">{row.label}</div>
+                          <div className={cn("v", !row.ok && "q-faint")}>{row.value}</div>
+                        </Fragment>
+                      ))}
+                    </div>
+                  ) : null}
+                  {report ? (
+                    <div style={{ marginTop: 12 }}>
+                      <Diagnostics diagnostics={report.diagnostics} />
+                    </div>
+                  ) : null}
+                </CollapsiblePanel>
+              </Collapsible>
             ) : null}
           </div>
         </div>

@@ -1,8 +1,8 @@
 import { PencilIcon, PlusIcon, RefreshCwIcon, Trash2Icon, UnplugIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Trans, useTranslation } from "react-i18next";
-
 import { ChipSelect } from "@/components/common/ChipSelect";
+import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "@/components/ui/collapsible";
 import type { AcpAgent, HarnessKind, HarnessVersionInfo } from "@/gen";
 import { HARNESS_LABELS } from "@/lib/entities";
 import { formatList, i18n } from "@/lib/i18n";
@@ -85,13 +85,17 @@ function HarnessRow({ row }: { row: HarnessVersionInfo }) {
       {showOutput ? (
         <div className="q-harness-out">
           {output?.length ? (
-            <details className="q-harness-log">
-              <summary>{t("harnesses.updateLog")}</summary>
-              {/* biome-ignore lint/a11y/noNoninteractiveTabindex: A scrollable log needs keyboard focus. */}
-              <section tabIndex={0} aria-label={t("harnesses.updateLog")}>
-                <pre className="q-mono">{output.join("\n")}</pre>
-              </section>
-            </details>
+            <Collapsible className="q-harness-log">
+              <CollapsibleTrigger className="min-h-7">
+                {t("harnesses.updateLog")}
+              </CollapsibleTrigger>
+              <CollapsiblePanel>
+                {/* biome-ignore lint/a11y/noNoninteractiveTabindex: A scrollable log needs keyboard focus. */}
+                <section tabIndex={0} aria-label={t("harnesses.updateLog")}>
+                  <pre className="q-mono">{output.join("\n")}</pre>
+                </section>
+              </CollapsiblePanel>
+            </Collapsible>
           ) : null}
           <div role="status">
             {result ? (

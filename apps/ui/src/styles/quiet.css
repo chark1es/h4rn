@@ -3024,9 +3024,7 @@
   margin-top: 4px;
   color: var(--fg-3);
 }
-.q-signin-details summary {
-  cursor: pointer;
-}
+
 .q-pal-i .ic {
   color: var(--fg-2);
 }
@@ -4061,15 +4059,7 @@
   font-style: normal;
   color: var(--fg-2);
 }
-.q-details {
-  margin-top: 8px;
-  font-size: 12px;
-}
-.q-details summary {
-  cursor: pointer;
-  color: var(--fg-3);
-  width: fit-content;
-}
+
 .q-qr {
   width: 168px;
   height: 168px;
@@ -5818,34 +5808,6 @@
   }
 }
 
-/* Disclosure: a 12 px chevron instead of the native triangle. */
-.q-disclosure > summary {
-  list-style: none;
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-}
-.q-disclosure > summary::-webkit-details-marker {
-  display: none;
-}
-.q-disclosure > summary::before {
-  content: "";
-  width: 12px;
-  height: 12px;
-  flex: none;
-  background: var(--fg-3);
-  -webkit-mask:
-    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m9 18 6-6-6-6'/%3E%3C/svg%3E")
-    center / contain no-repeat;
-  mask:
-    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m9 18 6-6-6-6'/%3E%3C/svg%3E")
-    center / contain no-repeat;
-  transition: transform var(--duration-micro) var(--ease-enter);
-}
-.q-disclosure[open] > summary::before {
-  transform: rotate(90deg);
-}
-
 /* Harness CLI versions and app update notice (ADR-043). */
 .q-group-head {
   display: flex;
@@ -5907,14 +5869,7 @@
   line-height: 1.5;
   white-space: pre-wrap;
 }
-.q-harness-log summary {
-  min-height: 28px;
-  align-content: center;
-  cursor: pointer;
-}
-.q-harness-log summary:hover {
-  color: var(--fg);
-}
+
 .q-harness-log section {
   max-height: 140px;
   overflow: auto;
