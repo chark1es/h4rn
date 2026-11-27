@@ -1,5 +1,4 @@
-import { createResizableController } from "@ui-sdk/react/resizable";
-import { type ReactNode, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { type ReactNode, useLayoutEffect, useRef, useState } from "react";
 
 import { Resizable, ResizableHandle, ResizablePanel } from "@/components/ui/resizable";
 
@@ -30,32 +29,29 @@ export function ShellSplit({
   onWidth: (width: number) => void;
   children: ReactNode;
 }) {
-  const controller = useMemo(() => createResizableController(), []);
   const groupRef = useRef<HTMLDivElement | null>(null);
-  const widthRef = useRef(width);
-  widthRef.current = width;
   const [groupWidth, setGroupWidth] = useState(0);
-  const groupWidthRef = useRef(0);
   const open = pane !== null && pane !== false && pane !== undefined;
 
   useLayoutEffect(() => {
     const group = groupRef.current;
     if (!group) return;
-    const update = () => {
-      const next = group.getBoundingClientRect().width;
-      groupWidthRef.current = next;
-      setGroupWidth(next);
-      controller.resize(PANE, `${widthRef.current}px`);
-    };
+    const update = () => setGroupWidth(group.getBoundingClientRect().width);
     update();
     const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(update);
     observer?.observe(group);
     return () => observer?.disconnect();
-  }, [controller]);
+  }, []);
 
-  useEffect(() => {
-    if (open) controller.resize(PANE, `${width}px`);
-  }, [controller, open, width]);
+  const share = groupWidth > 0 ? (Math.min(Math.max(width, min), max) / groupWidth) * 100 : 0;
+  const layout =
+    groupWidth <= 0
+      ? undefined
+      : !open
+        ? [100]
+        : side === "start"
+          ? [share, 100 - share]
+          : [100 - share, share];
 
   const paneCell = open
     ? [
@@ -76,14 +72,14 @@ export function ShellSplit({
   return (
     <Resizable
       ref={groupRef}
-      controller={controller}
       className="flex-1"
+      {...(layout ? { layout } : {})}
       {...(groupWidth > 0 ? { step: (STEP_PX / groupWidth) * 100 } : {})}
-      onLayoutChange={(layout, details) => {
+      onLayoutChange={(next, details) => {
         if (details.reason === "imperative" || details.reason === "resize") return;
-        const share = side === "start" ? layout[0] : layout.at(-1);
-        if (share === undefined || groupWidthRef.current <= 0 || layout.length < 2) return;
-        onWidth((share / 100) * groupWidthRef.current);
+        const paneShare = side === "start" ? next[0] : next.at(-1);
+        if (paneShare === undefined || groupWidth <= 0 || next.length < 2) return;
+        onWidth((paneShare / 100) * groupWidth);
       }}
     >
       {side === "start" ? paneCell : null}
