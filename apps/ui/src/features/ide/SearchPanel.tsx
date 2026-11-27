@@ -1,6 +1,7 @@
-import { CaseSensitiveIcon, Loader2Icon, RegexIcon, SearchIcon } from "lucide-react";
+import { CaseSensitiveIcon, RegexIcon, SearchIcon } from "lucide-react";
 import { type CSSProperties, useEffect, useMemo, useRef } from "react";
 import { useTranslation } from "react-i18next";
+import { AgentGlyph } from "@/components/agent/AgentGlyph";
 
 import { Tip } from "@/components/ui/tooltip";
 import type { FsSearchMatch } from "@/gen";
@@ -96,7 +97,10 @@ export function SearchPanel({ search, onQuery, onOption, onRun, onOpen }: Search
             }}
           />
           {search.running ? (
-            <Loader2Icon className="q-icon s14 animate-spin q-faint" aria-hidden />
+            <AgentGlyph
+              glyph={{ kind: "orb", state: "breathing", speed: 0.35, label: t("search.running") }}
+              size={14}
+            />
           ) : null}
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 4, marginTop: 8 }}>

@@ -79,6 +79,7 @@
     "regex": "Expresión regular",
     "glob": "Glob de archivos",
     "run": "Buscar",
+    "running": "Buscando…",
     "failed": "La búsqueda falló.",
     "noMatches": "No hay coincidencias en este espacio de trabajo.",
     "intro": "Escribe un patrón y pulsa Enter. Los resultados llegan a medida que el daemon recorre el árbol.",

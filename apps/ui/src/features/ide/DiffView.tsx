@@ -1,13 +1,13 @@
 import {
   FileDiffIcon,
   FileTextIcon,
-  Loader2Icon,
   MessageSquareIcon,
   RefreshCwIcon,
   TriangleAlertIcon,
 } from "lucide-react";
 import { Fragment, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { Trans, useTranslation } from "react-i18next";
+import { AgentGlyph } from "@/components/agent/AgentGlyph";
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
 import { ChipSelect } from "@/components/common/ChipSelect";
 import { Tip } from "@/components/ui/tooltip";
@@ -512,7 +512,10 @@ export function DiffView({
       >
         <div className="q-empty" style={{ padding: 0 }}>
           <p style={{ margin: 0, display: "flex", alignItems: "center", gap: 8 }}>
-            <Loader2Icon className="q-icon s14 animate-spin" aria-hidden />
+            <AgentGlyph
+              glyph={{ kind: "orb", state: "breathing", speed: 0.35, label: t("diff.loadingText") }}
+              size={14}
+            />
             {t("diff.loadingText")}
           </p>
         </div>
@@ -572,7 +575,15 @@ export function DiffView({
         >
           <div className="q-empty" style={{ padding: 0 }}>
             <p style={{ margin: 0, display: "flex", alignItems: "center", gap: 8 }}>
-              <Loader2Icon className="q-icon s14 animate-spin" aria-hidden />
+              <AgentGlyph
+                glyph={{
+                  kind: "orb",
+                  state: "breathing",
+                  speed: 0.35,
+                  label: t("diff.listingText"),
+                }}
+                size={14}
+              />
               {t("diff.listingText")}
             </p>
           </div>

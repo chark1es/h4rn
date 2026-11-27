@@ -78,6 +78,7 @@
     "regex": "Regular expression",
     "glob": "File glob",
     "run": "Search",
+    "running": "Searching…",
     "failed": "Search failed.",
     "noMatches": "No matches in this workspace.",
     "intro": "Type a pattern, then Enter. Results stream in as the daemon walks the tree.",
