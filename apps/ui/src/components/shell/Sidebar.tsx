@@ -940,12 +940,13 @@ function SettingsSidebar() {
                 <span className="lbl">{t(`nav.sections.${item.key}`)}</span>
                 {item.key === "harnesses" && harnessUpdates > 0 ? (
                   <Tip label={t("nav.harnessUpdates")}>
-                    <span
-                      className="ct inline-flex"
-                      role="img"
-                      aria-label={t("nav.harnessUpdates")}
-                    >
-                      <CircleArrowUpIcon className="size-3.5" strokeWidth={1.5} aria-hidden />
+                    <span className="ct q-num inline-flex items-center gap-1">
+                      <CircleArrowUpIcon
+                        className="size-3.5 shrink-0"
+                        strokeWidth={1.5}
+                        aria-hidden
+                      />
+                      {harnessUpdates}
                     </span>
                   </Tip>
                 ) : null}
