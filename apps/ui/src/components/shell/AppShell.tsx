@@ -63,6 +63,7 @@ import { AppUpdateNotice } from "@/features/updates/AppUpdateNotice";
 import { UsagePage } from "@/features/usage/UsagePage";
 import type { HarnessKind } from "@/gen";
 import { useIsPhone } from "@/hooks/use-media-query";
+import { useViewFade, viewKey } from "@/hooks/use-view-fade";
 import { useViewportWidth } from "@/hooks/use-viewport-width";
 import {
   DEFAULT_NEW_THREAD_WORKSPACE,
@@ -796,6 +797,8 @@ export function AppShell() {
       <Surface surface={route.surface} path={route.path} />
     ) : null;
   const ide = layout.view === "ide" && !isPhone && (isThread || route.kind === "ide");
+  const viewRef = useRef<HTMLDivElement>(null);
+  useViewFade(viewRef, viewKey(route, ide ? "ide" : "main"));
   const thread = activeThread(threads, selectedThreadId);
   const preview = useApp((state) => state.ui.preview);
   const previewExpanded = useApp((state) => state.ui.previewExpanded);
@@ -813,10 +816,7 @@ export function AppShell() {
         {surface ? <OfflineBanner /> : null}
         <AppUpdateNotice inline />
         <McpApprovalCard />
-        <div
-          className="q-ph-content"
-          style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}
-        >
+        <div ref={viewRef} className="q-ph-content flex min-h-0 flex-1 flex-col">
           {ide ? (
             <PhoneIdeNotice />
           ) : isThread ? (
@@ -875,7 +875,7 @@ export function AppShell() {
         {surface ? <OfflineBanner /> : null}
         <AppUpdateNotice />
         <McpApprovalCard />
-        <div style={{ flex: 1, minHeight: 0, display: "flex" }}>
+        <div ref={viewRef} className="flex min-h-0 flex-1">
           {main}
           {showPanel && thread ? <RightPanel thread={thread} ide={ide} /> : null}
         </div>
