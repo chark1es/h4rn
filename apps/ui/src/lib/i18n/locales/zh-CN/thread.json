@@ -162,8 +162,6 @@
     "phone": {
       "details": "详情",
       "review": "查看",
-      "close": "关闭审批查看",
-      "sheet": "批准命令",
       "runCommandOn": "在 {{host}} 上运行命令",
       "reviewRequestOn": "查看 {{host}} 上的请求",
       "folder": "文件夹",

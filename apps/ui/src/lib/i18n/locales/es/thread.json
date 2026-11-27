@@ -168,8 +168,6 @@
     "phone": {
       "details": "Detalles",
       "review": "Revisar",
-      "close": "Cerrar la revisión de la aprobación",
-      "sheet": "Aprobar comando",
       "runCommandOn": "Ejecutar un comando en {{host}}",
       "reviewRequestOn": "Revisar una solicitud en {{host}}",
       "folder": "Carpeta",

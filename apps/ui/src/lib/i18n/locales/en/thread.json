@@ -165,8 +165,6 @@
     "phone": {
       "details": "Details",
       "review": "Review",
-      "close": "Close approval review",
-      "sheet": "Approve command",
       "runCommandOn": "Run a command on {{host}}",
       "reviewRequestOn": "Review a request on {{host}}",
       "folder": "Folder",
