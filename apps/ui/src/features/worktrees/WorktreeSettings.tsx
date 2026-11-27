@@ -202,13 +202,12 @@ export function WorktreeSettings() {
           <div className="ctl">
             <input
               id="worktree-location"
-              className="q-input q-mono"
+              className="q-input q-mono text-xs"
               value={location}
               disabled={!online || !settingsCurrent || settingsLoading || settingsSaving}
               placeholder="~/worktrees"
               spellCheck={false}
               onChange={(event) => setLocation(event.target.value)}
-              style={{ maxWidth: 320, fontSize: 12 }}
             />
           </div>
         </div>
@@ -222,13 +221,12 @@ export function WorktreeSettings() {
           <div className="ctl">
             <input
               id="worktree-branch-prefix"
-              className="q-input q-mono"
+              className="q-input q-mono text-xs"
               value={prefix}
               disabled={!online || !settingsCurrent || settingsLoading || settingsSaving}
               placeholder="h4rn/"
               spellCheck={false}
               onChange={(event) => setPrefix(event.target.value)}
-              style={{ maxWidth: 220, fontSize: 12 }}
             />
           </div>
         </div>

@@ -308,7 +308,6 @@ function AddProfile() {
             value={name}
             onChange={(event) => setName(event.target.value)}
             aria-label={t("proxy.add.labelLabel")}
-            style={{ maxWidth: 260 }}
           />
         </div>
       </div>
@@ -318,11 +317,10 @@ function AddProfile() {
         </div>
         <div className="ctl">
           <input
-            className="q-input q-mono"
+            className="q-input q-mono text-xs"
             value={baseUrl}
             onChange={(event) => setBaseUrl(event.target.value)}
             aria-label={t("proxy.add.baseUrlLabel")}
-            style={{ maxWidth: 300, fontSize: 12 }}
           />
         </div>
       </div>
@@ -333,13 +331,12 @@ function AddProfile() {
         </div>
         <div className="ctl">
           <input
-            className="q-input q-mono"
+            className="q-input q-mono text-xs"
             type="password"
             value={managementKey}
             onChange={(event) => setManagementKey(event.target.value)}
             placeholder={t("proxy.storedOn", { host })}
             aria-label={t("proxy.managementKey")}
-            style={{ maxWidth: 300, fontSize: 12 }}
           />
         </div>
       </div>
@@ -350,13 +347,12 @@ function AddProfile() {
         </div>
         <div className="ctl">
           <input
-            className="q-input q-mono"
+            className="q-input q-mono text-xs"
             type="password"
             value={apiKey}
             onChange={(event) => setApiKey(event.target.value)}
             placeholder={t("proxy.storedOn", { host })}
             aria-label={t("proxy.accessKey")}
-            style={{ maxWidth: 300, fontSize: 12 }}
           />
         </div>
       </div>
@@ -425,11 +421,10 @@ function ProfileField({
       </div>
       <div className="ctl">
         <input
-          className="q-input q-mono"
+          className="q-input q-mono text-xs"
           value={draft}
           onChange={(event) => setDraft(event.target.value)}
           aria-label={label}
-          style={{ maxWidth: 300, fontSize: 12 }}
         />
         <button
           type="button"
@@ -471,13 +466,12 @@ function SecretField({
         {editing ? (
           <>
             <input
-              className="q-input q-mono"
+              className="q-input q-mono text-xs"
               type="password"
               value={value}
               onChange={(event) => setValue(event.target.value)}
               placeholder={t("proxy.newKey")}
               aria-label={t("proxy.newKeyLabel", { label })}
-              style={{ maxWidth: 240, fontSize: 12 }}
             />
             <button
               type="button"
@@ -551,7 +545,6 @@ function HarnessRow({ profile, harness }: { profile: ProxyProfile; harness: Harn
           />
           <ChipSelect
             label={t("proxy.harness.defaultModel", { harness: HARNESS_LABELS[harness] })}
-            className="w-47.5"
             disabled={!enabled}
             value={defaultModel}
             options={[
@@ -977,7 +970,6 @@ export function ProxySettings() {
         {profiles.length > 1 ? (
           <ChipSelect
             label={t("proxy.profile")}
-            className="w-40"
             value={selected?.id ?? ""}
             options={profiles.map((profile) => ({
               value: profile.id,

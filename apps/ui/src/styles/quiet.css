@@ -3813,13 +3813,30 @@ fieldset.q-seg-fs {
   color: var(--fg-2);
   margin-top: 2px;
 }
-/* Controls sit at the trailing edge of the row; inputs still fill it. */
 .q-field .ctl {
   flex: 1;
   display: flex;
   align-items: center;
-  justify-content: flex-end;
-  gap: 10px;
+  gap: 8px;
+  min-width: 0;
+}
+/* One label column and one control column: every control starts at the same
+   x and fills the column; read-only values sit in it too. */
+.q-field:has(> .lab + .ctl) {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 20rem;
+  column-gap: 24px;
+}
+.q-field:has(> .lab + .ctl) > .lab {
+  min-width: 0;
+}
+.q-field > .ctl > .q-input,
+.q-field > .ctl > input,
+.q-field > .ctl > textarea,
+.q-field > .ctl > [data-slot="select-trigger"],
+.q-field > .ctl > [data-slot="input"] {
+  flex: 1 1 auto;
+  width: 100%;
   min-width: 0;
 }
 .q-secret {
@@ -5645,7 +5662,9 @@ fieldset.q-seg-fs {
   .q-group > h2 {
     flex-wrap: wrap;
   }
-  .q-field {
+  .q-field,
+  .q-field:has(> .lab + .ctl) {
+    display: flex;
     flex-direction: column;
     align-items: stretch;
     gap: 8px;

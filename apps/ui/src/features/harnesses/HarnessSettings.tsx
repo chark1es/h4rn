@@ -49,7 +49,7 @@ function HarnessRow({ row }: { row: HarnessVersionInfo }) {
   return (
     <div className="q-harness-row">
       <div className="q-field">
-        <div className="lab" style={{ width: 200 }}>
+        <div className="lab">
           <div className="t">{HARNESS_LABELS[kind]}</div>
           <div className="s">{statusText(row)}</div>
         </div>
@@ -312,7 +312,6 @@ function AgentForm({
             value={form.name}
             onChange={(event) => patch({ name: event.target.value })}
             aria-label={t("harnesses.acp.displayNameLabel")}
-            style={{ maxWidth: 300 }}
           />
         </div>
       </div>
@@ -329,7 +328,6 @@ function AgentForm({
             disabled={agent !== "new"}
             onChange={(event) => patch({ id: event.target.value })}
             aria-label={t("harnesses.acp.instanceIdLabel")}
-            style={{ maxWidth: 240 }}
           />
         </div>
       </div>
@@ -346,7 +344,6 @@ function AgentForm({
             onChange={(event) => patch({ command: event.target.value })}
             aria-label={t("harnesses.acp.commandLabel")}
             placeholder="deepseek-acp"
-            style={{ maxWidth: 360 }}
           />
         </div>
       </div>
@@ -468,7 +465,6 @@ function AgentForm({
               onChange={(event) => patch({ path: event.target.value })}
               aria-label={t("harnesses.acp.fixedPathLabel")}
               placeholder="/home/you/project"
-              style={{ maxWidth: 320 }}
             />
           ) : null}
         </div>

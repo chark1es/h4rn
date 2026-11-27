@@ -102,7 +102,6 @@ export function AutoResumeSettings() {
             <ChipSelect<string>
               label={t("resume.longestWait")}
               value={String(draft.max_wait_ms)}
-              className="w-45"
               options={WAIT_CHOICES.map((choice) => ({
                 value: String(choice.ms),
                 label: formatNumber(choice.amount, {
@@ -136,7 +135,6 @@ export function AutoResumeSettings() {
               onChange={(event) =>
                 patch({ jitter_ms: Math.max(0, Number(event.target.value) || 0) * 1000 })
               }
-              style={{ maxWidth: 100, fontSize: 12 }}
             />
             <span className="q-faint" style={{ fontSize: 12 }}>
               {t("resume.seconds")}
@@ -148,9 +146,8 @@ export function AutoResumeSettings() {
             <div className="t">{t("resume.prompt")}</div>
             <div className="s">{t("resume.promptHint")}</div>
           </div>
-          <div className="ctl" style={{ display: "block" }}>
+          <div className="ctl">
             <textarea
-              className="q-input"
               value={draft.prompt}
               aria-label={t("resume.prompt")}
               rows={1}
@@ -162,14 +159,7 @@ export function AutoResumeSettings() {
                 }
               }}
               onChange={(event) => patch({ prompt: event.target.value })}
-              style={{
-                width: "100%",
-                maxWidth: 520,
-                fontSize: 13,
-                padding: 8,
-                resize: "none",
-                overflow: "hidden",
-              }}
+              className="q-input resize-none overflow-hidden p-2 text-sm"
             />
           </div>
         </div>

@@ -68,6 +68,7 @@ function SelectTrigger({
 }: SelectTriggerProps) {
   return (
     <SelectTriggerPrimitive
+      data-slot="select-trigger"
       disabled={disabled ?? false}
       className={cn(selectTriggerVariants({ size }), className)}
       {...props}

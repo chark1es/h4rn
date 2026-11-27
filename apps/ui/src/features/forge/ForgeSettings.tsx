@@ -248,7 +248,6 @@ function AddAccountForm({
           <ChipSelect
             label={t("forges.add.forge")}
             value={forge}
-            className="w-47.5"
             options={FORGES.map((kind) => ({ value: kind, label: forgeLabel(kind) }))}
             onChange={changeForge}
           />
@@ -275,8 +274,7 @@ function AddAccountForm({
         </div>
         <div className="ctl">
           <input
-            className="q-input q-mono"
-            style={{ maxWidth: 300, fontSize: 12 }}
+            className="q-input q-mono text-xs"
             aria-label={t("forges.add.baseUrlLabel")}
             value={baseUrl}
             onChange={(event) => setBaseUrl(event.target.value)}
@@ -292,8 +290,7 @@ function AddAccountForm({
           </div>
           <div className="ctl">
             <input
-              className="q-input q-mono"
-              style={{ maxWidth: 300, fontSize: 12 }}
+              className="q-input q-mono text-xs"
               autoComplete="username"
               aria-label={t("forges.add.email")}
               value={username}
@@ -318,7 +315,6 @@ function AddAccountForm({
             <ChipSelect
               label={t("forges.add.validateAgainstLabel")}
               value={detectedRepo ? repositoryName(detectedRepo) : ""}
-              className="w-75"
               options={candidateRepos.map((repo) => ({
                 value: repositoryName(repo),
                 label: repositoryName(repo),
@@ -335,8 +331,7 @@ function AddAccountForm({
         </div>
         <div className="ctl">
           <input
-            className="q-input q-mono"
-            style={{ maxWidth: 320, fontSize: 12 }}
+            className="q-input q-mono text-xs"
             type="password"
             autoComplete="off"
             aria-label={t("forges.add.tokenLabel")}

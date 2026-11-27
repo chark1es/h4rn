@@ -172,7 +172,6 @@ export function SourceControlSettings() {
                   <ChipSelect<AgentChoice>
                     label={t("sourceControl.codingAgentLabel")}
                     value={draft.harness ?? FOLLOW_THREAD}
-                    className="w-55"
                     options={[
                       {
                         value: FOLLOW_THREAD,
@@ -204,7 +203,6 @@ export function SourceControlSettings() {
                     <ChipSelect
                       label={t("sourceControl.modes.text_generator")}
                       value={draft.generator_id ?? ""}
-                      className="w-55"
                       options={generators.map((candidate) => ({
                         value: candidate.id,
                         label: candidate.name,
@@ -222,7 +220,6 @@ export function SourceControlSettings() {
                   <div className="ctl">
                     <input
                       className="q-input q-mono"
-                      style={{ width: 240 }}
                       aria-label={t("sourceControl.modelLabel")}
                       placeholder={generator?.model ?? t("sourceControl.modelPlaceholder")}
                       value={draft.model ?? ""}

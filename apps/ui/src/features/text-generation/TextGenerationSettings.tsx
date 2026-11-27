@@ -222,11 +222,10 @@ export function AddGenerator() {
         </div>
         <div className="ctl">
           <input
-            className="q-input"
+            className="q-input text-xs"
             value={name}
             aria-label={t("textGeneration.nameLabel")}
             onChange={(event) => setName(event.target.value)}
-            style={{ maxWidth: 300, fontSize: 12 }}
           />
         </div>
       </div>
@@ -239,7 +238,6 @@ export function AddGenerator() {
           <ChipSelect<TextGeneratorKind>
             label={t("textGeneration.kindLabel")}
             value={kind}
-            className="w-47.5"
             options={KINDS.map((entry) => ({
               value: entry,
               label: kindLabel(entry),
@@ -262,14 +260,13 @@ export function AddGenerator() {
         </div>
         <div className="ctl">
           <input
-            className="q-input q-mono"
+            className="q-input q-mono text-xs"
             value={baseUrl}
             aria-label={t("textGeneration.baseUrlLabel")}
             placeholder={
               kind === "anthropic" ? "https://api.anthropic.com" : "https://api.openai.com/v1"
             }
             onChange={(event) => setBaseUrl(event.target.value)}
-            style={{ maxWidth: 340, fontSize: 12 }}
           />
         </div>
       </div>
@@ -286,12 +283,11 @@ export function AddGenerator() {
         </div>
         <div className="ctl">
           <input
-            className="q-input q-mono"
+            className="q-input q-mono text-xs"
             value={model}
             aria-label={t("textGeneration.modelLabel")}
             placeholder="gpt-5.4-mini"
             onChange={(event) => setModel(event.target.value)}
-            style={{ maxWidth: 260, fontSize: 12 }}
           />
         </div>
       </div>
@@ -302,13 +298,12 @@ export function AddGenerator() {
         </div>
         <div className="ctl">
           <input
-            className="q-input q-mono"
+            className="q-input q-mono text-xs"
             type="password"
             value={apiKey}
             aria-label={t("textGeneration.apiKeyLabel")}
             placeholder={t("textGeneration.writeOnly")}
             onChange={(event) => setApiKey(event.target.value)}
-            style={{ maxWidth: 300, fontSize: 12 }}
           />
         </div>
       </div>
@@ -546,7 +541,6 @@ function TitleDraftForm({ saved }: { saved: TextGenerationSettings }) {
             <ChipSelect<AgentChoice>
               label={t("textGeneration.codingAgentLabel")}
               value={draft.harness ?? FOLLOW_THREAD}
-              className="w-55"
               options={[
                 {
                   value: FOLLOW_THREAD,
@@ -582,7 +576,6 @@ function TitleDraftForm({ saved }: { saved: TextGenerationSettings }) {
               <ChipSelect<TextGeneratorId>
                 label={t("textGeneration.generatorLabel")}
                 value={draft.generator_id ?? ""}
-                className="w-50"
                 disabled={generators.length === 0}
                 options={generators.map((entry) => ({
                   value: entry.id,
@@ -602,11 +595,10 @@ function TitleDraftForm({ saved }: { saved: TextGenerationSettings }) {
             </div>
             <div className="ctl">
               <input
-                className="q-input q-mono"
+                className="q-input q-mono text-xs"
                 value={model}
                 aria-label={t("textGeneration.titleModelLabel")}
                 onChange={(event) => patchSetting({ model: event.target.value })}
-                style={{ maxWidth: 260, fontSize: 12 }}
               />
               <button
                 type="button"
