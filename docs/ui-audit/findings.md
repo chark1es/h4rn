@@ -522,7 +522,7 @@ The store keeps the last three with no de-duplication, so the same error shows t
 - Component: `SettingsRemote.tsx` (Account, Hosts & devices), `ProxySettings.tsx`, `ForgeSettings.tsx`, `HarnessSettings.tsx`.
 - Fix: one rule. Trailing row actions use the secondary small variant. Destructive actions use the destructive variant and open an Alert Dialog. Ghost is only for tertiary actions in toolbars.
 
-**After: Fixed.** Trailing row actions use the secondary small button and removals use the destructive variant (Remove, Revoke); Forges' Remove opens an Alert Dialog, though Revoke on Hosts still uses an inline confirm (see keyboard.md).
+**After: Fixed.** Trailing row actions use the secondary small button and removals use the destructive variant (Remove, Revoke); Forges' Remove and the Revoke, Sign out and Disconnect actions on Hosts, Account and Network access open an Alert Dialog that keeps focus (see keyboard.md).
 
 ### K6 Shortcut hints show keys that don't do anything
 
