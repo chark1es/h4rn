@@ -3746,8 +3746,10 @@ fieldset.q-seg-fs {
 .q-group {
   margin-bottom: 32px;
 }
-.q-group > h2 {
+.q-group > h2,
+.q-group-head > h2 {
   font-size: 14px;
+  line-height: 20px;
   font-weight: 600;
   margin: 0 0 4px;
   display: flex;
@@ -5804,6 +5806,10 @@ fieldset.q-seg-fs {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+  margin-bottom: 4px;
+}
+.q-group-head > h2 {
+  margin: 0;
 }
 /* One argument or environment override in the ACP agent form. */
 .q-acp-row {
