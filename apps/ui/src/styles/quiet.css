@@ -1044,6 +1044,10 @@
 .q-prov .q-sep {
   margin: 0 2px;
 }
+/* The branch gives up space first; the harness name then ellipsizes. */
+.q-prov .br {
+  flex-shrink: 100;
+}
 .q-prov .br {
   display: inline-flex;
   align-items: center;
