@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { setLocalePreference } from "@/lib/i18n";
 import { promiseToast, pushToast } from "@/lib/toast";
-import { Toaster } from "./sonner";
+import { Toaster, toastClearance } from "./sonner";
 
 function stubViewport(phone: boolean) {
   window.matchMedia = ((query: string) => ({
@@ -120,5 +120,35 @@ describe("Toaster", () => {
     expect(toaster()?.getAttribute("data-sonner-theme")).toBe("light");
     expect(toaster()?.getAttribute("data-y-position")).toBe("bottom");
     expect(toaster()?.getAttribute("data-x-position")).toBe("right");
+  });
+
+  it("shows the same message once, however often it is raised", async () => {
+    render(<Toaster />);
+    act(() => {
+      pushToast({ title: "Couldn't reach atlas.", variant: "error" });
+      pushToast({ title: "Couldn't reach atlas.", variant: "error" });
+      pushToast({ title: "Couldn't reach orion.", variant: "error" });
+    });
+    await screen.findByText("Couldn't reach orion.");
+    expect(screen.getAllByText("Couldn't reach atlas.")).toHaveLength(1);
+  });
+
+  it("keeps errors up longer than other toasts", () => {
+    pushToast({ title: "Saved." });
+    pushToast({ title: "Couldn't save.", variant: "error" });
+    const history = toast.getHistory() as { title?: unknown; duration?: number }[];
+    const saved = history.find((entry) => entry.title === "Saved.");
+    const failed = history.find((entry) => entry.title === "Couldn't save.");
+    expect(saved?.duration).toBeUndefined();
+    expect(failed?.duration).toBe(8000);
+  });
+
+  it("lifts desktop toasts above the dock it is told about", async () => {
+    const dock = document.createElement("div");
+    Object.defineProperty(dock, "offsetHeight", { value: 180 });
+    const release = toastClearance(dock);
+    expect(document.documentElement.style.getPropertyValue("--toast-dock")).toBe("180px");
+    release?.();
+    expect(document.documentElement.style.getPropertyValue("--toast-dock")).toBe("");
   });
 });

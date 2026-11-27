@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 
 import { AgentGlyph } from "@/components/agent/AgentGlyph";
 import { PhonePanelSheet } from "@/components/panel/PhonePanelSheet";
+import { toastClearance } from "@/components/ui/sonner";
 import { TerminalPanel } from "@/features/terminal/TerminalPanel";
 import { AutoResumeCards } from "@/features/usage/AutoResumeCard";
 import { UsageFooter } from "@/features/usage/UsageFooter";
@@ -392,7 +393,7 @@ export function ThreadPane({ threadId }: { threadId: string }) {
       )}
 
       {!threadError || loaded ? (
-        <div className="q-dock">
+        <div ref={toastClearance} className="q-dock">
           <div className="q-col">
             {isPhone ? (
               <>

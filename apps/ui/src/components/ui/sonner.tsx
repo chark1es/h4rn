@@ -52,7 +52,6 @@ const CLASS_NAMES: ToastClassnames = {
     "group/toast flex w-(--width) items-start gap-2.5 rounded-xl border border-border bg-popover py-3 pr-10 pl-3 font-sans text-sm text-popover-foreground shadow-popup",
     "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring",
   ),
-  error: "border-danger/35",
   icon: "relative flex h-4.5 w-4 shrink-0 items-center justify-center",
   content: "flex min-w-0 flex-1 flex-col gap-0.5",
   title: cn("font-medium text-foreground"),
@@ -66,8 +65,25 @@ const CLASS_NAMES: ToastClassnames = {
 };
 
 /**
- * The app's one toast stack, on Sonner. Bottom right on desktop, top centre on
- * the phone, three deep, expanding on hover.
+ * A ref callback for a bottom dock, like the thread's approval card and composer:
+ * desktop toasts sit above it while it is on screen.
+ */
+function toastClearance(node: HTMLElement | null): (() => void) | undefined {
+  if (!node) return undefined;
+  const root = document.documentElement;
+  const update = () => root.style.setProperty("--toast-dock", `${node.offsetHeight}px`);
+  update();
+  const observer = new ResizeObserver(update);
+  observer.observe(node);
+  return () => {
+    observer.disconnect();
+    root.style.removeProperty("--toast-dock");
+  };
+}
+
+/**
+ * The app's one toast stack, on Sonner. Bottom right on desktop, above the
+ * composer when there is one; top centre on the phone, below the safe area.
  */
 function Toaster(props: ToasterProps) {
   const { t } = useTranslation("shell");
@@ -77,9 +93,9 @@ function Toaster(props: ToasterProps) {
     <Sonner
       theme={theme}
       position={phone ? "top-center" : "bottom-right"}
-      offset={{ bottom: "2.5rem", right: "0.75rem" }}
+      offset={{ bottom: "calc(var(--toast-dock, 1.5rem) + 0.75rem)", right: "1rem" }}
       mobileOffset={{
-        top: "calc(env(safe-area-inset-top) + 0.5rem)",
+        top: "calc(env(safe-area-inset-top) + 3.25rem)",
         left: "0.5rem",
         right: "0.5rem",
       }}
@@ -99,4 +115,4 @@ function Toaster(props: ToasterProps) {
   );
 }
 
-export { Toaster };
+export { Toaster, toastClearance };

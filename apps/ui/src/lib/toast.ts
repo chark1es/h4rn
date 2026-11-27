@@ -20,12 +20,20 @@ export type ToastInput = {
 
 const SHOW = { error: toast.error, info: toast.info, success: toast.success } as const;
 
-/** The one way the app raises a notification. Words are already translated. */
+const ERROR_DURATION = 8000;
+
+/**
+ * The one way the app raises a notification. Words are already translated.
+ * The same message raised again replaces the one on screen instead of stacking.
+ */
 export function pushToast(input: ToastInput): ToastId {
   const { action } = input;
-  return SHOW[input.variant ?? "info"](input.title, {
+  const variant = input.variant ?? "info";
+  const duration = input.ttlMs ?? (variant === "error" ? ERROR_DURATION : undefined);
+  return SHOW[variant](input.title, {
+    id: `${variant}\u0000${input.title}\u0000${input.description ?? ""}`,
     ...(input.description ? { description: input.description } : {}),
-    ...(input.ttlMs === undefined ? {} : { duration: input.ttlMs }),
+    ...(duration === undefined ? {} : { duration }),
     ...(action ? { action: { label: action.label, onClick: () => action.onClick() } } : {}),
   });
 }
