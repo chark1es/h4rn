@@ -10,6 +10,7 @@ import {
 import { Fragment, useEffect, useMemo, useState } from "react";
 import { Trans, useTranslation } from "react-i18next";
 import { ChipSelect } from "@/components/common/ChipSelect";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Switch } from "@/components/ui/switch";
 import type {
@@ -365,16 +366,11 @@ function AddProfile() {
           <div className="t">{t("common:default")}</div>
         </div>
         <div className="ctl">
-          <button
-            type="button"
-            className={cn("q-check", isDefault && "on")}
-            role="switch"
-            aria-checked={isDefault}
+          <Checkbox
+            checked={isDefault}
             aria-label={t("proxy.add.defaultLabel")}
-            onClick={() => setIsDefault((value) => !value)}
-          >
-            {isDefault ? <CheckIcon className="q-icon s12" strokeWidth={2} aria-hidden /> : null}
-          </button>
+            onCheckedChange={(next) => setIsDefault(next === true)}
+          />
         </div>
       </div>
       <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
