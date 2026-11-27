@@ -19,11 +19,12 @@ import {
 import { CheckIcon, ChevronRightIcon } from "lucide-react";
 import type * as React from "react";
 
-import { ShortcutCaps } from "@/components/ui/kbd";
+import { KeyGlyphs } from "@/components/ui/kbd";
 import {
   ariaKeyShortcut,
   bindingFor,
   type CommandId,
+  chordText,
   useKeybindingsVersion,
 } from "@/lib/keybindings";
 import { cn } from "@/lib/utils";
@@ -282,11 +283,19 @@ function MenuSeparator({
   );
 }
 
-/** A command's keys, right-aligned in muted keycaps. */
+/** A command's keys as plain muted text, right-aligned; follows rebinding live. */
 function MenuShortcut({ command, className }: { command: CommandId; className?: string }) {
+  useKeybindingsVersion();
   return (
-    <span aria-hidden="true" className={cn("ms-auto inline-flex ps-4 phone:hidden", className)}>
-      <ShortcutCaps command={command} />
+    <span
+      aria-hidden="true"
+      data-slot="menu-shortcut"
+      className={cn(
+        "ms-auto inline-flex items-center gap-px ps-4 text-xs text-muted-foreground tabular-nums phone:hidden [&_svg]:size-3",
+        className,
+      )}
+    >
+      <KeyGlyphs value={chordText(bindingFor(command))} />
     </span>
   );
 }

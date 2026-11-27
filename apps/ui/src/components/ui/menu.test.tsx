@@ -87,9 +87,9 @@ describe("Menu", () => {
     const pin = screen.getByRole("menuitem", { name: /Keep in Working/ });
     expect(pin.hasAttribute("data-has-icon")).toBe(false);
     expect(pin.getAttribute("aria-keyshortcuts")).toMatch(/^(Control|Meta)\+Alt\+P$/);
-    expect([...pin.querySelectorAll('[data-slot="kbd"]')].map((cap) => cap.textContent)).toEqual(
-      expect.arrayContaining(["P"]),
-    );
+    const hint = pin.querySelector('[data-slot="menu-shortcut"]');
+    expect(hint?.querySelector('[data-slot="kbd"]')).toBeNull();
+    expect(hint?.textContent).toMatch(/P$/);
     const check = screen.getByRole("menuitemcheckbox", { name: "Word wrap" });
     expect(check.hasAttribute("data-has-icon")).toBe(true);
     expect(screen.getByText("Started today").closest('[role="menuitem"]')).toBeNull();
