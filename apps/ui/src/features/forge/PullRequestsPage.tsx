@@ -29,6 +29,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { SegmentedControl, SegmentedControlItem } from "@/components/ui/segmented-control";
+import { Tabs, TabsCount, TabsList, TabsTab } from "@/components/ui/tabs";
 import {
   accountForRepo,
   appendComment,
@@ -1336,50 +1337,36 @@ function PrDetail({
       <div className="q-page">
         <div className="q-pr-cols">
           <div className="q-pr-main">
-            <div className="q-tabs" role="tablist">
-              <button
-                type="button"
-                role="tab"
-                aria-selected={tab === "conversation"}
-                onClick={() => setTab("conversation")}
-              >
-                {t("tabs.conversation")}{" "}
-                <span className="c">
-                  {formatNumber((comments?.comments.length ?? 0) + unresolved)}
-                </span>
-              </button>
-              <button
-                type="button"
-                role="tab"
-                aria-selected={tab === "commits"}
-                onClick={() => setTab("commits")}
-              >
-                {t("tabs.commits")}{" "}
-                <span className="c">{formatNumber(commits?.commits.length ?? pr.commits)}</span>
-              </button>
-              <button
-                type="button"
-                role="tab"
-                aria-selected={tab === "checks"}
-                onClick={() => setTab("checks")}
-              >
-                {t("tabs.checks")} <span className="c">{formatNumber(total)}</span>
-              </button>
-              <button
-                type="button"
-                role="tab"
-                aria-selected={tab === "files"}
-                onClick={() => setTab("files")}
-              >
-                {t("tabs.files")}{" "}
-                <span
-                  className="c"
-                  title={pr.changed_files_known ? undefined : t("tabs.filesUnknown")}
-                >
-                  {pr.changed_files_known ? formatNumber(pr.changed_files) : "—"}
-                </span>
-              </button>
-            </div>
+            <Tabs
+              className="mb-5 border-b border-border"
+              value={tab}
+              onValueChange={(value) => {
+                if (value) setTab(value as typeof tab);
+              }}
+            >
+              <TabsList aria-label={t("tabs.label")} className="-mb-px gap-5 overflow-x-auto">
+                <TabsTab value="conversation">
+                  {t("tabs.conversation")}
+                  <TabsCount>
+                    {formatNumber((comments?.comments.length ?? 0) + unresolved)}
+                  </TabsCount>
+                </TabsTab>
+                <TabsTab value="commits">
+                  {t("tabs.commits")}
+                  <TabsCount>{formatNumber(commits?.commits.length ?? pr.commits)}</TabsCount>
+                </TabsTab>
+                <TabsTab value="checks">
+                  {t("tabs.checks")}
+                  <TabsCount>{formatNumber(total)}</TabsCount>
+                </TabsTab>
+                <TabsTab value="files">
+                  {t("tabs.files")}
+                  <TabsCount title={pr.changed_files_known ? undefined : t("tabs.filesUnknown")}>
+                    {pr.changed_files_known ? formatNumber(pr.changed_files) : "—"}
+                  </TabsCount>
+                </TabsTab>
+              </TabsList>
+            </Tabs>
 
             {tab === "conversation" ? (
               <>

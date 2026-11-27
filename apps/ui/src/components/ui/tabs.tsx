@@ -24,6 +24,7 @@ const tabsListVariants = cva("group/tabs relative isolate flex min-w-0 shrink-0 
     variant: {
       underline: "h-9 gap-4",
       segmented: "inline-flex h-7 w-fit rounded-md bg-muted p-0.5 phone:h-9",
+      bare: "",
     },
   },
   defaultVariants: { variant: "underline" },
@@ -40,6 +41,7 @@ const tabsIndicatorVariants = cva(
         underline: "bottom-0 h-0.5 rounded-full bg-foreground",
         segmented:
           "top-(--active-tab-top) -z-10 h-(--active-tab-height) rounded-sm bg-card shadow-[inset_0_0_0_1px_var(--input)]",
+        bare: "hidden",
       },
     },
     defaultVariants: { variant: "underline" },

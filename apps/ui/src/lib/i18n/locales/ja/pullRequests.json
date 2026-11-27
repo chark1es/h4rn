@@ -94,6 +94,7 @@
     "openOn": "{{forge}} で開く"
   },
   "tabs": {
+    "label": "プルリクエストのセクション",
     "conversation": "会話",
     "commits": "コミット",
     "checks": "チェック",

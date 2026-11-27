@@ -4,8 +4,8 @@ import "./terminal.css";
 import { ChevronLeftIcon, PlusIcon, SearchIcon, TerminalIcon, XIcon } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { Trans, useTranslation } from "react-i18next";
-
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
+import { Tabs, TabsList, TabsTab } from "@/components/ui/tabs";
 import { useIsPhone } from "@/hooks/use-media-query";
 import { machineSeed } from "@/lib/entities";
 import { getClient, useApp } from "@/lib/store/appStore";
@@ -124,45 +124,49 @@ export function TerminalPanel({
         </>
       ) : (
         <div className="q-term-head">
-          <div className="q-ttabs">
-            {tabs.map((tab, index) => {
-              const active = tab.key === activeKey;
-              return (
-                <div key={tab.key} className="q-ttab-wrap">
-                  <button
-                    type="button"
-                    role="tab"
-                    aria-selected={active}
-                    className="q-ttab"
-                    onClick={() => setActiveKey(tab.key)}
-                    title={tab.title}
-                  >
-                    {index === 0 ? (
-                      <TerminalIcon className="q-icon s14 q-faint" strokeWidth={1.5} aria-hidden />
-                    ) : null}
-                    {tab.title}
-                    <span className="q-faint">{hostName}</span>
-                  </button>
-                  <button
-                    type="button"
-                    aria-label={t("terminal.close", { name: tab.title })}
-                    className="q-ttab-x"
-                    onClick={() => closeTab(tab.key)}
-                  >
-                    <XIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
-                  </button>
-                </div>
-              );
-            })}
-            <button
-              type="button"
-              aria-label={t("terminal.new")}
-              className="q-ibtn"
-              onClick={addTab}
-            >
-              <PlusIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-            </button>
-          </div>
+          <Tabs
+            className="min-w-0 flex-1 flex-row"
+            value={activeKey}
+            onValueChange={(value) => {
+              if (value) setActiveKey(value);
+            }}
+          >
+            <TabsList variant="bare" aria-label={t("terminal.tabs")} className="q-ttabs">
+              {tabs.map((tab, index) => {
+                return (
+                  <div key={tab.key} className="q-ttab-wrap">
+                    <TabsTab value={tab.key} className="q-ttab" title={tab.title}>
+                      {index === 0 ? (
+                        <TerminalIcon
+                          className="q-icon s14 q-faint"
+                          strokeWidth={1.5}
+                          aria-hidden
+                        />
+                      ) : null}
+                      {tab.title}
+                      <span className="q-faint">{hostName}</span>
+                    </TabsTab>
+                    <button
+                      type="button"
+                      aria-label={t("terminal.close", { name: tab.title })}
+                      className="q-ttab-x"
+                      onClick={() => closeTab(tab.key)}
+                    >
+                      <XIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+                    </button>
+                  </div>
+                );
+              })}
+              <button
+                type="button"
+                aria-label={t("terminal.new")}
+                className="q-ibtn"
+                onClick={addTab}
+              >
+                <PlusIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
+              </button>
+            </TabsList>
+          </Tabs>
 
           {searchOpen ? (
             <input

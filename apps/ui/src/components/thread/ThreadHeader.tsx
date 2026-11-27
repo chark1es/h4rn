@@ -31,6 +31,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Kbd } from "@/components/ui/kbd";
+import { Tabs, TabsList, TabsTab } from "@/components/ui/tabs";
 import { Tip } from "@/components/ui/tooltip";
 import { ThreadPullRequestBadge } from "@/features/forge/ThreadPullRequestBadge";
 import { openGuestShare } from "@/features/guest/guestStore";
@@ -81,29 +82,22 @@ export function ViewCluster({
   const panelOpen = layout.panelOpen && panelFits(layout, viewportWidth);
   return (
     <>
-      <div
-        className="q-seg inline q-viewseg"
-        role="tablist"
-        aria-label={t("header.view")}
-        title={titleWithShortcut(t("header.switchView"), "view.toggle")}
+      <Tabs
+        className="flex-row"
+        value={view}
+        onValueChange={(value) => {
+          if (value === "thread" || value === "ide") setView(value);
+        }}
       >
-        <button
-          type="button"
-          role="tab"
-          aria-selected={view === "thread"}
-          onClick={() => setView("thread")}
+        <TabsList
+          variant="segmented"
+          aria-label={t("header.view")}
+          title={titleWithShortcut(t("header.switchView"), "view.toggle")}
         >
-          {t("header.thread")}
-        </button>
-        <button
-          type="button"
-          role="tab"
-          aria-selected={view === "ide"}
-          onClick={() => setView("ide")}
-        >
-          IDE
-        </button>
-      </div>
+          <TabsTab value="thread">{t("header.thread")}</TabsTab>
+          <TabsTab value="ide">IDE</TabsTab>
+        </TabsList>
+      </Tabs>
       {onToggleTerminal ? (
         <Tip label={t("header.terminal")} command="terminal.toggle">
           <button
