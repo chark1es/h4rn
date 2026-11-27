@@ -5224,6 +5224,7 @@
   line-height: 18px;
 }
 
+/* Preview: an HTML file in a sandboxed frame, never a second app window */
 .q-pv {
   flex: 1;
   min-width: 0;
