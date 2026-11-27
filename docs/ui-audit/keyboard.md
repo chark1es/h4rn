@@ -12,7 +12,7 @@ H4RN_KB_OUT=<dir> node scripts/keyboard-audit.mjs http://127.0.0.1:<port>
 H4RN_KB="file tree" node scripts/keyboard-audit.mjs http://127.0.0.1:<port>
 ```
 
-It prints the table below and exits 1 if any surface fails. Final run: **38 of 40 surfaces pass**. The two failures are listed under "Failures to fix".
+It prints the table below and exits 1 if any surface fails. Final run: **40 of 40 surfaces pass**. The two that failed on the first run (toaster, inline revoke confirm) were fixed afterwards; see "Fixed after the first run".
 
 ## Results
 
@@ -30,7 +30,7 @@ It prints the table below and exits 1 if any surface fails. Final run: **38 of 4
 | Skill import dialog | Skills page, Tab to Find existing, Enter, Esc | Pass | starts on input "" |
 | Skill add dialog | Skills page, Tab to Add skill, Enter, Esc | Pass | starts on input "" |
 | Confirm dialog (remove forge account) | Forges, Tab to Remove, Enter, Tab ×20, Esc | Pass | starts on button "Cancel" |
-| Inline confirm (revoke device) | Hosts, Tab to Revoke, Enter, check focus | Fail | the inline confirm replaces the button and focus drops to the body; no Alert Dialog |
+| Confirm dialog (revoke device) | Hosts, Tab to Revoke, Enter, Tab ×20, Esc; again, Tab to Revoke, Enter | Pass | starts on button "Cancel"; after revoking, focus on button "Refresh" (was Fail: inline confirm dropped focus to the body) |
 | Thread actions menu | Tab to Thread actions, Enter, ArrowDown, typeahead S, Esc | Pass | typeahead "s" → Settle now |
 | Row actions menu (Shift+F10) | Tab to a thread row, Shift+F10, ArrowDown, Esc | Pass |  |
 | Row actions menu (button) | Tab to the row's Actions button, Enter, ArrowDown, Esc | Pass |  |
@@ -52,7 +52,7 @@ It prints the table below and exits 1 if any surface fails. Final run: **38 of 4
 | Resizer (sidebar) | Tab to Resize sidebar, ArrowRight ×3, check width | Pass | width 288 → 336, valuenow 20 → 23, focus line in the ring colour |
 | Settings form (Forges) | Tab through Forge select, Base URL, Token, Add account | Pass | Forge: GitHub → Forge base URL → Forge token |
 | Settings nav | Tab into the settings nav, Enter on Appearance | Pass |  |
-| Toaster | Tab past the last control into the toast, then Tab again | Fail | after Dismiss, Tab went to combobox "Interface language: System" (focus-visible false); Tab loops back into the toast (Sonner refocuses the last element on blur) |
+| Toaster | Tab past the last control into the toast, then Tab again | Pass | after Dismiss, Tab went to button "Back to threads" (focus-visible true), the first control on the page (was Fail: Tab looped back into the toast) |
 | Tooltip delay | Hover Right panel, time until visible; move to Toggle terminal | Pass | first 318 ms, next 25 ms (pointer used only to time hover) |
 | Tooltip on keyboard focus | Tab to Right panel, wait | Pass |  |
 | No tooltip on touch | hasTouch context, tap Right panel twice | Pass |  |
@@ -86,9 +86,11 @@ Each control was focused with Tab and captured in light and dark.
 | `16bae384` | The settings nav group headers still shrank 3–6 px when the MCP list opened (A6). | `.setnav .q-side-h` is `flex: none`. |
 | `d7f2e628` | With the right panel open, the header's provenance line squeezed the harness name to zero width. | The branch shrinks first, then the harness name ellipsizes, with the full name in its title. |
 
-## Failures to fix
+## Fixed after the first run
 
-Bigger than a small fix, so left for a follow-up:
+Both failures from the first run are fixed, and the audit passes on all 40 surfaces.
 
-1. **The toaster traps Tab.** After the toast's Dismiss button, Tab moves focus back to the element that was focused before the toast (without `:focus-visible`), and the next Tab goes into the toast again. So a keyboard user can't Tab past an open toast to wrap around the page. Shift+Tab still works, and dismissing the toast ends the loop. Error toasts are held for 8 s, so this happens often in practice. The cause is upstream: Sonner's list `onBlur` refocuses `lastFocusedElementRef` whenever focus leaves the toaster (`sonner/dist/index.mjs`, `onBlur`). Options: move the toaster before the main content in the DOM, wrap it so leaving it forward goes to the start of the page, or ask upstream for an opt-out.
-2. **Inline confirms drop focus, and there's no Alert Dialog.** Revoke on Settings → Hosts & devices (`NetworkAccess.tsx:241-270`), the device row's Remove in `SettingsRemote.tsx:~612` and the sign-in Remove in `ConnectSignIn.tsx:262` replace the button with an inline "Cancel / Revoke" pair. The focused button unmounts and focus falls to `<body>`. K5 says destructive actions open an Alert Dialog, as Forges' Remove already does. Port these three to `ConfirmDialog`, which also returns focus to the trigger.
+| Commit | Problem | Fix |
+|---|---|---|
+| `7b4f5f38` | **The toaster trapped Tab.** Sonner's list `onBlur` refocuses the element focused before the toast whenever focus leaves the stack, so Tab after Dismiss went back there and the next Tab went into the toast again. | `components/ui/sonner.tsx` watches Tab at the edges of the stack. When the stack was reached by Tab or a click, Tab past the last toast control moves to the next control in document order (wrapping to the first on the page) and Shift+Tab before the first moves to the previous one. Sonner's one refocus call is skipped for that move. Entry by Alt+T still returns focus to where it came from. `aria-live`, hover expand, de-duplication and positions are untouched. `sonner.test.tsx` "lets Tab leave the stack in document order" fails without the fix. |
+| `44c6b8a8` | **Inline confirms dropped focus, with no Alert Dialog.** Revoke in `NetworkAccess.tsx`, Revoke / Sign out on the device row in `SettingsRemote.tsx` and Sign out in `ConnectSignIn.tsx` replaced the button with an inline Cancel / confirm pair, and focus fell to `<body>`. | All three open the shared `ConfirmDialog` (UI SDK Alert Dialog), as Forges' Remove does: focus starts on Cancel, is trapped, and Esc or Cancel returns it to the trigger. If the confirmed action removes the row, focus moves to the next control after it, or the one before (`rememberNeighbours` in `lib/focus.ts`). The titles reuse the existing questions (`devices.confirmRevoke` now names the device) and a new `devices.confirmDescription.*` line says what happens, in all four catalogues. Test in `DirectDevicesTable.dom.test.tsx`; `e2e-remote.mjs` confirms Sign out in the dialog. |
