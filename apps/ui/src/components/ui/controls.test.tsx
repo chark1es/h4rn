@@ -13,6 +13,16 @@ import { Tabs, TabsList, TabsPanel, TabsTab } from "./tabs";
 
 afterEach(cleanup);
 
+function RangeExample() {
+  const [value, setValue] = useState<string | null>("day");
+  return (
+    <SegmentedControl aria-label="Range" value={value} onValueChange={setValue}>
+      <SegmentedControlItem value="day">Day</SegmentedControlItem>
+      <SegmentedControlItem value="week">Week</SegmentedControlItem>
+    </SegmentedControl>
+  );
+}
+
 describe("Switch", () => {
   it("is a named switch that Space and click toggle", () => {
     const onChange = vi.fn();
@@ -36,16 +46,7 @@ describe("Switch", () => {
 
 describe("SegmentedControl", () => {
   it("is a radio group whose arrows check the next item", () => {
-    function Example() {
-      const [value, setValue] = useState<string | null>("day");
-      return (
-        <SegmentedControl aria-label="Range" value={value} onValueChange={setValue}>
-          <SegmentedControlItem value="day">Day</SegmentedControlItem>
-          <SegmentedControlItem value="week">Week</SegmentedControlItem>
-        </SegmentedControl>
-      );
-    }
-    render(<Example />);
+    render(<RangeExample />);
     const group = screen.getByRole("radiogroup", { name: "Range" });
     expect(group.dataset.slot).toBe("segmented-control");
     const day = screen.getByRole("radio", { name: "Day" });
