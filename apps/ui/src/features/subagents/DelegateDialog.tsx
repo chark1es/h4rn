@@ -2,8 +2,10 @@ import { LoaderIcon } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { ChipSelect } from "@/components/common/ChipSelect";
+import { Button } from "@/components/ui/button";
 import {
   Dialog,
+  DialogBody,
   DialogContent,
   DialogDescription,
   DialogFooter,
@@ -141,172 +143,171 @@ export function DelegateDialog({ thread }: { thread: ThreadSummary }) {
 
   return (
     <Dialog open={open} onOpenChange={(value) => (value ? undefined : closeDelegate())}>
-      <DialogContent className="gap-3 sm:max-w-[560px]">
+      <DialogContent>
         <DialogHeader>
           <DialogTitle>{t("delegate.title")}</DialogTitle>
           <DialogDescription>{t("delegate.description")}</DialogDescription>
         </DialogHeader>
+        <DialogBody>
+          <div className="flex flex-col gap-1">
+            <label htmlFor="delegate-task" className="text-[12px] text-[var(--fg-3)]">
+              {t("fields.task")}
+            </label>
+            <Textarea
+              id="delegate-task"
+              value={task}
+              autoFocus
+              placeholder={t("delegate.taskPlaceholder")}
+              className="min-h-[84px] resize-none"
+              onChange={(event) => setTask(event.target.value)}
+            />
+          </div>
 
-        <div className="flex flex-col gap-1">
-          <label htmlFor="delegate-task" className="text-[12px] text-[var(--fg-3)]">
-            {t("fields.task")}
-          </label>
-          <Textarea
-            id="delegate-task"
-            value={task}
-            autoFocus
-            placeholder={t("delegate.taskPlaceholder")}
-            className="min-h-[84px] resize-none"
-            onChange={(event) => setTask(event.target.value)}
-          />
-        </div>
+          <div className="grid gap-3 sm:grid-cols-3">
+            <div className="flex flex-col gap-1">
+              <label htmlFor="delegate-host" className="text-[12px] text-[var(--fg-3)]">
+                {t("fields.host")}
+              </label>
+              <ChipSelect
+                id="delegate-host"
+                label={t("fields.host")}
+                value={host}
+                placeholder={t("fields.noOnlineHosts")}
+                width={160}
+                options={localOnlyHostOptions(
+                  onlineHosts,
+                  thread.host,
+                  t("delegate.hostLocalOnly"),
+                )}
+                onChange={(next) => {
+                  setHost(next);
+                  const options = hosts[next]?.harnesses.filter(
+                    (kind): kind is Exclude<HarnessKind, "acp"> => kind !== "acp",
+                  );
+                  const fallback = options?.[0];
+                  if (fallback && !options?.includes(harness as Exclude<HarnessKind, "acp">)) {
+                    setHarness(fallback);
+                    setModel(delegateModel(thread, fallback));
+                  }
+                }}
+              />
+            </div>
+            <div className="flex flex-col gap-1">
+              <label htmlFor="delegate-harness" className="text-[12px] text-[var(--fg-3)]">
+                {t("fields.harness")}
+              </label>
+              <ChipSelect
+                id="delegate-harness"
+                label={t("fields.harness")}
+                value={harness}
+                width={160}
+                options={harnessChoices.map((option) => ({
+                  value: option,
+                  label: HARNESS_LABELS[option],
+                }))}
+                onChange={(next) => {
+                  setHarness(next);
+                  // A model belongs to one harness; switching starts from the
+                  // new harness's own default rather than sending its CLI an id
+                  // it never issued.
+                  setModel(HARNESS_MODELS[next].default);
+                }}
+              />
+            </div>
+            <div className="flex flex-col gap-1">
+              <label htmlFor="delegate-model" className="text-[12px] text-[var(--fg-3)]">
+                {t("fields.model")}
+              </label>
+              <Input
+                id="delegate-model"
+                value={model}
+                className="font-mono"
+                onChange={(event) => setModel(event.target.value)}
+              />
+            </div>
+          </div>
 
-        <div className="grid gap-3 sm:grid-cols-3">
-          <div className="flex flex-col gap-1">
-            <label htmlFor="delegate-host" className="text-[12px] text-[var(--fg-3)]">
-              {t("fields.host")}
-            </label>
-            <ChipSelect
-              id="delegate-host"
-              label={t("fields.host")}
-              value={host}
-              placeholder={t("fields.noOnlineHosts")}
-              width={160}
-              options={localOnlyHostOptions(onlineHosts, thread.host, t("delegate.hostLocalOnly"))}
-              onChange={(next) => {
-                setHost(next);
-                const options = hosts[next]?.harnesses.filter(
-                  (kind): kind is Exclude<HarnessKind, "acp"> => kind !== "acp",
-                );
-                const fallback = options?.[0];
-                if (fallback && !options?.includes(harness as Exclude<HarnessKind, "acp">)) {
-                  setHarness(fallback);
-                  setModel(delegateModel(thread, fallback));
-                }
-              }}
-            />
+          <div className="grid gap-3 sm:grid-cols-3">
+            <div className="flex flex-col gap-1">
+              <label htmlFor="delegate-isolation" className="text-[12px] text-[var(--fg-3)]">
+                {t("fields.workspace")}
+              </label>
+              <ChipSelect<SubagentIsolation>
+                id="delegate-isolation"
+                label={t("fields.workspace")}
+                value={isolation}
+                width={160}
+                options={[
+                  { value: "worktree", label: t("delegate.isolated") },
+                  { value: "shared", label: t("delegate.shared") },
+                ]}
+                onChange={setIsolation}
+              />
+            </div>
+            <div className="flex flex-col gap-1">
+              <label htmlFor="delegate-turns" className="text-[12px] text-[var(--fg-3)]">
+                {t("delegate.maxTurns")}
+              </label>
+              <Input
+                id="delegate-turns"
+                inputMode="numeric"
+                placeholder="20"
+                value={maxTurns}
+                onChange={(event) => setMaxTurns(event.target.value)}
+              />
+            </div>
+            <div className="flex flex-col gap-1">
+              <label htmlFor="delegate-minutes" className="text-[12px] text-[var(--fg-3)]">
+                {t("delegate.maxMinutes")}
+              </label>
+              <Input
+                id="delegate-minutes"
+                inputMode="numeric"
+                placeholder="15"
+                value={maxMinutes}
+                onChange={(event) => setMaxMinutes(event.target.value)}
+              />
+            </div>
           </div>
-          <div className="flex flex-col gap-1">
-            <label htmlFor="delegate-harness" className="text-[12px] text-[var(--fg-3)]">
-              {t("fields.harness")}
-            </label>
-            <ChipSelect
-              id="delegate-harness"
-              label={t("fields.harness")}
-              value={harness}
-              width={160}
-              options={harnessChoices.map((option) => ({
-                value: option,
-                label: HARNESS_LABELS[option],
-              }))}
-              onChange={(next) => {
-                setHarness(next);
-                // A model belongs to one harness; switching starts from the
-                // new harness's own default rather than sending its CLI an id
-                // it never issued.
-                setModel(HARNESS_MODELS[next].default);
-              }}
-            />
-          </div>
-          <div className="flex flex-col gap-1">
-            <label htmlFor="delegate-model" className="text-[12px] text-[var(--fg-3)]">
-              {t("fields.model")}
-            </label>
-            <Input
-              id="delegate-model"
-              value={model}
-              className="font-mono"
-              onChange={(event) => setModel(event.target.value)}
-            />
-          </div>
-        </div>
 
-        <div className="grid gap-3 sm:grid-cols-3">
-          <div className="flex flex-col gap-1">
-            <label htmlFor="delegate-isolation" className="text-[12px] text-[var(--fg-3)]">
-              {t("fields.workspace")}
-            </label>
-            <ChipSelect<SubagentIsolation>
-              id="delegate-isolation"
-              label={t("fields.workspace")}
-              value={isolation}
-              width={160}
-              options={[
-                { value: "worktree", label: t("delegate.isolated") },
-                { value: "shared", label: t("delegate.shared") },
-              ]}
-              onChange={setIsolation}
-            />
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div className="flex flex-col gap-1">
+              <label htmlFor="delegate-tokens" className="text-[12px] text-[var(--fg-3)]">
+                {t("delegate.maxTokens")}
+              </label>
+              <Input
+                id="delegate-tokens"
+                inputMode="numeric"
+                placeholder="50000"
+                value={maxTokens}
+                onChange={(event) => setMaxTokens(event.target.value)}
+              />
+            </div>
+            <div className="flex flex-col gap-1">
+              <label htmlFor="delegate-summary" className="text-[12px] text-[var(--fg-3)]">
+                {t("delegate.summary")}
+              </label>
+              <Input
+                id="delegate-summary"
+                placeholder={t("delegate.summaryPlaceholder")}
+                value={summary}
+                onChange={(event) => setSummary(event.target.value)}
+              />
+            </div>
           </div>
-          <div className="flex flex-col gap-1">
-            <label htmlFor="delegate-turns" className="text-[12px] text-[var(--fg-3)]">
-              {t("delegate.maxTurns")}
-            </label>
-            <Input
-              id="delegate-turns"
-              inputMode="numeric"
-              placeholder="20"
-              value={maxTurns}
-              onChange={(event) => setMaxTurns(event.target.value)}
-            />
-          </div>
-          <div className="flex flex-col gap-1">
-            <label htmlFor="delegate-minutes" className="text-[12px] text-[var(--fg-3)]">
-              {t("delegate.maxMinutes")}
-            </label>
-            <Input
-              id="delegate-minutes"
-              inputMode="numeric"
-              placeholder="15"
-              value={maxMinutes}
-              onChange={(event) => setMaxMinutes(event.target.value)}
-            />
-          </div>
-        </div>
 
-        <div className="grid gap-3 sm:grid-cols-2">
-          <div className="flex flex-col gap-1">
-            <label htmlFor="delegate-tokens" className="text-[12px] text-[var(--fg-3)]">
-              {t("delegate.maxTokens")}
-            </label>
-            <Input
-              id="delegate-tokens"
-              inputMode="numeric"
-              placeholder="50000"
-              value={maxTokens}
-              onChange={(event) => setMaxTokens(event.target.value)}
-            />
-          </div>
-          <div className="flex flex-col gap-1">
-            <label htmlFor="delegate-summary" className="text-[12px] text-[var(--fg-3)]">
-              {t("delegate.summary")}
-            </label>
-            <Input
-              id="delegate-summary"
-              placeholder={t("delegate.summaryPlaceholder")}
-              value={summary}
-              onChange={(event) => setSummary(event.target.value)}
-            />
-          </div>
-        </div>
-
-        <p className="text-[11.5px] leading-[16px] text-[var(--fg-3)]">{t("delegate.note")}</p>
-
+          <p className="text-[11.5px] leading-[16px] text-[var(--fg-3)]">{t("delegate.note")}</p>
+        </DialogBody>
         <DialogFooter>
-          <button type="button" className="q-btn ghost" onClick={closeDelegate}>
+          <Button variant="ghost" onClick={closeDelegate}>
             {t("common:cancel")}
-          </button>
-          <button
-            type="button"
-            className="q-btn primary"
-            disabled={!task.trim() || spawning || !host}
-            onClick={() => void submit()}
-          >
+          </Button>
+          <Button disabled={!task.trim() || spawning || !host} onClick={() => void submit()}>
             {spawning ? (
               <LoaderIcon className="q-icon s14 q-spin" strokeWidth={1.5} aria-hidden />
             ) : null}
             {t("delegate.submit")}
-          </button>
+          </Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

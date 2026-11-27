@@ -15,6 +15,7 @@ import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
+  DialogBody,
   DialogContent,
   DialogDescription,
   DialogFooter,
@@ -309,7 +310,7 @@ export function AddProjectDialog() {
 
   return (
     <Dialog open={open} onOpenChange={(value) => (value ? undefined : closeAddProject())}>
-      <DialogContent className="gap-4 sm:max-w-[600px]">
+      <DialogContent>
         <DialogHeader>
           <DialogTitle>{t("addProject.title")}</DialogTitle>
           <DialogDescription>
@@ -318,124 +319,124 @@ export function AddProjectDialog() {
               : t("addProject.descriptionNoHost")}
           </DialogDescription>
         </DialogHeader>
+        <DialogBody>
+          <div className="q-addp-modes" role="radiogroup" aria-label={t("addProject.howTo")}>
+            {MODES.map((option) => (
+              // biome-ignore lint/a11y/useSemanticElements: a card-style radio needs a button
+              <button
+                key={option.value}
+                type="button"
+                role="radio"
+                aria-checked={mode === option.value}
+                className="q-addp-mode"
+                onClick={() => {
+                  setMode(option.value);
+                  setProblem(null);
+                }}
+              >
+                <option.icon className="q-icon" strokeWidth={1.5} aria-hidden />
+                <span className="q-addp-mode-t">{t(`addProject.modes.${option.value}.label`)}</span>
+                <span className="q-addp-mode-s">{t(`addProject.modes.${option.value}.hint`)}</span>
+                {mode === option.value ? (
+                  <CheckIcon className="q-icon s12 tick" strokeWidth={2} aria-hidden />
+                ) : null}
+              </button>
+            ))}
+          </div>
 
-        <div className="q-addp-modes" role="radiogroup" aria-label={t("addProject.howTo")}>
-          {MODES.map((option) => (
-            // biome-ignore lint/a11y/useSemanticElements: a card-style radio needs a button
-            <button
-              key={option.value}
-              type="button"
-              role="radio"
-              aria-checked={mode === option.value}
-              className="q-addp-mode"
-              onClick={() => {
-                setMode(option.value);
-                setProblem(null);
-              }}
-            >
-              <option.icon className="q-icon" strokeWidth={1.5} aria-hidden />
-              <span className="q-addp-mode-t">{t(`addProject.modes.${option.value}.label`)}</span>
-              <span className="q-addp-mode-s">{t(`addProject.modes.${option.value}.hint`)}</span>
-              {mode === option.value ? (
-                <CheckIcon className="q-icon s12 tick" strokeWidth={2} aria-hidden />
+          {mode === "import" ? (
+            <ImportPanel />
+          ) : (
+            <>
+              {mode === "clone" ? (
+                <label className="q-addp-field">
+                  <span className="lab">{t("fields.repository")}</span>
+                  <input
+                    className="q-input q-mono"
+                    value={url}
+                    placeholder={t("addProject.repoPlaceholder")}
+                    spellCheck={false}
+                    autoComplete="off"
+                    onChange={(event) => setUrl(event.target.value)}
+                  />
+                </label>
               ) : null}
-            </button>
-          ))}
-        </div>
 
-        {mode === "import" ? (
-          <ImportPanel />
-        ) : (
-          <>
-            {mode === "clone" ? (
-              <label className="q-addp-field">
-                <span className="lab">{t("fields.repository")}</span>
-                <input
-                  className="q-input q-mono"
-                  value={url}
-                  placeholder={t("addProject.repoPlaceholder")}
-                  spellCheck={false}
-                  autoComplete="off"
-                  onChange={(event) => setUrl(event.target.value)}
+              {mode === "new" ? (
+                <label className="q-addp-field">
+                  <span className="lab">{t("fields.name")}</span>
+                  <input
+                    className="q-input"
+                    value={name}
+                    placeholder="my-project"
+                    spellCheck={false}
+                    autoComplete="off"
+                    onChange={(event) => setName(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") {
+                        event.preventDefault();
+                        void submit();
+                      }
+                    }}
+                  />
+                </label>
+              ) : null}
+
+              <div className="q-addp-field">
+                <span className="lab">{t(`addProject.folderLabel.${mode}`)}</span>
+                <FolderBrowser
+                  listing={listing}
+                  loading={browser.loading}
+                  error={browser.error}
+                  onOpen={(path) => void browser.go(path)}
                 />
-              </label>
-            ) : null}
-
-            {mode === "new" ? (
-              <label className="q-addp-field">
-                <span className="lab">{t("fields.name")}</span>
-                <input
-                  className="q-input"
-                  value={name}
-                  placeholder="my-project"
-                  spellCheck={false}
-                  autoComplete="off"
-                  onChange={(event) => setName(event.target.value)}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter") {
-                      event.preventDefault();
-                      void submit();
-                    }
-                  }}
-                />
-              </label>
-            ) : null}
-
-            <div className="q-addp-field">
-              <span className="lab">{t(`addProject.folderLabel.${mode}`)}</span>
-              <FolderBrowser
-                listing={listing}
-                loading={browser.loading}
-                error={browser.error}
-                onOpen={(path) => void browser.go(path)}
-              />
-            </div>
-
-            {mode === "clone" ? (
-              <label className="q-addp-field">
-                <span className="lab">{t("addProject.folderName")}</span>
-                <input
-                  className="q-input q-mono"
-                  value={folderName}
-                  placeholder={cloneFolderName(url) || "repo"}
-                  spellCheck={false}
-                  autoComplete="off"
-                  onChange={(event) => setFolderName(event.target.value)}
-                />
-              </label>
-            ) : null}
-
-            {mode === "new" ? (
-              <label className="q-addp-check">
-                <input
-                  type="checkbox"
-                  className="sr-only"
-                  checked={gitInit}
-                  onChange={(event) => setGitInit(event.target.checked)}
-                />
-                <span className={cn("q-check", gitInit && "on")} aria-hidden>
-                  {gitInit ? <CheckIcon className="q-icon s12" strokeWidth={2} /> : null}
-                </span>
-                {t("addProject.gitInit")}
-              </label>
-            ) : null}
-
-            {summary ? <p className="q-addp-sum q-mono">{summary}</p> : null}
-            {problem ? (
-              <div className="q-banner err" role="alert">
-                {problem}
               </div>
-            ) : null}
-            {busy && mode === "clone" ? (
-              <p className="q-faint" style={{ margin: 0, fontSize: 12 }}>
-                {hostName
-                  ? t("addProject.cloning", { host: hostName })
-                  : t("addProject.cloningNoHost")}
-              </p>
-            ) : null}
-          </>
-        )}
 
+              {mode === "clone" ? (
+                <label className="q-addp-field">
+                  <span className="lab">{t("addProject.folderName")}</span>
+                  <input
+                    className="q-input q-mono"
+                    value={folderName}
+                    placeholder={cloneFolderName(url) || "repo"}
+                    spellCheck={false}
+                    autoComplete="off"
+                    onChange={(event) => setFolderName(event.target.value)}
+                  />
+                </label>
+              ) : null}
+
+              {mode === "new" ? (
+                <label className="q-addp-check">
+                  <input
+                    type="checkbox"
+                    className="sr-only"
+                    checked={gitInit}
+                    onChange={(event) => setGitInit(event.target.checked)}
+                  />
+                  <span className={cn("q-check", gitInit && "on")} aria-hidden>
+                    {gitInit ? <CheckIcon className="q-icon s12" strokeWidth={2} /> : null}
+                  </span>
+                  {t("addProject.gitInit")}
+                </label>
+              ) : null}
+
+              {summary ? <p className="q-addp-sum q-mono">{summary}</p> : null}
+              {problem ? (
+                <div className="q-banner err" role="alert">
+                  {problem}
+                </div>
+              ) : null}
+              {busy && mode === "clone" ? (
+                <p className="q-faint" style={{ margin: 0, fontSize: 12 }}>
+                  {hostName
+                    ? t("addProject.cloning", { host: hostName })
+                    : t("addProject.cloningNoHost")}
+                </p>
+              ) : null}
+            </>
+          )}
+        </DialogBody>
         <DialogFooter>
           <Button variant="ghost" onClick={closeAddProject}>
             {t("common:cancel")}

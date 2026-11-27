@@ -1,9 +1,10 @@
 import { DownloadIcon, FileTextIcon, ImageOffIcon } from "lucide-react";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
-
+import { Button } from "@/components/ui/button";
 import {
   Dialog,
+  DialogBody,
   DialogContent,
   DialogDescription,
   DialogFooter,
@@ -113,43 +114,37 @@ function LightboxBody({ attachment, onClose }: { attachment: Attachment; onClose
 
   return (
     <Dialog open onOpenChange={(open) => (open ? undefined : onClose())}>
-      <DialogContent className="max-h-[92dvh] gap-2 p-0 sm:max-w-3xl">
-        <DialogHeader className="flex-row items-baseline justify-between gap-3 border-b border-line px-4 py-3">
-          <div className="min-w-0">
-            <DialogTitle className="truncate text-compact">{attachment.name}</DialogTitle>
-            <DialogDescription className="text-small">
-              {attachment.mime} · {formatBytes(attachment.size)}
-            </DialogDescription>
-          </div>
+      <DialogContent size="xl">
+        <DialogHeader>
+          <DialogTitle className="truncate">{attachment.name}</DialogTitle>
+          <DialogDescription className="tabular-nums">
+            {attachment.mime} · {formatBytes(attachment.size)}
+          </DialogDescription>
         </DialogHeader>
-
-        <div className="flex min-h-40 items-center justify-center overflow-auto bg-bg-sunk px-2">
-          {loading || !url ? (
-            <p className="py-16 text-small text-fg-3">
-              {t("attachments.loading", { name: attachment.name })}
-            </p>
-          ) : error ? (
-            <p className="max-w-[42ch] py-16 text-center text-small text-danger">
-              {t("attachments.previewFailed", { message: error })}
-            </p>
-          ) : (
-            <img
-              src={url}
-              alt={attachment.name}
-              className="max-h-[62dvh] max-w-full object-contain"
-            />
-          )}
-        </div>
-
-        <DialogFooter className="flex-row items-center justify-end gap-2 border-t border-line px-4 py-2">
+        <DialogBody className="px-0 pb-0">
+          <div className="flex min-h-40 items-center justify-center overflow-auto border-t border-border bg-bg-sunk p-2">
+            {loading || !url ? (
+              <p className="py-16 text-sm text-muted-foreground">
+                {t("attachments.loading", { name: attachment.name })}
+              </p>
+            ) : error ? (
+              <p className="max-w-[42ch] py-16 text-center text-sm text-danger">
+                {t("attachments.previewFailed", { message: error })}
+              </p>
+            ) : (
+              <img
+                src={url}
+                alt={attachment.name}
+                className="max-h-[62dvh] max-w-full object-contain"
+              />
+            )}
+          </div>
+        </DialogBody>
+        <DialogFooter>
           <DownloadButton attachment={attachment} />
-          <button
-            type="button"
-            onClick={onClose}
-            className="h-8 rounded-md border border-line px-2.5 text-small font-medium text-fg transition-colors duration-micro hover:bg-bg-side focus-visible:ring-2 focus-visible:ring-focus focus-visible:outline-none"
-          >
+          <Button variant="secondary" onClick={onClose}>
             {t("common:close")}
-          </button>
+          </Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

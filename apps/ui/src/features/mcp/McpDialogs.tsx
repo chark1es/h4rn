@@ -6,6 +6,7 @@ import { ChipSelect } from "@/components/common/ChipSelect";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
+  DialogBody,
   DialogContent,
   DialogDescription,
   DialogFooter,
@@ -185,163 +186,163 @@ export function McpServerDialog({
 
   return (
     <Dialog open={open} onOpenChange={(value) => (value ? undefined : onClose())}>
-      <DialogContent className="gap-3 sm:max-w-[620px]">
+      <DialogContent size="lg">
         <DialogHeader>
           <DialogTitle>
             {server ? t("mcp.server.titleEdit", { name: server.name }) : t("mcp.server.titleAdd")}
           </DialogTitle>
           <DialogDescription>{t("mcp.server.description")}</DialogDescription>
         </DialogHeader>
-
-        <div className="grid gap-3">
-          <div className="flex flex-col gap-1">
-            <FieldLabel htmlFor="mcp-name">{t("fields.name")}</FieldLabel>
-            <Input
-              id="mcp-name"
-              value={name}
-              onChange={(event) => setName(event.target.value)}
-              placeholder="github"
-              autoComplete="off"
-              spellCheck={false}
-            />
-          </div>
-
-          <div className="flex flex-col gap-1">
-            <FieldLabel>{t("mcp.server.transport")}</FieldLabel>
-            <div className="q-seg inline" role="tablist" aria-label={t("mcp.server.transport")}>
-              {(["stdio", "http", "sse"] as const).map((option) => (
-                <button
-                  key={option}
-                  type="button"
-                  role="tab"
-                  aria-selected={kind === option}
-                  onClick={() => setKind(option)}
-                >
-                  {option === "stdio" ? "stdio" : option.toUpperCase()}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          {isStdio ? (
-            <>
-              <div className="flex flex-col gap-1">
-                <FieldLabel htmlFor="mcp-command">{t("mcp.server.command")}</FieldLabel>
-                <Input
-                  id="mcp-command"
-                  value={command}
-                  onChange={(event) => setCommand(event.target.value)}
-                  placeholder="npx"
-                  spellCheck={false}
-                />
-              </div>
-              <div className="flex flex-col gap-1">
-                <FieldLabel htmlFor="mcp-args" hint={t("mcp.server.argsHint")}>
-                  {t("fields.arguments")}
-                </FieldLabel>
-                <Textarea
-                  id="mcp-args"
-                  value={args}
-                  onChange={(event) => setArgs(event.target.value)}
-                  placeholder={EXAMPLE_ARGS}
-                  spellCheck={false}
-                  className="min-h-[64px] font-mono text-[12px]"
-                />
-              </div>
-              <div className="flex flex-col gap-1">
-                <FieldLabel htmlFor="mcp-cwd" hint={t("fields.optional")}>
-                  {t("mcp.server.cwd")}
-                </FieldLabel>
-                <Input
-                  id="mcp-cwd"
-                  value={cwd}
-                  onChange={(event) => setCwd(event.target.value)}
-                  placeholder="~/code/api"
-                  spellCheck={false}
-                />
-              </div>
-            </>
-          ) : (
+        <DialogBody>
+          <div className="grid gap-3">
             <div className="flex flex-col gap-1">
-              <FieldLabel htmlFor="mcp-url">{t("mcp.server.url")}</FieldLabel>
+              <FieldLabel htmlFor="mcp-name">{t("fields.name")}</FieldLabel>
               <Input
-                id="mcp-url"
-                value={url}
-                onChange={(event) => setUrl(event.target.value)}
-                placeholder="http://127.0.0.1:8931/mcp"
+                id="mcp-name"
+                value={name}
+                onChange={(event) => setName(event.target.value)}
+                placeholder="github"
+                autoComplete="off"
                 spellCheck={false}
               />
             </div>
-          )}
 
-          <div className="flex flex-col gap-1">
-            <FieldLabel hint={t("mcp.server.secretsHint")}>
-              {t(`mcp.server.${secretKind}.heading`)}
-            </FieldLabel>
-            <div className="flex flex-col gap-1.5">
-              {secrets.map((row, index) => (
-                <div key={row.id} className="flex items-center gap-1.5">
-                  <Input
-                    value={row.name}
-                    aria-label={t(`mcp.server.${secretKind}.name`, { index: index + 1 })}
-                    placeholder="GITHUB_TOKEN"
-                    spellCheck={false}
-                    onChange={(event) =>
-                      setSecrets((current) =>
-                        current.map((entry, position) =>
-                          position === index ? { ...entry, name: event.target.value } : entry,
-                        ),
-                      )
-                    }
-                  />
-                  <Input
-                    value={row.value}
-                    type="password"
-                    aria-label={t(`mcp.server.${secretKind}.value`, { index: index + 1 })}
-                    placeholder={
-                      row.name && server ? t("mcp.server.unchanged") : t("mcp.server.value")
-                    }
-                    autoComplete="new-password"
-                    onChange={(event) =>
-                      setSecrets((current) =>
-                        current.map((entry, position) =>
-                          position === index ? { ...entry, value: event.target.value } : entry,
-                        ),
-                      )
-                    }
-                  />
+            <div className="flex flex-col gap-1">
+              <FieldLabel>{t("mcp.server.transport")}</FieldLabel>
+              <div className="q-seg inline" role="tablist" aria-label={t("mcp.server.transport")}>
+                {(["stdio", "http", "sse"] as const).map((option) => (
                   <button
+                    key={option}
                     type="button"
-                    className="q-ibtn"
-                    aria-label={t(`mcp.server.${secretKind}.remove`, { index: index + 1 })}
-                    onClick={() =>
-                      setSecrets((current) =>
-                        current.length === 1
-                          ? [newSecretRow()]
-                          : current.filter((_, position) => position !== index),
-                      )
-                    }
+                    role="tab"
+                    aria-selected={kind === option}
+                    onClick={() => setKind(option)}
                   >
-                    <Trash2Icon className="q-icon s14" aria-hidden />
+                    {option === "stdio" ? "stdio" : option.toUpperCase()}
                   </button>
-                </div>
-              ))}
-              <button
-                type="button"
-                className="q-btn ghost"
-                style={{ alignSelf: "flex-start" }}
-                onClick={() => setSecrets((current) => [...current, newSecretRow()])}
-              >
-                <PlusIcon className="q-icon s14" aria-hidden /> {t("mcp.server.addRow")}
-              </button>
+                ))}
+              </div>
             </div>
+
+            {isStdio ? (
+              <>
+                <div className="flex flex-col gap-1">
+                  <FieldLabel htmlFor="mcp-command">{t("mcp.server.command")}</FieldLabel>
+                  <Input
+                    id="mcp-command"
+                    value={command}
+                    onChange={(event) => setCommand(event.target.value)}
+                    placeholder="npx"
+                    spellCheck={false}
+                  />
+                </div>
+                <div className="flex flex-col gap-1">
+                  <FieldLabel htmlFor="mcp-args" hint={t("mcp.server.argsHint")}>
+                    {t("fields.arguments")}
+                  </FieldLabel>
+                  <Textarea
+                    id="mcp-args"
+                    value={args}
+                    onChange={(event) => setArgs(event.target.value)}
+                    placeholder={EXAMPLE_ARGS}
+                    spellCheck={false}
+                    className="min-h-[64px] font-mono text-[12px]"
+                  />
+                </div>
+                <div className="flex flex-col gap-1">
+                  <FieldLabel htmlFor="mcp-cwd" hint={t("fields.optional")}>
+                    {t("mcp.server.cwd")}
+                  </FieldLabel>
+                  <Input
+                    id="mcp-cwd"
+                    value={cwd}
+                    onChange={(event) => setCwd(event.target.value)}
+                    placeholder="~/code/api"
+                    spellCheck={false}
+                  />
+                </div>
+              </>
+            ) : (
+              <div className="flex flex-col gap-1">
+                <FieldLabel htmlFor="mcp-url">{t("mcp.server.url")}</FieldLabel>
+                <Input
+                  id="mcp-url"
+                  value={url}
+                  onChange={(event) => setUrl(event.target.value)}
+                  placeholder="http://127.0.0.1:8931/mcp"
+                  spellCheck={false}
+                />
+              </div>
+            )}
+
+            <div className="flex flex-col gap-1">
+              <FieldLabel hint={t("mcp.server.secretsHint")}>
+                {t(`mcp.server.${secretKind}.heading`)}
+              </FieldLabel>
+              <div className="flex flex-col gap-1.5">
+                {secrets.map((row, index) => (
+                  <div key={row.id} className="flex items-center gap-1.5">
+                    <Input
+                      value={row.name}
+                      aria-label={t(`mcp.server.${secretKind}.name`, { index: index + 1 })}
+                      placeholder="GITHUB_TOKEN"
+                      spellCheck={false}
+                      onChange={(event) =>
+                        setSecrets((current) =>
+                          current.map((entry, position) =>
+                            position === index ? { ...entry, name: event.target.value } : entry,
+                          ),
+                        )
+                      }
+                    />
+                    <Input
+                      value={row.value}
+                      type="password"
+                      aria-label={t(`mcp.server.${secretKind}.value`, { index: index + 1 })}
+                      placeholder={
+                        row.name && server ? t("mcp.server.unchanged") : t("mcp.server.value")
+                      }
+                      autoComplete="new-password"
+                      onChange={(event) =>
+                        setSecrets((current) =>
+                          current.map((entry, position) =>
+                            position === index ? { ...entry, value: event.target.value } : entry,
+                          ),
+                        )
+                      }
+                    />
+                    <button
+                      type="button"
+                      className="q-ibtn"
+                      aria-label={t(`mcp.server.${secretKind}.remove`, { index: index + 1 })}
+                      onClick={() =>
+                        setSecrets((current) =>
+                          current.length === 1
+                            ? [newSecretRow()]
+                            : current.filter((_, position) => position !== index),
+                        )
+                      }
+                    >
+                      <Trash2Icon className="q-icon s14" aria-hidden />
+                    </button>
+                  </div>
+                ))}
+                <button
+                  type="button"
+                  className="q-btn ghost"
+                  style={{ alignSelf: "flex-start" }}
+                  onClick={() => setSecrets((current) => [...current, newSecretRow()])}
+                >
+                  <PlusIcon className="q-icon s14" aria-hidden /> {t("mcp.server.addRow")}
+                </button>
+              </div>
+            </div>
+
+            {problem ? (
+              <div className="q-banner err">{t(`mcp.server.problems.${problem}`)}</div>
+            ) : null}
           </div>
-
-          {problem ? (
-            <div className="q-banner err">{t(`mcp.server.problems.${problem}`)}</div>
-          ) : null}
-        </div>
-
+        </DialogBody>
         <DialogFooter>
           <Button variant="ghost" onClick={onClose}>
             {t("common:cancel")}
@@ -446,149 +447,151 @@ export function McpImportDialog({
 
   return (
     <Dialog open={open} onOpenChange={(value) => (value ? undefined : onClose())}>
-      <DialogContent className="gap-3 sm:max-w-[640px]">
+      <DialogContent size="lg">
         <DialogHeader>
           <DialogTitle>{t("mcp.import.title")}</DialogTitle>
           <DialogDescription>{t("mcp.import.description")}</DialogDescription>
         </DialogHeader>
-
-        <div className="grid gap-3 sm:grid-cols-2">
-          <div className="flex flex-col gap-1">
-            <FieldLabel htmlFor="mcp-import-harness">{t("fields.harness")}</FieldLabel>
-            <ChipSelect
-              id="mcp-import-harness"
-              block
-              label={t("fields.harness")}
-              value={harness}
-              options={HARNESSES.map((entry) => ({ value: entry, label: HARNESS_LABELS[entry] }))}
-              onChange={setHarness}
-            />
+        <DialogBody>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div className="flex flex-col gap-1">
+              <FieldLabel htmlFor="mcp-import-harness">{t("fields.harness")}</FieldLabel>
+              <ChipSelect
+                id="mcp-import-harness"
+                block
+                label={t("fields.harness")}
+                value={harness}
+                options={HARNESSES.map((entry) => ({ value: entry, label: HARNESS_LABELS[entry] }))}
+                onChange={setHarness}
+              />
+            </div>
+            <div className="flex flex-col gap-1">
+              <FieldLabel htmlFor="mcp-import-workspace" hint={t("fields.optional")}>
+                {t("fields.workspace")}
+              </FieldLabel>
+              <Input
+                id="mcp-import-workspace"
+                value={workspace}
+                onChange={(event) => setWorkspace(event.target.value)}
+                placeholder="~/code/api"
+                spellCheck={false}
+              />
+            </div>
           </div>
-          <div className="flex flex-col gap-1">
-            <FieldLabel htmlFor="mcp-import-workspace" hint={t("fields.optional")}>
-              {t("fields.workspace")}
-            </FieldLabel>
-            <Input
-              id="mcp-import-workspace"
-              value={workspace}
-              onChange={(event) => setWorkspace(event.target.value)}
-              placeholder="~/code/api"
-              spellCheck={false}
-            />
-          </div>
-        </div>
 
-        <div className="flex items-center gap-2">
-          <Button variant="secondary" onClick={() => void read()} disabled={busy}>
-            {busy ? t("mcp.import.reading") : t("mcp.import.read")}
-          </Button>
-          {preview ? (
-            <span className="q-faint" style={{ fontSize: 12 }}>
-              {preview.origins.join(" · ") || t("mcp.import.noFiles")}
-            </span>
-          ) : null}
-        </div>
-
-        {preview ? (
-          <>
-            <div className="q-sec-h" style={{ marginTop: 4 }}>
-              <h2>{t("mcp.import.entries")}</h2>
-              <span className="aside">
-                {t("mcp.import.summary", { selected: chosen, count: preview.conflicts.length })}
+          <div className="flex items-center gap-2">
+            <Button variant="secondary" onClick={() => void read()} disabled={busy}>
+              {busy ? t("mcp.import.reading") : t("mcp.import.read")}
+            </Button>
+            {preview ? (
+              <span className="q-faint" style={{ fontSize: 12 }}>
+                {preview.origins.join(" · ") || t("mcp.import.noFiles")}
               </span>
-            </div>
-            <div className="q-list">
-              {candidates.length === 0 ? (
-                <div className="q-li">
-                  <span className="q-faint">
-                    {t("mcp.import.noServers", { harness: HARNESS_LABELS[harness] })}
-                  </span>
-                </div>
-              ) : (
-                candidates.map((candidate) => (
-                  <label key={candidate.name} className="q-li" style={{ cursor: "pointer" }}>
-                    <span className="q-check" aria-hidden>
-                      <input
-                        type="checkbox"
-                        checked={Boolean(selected[candidate.name])}
-                        disabled={candidate.existing}
-                        onChange={(event) =>
-                          setSelected((current) => ({
-                            ...current,
-                            [candidate.name]: event.target.checked,
-                          }))
-                        }
-                        aria-label={t("mcp.import.importOne", { name: candidate.name })}
-                      />
-                    </span>
-                    <div className="grow">
-                      <div className="t">{candidate.name}</div>
-                      <div className="s">
-                        {candidate.transport.type} ·{" "}
-                        <span className="q-mono">{origin(candidate.transport)}</span>
-                      </div>
-                    </div>
-                    {candidate.existing ? (
-                      <span className="q-badge">{t("mcp.import.alreadyAdded")}</span>
-                    ) : null}
-                  </label>
-                ))
-              )}
-            </div>
+            ) : null}
+          </div>
 
-            {preview.conflicts.length > 0 ? (
-              <div className="flex flex-col gap-2">
-                {preview.conflicts.map((conflict) => (
-                  <div key={conflict.name} className="q-conflict">
-                    <div className="grow">
-                      <div className="t">
-                        {t("mcp.import.conflictTitle", { name: conflict.name })}
-                      </div>
-                      <div className="q-muted" style={{ fontSize: 12, marginTop: 2 }}>
-                        {t("mcp.import.conflictBody")}
-                      </div>
-                      <div className="flex items-center gap-1.5" style={{ marginTop: 8 }}>
-                        <ChipSelect
-                          label={t("mcp.import.resolutionFor", { name: conflict.name })}
-                          width={160}
-                          value={resolutions[conflict.name] ?? "keep_mine"}
-                          options={[
-                            { value: "keep_mine", label: t("mcp.import.keepMine") },
-                            { value: "use_theirs", label: t("mcp.import.useTheirs") },
-                            { value: "rename", label: t("mcp.import.renameTheirs") },
-                            { value: "skip", label: t("mcp.import.skip") },
-                          ]}
-                          onChange={(value) =>
-                            setResolutions((current) => ({
+          {preview ? (
+            <>
+              <div className="q-sec-h" style={{ marginTop: 4 }}>
+                <h2>{t("mcp.import.entries")}</h2>
+                <span className="aside">
+                  {t("mcp.import.summary", { selected: chosen, count: preview.conflicts.length })}
+                </span>
+              </div>
+              <div className="q-list">
+                {candidates.length === 0 ? (
+                  <div className="q-li">
+                    <span className="q-faint">
+                      {t("mcp.import.noServers", { harness: HARNESS_LABELS[harness] })}
+                    </span>
+                  </div>
+                ) : (
+                  candidates.map((candidate) => (
+                    <label key={candidate.name} className="q-li" style={{ cursor: "pointer" }}>
+                      <span className="q-check" aria-hidden>
+                        <input
+                          type="checkbox"
+                          checked={Boolean(selected[candidate.name])}
+                          disabled={candidate.existing}
+                          onChange={(event) =>
+                            setSelected((current) => ({
                               ...current,
-                              [conflict.name]: value,
+                              [candidate.name]: event.target.checked,
                             }))
                           }
+                          aria-label={t("mcp.import.importOne", { name: candidate.name })}
                         />
-                        {resolutions[conflict.name] === "rename" ? (
-                          <Input
-                            value={renames[conflict.name] ?? ""}
-                            onChange={(event) =>
-                              setRenames((current) => ({
+                      </span>
+                      <div className="grow">
+                        <div className="t">{candidate.name}</div>
+                        <div className="s">
+                          {candidate.transport.type} ·{" "}
+                          <span className="q-mono">{origin(candidate.transport)}</span>
+                        </div>
+                      </div>
+                      {candidate.existing ? (
+                        <span className="q-badge">{t("mcp.import.alreadyAdded")}</span>
+                      ) : null}
+                    </label>
+                  ))
+                )}
+              </div>
+
+              {preview.conflicts.length > 0 ? (
+                <div className="flex flex-col gap-2">
+                  {preview.conflicts.map((conflict) => (
+                    <div key={conflict.name} className="q-conflict">
+                      <div className="grow">
+                        <div className="t">
+                          {t("mcp.import.conflictTitle", { name: conflict.name })}
+                        </div>
+                        <div className="q-muted" style={{ fontSize: 12, marginTop: 2 }}>
+                          {t("mcp.import.conflictBody")}
+                        </div>
+                        <div className="flex items-center gap-1.5" style={{ marginTop: 8 }}>
+                          <ChipSelect
+                            label={t("mcp.import.resolutionFor", { name: conflict.name })}
+                            width={160}
+                            value={resolutions[conflict.name] ?? "keep_mine"}
+                            options={[
+                              { value: "keep_mine", label: t("mcp.import.keepMine") },
+                              { value: "use_theirs", label: t("mcp.import.useTheirs") },
+                              { value: "rename", label: t("mcp.import.renameTheirs") },
+                              { value: "skip", label: t("mcp.import.skip") },
+                            ]}
+                            onChange={(value) =>
+                              setResolutions((current) => ({
                                 ...current,
-                                [conflict.name]: event.target.value,
+                                [conflict.name]: value,
                               }))
                             }
-                            placeholder={t("mcp.import.newName")}
-                            aria-label={t("mcp.import.newNameFor", { name: conflict.name })}
                           />
-                        ) : null}
+                          {resolutions[conflict.name] === "rename" ? (
+                            <Input
+                              value={renames[conflict.name] ?? ""}
+                              onChange={(event) =>
+                                setRenames((current) => ({
+                                  ...current,
+                                  [conflict.name]: event.target.value,
+                                }))
+                              }
+                              placeholder={t("mcp.import.newName")}
+                              aria-label={t("mcp.import.newNameFor", { name: conflict.name })}
+                            />
+                          ) : null}
+                        </div>
                       </div>
                     </div>
-                  </div>
-                ))}
-              </div>
-            ) : null}
-          </>
-        ) : null}
+                  ))}
+                </div>
+              ) : null}
+            </>
+          ) : null}
 
-        {problem ? <div className="q-banner err">{t(`mcp.import.problems.${problem}`)}</div> : null}
-
+          {problem ? (
+            <div className="q-banner err">{t(`mcp.import.problems.${problem}`)}</div>
+          ) : null}
+        </DialogBody>
         <DialogFooter>
           <Button variant="ghost" onClick={onClose}>
             {t("common:cancel")}
@@ -673,63 +676,65 @@ export function McpShareDialog({
 
   return (
     <Dialog open={open} onOpenChange={(value) => (value ? undefined : onClose())}>
-      <DialogContent className="gap-3 sm:max-w-[560px]">
+      <DialogContent>
         <DialogHeader>
           <DialogTitle>
             {server ? t("mcp.share.title", { name: server.name }) : t("mcp.share.titleFallback")}
           </DialogTitle>
           <DialogDescription>{t("mcp.share.description")}</DialogDescription>
         </DialogHeader>
-
-        <div className="grid gap-3">
-          <div className="flex flex-col gap-1">
-            <FieldLabel htmlFor="mcp-share-machine">{t("mcp.share.machine")}</FieldLabel>
-            <ChipSelect
-              id="mcp-share-machine"
-              block
-              label={t("mcp.share.machine")}
-              placeholder={t("mcp.share.noMachine")}
-              value={machine}
-              options={choices.map((host) => ({ value: host.host_id, label: host.name }))}
-              onChange={setMachine}
-            />
+        <DialogBody>
+          <div className="grid gap-3">
+            <div className="flex flex-col gap-1">
+              <FieldLabel htmlFor="mcp-share-machine">{t("mcp.share.machine")}</FieldLabel>
+              <ChipSelect
+                id="mcp-share-machine"
+                block
+                label={t("mcp.share.machine")}
+                placeholder={t("mcp.share.noMachine")}
+                value={machine}
+                options={choices.map((host) => ({ value: host.host_id, label: host.name }))}
+                onChange={setMachine}
+              />
+            </div>
+            <div className="flex flex-col gap-1">
+              <FieldLabel htmlFor="mcp-share-allowed" hint={t("mcp.share.allowedHint")}>
+                {t("mcp.share.allowed")}
+              </FieldLabel>
+              <Input
+                id="mcp-share-allowed"
+                value={allowed}
+                onChange={(event) => setAllowed(event.target.value)}
+                placeholder={EXAMPLE_ALLOWED_TOOLS}
+                spellCheck={false}
+              />
+            </div>
+            <div className="flex flex-col gap-1">
+              <FieldLabel htmlFor="mcp-share-confirm" hint={t("mcp.share.confirmHint")}>
+                {t("mcp.share.confirm")}
+              </FieldLabel>
+              <Input
+                id="mcp-share-confirm"
+                value={confirmTools}
+                onChange={(event) => setConfirmTools(event.target.value)}
+                placeholder={EXAMPLE_CONFIRM_TOOLS}
+                spellCheck={false}
+              />
+            </div>
+            <label className="flex items-center gap-2 text-[12.5px] text-[var(--fg-2)]">
+              <input
+                type="checkbox"
+                checked={confirmAll}
+                onChange={(event) => setConfirmAll(event.target.checked)}
+              />
+              {t("mcp.share.confirmAll")}
+            </label>
           </div>
-          <div className="flex flex-col gap-1">
-            <FieldLabel htmlFor="mcp-share-allowed" hint={t("mcp.share.allowedHint")}>
-              {t("mcp.share.allowed")}
-            </FieldLabel>
-            <Input
-              id="mcp-share-allowed"
-              value={allowed}
-              onChange={(event) => setAllowed(event.target.value)}
-              placeholder={EXAMPLE_ALLOWED_TOOLS}
-              spellCheck={false}
-            />
-          </div>
-          <div className="flex flex-col gap-1">
-            <FieldLabel htmlFor="mcp-share-confirm" hint={t("mcp.share.confirmHint")}>
-              {t("mcp.share.confirm")}
-            </FieldLabel>
-            <Input
-              id="mcp-share-confirm"
-              value={confirmTools}
-              onChange={(event) => setConfirmTools(event.target.value)}
-              placeholder={EXAMPLE_CONFIRM_TOOLS}
-              spellCheck={false}
-            />
-          </div>
-          <label className="flex items-center gap-2 text-[12.5px] text-[var(--fg-2)]">
-            <input
-              type="checkbox"
-              checked={confirmAll}
-              onChange={(event) => setConfirmAll(event.target.checked)}
-            />
-            {t("mcp.share.confirmAll")}
-          </label>
-        </div>
 
-        {problem ? <div className="q-banner err">{t(`mcp.share.problems.${problem}`)}</div> : null}
-
+          {problem ? (
+            <div className="q-banner err">{t(`mcp.share.problems.${problem}`)}</div>
+          ) : null}
+        </DialogBody>
         <DialogFooter>
           <Button variant="ghost" onClick={onClose}>
             {t("common:cancel")}
@@ -793,77 +798,80 @@ export function McpToolsDialog({
 
   return (
     <Dialog open={open} onOpenChange={(value) => (value ? undefined : onClose())}>
-      <DialogContent className="gap-3 sm:max-w-[680px]">
+      <DialogContent size="lg">
         <DialogHeader>
           <DialogTitle>
             {server ? t("mcp.tools.title", { name: server.name }) : t("mcp.tools.titleFallback")}
           </DialogTitle>
           <DialogDescription>{t("mcp.tools.description")}</DialogDescription>
         </DialogHeader>
-
-        <div className="grid gap-2">
-          <div className="q-sec-h">
-            <h2>{t("mcp.tools.heading")}</h2>
-            <span className="aside">{t("mcp.tools.available", { count: tools.length })}</span>
-          </div>
-          <div className="q-list" style={{ maxHeight: 220, overflow: "auto" }}>
-            {tools.length === 0 ? (
-              <div className="q-li">
-                <span className="q-faint">{t("mcp.tools.none")}</span>
-              </div>
-            ) : (
-              tools.map((entry) => (
-                <button
-                  key={entry.name}
-                  type="button"
-                  className="q-li"
-                  style={{ textAlign: "left" }}
-                  aria-pressed={tool === entry.tool}
-                  onClick={() => setTool(entry.tool)}
-                >
-                  <span className="q-mono" style={{ fontSize: 12 }}>
-                    {entry.tool}
-                  </span>
-                  <div className="grow">
-                    <div className="s">{entry.description ?? t("mcp.tools.noDescription")}</div>
-                  </div>
-                  {entry.read_only ? (
-                    <span className="q-badge ok">{t("mcp.tools.readOnly")}</span>
-                  ) : null}
-                </button>
-              ))
-            )}
-          </div>
-
-          <div className="flex flex-col gap-1">
-            <FieldLabel htmlFor="mcp-call-args" hint={t("mcp.tools.argsHint")}>
-              {t("fields.arguments")}
-            </FieldLabel>
-            <Textarea
-              id="mcp-call-args"
-              value={args}
-              onChange={(event) => setArgs(event.target.value)}
-              spellCheck={false}
-              className="min-h-[72px] font-mono text-[12px]"
-            />
-          </div>
-
-          {result ? (
-            <div className="q-code" style={{ padding: 10, whiteSpace: "pre-wrap", maxHeight: 200 }}>
-              <span className={result.is_error ? "q-danger" : "q-ok"}>
-                {result.is_error ? t("mcp.tools.toolError") : t("mcp.tools.ok")} ·{" "}
-                {formatNumber(Number(result.duration_ms), { style: "unit", unit: "millisecond" })}
-                {result.truncated ? ` · ${t("mcp.tools.truncated")}` : null}
-              </span>
-              {"\n"}
-              {result.content || t("mcp.tools.noContent")}
+        <DialogBody>
+          <div className="grid gap-2">
+            <div className="q-sec-h">
+              <h2>{t("mcp.tools.heading")}</h2>
+              <span className="aside">{t("mcp.tools.available", { count: tools.length })}</span>
             </div>
-          ) : null}
-          {problem ? (
-            <div className="q-banner err">{t(`mcp.tools.problems.${problem}`)}</div>
-          ) : null}
-        </div>
+            <div className="q-list" style={{ maxHeight: 220, overflow: "auto" }}>
+              {tools.length === 0 ? (
+                <div className="q-li">
+                  <span className="q-faint">{t("mcp.tools.none")}</span>
+                </div>
+              ) : (
+                tools.map((entry) => (
+                  <button
+                    key={entry.name}
+                    type="button"
+                    className="q-li"
+                    style={{ textAlign: "left" }}
+                    aria-pressed={tool === entry.tool}
+                    onClick={() => setTool(entry.tool)}
+                  >
+                    <span className="q-mono" style={{ fontSize: 12 }}>
+                      {entry.tool}
+                    </span>
+                    <div className="grow">
+                      <div className="s">{entry.description ?? t("mcp.tools.noDescription")}</div>
+                    </div>
+                    {entry.read_only ? (
+                      <span className="q-badge ok">{t("mcp.tools.readOnly")}</span>
+                    ) : null}
+                  </button>
+                ))
+              )}
+            </div>
 
+            <div className="flex flex-col gap-1">
+              <FieldLabel htmlFor="mcp-call-args" hint={t("mcp.tools.argsHint")}>
+                {t("fields.arguments")}
+              </FieldLabel>
+              <Textarea
+                id="mcp-call-args"
+                value={args}
+                onChange={(event) => setArgs(event.target.value)}
+                spellCheck={false}
+                className="min-h-[72px] font-mono text-[12px]"
+              />
+            </div>
+
+            {result ? (
+              <div
+                className="q-code"
+                style={{ padding: 10, whiteSpace: "pre-wrap", maxHeight: 200 }}
+              >
+                <span className={result.is_error ? "q-danger" : "q-ok"}>
+                  {result.is_error ? t("mcp.tools.toolError") : t("mcp.tools.ok")} ·{" "}
+                  {formatNumber(Number(result.duration_ms), { style: "unit", unit: "millisecond" })}
+                  {result.truncated ? ` · ${t("mcp.tools.truncated")}` : null}
+                </span>
+                {"\n"}
+                {result.content || t("mcp.tools.noContent")}
+              </div>
+            ) : null}
+            {problem ? (
+              <div className="q-banner err">{t(`mcp.tools.problems.${problem}`)}</div>
+            ) : null}
+          </div>
+        </DialogBody>
         <DialogFooter>
           <Button variant="ghost" onClick={onClose}>
             {t("common:close")}
@@ -917,14 +925,18 @@ export function McpRemoveDialog({
 
   return (
     <Dialog open={open} onOpenChange={(value) => (value ? undefined : onClose())}>
-      <DialogContent className="gap-3 sm:max-w-[460px]">
+      <DialogContent size="sm">
         <DialogHeader>
           <DialogTitle>
             {server ? t("mcp.remove.title", { name: server.name }) : t("mcp.remove.titleFallback")}
           </DialogTitle>
           <DialogDescription>{t("mcp.remove.description")}</DialogDescription>
         </DialogHeader>
-        {problem ? <div className="q-banner err">{t("mcp.remove.problem")}</div> : null}
+        {problem ? (
+          <DialogBody>
+            <div className="q-banner err">{t("mcp.remove.problem")}</div>
+          </DialogBody>
+        ) : null}
         <DialogFooter>
           <Button variant="ghost" onClick={onClose}>
             {t("common:cancel")}
