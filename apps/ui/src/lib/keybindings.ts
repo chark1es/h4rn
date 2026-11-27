@@ -542,6 +542,33 @@ export function chordText(binding: string, apple = isApplePlatform): string {
   return apple ? keys.join("") : keys.join("+");
 }
 
+const ARIA_KEYS: Record<string, string> = {
+  enter: "Enter",
+  backspace: "Backspace",
+  delete: "Delete",
+  arrowup: "ArrowUp",
+  arrowdown: "ArrowDown",
+  arrowleft: "ArrowLeft",
+  arrowright: "ArrowRight",
+  space: "Space",
+  tab: "Tab",
+  escape: "Escape",
+};
+
+/** The `aria-keyshortcuts` value for a binding: "Control+Alt+P" or "Meta+Alt+P". */
+export function ariaKeyShortcut(binding: string, apple = isApplePlatform): string | undefined {
+  const chord = parseChord(binding);
+  if (!chord) return undefined;
+  return [
+    chord.mod ? (apple ? "Meta" : "Control") : null,
+    chord.alt ? "Alt" : null,
+    chord.shift ? "Shift" : null,
+    ARIA_KEYS[chord.key] ?? (chord.key.length === 1 ? chord.key.toUpperCase() : chord.key),
+  ]
+    .filter(Boolean)
+    .join("+");
+}
+
 export function shortcutText(id: CommandId): string {
   return chordText(bindingFor(id));
 }
