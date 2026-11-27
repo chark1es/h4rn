@@ -63,7 +63,7 @@ Notes on the table:
 
 - "starts on dialog" (Shortcuts, Guest share): those dialogs have no field, so UI SDK focuses the dialog itself. Tab moves into it and stays trapped.
 - The shortcuts sheet opens from anywhere except a text field: `shortcuts.open` is bound with `inInputs: false`, so Ctrl+/ in the composer types a slash. That's by design (see the sheet's own copy).
-- Command palette: the keys match the cmdk palette on main. One Escape closes even with a query typed (UI SDK Command would clear the query first). Home and End move the highlight to the first and last result, arrows stop at the ends, and Ctrl+N/J/P/K, ⌘+arrow and Alt+arrow work as in cmdk. Focus returns to the trigger.
+- Command palette: the keys match the cmdk palette on main. One Escape closes even with a query typed (UI SDK Command would clear the query first). Home and End move the highlight to the first and last result, arrows stop at the ends, and ⌘+arrow and Alt+arrow work as in cmdk. Ctrl+J/K/N/P stay off, as on main (`vimBindings={false}`), so Ctrl+K still closes the palette on Windows and Linux. Focus returns to the trigger.
 - Turn picker: the mock thread has one turn, so the menu has a single enabled item. It opens with Enter and closes with Escape, and focus returns to the trigger.
 - Tooltips open after about 320 ms, move between triggers in about 20 ms, also open on keyboard focus, and never open on tap in a `hasTouch` context.
 

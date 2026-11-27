@@ -11,6 +11,7 @@ vi.mock("@/lib/store/appStore", async (importOriginal) => {
   return { ...actual, forkThread: vi.fn(async () => true) };
 });
 
+import { useKeyboardShortcuts } from "@/hooks/use-keyboard-shortcuts";
 import { forkThread, getState, store } from "@/lib/store/appStore";
 import { CommandPalette } from "./CommandPalette";
 
@@ -154,6 +155,11 @@ describe("CommandPalette fork from latest turn", () => {
   });
 });
 
+function Shortcuts() {
+  useKeyboardShortcuts();
+  return null;
+}
+
 describe("CommandPalette keyboard", () => {
   afterEach(() => {
     cleanup();
@@ -194,6 +200,17 @@ describe("CommandPalette keyboard", () => {
       fireEvent.keyDown(input, { key: "ArrowUp" });
     });
     expect(highlightedIndex()).toBe(0);
+  });
+
+  it("closes on Ctrl+K through the global shortcut, which the field must not swallow", async () => {
+    render(<Shortcuts />);
+    renderPalette([turn()]);
+    const input = screen.getByRole("combobox");
+    await act(async () => {
+      input.focus();
+      fireEvent.keyDown(input, { key: "k", ctrlKey: true });
+    });
+    await waitFor(() => expect(getState().ui.paletteOpen).toBe(false));
   });
 
   it("closes on Escape", async () => {

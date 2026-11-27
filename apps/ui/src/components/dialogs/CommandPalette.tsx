@@ -604,9 +604,9 @@ export function CommandPalette() {
   const ranked = rankGroups(groups, query);
 
   // cmdk's keys, which UI SDK's Command leaves to the field: Escape closes even
-  // with text typed, Home and End jump to the first and last result, Ctrl+N/J
-  // and Ctrl+P/K move, ⌘ with an arrow jumps to an end, Alt with an arrow to
-  // the next group.
+  // with text typed, Home and End jump to the first and last result, ⌘ with an
+  // arrow jumps to an end, Alt with an arrow to the next group. Ctrl+J/K/N/P stay
+  // off, as on main, so Ctrl+K still reaches the global shortcut that closes us.
   const onKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
     if (event.nativeEvent.isComposing || event.keyCode === 229) return;
     const rows = ranked.flatMap((group) => group.rows).filter((row) => !row.disabled);
@@ -637,8 +637,8 @@ export function CommandPalette() {
       closePalette();
     } else if (key === "Home") jump(0);
     else if (key === "End") jump(rows.length - 1);
-    else if (key === "ArrowDown" || (event.ctrlKey && (key === "n" || key === "j"))) move(1);
-    else if (key === "ArrowUp" || (event.ctrlKey && (key === "p" || key === "k"))) move(-1);
+    else if (key === "ArrowDown") move(1);
+    else if (key === "ArrowUp") move(-1);
   };
 
   return (
