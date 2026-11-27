@@ -2364,12 +2364,13 @@ fieldset.q-seg-fs {
 .q-comp-f .grow {
   flex: 1;
 }
+/* The composer's model control: the compact Select size, borderless. */
 .q-model {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  height: 26px;
-  padding: 0 8px;
+  gap: 6px;
+  height: 24px;
+  padding: 0 6px;
   border-radius: 6px;
   color: var(--fg-2);
   font-size: 12px;
@@ -3123,15 +3124,6 @@ fieldset.q-seg-fs {
 }
 .q-chip:hover {
   background: var(--hover);
-}
-.q-chip .q-chip-label {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.q-chip .q-icon.s14 {
-  color: var(--fg-3);
-  flex: none;
 }
 .q-ch-diffhead {
   position: sticky;

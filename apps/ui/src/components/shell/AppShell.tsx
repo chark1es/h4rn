@@ -37,6 +37,7 @@ import {
   MenuSeparator,
   MenuTrigger,
 } from "@/components/ui/menu";
+import { selectTriggerVariants } from "@/components/ui/select";
 import { Toaster } from "@/components/ui/sonner";
 import { Tip } from "@/components/ui/tooltip";
 import { AttachmentTray } from "@/features/attachments/AttachmentTray";
@@ -86,6 +87,8 @@ import { activeThread } from "@/lib/thread-selection";
 
 const HARNESSES: HarnessKind[] = ["claude_code", "codex", "opencode", "antigravity"];
 
+/** The start screen's pickers share the compact Select trigger. */
+const START_CHIP = selectTriggerVariants({ size: "chip" });
 export function InboxDetailEmpty() {
   const hosts = useApp((state) => state.hosts);
   const localHostId = useApp((state) => state.localHostId);
@@ -355,7 +358,7 @@ export function InboxDetailEmpty() {
           <div className="q-chips" style={{ marginBottom: 10 }}>
             <Menu>
               <MenuTrigger
-                className="q-chip"
+                className={START_CHIP}
                 aria-label={
                   selectedHost
                     ? t("start.hostChip", { name: selectedHost.name })
@@ -368,7 +371,7 @@ export function InboxDetailEmpty() {
                   label={selectedHost?.name ?? t("start.host")}
                   size={16}
                 />
-                <span className="q-chip-label">
+                <span className="min-w-0 flex-1 truncate">
                   {selectedHost?.name ?? t("start.noOnlineHost")}
                 </span>
                 <ChevronDownIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
@@ -411,7 +414,7 @@ export function InboxDetailEmpty() {
 
             <Menu>
               <MenuTrigger
-                className="q-chip"
+                className={START_CHIP}
                 aria-label={t("start.harnessChip", { name: harnessLabel(harness) })}
               >
                 <EntityAvatar
@@ -420,7 +423,7 @@ export function InboxDetailEmpty() {
                   label={harnessLabel(harness)}
                   size={16}
                 />
-                <span className="q-chip-label">{harnessLabel(harness)}</span>
+                <span className="min-w-0 flex-1 truncate">{harnessLabel(harness)}</span>
                 <ChevronDownIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
               </MenuTrigger>
               <MenuContent align="start" className="w-60">
@@ -480,12 +483,12 @@ export function InboxDetailEmpty() {
             ) : null}
             <Menu>
               <MenuTrigger
-                className="q-chip"
+                className={START_CHIP}
                 aria-label={t("start.projectChip", { name: selectedFolder?.name ?? workspace })}
                 title={workspace}
               >
                 <FolderIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-                <span className="q-chip-label">
+                <span className="min-w-0 flex-1 truncate">
                   {customFolder || folderChoices.length === 0
                     ? t("start.projects")
                     : (selectedFolder?.name ?? shortPath(workspace))}
