@@ -446,8 +446,8 @@ describe("the pull requests page in another language", () => {
     render(<PullRequestsPage />);
 
     expect(await screen.findByRole("heading", { name: "Pull requests" })).toBeTruthy();
-    expect(screen.getByRole("tab", { name: "Abiertos" })).toBeTruthy();
-    expect(screen.getByRole("tab", { name: "Por revisar" })).toBeTruthy();
+    expect(screen.getByRole("radio", { name: "Abiertos" })).toBeTruthy();
+    expect(screen.getByRole("radio", { name: "Por revisar" })).toBeTruthy();
     expect(await screen.findByText("Abierto")).toBeTruthy();
     expect(screen.getByText("Todas las comprobaciones superadas")).toBeTruthy();
     expect(screen.getByText("Revisión solicitada")).toBeTruthy();

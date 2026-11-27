@@ -3,6 +3,7 @@ import { useEffect } from "react";
 import { useTranslation } from "react-i18next";
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
 import { ChipSelect } from "@/components/common/ChipSelect";
+import { SegmentedControl, SegmentedControlItem } from "@/components/ui/segmented-control";
 import { Tip } from "@/components/ui/tooltip";
 import type {
   LimitStatus,
@@ -146,23 +147,20 @@ function RangePicker({ compact = false }: { compact?: boolean }) {
   const { t } = useTranslation("usage");
   const range = useUsage((state) => state.query.range);
   return (
-    <div
-      className={cn("q-seg", compact ? undefined : "inline")}
-      role="tablist"
+    <SegmentedControl
+      width={compact ? "full" : "auto"}
       aria-label={t("range.label")}
+      value={range}
+      onValueChange={(value) => {
+        if (value) setRange(value as typeof range);
+      }}
     >
       {RANGES.map((key) => (
-        <button
-          key={key}
-          type="button"
-          role="tab"
-          aria-selected={range === key}
-          onClick={() => setRange(key)}
-        >
+        <SegmentedControlItem key={key} value={key}>
           {t(`range.${key}`)}
-        </button>
+        </SegmentedControlItem>
       ))}
-    </div>
+    </SegmentedControl>
   );
 }
 
@@ -170,19 +168,19 @@ function GroupPicker() {
   const { t } = useTranslation("usage");
   const groupBy = useUsage((state) => state.query.groupBy);
   return (
-    <div className="q-seg inline" role="tablist" aria-label={t("groupBy.label")}>
+    <SegmentedControl
+      aria-label={t("groupBy.label")}
+      value={groupBy}
+      onValueChange={(value) => {
+        if (value) setGroupBy(value as typeof groupBy);
+      }}
+    >
       {GROUPS.map((key) => (
-        <button
-          key={key}
-          type="button"
-          role="tab"
-          aria-selected={groupBy === key}
-          onClick={() => setGroupBy(key)}
-        >
+        <SegmentedControlItem key={key} value={key}>
           {t(`groupBy.${key}`)}
-        </button>
+        </SegmentedControlItem>
       ))}
-    </div>
+    </SegmentedControl>
   );
 }
 
@@ -190,19 +188,19 @@ function MetricPicker() {
   const { t } = useTranslation("usage");
   const metric = useUsage((state) => state.query.metric);
   return (
-    <div className="q-seg inline" role="tablist" aria-label={t("metric.label")}>
+    <SegmentedControl
+      aria-label={t("metric.label")}
+      value={metric}
+      onValueChange={(value) => {
+        if (value) setMetric(value as typeof metric);
+      }}
+    >
       {METRICS.map((key) => (
-        <button
-          key={key}
-          type="button"
-          role="tab"
-          aria-selected={metric === key}
-          onClick={() => setMetric(key)}
-        >
+        <SegmentedControlItem key={key} value={key}>
           {t(`metric.${key}`)}
-        </button>
+        </SegmentedControlItem>
       ))}
-    </div>
+    </SegmentedControl>
   );
 }
 

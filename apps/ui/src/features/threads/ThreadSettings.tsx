@@ -1,5 +1,6 @@
 import { useTranslation } from "react-i18next";
 
+import { SegmentedControl, SegmentedControlItem } from "@/components/ui/segmented-control";
 import { setDefaultPermissionMode, useThreadSettings } from "@/features/threads/settings";
 import type { RuntimeMode } from "@/gen";
 import { MODE_CHOICES } from "@/lib/threadControls";
@@ -24,20 +25,19 @@ export function NewThreadDefaults() {
           <div className="s">{t("threads.permissionsHint")}</div>
         </div>
         <div className="ctl">
-          <div className="q-seg" role="radiogroup" aria-label={t("threads.defaultPermissions")}>
+          <SegmentedControl
+            aria-label={t("threads.defaultPermissions")}
+            value={settings.defaultPermissionMode}
+            onValueChange={(value) => {
+              if (value) setDefaultPermissionMode(value as RuntimeMode);
+            }}
+          >
             {MODE_CHOICES.map((choice) => (
-              // biome-ignore lint/a11y/useSemanticElements: a segmented radio group, not a form radio
-              <button
-                key={choice.value}
-                type="button"
-                role="radio"
-                aria-checked={settings.defaultPermissionMode === choice.value}
-                onClick={() => setDefaultPermissionMode(choice.value as RuntimeMode)}
-              >
+              <SegmentedControlItem key={choice.value} value={choice.value}>
                 {t(`common:permissionModes.${choice.value}`)}
-              </button>
+              </SegmentedControlItem>
             ))}
-          </div>
+          </SegmentedControl>
         </div>
       </div>
       <p className="s q-muted">{t("threads.planNote")}</p>

@@ -551,7 +551,7 @@ describe("the Issues page", () => {
   it("asks the tracker again when the filter changes", async () => {
     render(<IssuesPage />);
     await screen.findByText("GitHub · alice");
-    fireEvent.click(screen.getByRole("tab", { name: "Closed" }));
+    fireEvent.click(screen.getByRole("radio", { name: "Closed" }));
     await waitFor(() => {
       expect(
         requestsOfType("forge_list_issues").some(
@@ -677,7 +677,7 @@ describe("the Issues page", () => {
     expect(screen.queryByText("Linear · Acme")).toBeNull();
     expect(screen.queryByText("ENG-1")).toBeNull();
     expect(screen.queryByLabelText("New comment")).toBeNull();
-    expect(screen.queryByRole("tab", { name: "Mentioning me" })).toBeNull();
+    expect(screen.queryByRole("radio", { name: "Mentioning me" })).toBeNull();
     expect(mock.request.mock.calls.map(([value]) => (value as ClientRequest).type)).not.toContain(
       "linear_list_issues",
     );
@@ -738,7 +738,7 @@ describe("the Issues page", () => {
     });
     render(<IssuesPage />);
     expect(await screen.findByText("Linear · Acme")).toBeTruthy();
-    expect(screen.getByRole("tab", { name: "Mentioning me" })).toBeTruthy();
+    expect(screen.getByRole("radio", { name: "Mentioning me" })).toBeTruthy();
     fireEvent.click(await screen.findByRole("button", { name: /Rate limit the import/ }));
     expect(await screen.findByLabelText("New comment")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Comment" })).toBeTruthy();
@@ -762,7 +762,7 @@ describe("the Issues page", () => {
     });
     render(<IssuesPage />);
     expect(await screen.findByText("Linear · Acme")).toBeTruthy();
-    expect(screen.queryByRole("tab", { name: "Mentioning me" })).toBeNull();
+    expect(screen.queryByRole("radio", { name: "Mentioning me" })).toBeNull();
     fireEvent.click(await screen.findByRole("button", { name: /Rate limit the import/ }));
     expect(await screen.findByRole("button", { name: /Link to this thread/ })).toBeTruthy();
     expect(screen.queryByLabelText("New comment")).toBeNull();
@@ -783,7 +783,7 @@ describe("the Issues page", () => {
     row.focus();
     expect(document.activeElement).toBe(row);
     expect(row.tagName).toBe("BUTTON");
-    expect(screen.getByRole("tab", { name: "Open" })).toBeTruthy();
+    expect(screen.getByRole("radio", { name: "Open" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Projects" })).toBeTruthy();
   });
 
@@ -826,7 +826,7 @@ describe("the Issues page", () => {
     });
     render(<IssuesPage />);
     await screen.findByText("#12");
-    expect(screen.queryByRole("tab", { name: "Mentioning me" })).toBeNull();
+    expect(screen.queryByRole("radio", { name: "Mentioning me" })).toBeNull();
     await openIssue();
     expect(screen.queryByLabelText("Close reason")).toBeNull();
   });
@@ -994,7 +994,7 @@ describe("accounts, filters and detail", () => {
   it("does not clear the list when the same filter is chosen again", async () => {
     render(<IssuesPage />);
     await screen.findByText("#12");
-    fireEvent.click(screen.getByRole("tab", { name: "Closed" }));
+    fireEvent.click(screen.getByRole("radio", { name: "Closed" }));
     await waitFor(() =>
       expect(
         requestsOfType("forge_list_issues").some(
@@ -1003,7 +1003,7 @@ describe("accounts, filters and detail", () => {
       ).toBe(true),
     );
     expect(await screen.findByText("#12")).toBeTruthy();
-    fireEvent.click(screen.getByRole("tab", { name: "Closed" }));
+    fireEvent.click(screen.getByRole("radio", { name: "Closed" }));
     expect(screen.getByText("#12")).toBeTruthy();
     expect(
       requestsOfType("forge_list_issues").filter(
@@ -1560,7 +1560,7 @@ describe("the Issues page in another language", () => {
     await setLocalePreference("ja");
     render(<IssuesPage />);
     expect(await screen.findByRole("heading", { name: "Issue", level: 1 })).toBeTruthy();
-    expect(screen.getByRole("tab", { name: "クローズ" })).toBeTruthy();
+    expect(screen.getByRole("radio", { name: "クローズ" })).toBeTruthy();
     expect(screen.getByPlaceholderText("トラッカーを検索")).toBeTruthy();
 
     fireEvent.click(await screen.findByRole("button", { name: /Dark mode flickers/ }));

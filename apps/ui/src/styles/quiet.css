@@ -345,7 +345,6 @@ fieldset.q-seg-fs {
     0 0 0 3px color-mix(in oklch, var(--focus) 25%, transparent);
 }
 
-
 .q-check {
   width: 16px;
   height: 16px;

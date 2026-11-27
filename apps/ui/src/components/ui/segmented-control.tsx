@@ -9,7 +9,7 @@ import type * as React from "react";
 import { cn } from "@/lib/utils";
 
 const segmentedControlVariants = cva(
-  "group/seg relative isolate inline-flex max-w-full shrink-0 items-stretch rounded-md bg-muted p-0.5 data-disabled:opacity-45",
+  "group/seg relative isolate inline-flex max-w-full shrink-0 items-stretch gap-0.5 rounded-md bg-muted p-0.5 data-disabled:opacity-45",
   {
     variants: {
       size: {

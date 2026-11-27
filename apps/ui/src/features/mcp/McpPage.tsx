@@ -15,7 +15,6 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
 import { Popover } from "@/components/common/Popover";
 import { LibraryErrorBanner } from "@/components/pages/LibraryErrorBanner";
@@ -27,6 +26,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { SegmentedControl, SegmentedControlItem } from "@/components/ui/segmented-control";
 import { Switch } from "@/components/ui/switch";
 import type { HarnessKind, HostId, McpServerView } from "@/gen";
 import { useIsPhone } from "@/hooks/use-media-query";
@@ -271,25 +271,21 @@ function ResolvePanel({ server, close }: { server: McpServerView; close: () => v
           {t("mcp.resolve.otherCopy", { harness: HARNESS_LABELS[harness] })}
         </div>
       ) : (
-        <div
-          className="q-seg q-resolve-seg"
-          role="radiogroup"
+        <SegmentedControl
+          width="full"
+          className="q-resolve-seg"
           aria-label={t("mcp.resolve.harness")}
+          value={harness}
+          onValueChange={(value) => {
+            if (value) setHarness(value as typeof harness);
+          }}
         >
           {MCP_HARNESSES.map((entry) => (
-            // biome-ignore lint/a11y/useSemanticElements: a segmented radio group, not a form radio
-            <button
-              key={entry}
-              type="button"
-              role="radio"
-              aria-checked={harness === entry}
-              aria-label={HARNESS_LABELS[entry]}
-              onClick={() => setHarness(entry)}
-            >
+            <SegmentedControlItem key={entry} value={entry}>
               {HARNESS_LABELS[entry]}
-            </button>
+            </SegmentedControlItem>
           ))}
-        </div>
+        </SegmentedControl>
       )}
       <div role="radiogroup" aria-label={t("mcp.resolve.resolution")}>
         {CONFLICT_CHOICES.map((option) => (

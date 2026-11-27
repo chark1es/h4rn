@@ -108,7 +108,7 @@ const SHOTS = [
     path: "/t/thr_h",
     wait: '[aria-label="Thread stream"]',
     action: async (page) => {
-      await page.getByRole("tab", { name: /Done/ }).click();
+      await page.getByRole("radio", { name: /Done/ }).click();
       await page.waitForTimeout(400);
     },
   },
@@ -196,7 +196,7 @@ const SHOTS = [
         .getByRole("tab", { name: /session\.test\.ts/ })
         .first()
         .click();
-      await page.getByRole("tab", { name: "vs agent" }).click();
+      await page.getByRole("radio", { name: "vs agent" }).click();
       await sidebar.locator('[data-thread-id="thr_a"]').click();
       await page.getByRole("heading", { name: "api" }).waitFor({ timeout: 10_000 });
       await sidebar.locator('[data-thread-id="thr_b"]').click();

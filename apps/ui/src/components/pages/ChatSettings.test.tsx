@@ -28,13 +28,13 @@ describe("chat settings", () => {
   it("remembers the follow-up behaviour this device sends with", () => {
     render(<SettingsPage section="chat" />);
 
-    const steer = screen.getByRole("button", { name: "Steer" });
-    expect(steer.getAttribute("aria-pressed")).toBe("false");
+    const steer = screen.getByRole("radio", { name: "Steer" });
+    expect(steer.getAttribute("aria-checked")).toBe("false");
     fireEvent.click(steer);
-    expect(steer.getAttribute("aria-pressed")).toBe("true");
+    expect(steer.getAttribute("aria-checked")).toBe("true");
     expect(followUpBehavior()).toBe("steer");
 
-    fireEvent.click(screen.getByRole("button", { name: "Queue" }));
+    fireEvent.click(screen.getByRole("radio", { name: "Queue" }));
     expect(followUpBehavior()).toBe("queue");
   });
 

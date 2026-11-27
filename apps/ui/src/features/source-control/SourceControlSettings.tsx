@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-
 import { ChipSelect } from "@/components/common/ChipSelect";
+import { SegmentedControl, SegmentedControlItem } from "@/components/ui/segmented-control";
 import { useHarnesses, useHarnessVersions } from "@/features/harnesses/harnessStore";
 import { LinearSettings } from "@/features/issues/LinearSettings";
 import {
@@ -29,24 +29,20 @@ function ModePicker({
 }) {
   const { t } = useTranslation(["settings", "common"]);
   return (
-    <div
-      className="q-seg inline q-seg-choice"
-      role="radiogroup"
+    <SegmentedControl
+      className="phone:w-full"
       aria-label={t("sourceControl.modeLabel")}
+      value={value}
+      onValueChange={(next) => {
+        if (next) onChange(next as SourceControlModelMode);
+      }}
     >
       {MODES.map((mode) => (
-        // biome-ignore lint/a11y/useSemanticElements: a segmented radio group, not a form radio
-        <button
-          key={mode}
-          type="button"
-          role="radio"
-          aria-checked={value === mode}
-          onClick={() => onChange(mode)}
-        >
+        <SegmentedControlItem key={mode} value={mode} className="phone:min-w-0 phone:flex-1">
           {t(`sourceControl.modes.${mode}`)}
-        </button>
+        </SegmentedControlItem>
       ))}
-    </div>
+    </SegmentedControl>
   );
 }
 

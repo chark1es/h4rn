@@ -79,14 +79,14 @@ describe("the title-mode picker", () => {
     expect(document.activeElement).toBe(radio("Off"));
   });
 
-  it("jumps to the ends with Home and End", () => {
+  it("moves back with ArrowLeft and wraps at the start", () => {
     render(<PickerHarness initial="coding_agent" />);
 
-    fireEvent.keyDown(radio("Coding agent"), { key: "Home" });
+    fireEvent.keyDown(radio("Coding agent"), { key: "ArrowLeft" });
     expect(radio("Off").getAttribute("aria-checked")).toBe("true");
     expect(document.activeElement).toBe(radio("Off"));
 
-    fireEvent.keyDown(radio("Off"), { key: "End" });
+    fireEvent.keyDown(radio("Off"), { key: "ArrowLeft" });
     const last = radio("Text generator");
     expect(last.getAttribute("aria-checked")).toBe("true");
     expect(document.activeElement).toBe(last);

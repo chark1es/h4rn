@@ -14,7 +14,6 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-
 import { AgentGlyph } from "@/components/agent/AgentGlyph";
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
 import { ChipSelect } from "@/components/common/ChipSelect";
@@ -29,6 +28,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { SegmentedControl, SegmentedControlItem } from "@/components/ui/segmented-control";
 import {
   accountForRepo,
   appendComment,
@@ -501,22 +501,22 @@ export function PullRequestsPage() {
           />
         ) : null}
         <span className="grow" />
-        <div className="q-seg" role="tablist" aria-label={t("filters.label")}>
+        <SegmentedControl
+          className="q-pr-filters"
+          aria-label={t("filters.label")}
+          value={filter}
+          onValueChange={(value) => {
+            if (!value) return;
+            setFilter(value as typeof filter);
+            setPage(1);
+          }}
+        >
           {filters.map((key) => (
-            <button
-              key={key}
-              type="button"
-              role="tab"
-              aria-selected={filter === key}
-              onClick={() => {
-                setFilter(key);
-                setPage(1);
-              }}
-            >
+            <SegmentedControlItem key={key} value={key}>
               {t(`filters.${key}`)}
-            </button>
+            </SegmentedControlItem>
           ))}
-        </div>
+        </SegmentedControl>
         <OpenPrButton
           repo={repo}
           thread={activeThread}

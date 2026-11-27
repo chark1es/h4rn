@@ -11,6 +11,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { ShortcutCaps } from "@/components/ui/kbd";
+import { SegmentedControl, SegmentedControlItem } from "@/components/ui/segmented-control";
 import { Tip } from "@/components/ui/tooltip";
 import type { ThreadSummary } from "@/gen";
 import { harnessLabel, harnessSeed } from "@/lib/entities";
@@ -49,24 +50,17 @@ export function ChangesSection({
   return (
     <>
       <div className="q-rp-bar">
-        <div className="q-seg inline" role="tablist" aria-label={t("changes.compare")}>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={mode === "agent"}
-            onClick={() => setMode("agent")}
-          >
-            {t("changes.vsAgent")}
-          </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={mode === "head"}
-            onClick={() => setMode("head")}
-          >
-            {t("changes.vsHead")}
-          </button>
-        </div>
+        <SegmentedControl
+          size="sm"
+          aria-label={t("changes.compare")}
+          value={mode}
+          onValueChange={(value) => {
+            if (value === "agent" || value === "head") setMode(value);
+          }}
+        >
+          <SegmentedControlItem value="agent">{t("changes.vsAgent")}</SegmentedControlItem>
+          <SegmentedControlItem value="head">{t("changes.vsHead")}</SegmentedControlItem>
+        </SegmentedControl>
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <button type="button" className="q-btn ghost" style={{ height: 26 }}>
