@@ -168,8 +168,8 @@ const SHOTS = [
       await page.keyboard.press("Control+End");
       await page.keyboard.type(" ");
       await page.getByRole("tab", { name: "Diff" }).click();
-      await page.getByRole("button", { name: /Diff source/ }).click();
-      await page.getByRole("menuitem", { name: /^Turn/ }).click();
+      await page.getByRole("combobox", { name: /Diff source/ }).click();
+      await page.getByRole("option", { name: /^Turn/ }).click();
       await page.waitForTimeout(700);
     },
   },

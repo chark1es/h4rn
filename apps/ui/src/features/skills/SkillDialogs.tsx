@@ -684,7 +684,7 @@ export function SkillDetailsDialog({
         <div className="flex flex-wrap items-center gap-2">
           <ChipSelect
             label={t("skills.details.fromVersion")}
-            width={200}
+            className="w-50"
             value={from}
             options={[
               { value: "", label: t("skills.details.newSkill") },
@@ -695,7 +695,7 @@ export function SkillDetailsDialog({
           <span className="q-faint">→</span>
           <ChipSelect
             label={t("skills.details.toVersion")}
-            width={200}
+            className="w-50"
             value={to}
             options={versions.map((version) => ({ value: version, label: version.slice(0, 12) }))}
             onChange={setTo}

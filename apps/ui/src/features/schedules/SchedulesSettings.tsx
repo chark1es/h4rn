@@ -97,7 +97,7 @@ function ScheduleFields({
           <ChipSelect<ScheduleKind>
             label={t("schedules.editor.schedule")}
             value={schedule.kind}
-            width={150}
+            className="w-37.5"
             options={SCHEDULE_KINDS.map((kind) => ({
               value: kind,
               label: scheduleKindLabel(kind),
@@ -152,7 +152,7 @@ function ScheduleFields({
             <ChipSelect<"minutes" | "hours">
               label={t("schedules.editor.intervalUnit")}
               value={schedule.unit}
-              width={110}
+              className="w-27.5"
               options={[
                 { value: "minutes", label: unitLabel("minutes") },
                 { value: "hours", label: unitLabel("hours") },
@@ -478,7 +478,7 @@ function ScheduleEditor({
           <ChipSelect<ScheduleDraft["destination"]>
             label={t("schedules.editor.destination")}
             value={draft.destination}
-            width={220}
+            className="w-55"
             options={DESTINATIONS.map((value) => ({
               value,
               label: describeDestination(value),
@@ -520,7 +520,7 @@ function ScheduleEditor({
           <ChipSelect<string>
             label={t("schedules.editor.harness")}
             value={draft.harness === "acp" ? `acp:${draft.agent_id ?? ""}` : draft.harness}
-            width={200}
+            className="w-50"
             options={[
               ...harnesses
                 .filter((kind) => kind !== "acp")
@@ -585,7 +585,7 @@ function ScheduleEditor({
           <ChipSelect<ScheduleDraft["runtime_mode"]>
             label={t("threads.permissions")}
             value={draft.runtime_mode}
-            width={190}
+            className="w-47.5"
             options={MODE_CHOICES.map((choice) => ({
               value: choice.value,
               label: t(`common:permissionModes.${choice.value}`),

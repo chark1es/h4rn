@@ -869,11 +869,11 @@ describe("the Issues page", () => {
   it("names the issue a GitHub duplicate close duplicates", async () => {
     await openIssue();
     // Radix opens on pointer down, not click.
-    fireEvent.pointerDown(screen.getByRole("button", { name: /Close reason/ }), {
+    fireEvent.pointerDown(screen.getByRole("combobox", { name: /Close reason/ }), {
       button: 0,
       pointerType: "mouse",
     });
-    fireEvent.click(await screen.findByRole("menuitem", { name: "Duplicate" }));
+    fireEvent.click(await screen.findByRole("option", { name: "Duplicate" }));
     const picker = await screen.findByLabelText("Duplicate of issue number");
     fireEvent.change(picker, { target: { value: "9" } });
     fireEvent.click(screen.getByRole("button", { name: "Close issue" }));

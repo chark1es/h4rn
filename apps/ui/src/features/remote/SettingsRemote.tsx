@@ -835,7 +835,7 @@ function PairDeviceGroup({ onClose }: { onClose: () => void }) {
               label={t("devices.pairing.machineLabel")}
               value={machineId}
               placeholder={t("devices.pairing.noMachines")}
-              width={200}
+              className="w-50"
               options={available.map((machine) => ({
                 value: machine.id,
                 label: machine.name,

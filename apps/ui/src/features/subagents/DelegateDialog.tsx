@@ -171,7 +171,7 @@ export function DelegateDialog({ thread }: { thread: ThreadSummary }) {
               label={t("fields.host")}
               value={host}
               placeholder={t("fields.noOnlineHosts")}
-              width={160}
+              className="w-40"
               options={localOnlyHostOptions(onlineHosts, thread.host, t("delegate.hostLocalOnly"))}
               onChange={(next) => {
                 setHost(next);
@@ -194,7 +194,7 @@ export function DelegateDialog({ thread }: { thread: ThreadSummary }) {
               id="delegate-harness"
               label={t("fields.harness")}
               value={harness}
-              width={160}
+              className="w-40"
               options={harnessChoices.map((option) => ({
                 value: option,
                 label: HARNESS_LABELS[option],
@@ -230,7 +230,7 @@ export function DelegateDialog({ thread }: { thread: ThreadSummary }) {
               id="delegate-isolation"
               label={t("fields.workspace")}
               value={isolation}
-              width={160}
+              className="w-40"
               options={[
                 { value: "worktree", label: t("delegate.isolated") },
                 { value: "shared", label: t("delegate.shared") },

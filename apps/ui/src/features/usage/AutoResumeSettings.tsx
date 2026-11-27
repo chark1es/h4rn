@@ -102,7 +102,7 @@ export function AutoResumeSettings() {
             <ChipSelect<string>
               label={t("resume.longestWait")}
               value={String(draft.max_wait_ms)}
-              width={180}
+              className="w-45"
               options={WAIT_CHOICES.map((choice) => ({
                 value: String(choice.ms),
                 label: formatNumber(choice.amount, {

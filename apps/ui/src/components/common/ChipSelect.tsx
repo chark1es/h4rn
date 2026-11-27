@@ -1,13 +1,8 @@
-import { CheckIcon, ChevronDownIcon } from "lucide-react";
-import type { ReactNode } from "react";
+import { type ReactNode, useRef } from "react";
 import { useTranslation } from "react-i18next";
 
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
+import { Select, SelectContent, SelectItem, SelectTrigger } from "@/components/ui/select";
+import { cn } from "@/lib/utils";
 
 export type ChipOption<T extends string> = {
   value: T;
@@ -19,11 +14,7 @@ export type ChipOption<T extends string> = {
   disabled?: boolean;
 };
 
-/**
- * The prototype's picker: a 24 px chip (radius 6, label, 12 px chevron) that
- * opens a menu. It replaces the native `<select>`, which draws OS chrome the
- * Quiet controls do not use.
- */
+/** A labelled Select over a short list of options, sized like an Input. */
 export function ChipSelect<T extends string>({
   value,
   options,
@@ -33,62 +24,72 @@ export function ChipSelect<T extends string>({
   placeholder,
   disabled,
   className,
-  width,
   block,
+  size,
 }: {
   value: T | "";
   options: ChipOption<T>[];
+  /** Runs on every pick, including the option already chosen. */
   onChange: (value: T) => void;
-  /** Accessible name; also the group label announced for the menu. */
+  /** Names the control; the current choice follows it. */
   label: string;
   id?: string;
   placeholder?: string;
   disabled?: boolean;
   className?: string;
-  /** Fixed chip width in px; the chip otherwise hugs its label. */
-  width?: number;
-  /** Fill the field like an input (28 px) instead of hugging the label. */
+  /** Fill the field instead of hugging the label. */
   block?: boolean;
+  size?: "default" | "chip";
 }) {
   const { t } = useTranslation("common");
+  const changed = useRef(false);
+  const withIcon = options.some((option) => option.icon);
   const current = options.find((option) => option.value === value);
   return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <button
-          type="button"
-          id={id}
-          className={`q-chip q-chip-select${block ? " block" : ""}${className ? ` ${className}` : ""}`}
-          style={width ? { width, maxWidth: "100%" } : undefined}
-          aria-label={`${label}: ${current?.label ?? placeholder ?? t("choose")}`}
-          aria-haspopup="menu"
-          disabled={disabled || options.length === 0}
-        >
-          {current?.icon}
-          <span className="q-chip-label">{current?.label ?? placeholder ?? t("choose")}</span>
-          <ChevronDownIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
-        </button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="start" className="min-w-[160px] max-w-[320px]">
+    <Select<T>
+      items={options.map((option) => ({
+        value: option.value,
+        label: option.label,
+        ...(option.disabled ? { disabled: true } : {}),
+      }))}
+      value={value === "" ? null : value}
+      placeholder={placeholder ?? t("choose")}
+      disabled={disabled || options.length === 0}
+      onValueChange={(next) => {
+        if (next === null) return;
+        changed.current = true;
+        onChange(next);
+      }}
+      onOpenChange={(open, details) => {
+        if (open) {
+          changed.current = false;
+          return;
+        }
+        // Choosing the current option changes no value, but callers still treat it as a pick.
+        if (details.reason === "item-press" && !changed.current && value !== "") onChange(value);
+      }}
+    >
+      <SelectTrigger
+        id={id}
+        aria-label={`${label}: ${current?.label ?? placeholder ?? t("choose")}`}
+        size={size}
+        withIcon={withIcon}
+        className={cn(block ? "w-full" : "w-auto max-w-full", className)}
+      />
+      <SelectContent align="start" className="max-w-80">
         {options.map((option) => (
-          <DropdownMenuItem
+          <SelectItem<T>
             key={option.value}
+            value={option.value}
+            label={option.label}
             disabled={option.disabled}
-            onSelect={() => onChange(option.value)}
+            icon={option.icon}
+            description={option.hint}
           >
-            {option.icon}
-            <span className="min-w-0 flex-1">
-              <span className="block truncate">{option.label}</span>
-              {option.hint ? (
-                <span className="block truncate text-[11.5px] text-fg-3">{option.hint}</span>
-              ) : null}
-            </span>
-            {option.value === value ? (
-              <CheckIcon className="q-icon s14 text-fg-3" strokeWidth={1.5} aria-hidden />
-            ) : null}
-          </DropdownMenuItem>
+            {option.label}
+          </SelectItem>
         ))}
-      </DropdownMenuContent>
-    </DropdownMenu>
+      </SelectContent>
+    </Select>
   );
 }

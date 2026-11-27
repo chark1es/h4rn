@@ -135,8 +135,7 @@ function ScopePicker({ compact = false }: { compact?: boolean }) {
       value={scope}
       options={options}
       onChange={setScope}
-      width={120}
-      {...(compact ? { className: "q-scope-compact" } : {})}
+      className={cn("w-30", compact && "ms-auto me-4 mt-2")}
     />
   );
 }

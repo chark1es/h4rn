@@ -239,7 +239,7 @@ export function AddGenerator() {
           <ChipSelect<TextGeneratorKind>
             label={t("textGeneration.kindLabel")}
             value={kind}
-            width={190}
+            className="w-47.5"
             options={KINDS.map((entry) => ({
               value: entry,
               label: kindLabel(entry),
@@ -546,7 +546,7 @@ function TitleDraftForm({ saved }: { saved: TextGenerationSettings }) {
             <ChipSelect<AgentChoice>
               label={t("textGeneration.codingAgentLabel")}
               value={draft.harness ?? FOLLOW_THREAD}
-              width={220}
+              className="w-55"
               options={[
                 {
                   value: FOLLOW_THREAD,
@@ -582,7 +582,7 @@ function TitleDraftForm({ saved }: { saved: TextGenerationSettings }) {
               <ChipSelect<TextGeneratorId>
                 label={t("textGeneration.generatorLabel")}
                 value={draft.generator_id ?? ""}
-                width={200}
+                className="w-50"
                 disabled={generators.length === 0}
                 options={generators.map((entry) => ({
                   value: entry.id,

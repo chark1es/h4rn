@@ -172,7 +172,7 @@ export function SourceControlSettings() {
                   <ChipSelect<AgentChoice>
                     label={t("sourceControl.codingAgentLabel")}
                     value={draft.harness ?? FOLLOW_THREAD}
-                    width={220}
+                    className="w-55"
                     options={[
                       {
                         value: FOLLOW_THREAD,
@@ -204,7 +204,7 @@ export function SourceControlSettings() {
                     <ChipSelect
                       label={t("sourceControl.modes.text_generator")}
                       value={draft.generator_id ?? ""}
-                      width={220}
+                      className="w-55"
                       options={generators.map((candidate) => ({
                         value: candidate.id,
                         label: candidate.name,
