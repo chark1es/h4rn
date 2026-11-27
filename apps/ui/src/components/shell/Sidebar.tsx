@@ -69,7 +69,6 @@ import {
   openNewThread,
   openThread,
   setLibrarySelected,
-  setSidebarWidth,
   setTab,
   setUi,
   toggleSidebar,
@@ -77,7 +76,6 @@ import {
 } from "@/lib/store/appStore";
 import { cn } from "@/lib/utils";
 import { hostStatus } from "./hostStatus";
-import { Resizer } from "./Resizer";
 import { snoozeWakeLabel } from "./snoozeWake";
 
 const SKELETON_WIDTHS: Array<[string, string]> = [
@@ -678,7 +676,7 @@ function ThreadsSidebar() {
   const activate = (value: ThreadTab) => setTab(value);
 
   return (
-    <nav className="q-side" aria-label={t("label")} style={{ width: layout.sidebarWidth }}>
+    <nav className="q-side" aria-label={t("label")}>
       <div className="q-side-hd">
         <div className="q-side-top">
           <span className="q-word">h4rn</span>
@@ -813,14 +811,6 @@ function ThreadsSidebar() {
         rows={rows}
         connection={connection}
       />
-      <Resizer
-        side="side"
-        width={layout.sidebarWidth}
-        min={240}
-        max={420}
-        label={t("sidebar:resize")}
-        onChange={setSidebarWidth}
-      />
     </nav>
   );
 }
@@ -935,11 +925,7 @@ function SettingsSidebar() {
   };
 
   return (
-    <nav
-      className="q-side q-set-side"
-      aria-label={t("page.label")}
-      style={{ width: layout.sidebarWidth }}
-    >
+    <nav className="q-side q-set-side" aria-label={t("page.label")}>
       <div className="q-side-hd">
         <div className="q-side-top">
           <Tip label={t("nav.backTitle")}>
@@ -1083,14 +1069,6 @@ function SettingsSidebar() {
         offline={connection.status === "offline"}
         rows={rows}
         connection={connection}
-      />
-      <Resizer
-        side="side"
-        width={layout.sidebarWidth}
-        min={240}
-        max={420}
-        label={t("sidebar:resize")}
-        onChange={setSidebarWidth}
       />
     </nav>
   );

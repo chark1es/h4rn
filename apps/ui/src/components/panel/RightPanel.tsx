@@ -1,7 +1,6 @@
 import { XIcon } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
-import { Resizer } from "@/components/shell/Resizer";
 import { Tabs, TabsCount, TabsList, TabsPanel, TabsTab } from "@/components/ui/tabs";
 import { Tip } from "@/components/ui/tooltip";
 import { PreviewPanel } from "@/features/preview/PreviewPanel";
@@ -10,14 +9,7 @@ import { useSubagentCount } from "@/features/subagents/subagentStore";
 import type { ThreadSummary } from "@/gen";
 import { harnessLabel } from "@/lib/entities";
 import { formatNumber } from "@/lib/i18n";
-import {
-  openPreview,
-  type PanelTab,
-  setPanelTab,
-  setPanelWidth,
-  togglePanel,
-  useApp,
-} from "@/lib/store/appStore";
+import { openPreview, type PanelTab, setPanelTab, togglePanel, useApp } from "@/lib/store/appStore";
 import { ChangesSection } from "./ChangesSection";
 import { usePanelChanges } from "./usePanelChanges";
 import { WorkspaceFiles } from "./WorkspaceFiles";
@@ -30,7 +22,6 @@ function workspaceName(path: string): string {
 export function RightPanel({ thread, ide = false }: { thread: ThreadSummary; ide?: boolean }) {
   const { t } = useTranslation("thread");
   const tab = useApp((state) => state.ui.layout.panelTab);
-  const width = useApp((state) => state.ui.layout.panelWidth);
   const ideActivePath = useApp((state) => state.ui.ideActivePath);
   const changes = usePanelChanges(thread);
   const changeCount = changes.changes?.files.length ?? 0;
@@ -40,11 +31,7 @@ export function RightPanel({ thread, ide = false }: { thread: ThreadSummary; ide
   const previewPath = preview?.threadId === thread.thread_id ? preview.path : null;
 
   return (
-    <aside
-      className="q-rp"
-      aria-label={t("panel.label")}
-      style={{ ["--rp-w" as string]: `${width}px` }}
-    >
+    <aside className="q-rp" aria-label={t("panel.label")}>
       <Tabs
         className="min-h-0 flex-1"
         value={tab}
@@ -117,15 +104,6 @@ export function RightPanel({ thread, ide = false }: { thread: ThreadSummary; ide
           <SubagentsPanel thread={thread} />
         </TabsPanel>
       </Tabs>
-
-      <Resizer
-        side="panel"
-        width={width}
-        min={320}
-        max={640}
-        label={t("panel.resize")}
-        onChange={setPanelWidth}
-      />
     </aside>
   );
 }

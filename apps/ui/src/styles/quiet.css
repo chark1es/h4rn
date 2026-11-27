@@ -436,8 +436,8 @@
 
 /* Desktop shell: one sidebar, one main column, one right panel */
 .q-side {
-  width: var(--side-w, 288px);
-  flex: none;
+  width: 100%;
+  flex: 1;
   background: var(--bg-side);
   border-right: 1px solid var(--line);
   display: flex;
@@ -913,44 +913,7 @@
   font-size: 12px;
   color: var(--fg-3);
 }
-.q-resizer {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  width: 8px;
-  margin: 0;
-  border: 0;
-  background: transparent;
-  z-index: 6;
-  cursor: col-resize;
-  touch-action: none;
-}
-.q-resizer.side {
-  right: -4px;
-}
-.q-resizer.panel {
-  left: -4px;
-}
-.q-resizer::after {
-  content: "";
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  left: 3.5px;
-  width: 1px;
-  background: transparent;
-  transition: background var(--duration-micro) var(--ease-enter);
-}
-.q-resizer:hover::after,
-.q-resizer.drag::after,
-.q-resizer:focus-visible::after {
-  background: var(--focus);
-  left: 3px;
-  width: 2px;
-}
-.q-resizer:focus-visible {
-  outline: none;
-}
+
 .q-scroll {
   overflow: auto;
   min-height: 0;
@@ -5025,8 +4988,8 @@
 
 /* One right panel, scoped to the selected thread */
 .q-rp {
-  width: var(--rp-w, 400px);
-  flex: none;
+  width: 100%;
+  flex: 1;
   border-left: 1px solid var(--line);
   display: flex;
   flex-direction: column;
