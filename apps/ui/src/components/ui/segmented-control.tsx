@@ -29,7 +29,10 @@ type SegmentedControlProps = Omit<
   React.ComponentProps<typeof SegmentedControlPrimitive>,
   "className" | "children"
 > &
-  VariantProps<typeof segmentedControlVariants> & { className?: string; children?: React.ReactNode };
+  VariantProps<typeof segmentedControlVariants> & {
+    className?: string;
+    children?: React.ReactNode;
+  };
 
 function SegmentedControl({ className, size, width, children, ...props }: SegmentedControlProps) {
   return (

@@ -46,7 +46,10 @@ const tabsIndicatorVariants = cva(
   },
 );
 
-type TabsListProps = Omit<React.ComponentProps<typeof TabsListPrimitive>, "className" | "children"> &
+type TabsListProps = Omit<
+  React.ComponentProps<typeof TabsListPrimitive>,
+  "className" | "children"
+> &
   VariantProps<typeof tabsListVariants> &
   ClassName & { children?: React.ReactNode };
 
@@ -99,7 +102,10 @@ type TabsPanelProps = Omit<React.ComponentProps<typeof TabsPanelPrimitive>, "cla
 function TabsPanel({ className, ...props }: TabsPanelProps) {
   return (
     <TabsPanelPrimitive
-      className={cn("flex min-h-0 flex-1 flex-col outline-none focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring", className)}
+      className={cn(
+        "flex min-h-0 flex-1 flex-col outline-none focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring",
+        className,
+      )}
       {...props}
     />
   );

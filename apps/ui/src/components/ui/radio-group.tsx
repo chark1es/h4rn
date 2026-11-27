@@ -1,7 +1,7 @@
 import {
-  Radio as RadioPrimitive,
   RadioGroup as RadioGroupPrimitive,
   RadioIndicator,
+  Radio as RadioPrimitive,
 } from "@ui-sdk/react/radio";
 import type * as React from "react";
 
