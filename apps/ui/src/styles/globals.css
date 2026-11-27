@@ -182,29 +182,9 @@ button {
     color: var(--fg);
   }
 
-  /* Radix state animation utilities used by the shadcn skins. */
-  [data-slot="sheet-overlay"][data-state="open"] {
-    animation: h4rn-fade-in var(--duration-modal) var(--ease-enter);
-  }
-
-  [data-slot="sheet-overlay"][data-state="closed"] {
-    animation: h4rn-fade-out var(--duration-modal-exit) var(--ease-exit) forwards;
-  }
-
+  /* Radix state animation for the dropdown menu skin. */
   [data-slot="dropdown-menu-content"][data-state="open"] {
     animation: h4rn-pop-in var(--duration-popup) var(--ease-enter);
-  }
-
-  [data-slot="sheet-content"][data-side="bottom"][data-state="open"] {
-    animation: h4rn-sheet-up var(--duration-modal) var(--ease-enter);
-  }
-
-  [data-slot="sheet-content"][data-side="bottom"][data-state="closed"] {
-    animation: h4rn-sheet-down var(--duration-modal-exit) var(--ease-exit) forwards;
-  }
-
-  [data-slot="sheet-content"][data-side="right"][data-state="open"] {
-    animation: h4rn-sheet-right var(--duration-modal) var(--ease-enter);
   }
 
   [data-slot="skeleton"] {
@@ -252,24 +232,6 @@ button {
   color: var(--fg);
 }
 
-@keyframes h4rn-fade-in {
-  from {
-    opacity: 0;
-  }
-  to {
-    opacity: 1;
-  }
-}
-
-@keyframes h4rn-fade-out {
-  from {
-    opacity: 1;
-  }
-  to {
-    opacity: 0;
-  }
-}
-
 @keyframes h4rn-pop-in {
   from {
     opacity: 0;
@@ -278,39 +240,6 @@ button {
   to {
     opacity: 1;
     transform: translateY(0) scale(1);
-  }
-}
-
-@keyframes h4rn-sheet-up {
-  from {
-    transform: translateY(12px);
-    opacity: 0;
-  }
-  to {
-    transform: translateY(0);
-    opacity: 1;
-  }
-}
-
-@keyframes h4rn-sheet-down {
-  from {
-    transform: translateY(0);
-    opacity: 1;
-  }
-  to {
-    transform: translateY(12px);
-    opacity: 0;
-  }
-}
-
-@keyframes h4rn-sheet-right {
-  from {
-    transform: translateX(12px);
-    opacity: 0;
-  }
-  to {
-    transform: translateX(0);
-    opacity: 1;
   }
 }
 
@@ -325,8 +254,6 @@ button {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  [data-slot="sheet-content"],
-  [data-slot="sheet-overlay"],
   [data-slot="dropdown-menu-content"] {
     animation: none !important;
   }
