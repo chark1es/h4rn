@@ -74,6 +74,18 @@ import { HarnessSwitch } from "./HarnessSwitch";
 
 const NO_TURNS: StreamTurn[] = [];
 
+/**
+ * The thread and IDE views each mount their own view switch, so choosing a
+ * view from the keyboard unmounts the focused tab. The switch that mounts
+ * next takes focus back onto its selected tab.
+ */
+let refocusViewTab = false;
+const takeViewFocus = (node: HTMLElement | null) => {
+  if (!node || !refocusViewTab) return;
+  refocusViewTab = false;
+  node.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]')?.focus();
+};
+
 export function ViewCluster({
   terminalOpen = false,
   onToggleTerminal,
@@ -89,22 +101,26 @@ export function ViewCluster({
   const panelOpen = layout.panelOpen && panelFits(layout, viewportWidth);
   return (
     <>
-      <Tabs
-        className="flex-row"
-        value={view}
-        onValueChange={(value) => {
-          if (value === "thread" || value === "ide") setView(value);
-        }}
-      >
-        <TabsList
-          variant="segmented"
-          aria-label={t("header.view")}
-          title={titleWithShortcut(t("header.switchView"), "view.toggle")}
+      <span ref={takeViewFocus} className="contents">
+        <Tabs
+          className="flex-row"
+          value={view}
+          onValueChange={(value) => {
+            if (value !== "thread" && value !== "ide") return;
+            refocusViewTab = document.activeElement?.getAttribute("role") === "tab";
+            setView(value);
+          }}
         >
-          <TabsTab value="thread">{t("header.thread")}</TabsTab>
-          <TabsTab value="ide">IDE</TabsTab>
-        </TabsList>
-      </Tabs>
+          <TabsList
+            variant="segmented"
+            aria-label={t("header.view")}
+            title={titleWithShortcut(t("header.switchView"), "view.toggle")}
+          >
+            <TabsTab value="thread">{t("header.thread")}</TabsTab>
+            <TabsTab value="ide">IDE</TabsTab>
+          </TabsList>
+        </Tabs>
+      </span>
       {onToggleTerminal ? (
         <Tip label={t("header.terminal")} command="terminal.toggle">
           <button

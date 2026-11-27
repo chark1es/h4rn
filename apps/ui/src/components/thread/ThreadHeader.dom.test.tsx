@@ -13,7 +13,7 @@ vi.mock("@/lib/store/appStore", async (importOriginal) => {
 });
 
 import { forkThread, getState, store } from "@/lib/store/appStore";
-import { ThreadHeader } from "./ThreadHeader";
+import { ThreadHeader, ViewCluster } from "./ThreadHeader";
 
 const summary: ThreadSummary = {
   thread_id: "thread_1",
@@ -122,5 +122,27 @@ describe("ThreadHeader fork from latest turn", () => {
     expect(item.getAttribute("data-disabled")).toBeNull();
     fireEvent.click(item);
     await waitFor(() => expect(forkThread).toHaveBeenCalledWith("thread_1", "turn_1"));
+  });
+});
+
+describe("ViewCluster", () => {
+  afterEach(cleanup);
+
+  it("keeps focus on the view tabs when a key switches the view and remounts them", async () => {
+    store.setState({
+      ...getState(),
+      ui: { ...getState().ui, layout: { ...getState().ui.layout, view: "thread" } },
+    });
+    const { unmount } = render(<ViewCluster />);
+    const thread = screen.getByRole("tab", { name: "Thread" });
+    thread.focus();
+    await act(async () => {
+      fireEvent.keyDown(thread, { key: "ArrowRight" });
+    });
+    expect(getState().ui.layout.view).toBe("ide");
+    // The IDE pane mounts its own cluster in place of the thread header's.
+    unmount();
+    render(<ViewCluster />);
+    expect(document.activeElement).toBe(screen.getByRole("tab", { name: "IDE" }));
   });
 });
