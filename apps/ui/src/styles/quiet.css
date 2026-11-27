@@ -1139,6 +1139,7 @@ fieldset.q-seg-fs {
   font-size: 12px;
   color: var(--fg-3);
   flex: none;
+  margin-left: auto;
 }
 .q-row-status.you {
   color: var(--accent-tx);
