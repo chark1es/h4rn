@@ -4171,15 +4171,15 @@ fieldset.q-seg-fs {
     margin-top: 4px;
     min-width: 0;
   }
-  /* Nothing on the meta line wraps. The harness name gives way first (its
-     title has the full name), then the state word. */
+  /* Nothing on the meta line wraps. The harness name and the state word
+     share the squeeze; each ellipsizes and its title has the full text. */
   .q-ph-th-meta > :not(.grow) {
     flex: none;
     white-space: nowrap;
   }
   .q-ph-th-meta > .q-harness-switch {
-    flex: 0 100 auto;
-    min-width: 0;
+    flex: 0 1 auto;
+    min-width: 4.5rem;
   }
   .q-th-state {
     font-size: 14px;
