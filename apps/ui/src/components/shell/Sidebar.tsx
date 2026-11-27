@@ -5,8 +5,10 @@ import {
   ChartNoAxesColumnIcon,
   CheckIcon,
   ChevronDownIcon,
+  ChevronLeftIcon,
   ChevronRightIcon,
   CircleAlertIcon,
+  CircleArrowUpIcon,
   CircleCheckIcon,
   CircleDotIcon,
   CircleIcon,
@@ -18,6 +20,7 @@ import {
   LogInIcon,
   PanelLeftIcon,
   PlugIcon,
+  PlusIcon,
   QrCodeIcon,
   SearchIcon,
   ServerIcon,
@@ -30,6 +33,7 @@ import { Trans, useTranslation } from "react-i18next";
 import { AgentGlyph } from "@/components/agent/AgentGlyph";
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
 import { StateTabs } from "@/components/inbox/StateTabs";
+import { Button } from "@/components/ui/button";
 import { ShortcutCaps } from "@/components/ui/kbd";
 import {
   Menu,
@@ -915,12 +919,7 @@ function SettingsSidebar() {
               aria-label={t("nav.back")}
               onClick={() => navigate({ kind: "inbox" })}
             >
-              <ChevronRightIcon
-                className="q-icon"
-                style={{ transform: "rotate(180deg)" }}
-                strokeWidth={1.5}
-                aria-hidden
-              />
+              <ChevronLeftIcon className="q-icon" strokeWidth={1.5} aria-hidden />
             </button>
           </Tip>
           <span className="q-word">{t("page.label")}</span>
@@ -938,7 +937,7 @@ function SettingsSidebar() {
           return (
             <div key={item.key} style={{ display: "contents" }}>
               {header ? (
-                <div className="q-side-h" style={{ paddingTop: 18 }}>
+                <div className="q-side-h">
                   <span>{t(`nav.groups.${header}`)}</span>
                 </div>
               ) : null}
@@ -955,9 +954,15 @@ function SettingsSidebar() {
                 <item.icon className="q-icon" strokeWidth={1.5} aria-hidden />
                 <span className="lbl">{t(`nav.sections.${item.key}`)}</span>
                 {item.key === "harnesses" && harnessUpdates > 0 ? (
-                  <span className="ct q-num" title={t("nav.harnessUpdates")}>
-                    {harnessUpdates}
-                  </span>
+                  <Tip label={t("nav.harnessUpdates")}>
+                    <span
+                      className="ct inline-flex"
+                      role="img"
+                      aria-label={t("nav.harnessUpdates")}
+                    >
+                      <CircleArrowUpIcon className="size-3.5" strokeWidth={1.5} aria-hidden />
+                    </span>
+                  </Tip>
                 ) : null}
                 {item.key === "hosts" ? (
                   <span
@@ -976,17 +981,17 @@ function SettingsSidebar() {
                   <div className="q-side-h">
                     <span>{t("nav.tools")}</span>
                     <Tip label={t("nav.addMcp")}>
-                      <button
-                        type="button"
-                        className="q-ibtn s22"
+                      <Button
+                        variant="ghost"
+                        size="icon-sm"
                         aria-label={t("nav.addMcp")}
                         onClick={() => {
                           setLibrarySelected("__new");
                           goLibrary("/library");
                         }}
                       >
-                        +
-                      </button>
+                        <PlusIcon strokeWidth={1.5} aria-hidden />
+                      </Button>
                     </Tip>
                   </div>
                   <button
