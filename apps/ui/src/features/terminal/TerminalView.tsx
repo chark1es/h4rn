@@ -9,13 +9,7 @@ import {
   RefreshCwIcon,
   WifiOffIcon,
 } from "lucide-react";
-import {
-  type ReactNode,
-  useCallback,
-  useEffect,
-  useRef,
-  useState,
-} from "react";
+import { type ReactNode, useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { H4rnClient } from "@/lib/client/client";
 import { cn } from "@/lib/utils";
