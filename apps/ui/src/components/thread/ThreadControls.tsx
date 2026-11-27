@@ -93,7 +93,7 @@ export function ThreadControls({ summary }: { summary: ThreadSummary }) {
       triggerClassName="q-model"
       trigger={({ open: expanded }) => (
         <>
-          <span className="truncate" style={{ maxWidth: 210 }}>
+          <span className="max-w-52 truncate" title={summary.model}>
             {summary.model}
           </span>
           {changed.length > 0 ? (
