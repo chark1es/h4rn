@@ -98,14 +98,20 @@ function DialogContent({
   showCloseButton = true,
   initialFocus,
   children,
+  ref,
   ...props
 }: DialogContentProps) {
   const sheet = useDialogSheet();
   const content = React.useRef<HTMLDivElement>(null);
-  const contentRef = React.useCallback((node: HTMLDivElement | null) => {
-    content.current = node;
-    return skipReducedSheetMotion(node);
-  }, []);
+  const contentRef = React.useCallback(
+    (node: HTMLDivElement | null) => {
+      content.current = node;
+      if (typeof ref === "function") ref(node);
+      else if (ref) ref.current = node;
+      return skipReducedSheetMotion(node);
+    },
+    [ref],
+  );
   // The close button comes first in the header, so the default "first focusable"
   // would land there; start on the task instead, as React's autoFocus intends.
   const firstField = React.useCallback(() => {

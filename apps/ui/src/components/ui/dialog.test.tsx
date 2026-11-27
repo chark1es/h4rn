@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { useState } from "react";
+import { createRef, useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ConfirmDialog } from "@/components/common/ConfirmDialog";
@@ -86,6 +86,27 @@ describe("Dialog", () => {
     fireEvent.keyDown(document.activeElement as Element, { key: "Escape" });
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
     expect(document.activeElement).toBe(trigger);
+  });
+
+  it("hands its content node to a caller's ref and still starts on the first field", async () => {
+    const ref = createRef<HTMLDivElement>();
+    render(
+      <Dialog defaultOpen>
+        <DialogContent ref={ref}>
+          <DialogHeader>
+            <DialogTitle>Rename thread</DialogTitle>
+          </DialogHeader>
+          <DialogBody>
+            <input aria-label="Title" />
+          </DialogBody>
+        </DialogContent>
+      </Dialog>,
+    );
+    const dialog = await screen.findByRole("dialog", { name: "Rename thread" });
+    expect(ref.current).toBe(dialog);
+    await waitFor(() =>
+      expect(document.activeElement).toBe(screen.getByRole("textbox", { name: "Title" })),
+    );
   });
 
   it("closes from the close button and from Cancel, and runs Save", async () => {
