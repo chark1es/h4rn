@@ -10,9 +10,10 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-
+import { Button } from "@/components/ui/button";
 import {
   Dialog,
+  DialogBody,
   DialogContent,
   DialogDescription,
   DialogFooter,
@@ -230,9 +231,9 @@ export function GitActionsDialog({
   return (
     <>
       <Dialog open={open} onOpenChange={onOpenChange}>
-        <DialogContent className="sm:max-w-[560px]">
+        <DialogContent>
           <DialogHeader>
-            <DialogTitle className="q-git-title">
+            <DialogTitle className="flex items-center gap-2 font-mono">
               <GitBranchIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
               {branch ?? t("git.noBranch")}
             </DialogTitle>
@@ -244,162 +245,142 @@ export function GitActionsDialog({
                   : t("git.noUpstream")}
             </DialogDescription>
           </DialogHeader>
+          <DialogBody>
+            {loading && status === null ? (
+              <p className="q-faint" role="status">
+                {t("git.reading")}
+              </p>
+            ) : null}
 
-          {loading && status === null ? (
-            <p className="q-faint" role="status">
-              {t("git.reading")}
-            </p>
-          ) : null}
+            {status ? (
+              <div className="q-git-status">
+                <div className="q-git-meta">
+                  {status.operation ? (
+                    <span className="q-badge">
+                      {t("git.operation", { operation: status.operation.replace("_", "-") })}
+                    </span>
+                  ) : null}
+                  {status.upstream ? (
+                    <>
+                      <span className="q-mono">
+                        <ArrowUpIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+                        {t("git.ahead", { count: status.ahead })}
+                      </span>
+                      <span className="q-mono">
+                        <ArrowDownIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+                        {t("git.behind", { count: status.behind })}
+                      </span>
+                    </>
+                  ) : null}
+                  <span className="grow" />
+                  <button
+                    type="button"
+                    className="q-ibtn"
+                    aria-label={t("git.refresh")}
+                    title={t("common:refresh")}
+                    onClick={() => void refresh()}
+                    disabled={loading}
+                  >
+                    <RefreshCwIcon
+                      className={cn("q-icon s14", loading && "animate-spin")}
+                      strokeWidth={1.5}
+                      aria-hidden
+                    />
+                  </button>
+                </div>
+                <div className="q-git-changes">
+                  <ChangeSet
+                    label={t("git.staged")}
+                    count={status.staged.count}
+                    paths={status.staged.paths}
+                    truncated={status.staged.truncated}
+                  />
+                  <ChangeSet
+                    label={t("git.unstaged")}
+                    count={status.unstaged.count}
+                    paths={status.unstaged.paths}
+                    truncated={status.unstaged.truncated}
+                  />
+                  <ChangeSet
+                    label={t("git.untracked")}
+                    count={status.untracked.count}
+                    paths={status.untracked.paths}
+                    truncated={status.untracked.truncated}
+                  />
+                </div>
+              </div>
+            ) : null}
 
-          {status ? (
-            <div className="q-git-status">
-              <div className="q-git-meta">
-                {status.operation ? (
-                  <span className="q-badge">
-                    {t("git.operation", { operation: status.operation.replace("_", "-") })}
-                  </span>
-                ) : null}
-                {status.upstream ? (
-                  <>
-                    <span className="q-mono">
-                      <ArrowUpIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
-                      {t("git.ahead", { count: status.ahead })}
-                    </span>
-                    <span className="q-mono">
-                      <ArrowDownIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
-                      {t("git.behind", { count: status.behind })}
-                    </span>
-                  </>
-                ) : null}
-                <span className="grow" />
+            <div className="q-field q-field-block">
+              <div className="t q-git-label">
+                <label htmlFor="git-commit-message">{t("git.commitMessage")}</label>
                 <button
                   type="button"
-                  className="q-ibtn"
-                  aria-label={t("git.refresh")}
-                  title={t("common:refresh")}
-                  onClick={() => void refresh()}
-                  disabled={loading}
+                  className="q-btn ghost"
+                  onClick={() => void generate()}
+                  disabled={generating || loading || busy !== null}
                 >
-                  <RefreshCwIcon
-                    className={cn("q-icon s14", loading && "animate-spin")}
-                    strokeWidth={1.5}
-                    aria-hidden
-                  />
+                  <SparklesIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+                  {generating ? t("git.generating") : t("git.generate")}
                 </button>
               </div>
-              <div className="q-git-changes">
-                <ChangeSet
-                  label={t("git.staged")}
-                  count={status.staged.count}
-                  paths={status.staged.paths}
-                  truncated={status.staged.truncated}
-                />
-                <ChangeSet
-                  label={t("git.unstaged")}
-                  count={status.unstaged.count}
-                  paths={status.unstaged.paths}
-                  truncated={status.unstaged.truncated}
-                />
-                <ChangeSet
-                  label={t("git.untracked")}
-                  count={status.untracked.count}
-                  paths={status.untracked.paths}
-                  truncated={status.untracked.truncated}
-                />
+              <textarea
+                id="git-commit-message"
+                className="q-input q-mono"
+                rows={4}
+                value={message}
+                placeholder={t("git.messagePlaceholder")}
+                aria-label={t("git.commitMessage")}
+                onChange={(event) => setMessage(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+                    event.preventDefault();
+                    if (canCommit) void commit();
+                  }
+                }}
+              />
+            </div>
+
+            <label className="q-addp-check">
+              <input
+                type="checkbox"
+                className="sr-only"
+                checked={includeUnstaged}
+                onChange={(event) => setIncludeUnstaged(event.target.checked)}
+              />
+              <span className={cn("q-check", includeUnstaged && "on")} aria-hidden>
+                {includeUnstaged ? <CheckIcon className="q-icon s12" strokeWidth={2} /> : null}
+              </span>
+              {t("git.includeUnstaged")}
+            </label>
+
+            {generationOff ? (
+              <p className="q-faint" role="status">
+                {t("git.generationOff")}
+              </p>
+            ) : null}
+            {error ? (
+              <div className="q-banner err wrap" role="alert">
+                {shownError(error, t)}
               </div>
-            </div>
-          ) : null}
-
-          <div className="q-field q-field-block">
-            <div className="t q-git-label">
-              <label htmlFor="git-commit-message">{t("git.commitMessage")}</label>
-              <button
-                type="button"
-                className="q-btn ghost"
-                onClick={() => void generate()}
-                disabled={generating || loading || busy !== null}
-              >
-                <SparklesIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
-                {generating ? t("git.generating") : t("git.generate")}
-              </button>
-            </div>
-            <textarea
-              id="git-commit-message"
-              className="q-input q-mono"
-              rows={4}
-              value={message}
-              placeholder={t("git.messagePlaceholder")}
-              aria-label={t("git.commitMessage")}
-              onChange={(event) => setMessage(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
-                  event.preventDefault();
-                  if (canCommit) void commit();
-                }
-              }}
-            />
-          </div>
-
-          <label className="q-addp-check">
-            <input
-              type="checkbox"
-              className="sr-only"
-              checked={includeUnstaged}
-              onChange={(event) => setIncludeUnstaged(event.target.checked)}
-            />
-            <span className={cn("q-check", includeUnstaged && "on")} aria-hidden>
-              {includeUnstaged ? <CheckIcon className="q-icon s12" strokeWidth={2} /> : null}
-            </span>
-            {t("git.includeUnstaged")}
-          </label>
-
-          {generationOff ? (
-            <p className="q-faint" role="status">
-              {t("git.generationOff")}
-            </p>
-          ) : null}
-          {error ? (
-            <div className="q-banner err wrap" role="alert">
-              {shownError(error, t)}
-            </div>
-          ) : null}
-
-          <DialogFooter className="q-git-footer">
-            <button
-              type="button"
-              className="q-btn secondary"
-              onClick={() => setPrOpen(true)}
-              disabled={!canPush}
-            >
+            ) : null}
+          </DialogBody>
+          <DialogFooter className="flex-wrap">
+            <Button variant="secondary" onClick={() => setPrOpen(true)} disabled={!canPush}>
               <GitPullRequestIcon className="q-icon s14" aria-hidden />
               {t("git.createPr")}
-            </button>
+            </Button>
             <span className="grow" />
-            <button
-              type="button"
-              className="q-btn secondary"
-              onClick={() => void push()}
-              disabled={!canPush}
-            >
+            <Button variant="secondary" onClick={() => void push()} disabled={!canPush}>
               {busy === "push" ? t("git.pushing") : t("git.push")}
-            </button>
-            <button
-              type="button"
-              className="q-btn secondary"
-              onClick={() => void commitAndPush()}
-              disabled={!canCommit}
-            >
+            </Button>
+            <Button variant="secondary" onClick={() => void commitAndPush()} disabled={!canCommit}>
               {busy === "both" ? t("git.committingAndPushing") : t("git.commitAndPush")}
-            </button>
-            <button
-              type="button"
-              className="q-btn primary"
-              onClick={() => void commit()}
-              disabled={!canCommit}
-            >
+            </Button>
+            <Button onClick={() => void commit()} disabled={!canCommit}>
               <GitCommitHorizontalIcon className="q-icon s14" aria-hidden />
               {busy === "commit" ? t("git.committing") : t("git.commit")}
-            </button>
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -546,7 +527,7 @@ export function CreatePullRequestDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-[560px]">
+      <DialogContent>
         <DialogHeader>
           <DialogTitle>{t("pullRequest.title")}</DialogTitle>
           <DialogDescription>
@@ -559,92 +540,90 @@ export function CreatePullRequestDialog({
                 (noRemote ? t("pullRequest.noRemote") : t("pullRequest.looking")))}
           </DialogDescription>
         </DialogHeader>
-
-        <div className="q-field q-field-block">
-          <div className="t q-git-label">
-            <label htmlFor="git-pr-title">{t("pullRequest.titleField")}</label>
-            <button
-              type="button"
-              className="q-btn ghost"
-              onClick={() => void generate()}
-              disabled={generating || busy}
-            >
-              <SparklesIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
-              {generating ? t("git.generating") : t("git.generate")}
-            </button>
+        <DialogBody>
+          <div className="q-field q-field-block">
+            <div className="t q-git-label">
+              <label htmlFor="git-pr-title">{t("pullRequest.titleField")}</label>
+              <button
+                type="button"
+                className="q-btn ghost"
+                onClick={() => void generate()}
+                disabled={generating || busy}
+              >
+                <SparklesIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+                {generating ? t("git.generating") : t("git.generate")}
+              </button>
+            </div>
+            <input
+              id="git-pr-title"
+              className="q-input"
+              value={title}
+              aria-label={t("pullRequest.titleLabel")}
+              onChange={(event) => setTitle(event.target.value)}
+            />
           </div>
-          <input
-            id="git-pr-title"
-            className="q-input"
-            value={title}
-            aria-label={t("pullRequest.titleLabel")}
-            onChange={(event) => setTitle(event.target.value)}
-          />
-        </div>
 
-        <label className="q-field q-field-block">
-          <span className="t">{t("pullRequest.description")}</span>
-          <textarea
-            className="q-input"
-            rows={5}
-            value={body}
-            aria-label={t("pullRequest.descriptionLabel")}
-            onChange={(event) => setBody(event.target.value)}
-          />
-        </label>
-
-        <div className="q-git-pr-fields">
           <label className="q-field q-field-block">
-            <span className="t">{t("pullRequest.base")}</span>
-            <input
-              className="q-input q-mono"
-              value={base}
-              aria-label={t("pullRequest.base")}
-              onChange={(event) => setBase(event.target.value)}
+            <span className="t">{t("pullRequest.description")}</span>
+            <textarea
+              className="q-input"
+              rows={5}
+              value={body}
+              aria-label={t("pullRequest.descriptionLabel")}
+              onChange={(event) => setBody(event.target.value)}
             />
-            <span className="s">
-              {status !== null && !status.default_branch
-                ? t("pullRequest.baseNoDefault")
-                : t("pullRequest.baseHint")}
-            </span>
           </label>
-          <label className="q-addp-check q-git-draft">
-            <input
-              type="checkbox"
-              className="sr-only"
-              checked={draft}
-              onChange={(event) => setDraft(event.target.checked)}
-            />
-            <span className={cn("q-check", draft && "on")} aria-hidden>
-              {draft ? <CheckIcon className="q-icon s12" strokeWidth={2} /> : null}
-            </span>
-            {t("pullRequest.draft")}
-          </label>
-        </div>
 
-        {generationOff ? (
-          <p className="q-faint" role="status">
-            {t("git.generationOff")}
-          </p>
-        ) : null}
-        {error ? (
-          <div className="q-banner err wrap" role="alert">
-            {shownError(error, t)}
+          <div className="q-git-pr-fields">
+            <label className="q-field q-field-block">
+              <span className="t">{t("pullRequest.base")}</span>
+              <input
+                className="q-input q-mono"
+                value={base}
+                aria-label={t("pullRequest.base")}
+                onChange={(event) => setBase(event.target.value)}
+              />
+              <span className="s">
+                {status !== null && !status.default_branch
+                  ? t("pullRequest.baseNoDefault")
+                  : t("pullRequest.baseHint")}
+              </span>
+            </label>
+            <label className="q-addp-check q-git-draft">
+              <input
+                type="checkbox"
+                className="sr-only"
+                checked={draft}
+                onChange={(event) => setDraft(event.target.checked)}
+              />
+              <span className={cn("q-check", draft && "on")} aria-hidden>
+                {draft ? <CheckIcon className="q-icon s12" strokeWidth={2} /> : null}
+              </span>
+              {t("pullRequest.draft")}
+            </label>
           </div>
-        ) : null}
 
+          {generationOff ? (
+            <p className="q-faint" role="status">
+              {t("git.generationOff")}
+            </p>
+          ) : null}
+          {error ? (
+            <div className="q-banner err wrap" role="alert">
+              {shownError(error, t)}
+            </div>
+          ) : null}
+        </DialogBody>
         <DialogFooter>
-          <button type="button" className="q-btn ghost" onClick={() => onOpenChange(false)}>
+          <Button variant="ghost" onClick={() => onOpenChange(false)}>
             {t("common:cancel")}
-          </button>
-          <button
-            type="button"
-            className="q-btn primary"
+          </Button>
+          <Button
             onClick={() => void create()}
             disabled={busy || !repo || !title.trim() || !base.trim()}
           >
             {busy ? t("pullRequest.opening") : t("pullRequest.open")}
-          </button>
+          </Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

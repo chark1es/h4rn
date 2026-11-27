@@ -19,8 +19,10 @@ import { AgentGlyph } from "@/components/agent/AgentGlyph";
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
 import { ChipSelect } from "@/components/common/ChipSelect";
 import { Markdown } from "@/components/thread/Markdown";
+import { Button } from "@/components/ui/button";
 import {
   Dialog,
+  DialogBody,
   DialogContent,
   DialogDescription,
   DialogFooter,
@@ -708,46 +710,46 @@ function OpenPrButton({
             {t("open.description", { forge: forgeLabel(repo.forge) })}
           </DialogDescription>
         </DialogHeader>
-        <label className="q-field" style={{ display: "block" }}>
-          <span className="t">{t("open.titleField")}</span>
-          <input
-            className="q-input"
-            value={title}
-            onChange={(event) => setTitle(event.target.value)}
-            aria-label={t("open.titleLabel")}
-          />
-        </label>
-        <label className="q-field" style={{ display: "block" }}>
-          <span className="t">{t("open.base")}</span>
-          <input
-            className="q-input"
-            value={base}
-            onChange={(event) => setBase(event.target.value)}
-            aria-label={t("open.base")}
-          />
-        </label>
-        <label className="q-field" style={{ display: "block" }}>
-          <span className="t">{t("open.descriptionField")}</span>
-          <textarea
-            className="q-input"
-            rows={4}
-            value={body}
-            onChange={(event) => setBody(event.target.value)}
-            aria-label={t("open.descriptionLabel")}
-          />
-        </label>
+        <DialogBody>
+          <label className="q-field" style={{ display: "block" }}>
+            <span className="t">{t("open.titleField")}</span>
+            <input
+              className="q-input"
+              value={title}
+              onChange={(event) => setTitle(event.target.value)}
+              aria-label={t("open.titleLabel")}
+            />
+          </label>
+          <label className="q-field" style={{ display: "block" }}>
+            <span className="t">{t("open.base")}</span>
+            <input
+              className="q-input"
+              value={base}
+              onChange={(event) => setBase(event.target.value)}
+              aria-label={t("open.base")}
+            />
+          </label>
+          <label className="q-field" style={{ display: "block" }}>
+            <span className="t">{t("open.descriptionField")}</span>
+            <textarea
+              className="q-input"
+              rows={4}
+              value={body}
+              onChange={(event) => setBody(event.target.value)}
+              aria-label={t("open.descriptionLabel")}
+            />
+          </label>
+        </DialogBody>
         <DialogFooter>
-          <button type="button" className="q-btn ghost" onClick={() => setOpen(false)}>
+          <Button variant="ghost" onClick={() => setOpen(false)}>
             {t("common:cancel")}
-          </button>
-          <button
-            type="button"
-            className="q-btn primary"
+          </Button>
+          <Button
             disabled={busy || title.trim() === "" || base.trim() === ""}
             onClick={() => void submit()}
           >
             {busy ? t("open.submitting") : t("open.submit")}
-          </button>
+          </Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

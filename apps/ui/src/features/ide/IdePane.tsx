@@ -21,6 +21,7 @@ import { ViewCluster } from "@/components/thread/ThreadHeader";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
+  DialogBody,
   DialogContent,
   DialogDescription,
   DialogFooter,
@@ -816,7 +817,7 @@ export function IdePane() {
         open={state.conflict !== null}
         onOpenChange={(open) => !open && session.patch({ conflict: null })}
       >
-        <DialogContent className="sm:max-w-2xl">
+        <DialogContent size="lg">
           <DialogHeader>
             <DialogTitle>
               {state.conflict?.deleted
@@ -827,27 +828,29 @@ export function IdePane() {
               {state.conflict?.deleted ? t("conflict.deletedBody") : t("conflict.changedBody")}
             </DialogDescription>
           </DialogHeader>
-          {state.conflict ? (
-            <div className="max-h-64 overflow-auto rounded-lg border border-line bg-bg-side font-mono text-[10px] leading-4">
-              {computeDiff(state.conflict.theirs, state.conflict.mine)
-                .slice(0, 80)
-                .map((line) => (
-                  <div
-                    key={`${line.kind}-${line.oldLine}-${line.newLine}`}
-                    className={cn(
-                      "flex gap-2 px-2",
-                      line.kind === "added" && "bg-ok-soft text-ok",
-                      line.kind === "removed" && "bg-danger-soft text-danger",
-                    )}
-                  >
-                    <span className="w-4 shrink-0 text-fg-3">
-                      {line.kind === "added" ? "+" : line.kind === "removed" ? "−" : " "}
-                    </span>
-                    <span className="whitespace-pre-wrap">{line.text || " "}</span>
-                  </div>
-                ))}
-            </div>
-          ) : null}
+          <DialogBody>
+            {state.conflict ? (
+              <div className="max-h-64 overflow-auto rounded-lg border border-line bg-bg-side font-mono text-[10px] leading-4">
+                {computeDiff(state.conflict.theirs, state.conflict.mine)
+                  .slice(0, 80)
+                  .map((line) => (
+                    <div
+                      key={`${line.kind}-${line.oldLine}-${line.newLine}`}
+                      className={cn(
+                        "flex gap-2 px-2",
+                        line.kind === "added" && "bg-ok-soft text-ok",
+                        line.kind === "removed" && "bg-danger-soft text-danger",
+                      )}
+                    >
+                      <span className="w-4 shrink-0 text-fg-3">
+                        {line.kind === "added" ? "+" : line.kind === "removed" ? "−" : " "}
+                      </span>
+                      <span className="whitespace-pre-wrap">{line.text || " "}</span>
+                    </div>
+                  ))}
+              </div>
+            ) : null}
+          </DialogBody>
           <DialogFooter>
             <Button variant="ghost" onClick={() => session.patch({ conflict: null })}>
               {t("common:cancel")}

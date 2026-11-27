@@ -6672,13 +6672,6 @@ fieldset.q-seg-fs {
 }
 
 /* Git actions: the branch's own state, quiet enough to sit in a dialog. */
-.q-git-title {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-family: var(--font-mono);
-  font-size: 14px;
-}
 .q-git-status {
   display: grid;
   gap: 10px;
@@ -6720,10 +6713,6 @@ fieldset.q-seg-fs {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
-}
-.q-git-footer {
-  flex-wrap: wrap;
   gap: 8px;
 }
 .q-git-pr-fields {
