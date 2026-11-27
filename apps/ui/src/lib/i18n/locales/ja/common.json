@@ -47,5 +47,6 @@
   },
   "orPress": "または <kbd/> を押します",
   "acpAgent": "ACP エージェント",
-  "choose": "選択…"
+  "choose": "選択…",
+  "showSuggestions": "候補を表示"
 }

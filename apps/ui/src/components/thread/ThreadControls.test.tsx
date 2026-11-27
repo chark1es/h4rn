@@ -4,6 +4,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { ThreadSummary } from "@/gen";
+import { suggestionsOf } from "@/test/popups";
 import { ThreadControls } from "./ThreadControls";
 
 const mock = vi.hoisted(() => ({
@@ -95,7 +96,7 @@ describe("ThreadControls", () => {
     render(<ThreadControls summary={summary()} />);
     fireEvent.click(screen.getByText("claude-sonnet-5-5"));
     expect(screen.getByRole("dialog", { name: "Thread settings" })).toBeTruthy();
-    fireEvent.click(screen.getByRole("menuitemradio", { name: "Plan" }));
+    fireEvent.click(screen.getByRole("option", { name: "Plan" }));
     expect(mock.actions.setThreadRuntimeMode).toHaveBeenCalledWith("th_1", "plan");
   });
 
@@ -168,7 +169,7 @@ describe("ThreadControls", () => {
       />,
     );
     fireEvent.click(screen.getByText("gpt-b"));
-    fireEvent.click(screen.getByRole("menuitemradio", { name: /^Fast/ }));
+    fireEvent.click(screen.getByRole("option", { name: /^Fast/ }));
     expect(mock.actions.setThreadFast).toHaveBeenCalledWith("th_1", false);
   });
 
@@ -184,7 +185,7 @@ describe("ThreadControls", () => {
     expect(screen.getByText(/the agent manages its own mode/)).toBeTruthy();
   });
 
-  it("offers the agent's advertised modes and models in the composer", () => {
+  it("offers the agent's advertised modes and models in the composer", async () => {
     mock.agents = [
       {
         id: "demo",
@@ -198,14 +199,11 @@ describe("ThreadControls", () => {
       />,
     );
     fireEvent.click(screen.getByText("m-1"));
-    const rows = screen.getAllByRole("menuitemradio").map((row) => row.textContent);
+    const rows = screen.getAllByRole("option").map((row) => row.textContent);
     expect(rows.some((text) => text?.includes("Auto-accept edits"))).toBe(true);
     expect(rows.some((text) => text?.includes("Full access"))).toBe(true);
     // The live session's catalogue wins over the probe's cached list.
-    const datalist = document.querySelector("datalist");
-    const models = Array.from(datalist?.querySelectorAll("option") ?? []).map((option) =>
-      option.getAttribute("value"),
-    );
+    const models = await suggestionsOf(screen.getByRole("combobox", { name: "Model" }));
     expect(models).toEqual(["m-1", "m-3"]);
   });
 });

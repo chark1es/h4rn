@@ -8,9 +8,9 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-
 import { ChipSelect } from "@/components/common/ChipSelect";
 import { ConfirmDialog } from "@/components/common/ConfirmDialog";
+import { SuggestInput } from "@/components/ui/autocomplete";
 import {
   loadAcpAgents,
   loadHarnessVersions,
@@ -453,19 +453,15 @@ function ScheduleEditor({
           <FieldError message={errors.timezone} />
         </div>
         <div className="ctl">
-          <input
-            className="q-input q-mono"
+          <SuggestInput
             aria-label={t("schedules.editor.timezone")}
-            list="schedule-timezones"
             value={draft.timezone}
-            onChange={(event) => patch({ timezone: event.target.value })}
-            style={{ width: 220 }}
+            onValueChange={(next) => patch({ timezone: next })}
+            suggestions={timezoneOptions(timezone)}
+            showLabel={t("common:showSuggestions")}
+            mono
+            className="w-55"
           />
-          <datalist id="schedule-timezones">
-            {timezoneOptions(timezone).map((name) => (
-              <option key={name} value={name} />
-            ))}
-          </datalist>
         </div>
       </div>
 
@@ -494,21 +490,15 @@ function ScheduleEditor({
           <FieldError message={errors.workspace} />
         </div>
         <div className="ctl">
-          <input
-            className="q-input q-mono"
+          <SuggestInput
             aria-label={t("schedules.editor.workspaceLabel")}
-            list="schedule-workspaces"
             value={draft.workspace_path}
-            onChange={(event) => patch({ workspace_path: event.target.value })}
-            style={{ width: 320 }}
+            onValueChange={(next) => patch({ workspace_path: next })}
+            suggestions={projects.map((project) => project.path)}
+            showLabel={t("common:showSuggestions")}
+            mono
+            className="w-80"
           />
-          <datalist id="schedule-workspaces">
-            {projects.map((project) => (
-              <option key={project.id} value={project.path}>
-                {project.name}
-              </option>
-            ))}
-          </datalist>
         </div>
       </div>
 

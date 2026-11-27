@@ -3,6 +3,7 @@ import type * as React from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Trans, useTranslation } from "react-i18next";
 import { ChipSelect } from "@/components/common/ChipSelect";
+import { SuggestInput } from "@/components/ui/autocomplete";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -580,18 +581,14 @@ export function NewThreadDialog() {
 
           <div className="flex flex-col gap-1">
             <FieldLabel htmlFor="new-thread-model">{t("fields.model")}</FieldLabel>
-            <Input
+            <SuggestInput
               id="new-thread-model"
               value={model}
-              onChange={(event) => setModel(event.target.value)}
-              list={`h4rn-models-${harness}`}
-              className="font-mono"
+              onValueChange={setModel}
+              suggestions={modelChoices}
+              showLabel={t("common:showSuggestions")}
+              mono
             />
-            <datalist id={`h4rn-models-${harness}`}>
-              {modelChoices.map((option) => (
-                <option key={option} value={option} />
-              ))}
-            </datalist>
             {harness === "acp" ? (
               <span className="text-small text-fg-3">
                 {probing

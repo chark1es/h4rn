@@ -43,3 +43,24 @@ export function installPopupStubs(): void {
     document.head.append(style);
   }
 }
+
+/** Opens a SuggestInput's list from its button and reads the suggestions it offers. */
+export async function suggestionsOf(input: HTMLElement): Promise<string[]> {
+  const { act, fireEvent } = await import("@testing-library/react");
+  const show = input.parentElement?.querySelector<HTMLElement>(
+    '[data-slot="autocomplete-trigger"]',
+  );
+  // i18n-ignore-next-line: a test failure, not copy
+  if (!show) throw new Error("the field has no suggestions button");
+  await act(async () => {
+    fireEvent.click(show);
+  });
+  const list = document.getElementById(input.getAttribute("aria-controls") ?? "");
+  const options = [...(list ?? document).querySelectorAll('[role="option"]')].map(
+    (option) => option.textContent ?? "",
+  );
+  await act(async () => {
+    fireEvent.keyDown(input, { key: "Escape" });
+  });
+  return options;
+}

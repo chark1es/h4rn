@@ -109,6 +109,7 @@ import {
   readNewThreadDraft,
   writeNewThreadDraft,
 } from "@/lib/drafts";
+import { suggestionsOf } from "@/test/popups";
 import { NewThreadDialog } from "./NewThreadDialog";
 
 function host(hostId: string, name: string): HostSummary {
@@ -386,9 +387,7 @@ describe("NewThreadDialog drafts", () => {
     await waitFor(() =>
       expect(screen.getByRole("combobox", { name: "Harness: Demo agent" })).toBeTruthy(),
     );
-    const options = Array.from(
-      document.querySelectorAll<HTMLOptionElement>("#h4rn-models-acp option"),
-    ).map((option) => option.value);
+    const options = await suggestionsOf(screen.getByLabelText("Model"));
     expect(options).toEqual(["cached-model"]);
     expect(screen.getByText("the agent exited before the handshake")).toBeTruthy();
   });
@@ -916,10 +915,7 @@ describe("NewThreadDialog drafts", () => {
       { type: "list_harness_models", host: "host_a", harness: "codex" },
       expect.anything(),
     );
-    const options = Array.from(
-      document.querySelectorAll<HTMLOptionElement>("#h4rn-models-codex option"),
-      (option) => option.value,
-    );
+    const options = await suggestionsOf(screen.getByLabelText("Model"));
     expect(options).toEqual(["default", "live-codex"]);
   });
 

@@ -47,5 +47,6 @@
   },
   "orPress": "or press <kbd/>",
   "acpAgent": "ACP agent",
-  "choose": "Choose…"
+  "choose": "Choose…",
+  "showSuggestions": "Show suggestions"
 }
