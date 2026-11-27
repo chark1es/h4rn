@@ -17,6 +17,7 @@ import { CheckIcon, ChevronDownIcon } from "lucide-react";
 import type * as React from "react";
 
 import { itemRow, popupSurface, sheetSurface } from "@/components/ui/menu";
+import { skipReducedSheetMotion } from "@/lib/sheet-motion";
 import { cn } from "@/lib/utils";
 
 type WithClassName<P> = Omit<P, "className" | "children" | "disabled"> & {
@@ -97,6 +98,7 @@ function SelectContent({
 }: WithClassName<React.ComponentProps<typeof SelectContentPrimitive>>) {
   return (
     <SelectContentPrimitive
+      ref={skipReducedSheetMotion}
       sideOffset={sideOffset}
       collisionPadding={collisionPadding}
       className={cn(popupSurface, "min-w-(--anchor-width)", sheetSurface, className)}

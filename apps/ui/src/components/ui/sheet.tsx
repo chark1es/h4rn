@@ -10,6 +10,7 @@ import {
 import type * as React from "react";
 
 import { modalSurfaceClassName, SheetGrabber } from "@/components/ui/dialog";
+import { skipReducedSheetMotion } from "@/lib/sheet-motion";
 import { cn } from "@/lib/utils";
 
 /** A bottom sheet for phone-only surfaces. Dialogs become sheets on their own. */
@@ -27,6 +28,7 @@ function SheetContent({ className, size = "auto", children, ...props }: SheetCon
     <>
       <DrawerBackdropPrimitive className="fixed inset-0 bg-scrim" />
       <DrawerContentPrimitive
+        ref={skipReducedSheetMotion}
         data-size={size}
         className={cn(
           modalSurfaceClassName,

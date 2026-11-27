@@ -27,6 +27,7 @@ import {
   chordText,
   useKeybindingsVersion,
 } from "@/lib/keybindings";
+import { skipReducedSheetMotion } from "@/lib/sheet-motion";
 import { cn } from "@/lib/utils";
 
 type WithClassName<P> = Omit<P, "className" | "children" | "disabled"> & {
@@ -89,6 +90,7 @@ function MenuContent({
 }: WithClassName<React.ComponentProps<typeof MenuContentPrimitive>>) {
   return (
     <MenuContentPrimitive
+      ref={skipReducedSheetMotion}
       sideOffset={sideOffset}
       collisionPadding={collisionPadding}
       className={cn(popupSurface, sheetSurface, className)}
@@ -104,6 +106,7 @@ function MenuSubContent({
 }: WithClassName<React.ComponentProps<typeof MenuSubContentPrimitive>>) {
   return (
     <MenuSubContentPrimitive
+      ref={skipReducedSheetMotion}
       collisionPadding={collisionPadding}
       className={cn(popupSurface, sheetSurface, className)}
       {...props}

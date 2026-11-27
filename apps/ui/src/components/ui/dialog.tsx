@@ -14,6 +14,7 @@ import * as React from "react";
 import { useTranslation } from "react-i18next";
 
 import { useIsPhone } from "@/hooks/use-media-query";
+import { skipReducedSheetMotion } from "@/lib/sheet-motion";
 import { cn } from "@/lib/utils";
 
 const DialogSheetContext = React.createContext(false);
@@ -101,6 +102,10 @@ function DialogContent({
 }: DialogContentProps) {
   const sheet = useDialogSheet();
   const content = React.useRef<HTMLDivElement>(null);
+  const contentRef = React.useCallback((node: HTMLDivElement | null) => {
+    content.current = node;
+    return skipReducedSheetMotion(node);
+  }, []);
   // The close button comes first in the header, so the default "first focusable"
   // would land there; start on the task instead, as React's autoFocus intends.
   const firstField = React.useCallback(() => {
@@ -116,7 +121,7 @@ function DialogContent({
     <>
       {sheet ? null : <DialogBackdropPrimitive className={backdropClassName} />}
       <DialogContentPrimitive
-        ref={content}
+        ref={contentRef}
         initialFocus={initialFocus ?? firstField}
         className={cn(sheet ? sheetContentClassName : dialogContentVariants({ size }), className)}
         data-size={size ?? "md"}
