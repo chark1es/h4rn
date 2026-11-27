@@ -31,7 +31,7 @@ function Select<T = string>({ presentation = "auto", ...props }: SelectProps<T, 
 
 const selectTriggerVariants = cva(
   [
-    "inline-flex min-w-0 cursor-default items-center gap-2 rounded-md border border-input bg-card text-start text-foreground outline-none",
+    "hit-area relative inline-flex min-w-0 cursor-default items-center gap-2 rounded-md border border-input bg-card text-start text-foreground outline-none",
     "transition-[border-color,box-shadow,background-color] duration-micro ease-enter",
     "hover:bg-hover focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/25",
     "data-open:border-ring data-placeholder:text-fg-3",

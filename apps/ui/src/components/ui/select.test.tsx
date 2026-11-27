@@ -138,3 +138,29 @@ describe("Select as a sheet", () => {
     expect(sheetClasses(select)).toEqual(sheetClasses(menu));
   });
 });
+
+describe("SelectTrigger", () => {
+  it("reaches past its 24 and 28 px look to a full hit area", () => {
+    render(
+      <>
+        <Select defaultValue="apple">
+          <SelectTrigger aria-label="Default" />
+          <SelectContent>
+            <SelectItem value="apple">Apple</SelectItem>
+          </SelectContent>
+        </Select>
+        <Select defaultValue="apple">
+          <SelectTrigger aria-label="Chip" size="chip" />
+          <SelectContent>
+            <SelectItem value="apple">Apple</SelectItem>
+          </SelectContent>
+        </Select>
+      </>,
+    );
+    for (const name of ["Default", "Chip"]) {
+      const classes = screen.getByRole("combobox", { name }).classList;
+      expect(classes.contains("hit-area")).toBe(true);
+      expect(classes.contains("relative")).toBe(true);
+    }
+  });
+});
