@@ -2351,6 +2351,8 @@ fieldset.q-seg-fs {
 .q-harness-switch {
   display: inline-flex;
   align-items: center;
+  min-width: 0;
+  white-space: nowrap;
   gap: 4px;
   height: 22px;
   padding: 0 6px;
@@ -4143,13 +4145,15 @@ fieldset.q-seg-fs {
     margin-top: 4px;
     min-width: 0;
   }
-  .q-ph-th-meta > span:not(.grow) {
+  /* Nothing on the meta line wraps. The harness name gives way first (its
+     title has the full name), then the state word. */
+  .q-ph-th-meta > :not(.grow) {
     flex: none;
     white-space: nowrap;
   }
-  .q-ph-th-meta > span:not(.grow) {
-    flex: none;
-    white-space: nowrap;
+  .q-ph-th-meta > .q-harness-switch {
+    flex: 0 100 auto;
+    min-width: 0;
   }
   .q-th-state {
     font-size: 14px;
@@ -4360,12 +4364,6 @@ fieldset.q-seg-fs {
   color: var(--accent-tx);
   font-size: 16px;
   padding: 0 8px;
-}
-.q-ph-back-glyph {
-  font-size: 24px;
-  line-height: 1;
-  margin: -2px 1px 0 -4px;
-  font-weight: 400;
 }
 .q-ph-nav .ttl {
   font-size: 16px;

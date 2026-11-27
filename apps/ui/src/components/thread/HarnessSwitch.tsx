@@ -271,7 +271,12 @@ export function HarnessSwitch({ summary }: { summary: ThreadSummary }) {
   const trigger = (
     <>
       <span className="sr-only">{t("harnessSwitch.trigger")}</span>
-      <span>{threadHarnessLabel(summary.harness, summary.agent_id)}</span>
+      <span
+        className="min-w-0 truncate"
+        title={threadHarnessLabel(summary.harness, summary.agent_id)}
+      >
+        {threadHarnessLabel(summary.harness, summary.agent_id)}
+      </span>
       <ChevronDownIcon
         className={cn("q-icon s12", open && "q-rot180")}
         strokeWidth={1.5}

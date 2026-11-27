@@ -2,6 +2,7 @@ import {
   AlarmClockIcon,
   ArchiveIcon,
   CheckCheckIcon,
+  ChevronLeftIcon,
   FileDiffIcon,
   GitBranchIcon,
   GitForkIcon,
@@ -305,9 +306,7 @@ export function ThreadHeader({
         {gitDialog}
         <div className="q-ph-nav">
           <button type="button" className="navbtn" aria-label={t("header.back")} onClick={onBack}>
-            <span aria-hidden className="q-ph-back-glyph">
-              ‹
-            </span>
+            <ChevronLeftIcon className="q-icon s22 -ms-1" strokeWidth={1.5} aria-hidden />
             {t("header.inbox")}
           </button>
           <span className="ttl" />
