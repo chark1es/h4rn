@@ -130,7 +130,6 @@ function AccountsTable({
                 <button
                   type="button"
                   className="q-btn danger"
-                  style={{ height: 24 }}
                   aria-label={t("forges.removeLabel", {
                     name: account.display_name ?? account.username ?? forgeLabel(account.forge),
                   })}

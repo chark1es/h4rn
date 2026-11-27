@@ -258,17 +258,15 @@ export function SignOutButton({ onDone }: { onDone?: () => void }) {
   const busy = useRemote((state) => state.busy);
   if (!confirming) {
     return (
-      <button type="button" className="q-btn ghost" onClick={() => setConfirming(true)}>
+      <button type="button" className="q-btn danger" onClick={() => setConfirming(true)}>
         <LogOutIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
         {t("devices.signOut")}
       </button>
     );
   }
   return (
-    <span style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
-      <span className="q-faint" style={{ fontSize: 12 }}>
-        {t("connect.forgetDevice")}
-      </span>
+    <span className="inline-flex items-center gap-2">
+      <span className="q-faint text-xs">{t("connect.forgetDevice")}</span>
       <button
         type="button"
         className="q-btn ghost"

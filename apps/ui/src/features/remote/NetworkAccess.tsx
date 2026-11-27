@@ -202,7 +202,7 @@ export function DirectPairingBlock({
             )}
             {copied ? t("common:copied") : t("devices.pairing.copyLink")}
           </button>
-          <button type="button" className="q-btn ghost" onClick={onNewCode}>
+          <button type="button" className="q-btn secondary" onClick={onNewCode}>
             <RefreshCwIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
             {t("devices.pairing.newCode")}
           </button>
@@ -268,18 +268,12 @@ function DirectDeviceRow({
             <span className="q-faint" style={{ fontSize: 12 }}>
               {t("devices.confirmRevoke")}
             </span>
-            <button
-              type="button"
-              className="q-btn ghost"
-              style={{ height: 24 }}
-              onClick={() => setConfirming(false)}
-            >
+            <button type="button" className="q-btn ghost" onClick={() => setConfirming(false)}>
               {t("common:cancel")}
             </button>
             <button
               type="button"
               className="q-btn danger"
-              style={{ height: 24 }}
               disabled={busy}
               aria-label={t("access.revokeLabel", { name })}
               onClick={() => {
@@ -295,7 +289,6 @@ function DirectDeviceRow({
           <button
             type="button"
             className="q-btn danger"
-            style={{ height: 24 }}
             aria-label={t("access.revokeLabel", { name })}
             onClick={() => setConfirming(true)}
           >

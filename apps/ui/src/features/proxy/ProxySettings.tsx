@@ -496,11 +496,11 @@ function SecretField({
               {hasKey ? t("proxy.storedOn", { host }) : t("proxy.noKeyStored")}
             </span>
             <span style={{ flex: 1 }} />
-            <button type="button" className="q-btn ghost" onClick={() => setEditing(true)}>
+            <button type="button" className="q-btn secondary" onClick={() => setEditing(true)}>
               {t("proxy.replace")}
             </button>
             {hasKey ? (
-              <button type="button" className="q-btn ghost" onClick={onClear}>
+              <button type="button" className="q-btn danger" onClick={onClear}>
                 {t("common:remove")}
               </button>
             ) : null}

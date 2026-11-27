@@ -128,12 +128,7 @@ function MachineRows({
     <div className="q-group">
       <h2>
         {t("hosts.machines")} <span className="grow" />
-        <button
-          type="button"
-          className="q-btn ghost"
-          style={{ fontWeight: 500 }}
-          onClick={() => void refresh()}
-        >
+        <button type="button" className="q-btn secondary" onClick={() => void refresh()}>
           <RefreshCwIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
           {t("common:refresh")}
         </button>
@@ -196,19 +191,13 @@ function MachineRows({
                 </td>
                 <td className="r" style={{ paddingRight: 0 }}>
                   {active ? (
-                    <button
-                      type="button"
-                      className="q-btn ghost"
-                      style={{ height: 24 }}
-                      onClick={forgetMachine}
-                    >
+                    <button type="button" className="q-btn secondary" onClick={forgetMachine}>
                       {t("hosts.disconnect")}
                     </button>
                   ) : (
                     <button
                       type="button"
                       className="q-btn secondary"
-                      style={{ height: 24 }}
                       disabled={!machine.online || busy !== null}
                       onClick={() => void activateMachine(machine.id)}
                     >
@@ -561,12 +550,7 @@ function DeviceRow({
               >
                 <CheckIcon className="q-icon s14" strokeWidth={2} aria-hidden />
               </button>
-              <button
-                type="button"
-                className="q-btn ghost"
-                style={{ height: 24 }}
-                onClick={() => setEditing(false)}
-              >
+              <button type="button" className="q-btn ghost" onClick={() => setEditing(false)}>
                 {t("common:cancel")}
               </button>
             </span>
@@ -597,18 +581,12 @@ function DeviceRow({
                   ? t("devices.confirmDisconnect")
                   : t("devices.confirmRevoke")}
             </span>
-            <button
-              type="button"
-              className="q-btn ghost"
-              style={{ height: 24 }}
-              onClick={() => setConfirming(false)}
-            >
+            <button type="button" className="q-btn ghost" onClick={() => setConfirming(false)}>
               {t("common:cancel")}
             </button>
             <button
               type="button"
               className="q-btn danger"
-              style={{ height: 24 }}
               disabled={busy}
               onClick={() => {
                 setBusy(true);
@@ -631,12 +609,7 @@ function DeviceRow({
             >
               <PencilIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
             </button>
-            <button
-              type="button"
-              className="q-btn danger"
-              style={{ height: 24 }}
-              onClick={() => setConfirming(true)}
-            >
+            <button type="button" className="q-btn danger" onClick={() => setConfirming(true)}>
               {current ? t("devices.signOut") : t("common:revoke")}
             </button>
           </span>
@@ -815,12 +788,7 @@ function PairDeviceGroup({ onClose }: { onClose: () => void }) {
             />
           </span>
         ) : null}
-        <button
-          type="button"
-          className="q-btn ghost"
-          style={{ height: 24, marginLeft: 8 }}
-          onClick={onClose}
-        >
+        <button type="button" className="q-btn secondary ml-2" onClick={onClose}>
           {t("common:done")}
         </button>
       </h2>
@@ -924,7 +892,7 @@ function PairDeviceGroup({ onClose }: { onClose: () => void }) {
                 </button>
                 <button
                   type="button"
-                  className="q-btn ghost"
+                  className="q-btn secondary"
                   onClick={() => void createPairing(machineId, scopes)}
                 >
                   <RefreshCwIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />

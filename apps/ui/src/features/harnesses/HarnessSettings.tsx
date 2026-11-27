@@ -161,7 +161,7 @@ function AgentRow({ agent, onEdit }: { agent: AcpAgent; onEdit: () => void }) {
           </span>
           <button
             type="button"
-            className="q-btn ghost"
+            className="q-btn secondary"
             disabled={probing}
             onClick={() => void probeAcpAgent(agent.id).then(setError)}
           >
@@ -174,7 +174,7 @@ function AgentRow({ agent, onEdit }: { agent: AcpAgent; onEdit: () => void }) {
           </button>
           <button
             type="button"
-            className="q-btn ghost"
+            className="q-btn secondary"
             onClick={onEdit}
             aria-label={t("harnesses.acp.editLabel", { name: agent.name })}
           >
@@ -183,7 +183,7 @@ function AgentRow({ agent, onEdit }: { agent: AcpAgent; onEdit: () => void }) {
           </button>
           <button
             type="button"
-            className="q-btn ghost danger"
+            className="q-btn danger"
             disabled={removing}
             aria-label={t("harnesses.acp.removeLabel", { name: agent.name })}
             onClick={() => {
@@ -369,7 +369,7 @@ function AgentForm({
               />
               <button
                 type="button"
-                className="q-btn ghost"
+                className="q-btn secondary"
                 aria-label={t("harnesses.acp.removeArgument", { row: index + 1 })}
                 onClick={() => patch({ args: form.args.filter((_, at) => at !== index) })}
               >
@@ -379,7 +379,7 @@ function AgentForm({
           ))}
           <button
             type="button"
-            className="q-btn ghost"
+            className="q-btn secondary"
             style={{ alignSelf: "flex-start" }}
             onClick={() => patch({ args: [...form.args, ""] })}
           >
@@ -421,7 +421,7 @@ function AgentForm({
               />
               <button
                 type="button"
-                className="q-btn ghost"
+                className="q-btn secondary"
                 aria-label={t("harnesses.acp.removeEnv", { row: index + 1 })}
                 disabled={form.env.length === 1 && row.key === "" && row.value === ""}
                 onClick={() => patch({ env: form.env.filter((_, at) => at !== index) })}
@@ -432,7 +432,7 @@ function AgentForm({
           ))}
           <button
             type="button"
-            className="q-btn ghost"
+            className="q-btn secondary"
             style={{ alignSelf: "flex-start" }}
             onClick={() => patch({ env: [...form.env, { key: "", value: "" }] })}
           >
@@ -521,7 +521,7 @@ export function HarnessSettings() {
           <h2>{t("harnesses.cliVersions")}</h2>
           <button
             type="button"
-            className="q-btn ghost"
+            className="q-btn secondary"
             disabled={loading || connection !== "online"}
             onClick={() => void loadHarnessVersions()}
           >
