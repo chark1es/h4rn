@@ -3,6 +3,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { backdropClassName } from "./dialog";
 import { Sheet, SheetBody, SheetClose, SheetContent, SheetFooter, SheetTitle } from "./sheet";
 
 afterEach(cleanup);
@@ -30,6 +31,13 @@ describe("Sheet", () => {
     const dialog = await screen.findByRole("dialog", { name: "Run npm test on studio" });
     expect(dialog.getAttribute("aria-modal")).toBe("true");
     expect(dialog.querySelector('[data-slot="sheet-grabber"]')).not.toBeNull();
+  });
+
+  it("fades its backdrop like a dialog's", async () => {
+    render(<Example onClosed={() => undefined} onApprove={() => undefined} />);
+    await screen.findByRole("dialog");
+    const backdrop = document.querySelector('[data-slot="drawer-backdrop"]');
+    expect(backdrop?.className).toBe(backdropClassName);
   });
 
   it("closes on Escape and reports it once the exit finishes", async () => {

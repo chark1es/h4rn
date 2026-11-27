@@ -9,7 +9,7 @@ import {
 } from "@ui-sdk/react/drawer";
 import type * as React from "react";
 
-import { modalSurfaceClassName, SheetGrabber } from "@/components/ui/dialog";
+import { backdropClassName, modalSurfaceClassName, SheetGrabber } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
 
 /** A bottom sheet for phone-only surfaces. Dialogs become sheets on their own. */
@@ -25,7 +25,7 @@ type SheetContentProps = Omit<React.ComponentProps<typeof DrawerContentPrimitive
 function SheetContent({ className, size = "auto", children, ...props }: SheetContentProps) {
   return (
     <>
-      <DrawerBackdropPrimitive className="fixed inset-0 bg-scrim" />
+      <DrawerBackdropPrimitive className={backdropClassName} />
       <DrawerContentPrimitive
         data-size={size}
         className={cn(
