@@ -555,7 +555,9 @@ const AUDIT_SHOTS = [
     path: "/t/thr_a",
     wait: '[aria-label="Thread stream"]',
     action: async (page) => {
-      await page.getByRole("button", { name: "Actions for Migrate session store to Redis" }).click();
+      await page
+        .getByRole("button", { name: "Actions for Migrate session store to Redis" })
+        .click();
       await page.getByRole("menu").first().waitFor({ state: "visible" });
       await page.waitForTimeout(350);
     },
