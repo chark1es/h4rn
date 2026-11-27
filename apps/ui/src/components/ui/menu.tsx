@@ -40,7 +40,7 @@ type WithClassName<P> = Omit<P, "className" | "children" | "disabled"> & {
  */
 const popupSurface = [
   "min-w-40 max-w-80 overflow-y-auto overscroll-contain rounded-md border border-border bg-popover p-1 text-sm text-popover-foreground shadow-popup outline-none",
-  "max-h-[min(var(--available-height),--spacing(96))]",
+  "max-h-[min(var(--available-height),--spacing(120))]",
   "origin-(--transform-origin) transition-[opacity,scale] duration-popup ease-enter",
   "data-starting-style:scale-96 data-starting-style:opacity-0",
   "data-ending-style:scale-96 data-ending-style:opacity-0 data-ending-style:duration-popup-exit data-ending-style:ease-exit",

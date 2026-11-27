@@ -316,7 +316,7 @@ function HostsMenuContent({
       side="top"
       align="start"
       aria-label={t("hosts.title")}
-      className="w-(--anchor-width) min-w-64"
+      className="w-(--anchor-width) min-w-72"
     >
       <MenuGroup>
         <MenuGroupLabel className="justify-between gap-2 text-sm font-semibold text-foreground">
@@ -355,7 +355,7 @@ function HostsMenuContent({
                 }
                 trailing={
                   <>
-                    <span className={cn(!row.online && reachableLink && "text-destructive")}>
+                    <span>
                       {row.online
                         ? row.path
                           ? `${t(`hosts.path.${row.path}`)}${

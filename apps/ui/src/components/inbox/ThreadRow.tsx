@@ -212,7 +212,7 @@ export function ThreadRow({
           <MoreHorizontalIcon className="q-icon" strokeWidth={1.5} aria-hidden />
         </MenuTrigger>
       </div>
-      <MenuContent align="end" className="w-60">
+      <MenuContent align="end" className="min-w-56">
         <MenuGroup>
           <MenuGroupLabel>
             {t("row.harnessOn", {

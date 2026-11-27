@@ -193,7 +193,7 @@ export function ThreadHeader({
           aria-hidden
         />
       </MenuTrigger>
-      <MenuContent align="end" className="w-64">
+      <MenuContent align="end" className="min-w-56">
         <MenuGroup>
           <MenuGroupLabel>{t("header.thread")}</MenuGroupLabel>
           <MenuItem
