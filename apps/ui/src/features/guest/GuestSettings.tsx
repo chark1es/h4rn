@@ -56,13 +56,11 @@ export function GuestSettingsForm() {
           </div>
         </div>
         {rewindError ? (
-          <p className="q-danger" role="alert" style={{ margin: "8px 0 0", fontSize: 12 }}>
+          <p className="q-danger mt-2 mx-0 mb-0 text-xs" role="alert">
             {errorWords(rewindError).message}
           </p>
         ) : null}
-        <p className="q-muted" style={{ fontSize: 13 }}>
-          {t("labs.rewindOffNote")}
-        </p>
+        <p className="q-muted text-sm">{t("labs.rewindOffNote")}</p>
       </div>
       <div className="q-group">
         <h2>{t("labs.sharing")}</h2>
@@ -93,13 +91,11 @@ export function GuestSettingsForm() {
           </div>
         </div>
         {error ? (
-          <p className="q-danger" role="alert" style={{ margin: "8px 0 0", fontSize: 12 }}>
+          <p className="q-danger mt-2 mx-0 mb-0 text-xs" role="alert">
             {guestErrorText(error)}
           </p>
         ) : null}
-        <p className="q-muted" style={{ fontSize: 13 }}>
-          {t("labs.guestOffNote")}
-        </p>
+        <p className="q-muted text-sm">{t("labs.guestOffNote")}</p>
       </div>
       <div className="q-group">
         <h2>{t("labs.outsideAgents")}</h2>
@@ -121,7 +117,7 @@ export function GuestSettingsForm() {
           </div>
         </div>
         {outsideError ? (
-          <p className="q-danger" role="alert" style={{ margin: "8px 0 0", fontSize: 12 }}>
+          <p className="q-danger mt-2 mx-0 mb-0 text-xs" role="alert">
             {outsideError.message}
             {outsideError.hint ? ` ${outsideError.hint}` : ""}
           </p>

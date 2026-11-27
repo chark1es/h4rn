@@ -62,11 +62,7 @@ function AccountsTable({
 }) {
   const { t } = useTranslation(["settings", "common"]);
   if (accounts.length === 0) {
-    return (
-      <p className="q-muted" style={{ fontSize: 13, margin: "4px 0 16px" }}>
-        {t("forges.noAccounts")}
-      </p>
-    );
+    return <p className="q-muted text-sm mt-1 mx-0 mb-4">{t("forges.noAccounts")}</p>;
   }
   return (
     <table className="q-tbl">
@@ -88,7 +84,7 @@ function AccountsTable({
                 <span className="q-cell-id">
                   <KeyRoundIcon className="q-icon s14 q-faint" strokeWidth={1.5} aria-hidden />
                   <span>
-                    <span style={{ fontWeight: 500 }}>
+                    <span className="font-medium">
                       {account.display_name ?? account.username ?? forgeLabel(account.forge)}
                     </span>
                     <span className="q-faint"> · {sourceLabel(account.source)}</span>
@@ -126,7 +122,7 @@ function AccountsTable({
                   style: "short",
                 })}
               </td>
-              <td className="r" style={{ paddingRight: 0 }}>
+              <td className="r pr-0">
                 <button
                   type="button"
                   className="q-btn danger"
@@ -293,9 +289,7 @@ function AddAccountForm({
               placeholder="you@example.com"
             />
             {accessTokenWithoutRepository ? (
-              <span className="q-warn" style={{ fontSize: 12, display: "block" }}>
-                {t("forges.add.needsRepository")}
-              </span>
+              <span className="q-warn text-xs block">{t("forges.add.needsRepository")}</span>
             ) : null}
           </div>
         </div>
@@ -350,9 +344,7 @@ function AddAccountForm({
             {busy ? t("common:checking") : t("forges.add.button")}
           </button>
           {missingOrganization ? (
-            <span className="q-warn" style={{ fontSize: 12 }}>
-              {t("forges.add.missingOrganization")}
-            </span>
+            <span className="q-warn text-xs">{t("forges.add.missingOrganization")}</span>
           ) : null}
         </div>
       </div>
@@ -468,10 +460,8 @@ function DeviceFlow({ baseUrl, onComplete }: { baseUrl: string; onComplete: () =
               }}
             />
           </p>
-          <div className="q-code-big" style={{ margin: "4px 0 10px" }}>
-            {flow.user_code}
-          </div>
-          <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+          <div className="q-code-big mt-1 mx-0 mb-2.5">{flow.user_code}</div>
+          <div className="flex gap-1.5 items-center">
             <span className="q-faint" style={{ fontSize: 12 }}>
               <RefreshCwIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />{" "}
               {t("forges.device.waiting")}
@@ -484,7 +474,7 @@ function DeviceFlow({ baseUrl, onComplete }: { baseUrl: string; onComplete: () =
       ) : (
         <>
           <p className="desc">{t("forges.device.hint")}</p>
-          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <div className="flex gap-2 items-center">
             <button
               type="button"
               className="q-btn secondary"
@@ -493,11 +483,7 @@ function DeviceFlow({ baseUrl, onComplete }: { baseUrl: string; onComplete: () =
             >
               {busy ? t("forges.device.starting") : t("forges.device.start")}
             </button>
-            {status ? (
-              <span className="q-warn" style={{ fontSize: 12 }}>
-                {status}
-              </span>
-            ) : null}
+            {status ? <span className="q-warn text-xs">{status}</span> : null}
           </div>
         </>
       )}
@@ -638,7 +624,7 @@ export function ForgeSettings() {
   return (
     <div className="q-form wide">
       <div className="q-form-head">
-        <div style={{ flex: 1 }}>
+        <div className="flex-1">
           <h1>{t("forges.title")}</h1>
           <p className="lead">{t("forges.lead")}</p>
         </div>
@@ -659,7 +645,7 @@ export function ForgeSettings() {
         {loading ? (
           <div aria-busy="true">
             {[0, 1].map((row) => (
-              <div key={row} className="q-skel" style={{ height: 40, marginBottom: 8 }} />
+              <div key={row} className="q-skel h-10 mb-2" />
             ))}
           </div>
         ) : (
@@ -678,7 +664,7 @@ export function ForgeSettings() {
             components={{ code: <span className="q-mono" /> }}
           />
         </p>
-        <div style={{ display: "flex", gap: 8 }}>
+        <div className="flex gap-2">
           <button
             type="button"
             className="q-btn secondary"

@@ -64,7 +64,7 @@ function WaitingForTurn({
   return (
     <div className="q-stream">
       <div className="q-col">
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <div className="flex items-center gap-2">
           <AgentGlyph glyph={glyph} size={14} />
           <p className="q-faint" style={{ margin: 0, fontSize: 12 }}>
             {t("pane.waitingFor", { harness, host })}
@@ -78,7 +78,7 @@ function WaitingForTurn({
             {t("common:cancel")}
           </button>
         </div>
-        <div style={{ marginTop: 16, display: "grid", gap: 8 }} aria-hidden>
+        <div className="mt-4 grid gap-2" aria-hidden>
           <div className="q-skel" style={{ height: 10, width: "82%" }} />
           <div className="q-skel" style={{ height: 10, width: "64%" }} />
           <div className="q-skel" style={{ height: 10, width: "44%" }} />
@@ -186,12 +186,12 @@ export function ThreadPane({ threadId }: { threadId: string }) {
             <h3 style={{ fontSize: 16, lineHeight: "24px", marginTop: 10 }}>
               {t("pane.loadFailed")}
             </h3>
-            <p style={{ margin: 0 }}>
+            <p className="m-0">
               {threadError
                 ? t("pane.stillActive", { message: threadError.message })
                 : t("pane.notFound")}
             </p>
-            <div style={{ display: "flex", gap: 8 }}>
+            <div className="flex gap-2">
               <button type="button" className="q-btn primary" onClick={() => retryThread(threadId)}>
                 <RefreshCwIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
                 {t("common:retry")}
@@ -303,10 +303,10 @@ export function ThreadPane({ threadId }: { threadId: string }) {
             <h3 style={{ fontSize: 16, lineHeight: "24px", marginTop: 10 }}>
               {t("pane.loadFailed")}
             </h3>
-            <p style={{ margin: 0 }}>
+            <p className="m-0">
               {threadError.message} {threadError.hint ?? t("pane.nothingLost")}
             </p>
-            <div style={{ display: "flex", gap: 8 }}>
+            <div className="flex gap-2">
               <button type="button" className="q-btn primary" onClick={() => retryThread(threadId)}>
                 <RefreshCwIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
                 {t("common:retry")}
@@ -369,7 +369,7 @@ export function ThreadPane({ threadId }: { threadId: string }) {
           <div className="q-empty" style={{ width: 460, maxWidth: "100%", padding: 0 }}>
             <InboxIcon className="q-icon s22 q-faint" strokeWidth={1.5} aria-hidden />
             <h3 style={{ fontSize: 16, lineHeight: "24px" }}>{t("pane.emptyTitle")}</h3>
-            <p style={{ margin: 0 }}>
+            <p className="m-0">
               {summary.agent_state === "done"
                 ? t("pane.emptyFinished", { host: host?.name ?? summary.host })
                 : t("pane.emptyIdle", { host: host?.name ?? summary.host })}

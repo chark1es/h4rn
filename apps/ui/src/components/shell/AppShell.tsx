@@ -758,7 +758,7 @@ function PhoneIdeNotice() {
       <div className="q-center-empty">
         <div className="q-empty" style={{ width: 340, padding: 0 }}>
           <h3 style={{ fontSize: 16, lineHeight: "24px" }}>{t("phoneIde.title")}</h3>
-          <p style={{ margin: 0 }}>{t("phoneIde.body")}</p>
+          <p className="m-0">{t("phoneIde.body")}</p>
           <button
             type="button"
             className="q-btn secondary"

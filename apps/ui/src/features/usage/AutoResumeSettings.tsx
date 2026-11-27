@@ -60,8 +60,8 @@ export function AutoResumeSettings() {
     return (
       <div className="q-form">
         <h1>{t("resume.title")}</h1>
-        <div className="q-skel" style={{ height: 12, width: 240 }} />
-        <div className="q-skel" style={{ height: 120, marginTop: 18 }} />
+        <div className="q-skel h-3 w-60" />
+        <div className="q-skel h-30 mt-4" />
       </div>
     );
   }
@@ -164,7 +164,7 @@ export function AutoResumeSettings() {
             />
           </div>
         </div>
-        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+        <div className="flex gap-2 justify-end">
           <span
             className="q-faint"
             style={{ fontSize: 12, marginRight: "auto", alignSelf: "center" }}
@@ -193,7 +193,7 @@ export function AutoResumeSettings() {
           </button>
         </div>
         {error ? (
-          <p className="q-danger" style={{ fontSize: 12, marginTop: 8 }}>
+          <p className="q-danger text-xs mt-2">
             {error.message}
             {error.hint ? ` ${error.hint}` : ""}
           </p>

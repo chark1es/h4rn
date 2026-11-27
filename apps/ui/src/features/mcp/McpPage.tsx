@@ -213,9 +213,7 @@ function ConflictCard({ server }: { server: McpServerView }) {
       <TriangleAlertIcon className="q-icon q-warn" aria-hidden />
       <div className="grow">
         <div className="t">{text}</div>
-        <div className="q-muted" style={{ fontSize: 12, marginTop: 2 }}>
-          {t("mcp.conflict.body")}
-        </div>
+        <div className="q-muted text-xs mt-0.5">{t("mcp.conflict.body")}</div>
       </div>
       <Popover
         label={t("mcp.conflict.label", { name: server.name })}
@@ -259,10 +257,8 @@ function ResolvePanel({ server, close }: { server: McpServerView; close: () => v
         void settle();
       }}
     >
-      <div style={{ fontWeight: 600, marginBottom: 2 }}>
-        {t("mcp.resolve.title", { name: server.name })}
-      </div>
-      <div className="q-muted" style={{ fontSize: 12, marginBottom: 10 }}>
+      <div className="font-semibold mb-0.5">{t("mcp.resolve.title", { name: server.name })}</div>
+      <div className="q-muted text-xs mb-2.5">
         {t("mcp.resolve.choose", { harness: HARNESS_LABELS[harness] })}
       </div>
       {locked ? (
@@ -302,7 +298,7 @@ function ResolvePanel({ server, close }: { server: McpServerView; close: () => v
             />
             <span className={cn("q-radio", choice === option.value && "on")} aria-hidden />
             <span>
-              <span style={{ fontWeight: 500 }}>{t(CHOICE_LABELS[option.value])}</span>
+              <span className="font-medium">{t(CHOICE_LABELS[option.value])}</span>
               <span className="q-faint sub">{t(`mcp.resolve.hints.${option.value}`)}</span>
             </span>
           </label>
@@ -310,15 +306,14 @@ function ResolvePanel({ server, close }: { server: McpServerView; close: () => v
       </div>
       {choice === "rename" ? (
         <input
-          className="q-input"
-          style={{ marginTop: 8 }}
+          className="q-input mt-2"
           value={rename}
           onChange={(event) => setRename(event.target.value)}
           placeholder={t("mcp.resolve.newName")}
           aria-label={t("dialogs:mcp.import.newNameFor", { name: server.name })}
         />
       ) : null}
-      <div style={{ display: "flex", justifyContent: "flex-end", gap: 6, marginTop: 12 }}>
+      <div className="flex justify-end gap-1.5 mt-3">
         <button type="button" className="q-btn ghost" onClick={close}>
           {t("common:cancel")}
         </button>
@@ -405,7 +400,7 @@ function SharedWithYou({ current }: { current: McpServerView | null }) {
               >
                 <div className="t">
                   {server.name}{" "}
-                  <span className="q-faint" style={{ fontWeight: 400 }}>
+                  <span className="q-faint font-normal">
                     {t("mcp.sharedWithYou.from", { host: host?.name ?? machine })}
                   </span>
                 </div>
@@ -519,10 +514,10 @@ function Activity({ server }: { server: McpServerView }) {
 function SkeletonDetail({ label }: { label: string }) {
   return (
     <div className="q-form wide" role="status" aria-busy="true" aria-label={label}>
-      <div className="q-skel" style={{ width: 180, height: 22, marginBottom: 8 }} />
-      <div className="q-skel" style={{ width: 420, height: 12, marginBottom: 28 }} />
-      <div className="q-skel" style={{ width: "100%", height: 48, marginBottom: 8 }} />
-      <div className="q-skel" style={{ width: "100%", height: 168 }} />
+      <div className="q-skel w-45 h-5.5 mb-2" />
+      <div className="q-skel w-105 h-3 mb-7" />
+      <div className="q-skel w-full h-12 mb-2" />
+      <div className="q-skel w-full h-42" />
     </div>
   );
 }
@@ -922,7 +917,7 @@ export function McpPage() {
 
             <CredentialField server={server} />
 
-            <div className="q-sec" style={{ marginTop: 28 }}>
+            <div className="q-sec mt-7">
               <div className="q-sec-h">
                 <h2>{t("mcp.where.title")}</h2>
                 <span className="aside">{t("mcp.where.aside")}</span>
@@ -935,9 +930,7 @@ export function McpPage() {
                       <th style={{ width: "22%" }}>{t("mcp.where.harness")}</th>
                       <th>{t("mcp.where.deliveredAs")}</th>
                       <th>{t("mcp.where.status")}</th>
-                      <th className="r" style={{ paddingRight: 0 }}>
-                        {t("common:on")}
-                      </th>
+                      <th className="r pr-0">{t("common:on")}</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -986,7 +979,7 @@ export function McpPage() {
                             </span>
                           )}
                         </td>
-                        <td className="r" style={{ paddingRight: 0 }}>
+                        <td className="r pr-0">
                           <Toggle
                             checked={row.enabled}
                             busy={row.busy}

@@ -73,7 +73,7 @@ export function AboutSettings() {
         </div>
         <div className="ctl">
           <span className="q-mono q-muted">{version ?? "—"}</span>
-          <span style={{ flex: 1 }} />
+          <span className="flex-1" />
           <button
             type="button"
             className="q-btn secondary"

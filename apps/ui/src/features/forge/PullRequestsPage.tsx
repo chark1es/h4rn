@@ -197,7 +197,7 @@ function ChecksActions({
   const rerun = rerunAction(checks);
   const blocked = rerun.kind !== "ready";
   return (
-    <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
+    <div className="flex gap-1.5 mt-2">
       {log?.details_url ? (
         <a
           className="q-btn secondary"
@@ -238,9 +238,9 @@ function PrSkeleton() {
   return (
     <div className="q-page" role="status" aria-busy="true" aria-label={t("loading")}>
       <div style={{ maxWidth: 860, margin: "0 auto", padding: "24px 32px" }}>
-        <div className="q-skel" style={{ width: 220, height: 20, marginBottom: 18 }} />
+        <div className="q-skel w-55 h-5 mb-4" />
         {[0, 1, 2, 3].map((row) => (
-          <div key={row} className="q-skel" style={{ height: 52, marginBottom: 8 }} />
+          <div key={row} className="q-skel h-13 mb-2" />
         ))}
       </div>
     </div>
@@ -252,7 +252,7 @@ function EmptyForge({ onSettings }: { onSettings: () => void }) {
   return (
     <div className="q-page">
       <div className="q-center-empty">
-        <div className="q-empty" style={{ width: 400 }}>
+        <div className="q-empty w-100">
           <GitPullRequestIcon className="q-icon s22 q-faint" strokeWidth={1.5} aria-hidden />
           <h3>{t("noForge.title")}</h3>
           <p>{t("noForge.body")}</p>
@@ -270,7 +270,7 @@ function NoRepo({ onSettings }: { onSettings: () => void }) {
   return (
     <div className="q-page">
       <div className="q-center-empty">
-        <div className="q-empty" style={{ width: 420 }}>
+        <div className="q-empty w-105">
           <GitPullRequestIcon className="q-icon s22 q-faint" strokeWidth={1.5} aria-hidden />
           <h3>{t("noRepo.title")}</h3>
           <p>{t("noRepo.body")}</p>
@@ -424,7 +424,7 @@ export function PullRequestsPage() {
       <main className="q-main" aria-label={t("title")}>
         <div className="q-page">
           <div className="q-center-empty">
-            <div className="q-empty" style={{ width: 420 }}>
+            <div className="q-empty w-105">
               <CircleAlertIcon className="q-icon s22 q-danger" strokeWidth={1.5} aria-hidden />
               <h3>{t("accountsFailed")}</h3>
               <p>{accountsError}</p>
@@ -558,7 +558,7 @@ export function PullRequestsPage() {
       <div className="q-scroll">
         {listError ? (
           <div className="q-center-empty">
-            <div className="q-empty" style={{ width: 420 }}>
+            <div className="q-empty w-105">
               <CircleAlertIcon className="q-icon s22 q-danger" strokeWidth={1.5} aria-hidden />
               <h3>{t("listFailed")}</h3>
               <p>{listError}</p>
@@ -574,12 +574,12 @@ export function PullRequestsPage() {
         ) : listLoading && prs.length === 0 ? (
           <div className="q-rows" aria-busy="true">
             {[0, 1, 2, 3].map((row) => (
-              <div key={row} className="q-skel" style={{ height: 52, margin: "4px 8px" }} />
+              <div key={row} className="q-skel h-13 my-1 mx-2" />
             ))}
           </div>
         ) : prs.length === 0 ? (
           <div className="q-center-empty">
-            <div className="q-empty" style={{ width: 380 }}>
+            <div className="q-empty w-95">
               <GitPullRequestIcon className="q-icon s22 q-faint" strokeWidth={1.5} aria-hidden />
               <h3>
                 {filter === "review"
@@ -641,7 +641,7 @@ export function PullRequestsPage() {
               );
             })}
             {hasMore ? (
-              <div style={{ padding: "12px 8px" }}>
+              <div className="py-3 px-2">
                 <button
                   type="button"
                   className="q-btn secondary"
@@ -1252,12 +1252,12 @@ function PrDetail({
     return (
       <main className="q-main" aria-label={t("detail.label")} aria-busy="true">
         <header className="q-page-head q-pr-head">
-          <div style={{ flex: 1 }}>
-            <div className="q-skel" style={{ width: 320, height: 22 }} />
+          <div className="flex-1">
+            <div className="q-skel w-80 h-5.5" />
           </div>
         </header>
         <div className="q-page">
-          <div className="q-skel" style={{ height: 260, margin: "24px 32px" }} />
+          <div className="q-skel h-65 my-6 mx-8" />
         </div>
       </main>
     );
@@ -1268,11 +1268,11 @@ function PrDetail({
       <main className="q-main" aria-label={t("detail.label")}>
         <div className="q-page">
           <div className="q-center-empty">
-            <div className="q-empty" style={{ width: 420 }}>
+            <div className="q-empty w-105">
               <CircleAlertIcon className="q-icon s22 q-danger" strokeWidth={1.5} aria-hidden />
               <h3>{t("detail.failed")}</h3>
               <p>{error ?? t("detail.noDetail")}</p>
-              <div style={{ display: "flex", gap: 6, justifyContent: "center" }}>
+              <div className="flex gap-1.5 justify-center">
                 <button type="button" className="q-btn secondary" onClick={onBack}>
                   {t("detail.back")}
                 </button>
@@ -1296,7 +1296,7 @@ function PrDetail({
   return (
     <main className="q-main" aria-label={t("detail.label")}>
       <header className="q-page-head q-pr-head">
-        <div style={{ flex: 1, minWidth: 0 }}>
+        <div className="flex-1 min-w-0">
           <nav className="q-crumb" aria-label={t("detail.breadcrumb")}>
             <button type="button" className="q-crumb-link" onClick={onBack}>
               {t("title")}
@@ -1313,23 +1313,15 @@ function PrDetail({
             <span aria-current="page">#{number}</span>
           </nav>
           <h1 style={{ fontSize: 16, lineHeight: "22px" }}>
-            {pr.summary.title}{" "}
-            <span className="q-faint" style={{ fontWeight: 400 }}>
-              #{number}
-            </span>
+            {pr.summary.title} <span className="q-faint font-normal">#{number}</span>
           </h1>
           <div className="q-muted q-pr-meta">
             <span className={`q-badge ${state.tone}`} style={{ height: 18 }}>
               {state.label}
             </span>
-            <span className="mono" style={{ fontSize: 12 }}>
-              {pr.summary.head_branch}
-            </span>{" "}
-            →{" "}
-            <span className="mono" style={{ fontSize: 12 }}>
-              {pr.summary.base_branch}
-            </span>{" "}
-            · {t("detail.commits", { count: pr.commits })} ·{" "}
+            <span className="mono text-xs">{pr.summary.head_branch}</span> →{" "}
+            <span className="mono text-xs">{pr.summary.base_branch}</span> ·{" "}
+            {t("detail.commits", { count: pr.commits })} ·{" "}
             {isNow(pr.created_at)
               ? t("detail.openedByNow", { author: pr.summary.author })
               : t("detail.openedBy", {
@@ -1471,7 +1463,7 @@ function PrDetail({
                         </div>
                         <ThreadQuote thread={thread} files={diffFiles} />
                         {thread.comments.map((comment) => (
-                          <div key={comment.comment_id} style={{ marginBottom: 10 }}>
+                          <div className="mb-2.5" key={comment.comment_id}>
                             <div className="q-cmt-h" style={{ marginBottom: 2 }}>
                               <b>{comment.author}</b> · {formatAge(comment.created_at)}
                               {comment.comment_id.startsWith("tmp_") ? (
@@ -1568,7 +1560,7 @@ function PrDetail({
                       </div>
                     ))}
 
-                    <div style={{ marginTop: 18 }}>
+                    <div className="mt-4">
                       <div className="q-composer">
                         <textarea
                           aria-label={t("conversation.commentOn", { number })}
@@ -1664,7 +1656,7 @@ function PrDetail({
                   />
                 ) : checks ? (
                   <>
-                    <div className="q-muted" style={{ marginBottom: 10 }}>
+                    <div className="q-muted mb-2.5">
                       {checksLabel(checks.state, checks.passed, checks.total)} ·{" "}
                       <span className="q-mono">{checks.head_sha.slice(0, 8)}</span>
                     </div>
@@ -1795,7 +1787,7 @@ function PrDetail({
                         })
                       : null}
                     {diffPage?.has_more && !diffError ? (
-                      <div style={{ padding: "12px 0" }}>
+                      <div className="py-3 px-0">
                         <button
                           type="button"
                           className="q-btn secondary"
@@ -1976,7 +1968,7 @@ function PrDetail({
                   {t("side.noAgentThread")}
                 </p>
               )}
-              <div style={{ marginTop: 8 }}>
+              <div className="mt-2">
                 <button
                   type="button"
                   className="q-btn ghost"

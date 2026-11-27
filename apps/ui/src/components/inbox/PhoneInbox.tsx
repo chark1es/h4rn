@@ -168,7 +168,7 @@ export function PhoneInbox() {
             <span className="q-num q-faint">{formatNumber(snoozed.length)}</span>
           </button>
         ) : null}
-        <div style={{ height: 16 }} />
+        <div className="h-4" />
       </div>
     </>
   );

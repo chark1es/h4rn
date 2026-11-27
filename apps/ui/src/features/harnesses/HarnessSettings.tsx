@@ -58,7 +58,7 @@ function HarnessRow({ row }: { row: HarnessVersionInfo }) {
             {row.installed ?? "—"}
             {row.update_available && row.latest ? ` → ${row.latest}` : ""}
           </span>
-          <span style={{ flex: 1 }} />
+          <span className="flex-1" />
           {row.update_available && runnable ? (
             <button
               type="button"
@@ -283,7 +283,7 @@ function AgentForm({
         ) : (
           <p className="q-muted">{t("harnesses.acp.reading")}</p>
         )}
-        <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 12 }}>
+        <div className="flex justify-end mt-3">
           <button type="button" className="q-btn ghost" onClick={onDone}>
             {t("common:close")}
           </button>
@@ -476,7 +476,7 @@ function AgentForm({
         </p>
       ) : null}
 
-      <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 12 }}>
+      <div className="flex justify-end gap-2 mt-3">
         <button type="button" className="q-btn ghost" onClick={onDone} disabled={saving}>
           {t("common:cancel")}
         </button>
@@ -530,7 +530,7 @@ export function HarnessSettings() {
           </button>
         </div>
         {!loaded ? (
-          <div className="q-skel" style={{ height: 120 }} />
+          <div className="q-skel h-30" />
         ) : error ? (
           <p className="q-muted">{error.message}</p>
         ) : (
@@ -555,7 +555,7 @@ export function HarnessSettings() {
         </div>
         <p className="desc">{t("harnesses.acp.hint")}</p>
         {!agentsLoaded ? (
-          <div className="q-skel" style={{ height: 80 }} />
+          <div className="q-skel h-20" />
         ) : agentsError ? (
           <p className="q-muted">{agentsError.message}</p>
         ) : agents.length === 0 ? (

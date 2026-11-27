@@ -136,11 +136,11 @@ function Conflicts({ conflicts }: { conflicts: SkillConflict[] }) {
         {conflicts.map((conflict) => {
           const choice = choices[conflict.id] ?? "keep_local";
           return (
-            <div className="q-conflict" key={conflict.id} style={{ flexWrap: "wrap", rowGap: 8 }}>
+            <div className="q-conflict flex-wrap gap-y-2" key={conflict.id}>
               <TriangleAlertIcon className="q-icon q-warn" aria-hidden />
               <div className="grow" style={{ minWidth: isPhone ? "calc(100% - 28px)" : undefined }}>
                 <div className="t">{conflict.name}</div>
-                <div className="q-muted" style={{ fontSize: 12, marginTop: 2 }}>
+                <div className="q-muted text-xs mt-0.5">
                   <Trans
                     t={t}
                     i18nKey="skills.conflicts.versions"
@@ -307,7 +307,7 @@ function SkeletonList({ label }: { label: string }) {
             />
             <div className="q-skel" style={{ width: "38%", height: 8, marginTop: 6 }} />
           </div>
-          <div className="q-skel" style={{ width: 180, height: 24 }} />
+          <div className="q-skel w-45 h-6" />
         </div>
       ))}
     </div>

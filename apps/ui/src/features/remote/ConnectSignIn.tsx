@@ -132,10 +132,8 @@ export function ConnectSignIn() {
             </div>
           </div>
           <div className="ctl" style={{ display: "block" }}>
-            <div className="q-code-big" style={{ marginBottom: 8 }}>
-              {login.userCode}
-            </div>
-            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+            <div className="q-code-big mb-2">{login.userCode}</div>
+            <div className="flex gap-1.5 flex-wrap">
               <a
                 className="q-btn secondary"
                 href={login.verificationUriComplete ?? login.verificationUri}
@@ -242,9 +240,7 @@ export function ConnectSignIn() {
             <div className="t">{t("connect.failed")}</div>
           </div>
           <div className="ctl">
-            <span className="q-danger" style={{ fontSize: 12 }}>
-              {remoteErrorText(error)}
-            </span>
+            <span className="q-danger text-xs">{remoteErrorText(error)}</span>
           </div>
         </div>
       ) : null}

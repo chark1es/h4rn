@@ -206,11 +206,11 @@ function Diagnostics({ diagnostics }: { diagnostics: ProxyDiagnostic[] }) {
           className="q-li"
           style={{ display: "block" }}
         >
-          <div style={{ display: "flex", gap: 6, alignItems: "flex-start" }}>
+          <div className="flex gap-1.5 items-start">
             {diagnostic.level === "error" ? (
               <TriangleAlertIcon className="q-icon s12 q-danger" strokeWidth={1.5} aria-hidden />
             ) : null}
-            <span style={{ fontWeight: 500 }}>{diagnostic.message}</span>
+            <span className="font-medium">{diagnostic.message}</span>
           </div>
           {diagnostic.hint ? (
             <div className="q-faint" style={{ fontSize: 12, marginTop: 3 }}>
@@ -373,7 +373,7 @@ function AddProfile() {
           </button>
         </div>
       </div>
-      <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+      <div className="flex gap-2 justify-end">
         <button type="button" className="q-btn ghost" onClick={() => setOpen(false)}>
           {t("common:cancel")}
         </button>
@@ -495,7 +495,7 @@ function SecretField({
               <KeyRoundIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
               {hasKey ? t("proxy.storedOn", { host }) : t("proxy.noKeyStored")}
             </span>
-            <span style={{ flex: 1 }} />
+            <span className="flex-1" />
             <button type="button" className="q-btn secondary" onClick={() => setEditing(true)}>
               {t("proxy.replace")}
             </button>
@@ -811,7 +811,7 @@ function ProfileDetail({ profile }: { profile: ProxyProfile }) {
                   </div>
                 ) : null}
                 {report ? (
-                  <div style={{ marginTop: 12 }}>
+                  <div className="mt-3">
                     <Diagnostics diagnostics={report.diagnostics} />
                   </div>
                 ) : null}
@@ -930,8 +930,8 @@ export function ProxySettings() {
     return (
       <div className="q-form">
         <h1>CLIProxyAPI</h1>
-        <div className="q-skel" style={{ height: 12, width: 260 }} />
-        <div className="q-skel" style={{ height: 120, marginTop: 18 }} />
+        <div className="q-skel h-3 w-65" />
+        <div className="q-skel h-30 mt-4" />
       </div>
     );
   }
@@ -941,7 +941,7 @@ export function ProxySettings() {
       <div className="q-form">
         <h1>CLIProxyAPI</h1>
         <div className="q-empty">
-          <p style={{ margin: 0 }}>{error.message}</p>
+          <p className="m-0">{error.message}</p>
           <p className="q-faint" style={{ margin: "4px 0 12px" }}>
             {error.hint ?? t("proxy.startDaemon")}
           </p>
@@ -960,7 +960,7 @@ export function ProxySettings() {
   return (
     <div className="q-form">
       <div className="q-form-head">
-        <div style={{ flex: 1 }}>
+        <div className="flex-1">
           <h1>
             {selected?.name ?? "CLIProxyAPI"}
             {selected && !selected.name.includes(host) ? ` ${t("proxy.onHost", { host })}` : ""}
@@ -991,13 +991,13 @@ export function ProxySettings() {
 
       {selected ? <ProfileDetail profile={selected} /> : null}
       {profiles.length > 0 ? (
-        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 12 }}>
+        <div className="flex gap-2 justify-end mt-3">
           <AddProfile />
         </div>
       ) : null}
 
       {saveError ? (
-        <p className="q-danger" style={{ fontSize: 12, marginTop: 12 }}>
+        <p className="q-danger text-xs mt-3">
           {saveError.message}
           {saveError.hint ? ` ${saveError.hint}` : ""}
         </p>

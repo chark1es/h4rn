@@ -262,7 +262,7 @@ export function SourceControlSettings() {
             </p>
           ) : null}
 
-          <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+          <div className="flex gap-2 justify-end">
             <button
               type="button"
               className="q-btn ghost"

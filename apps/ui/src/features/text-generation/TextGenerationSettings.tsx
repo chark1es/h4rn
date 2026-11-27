@@ -72,7 +72,7 @@ function TestResult({ generatorId }: { generatorId: TextGeneratorId }) {
   }
   if (error) {
     return (
-      <span className="q-danger" role="alert" style={{ fontSize: 12 }}>
+      <span className="q-danger text-xs" role="alert">
         {error.message}
         {error.hint ? ` ${error.hint}` : ""}
       </span>
@@ -81,7 +81,7 @@ function TestResult({ generatorId }: { generatorId: TextGeneratorId }) {
   if (!report) return null;
   if (report.ok) {
     return (
-      <span className="q-ok" style={{ fontSize: 12 }}>
+      <span className="q-ok text-xs">
         <CircleCheckIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />{" "}
         {report.reply
           ? t("textGeneration.repliedWith", {
@@ -103,7 +103,7 @@ function TestResult({ generatorId }: { generatorId: TextGeneratorId }) {
     );
   }
   return (
-    <span className="q-danger" role="alert" style={{ fontSize: 12 }}>
+    <span className="q-danger text-xs" role="alert">
       <TriangleAlertIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />{" "}
       {report.error ?? t("textGeneration.noAnswer")}
       {report.hint ? ` ${report.hint}` : ""}
@@ -131,7 +131,7 @@ function GeneratorRow({ id }: { id: TextGeneratorId }) {
         </div>
       </div>
       <div className="ctl" style={{ display: "block" }}>
-        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+        <div className="flex gap-2 items-center flex-wrap">
           <span className="q-secret">
             <KeyRoundIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
             {generator.has_api_key
@@ -154,7 +154,7 @@ function GeneratorRow({ id }: { id: TextGeneratorId }) {
             {t("common:remove")}
           </button>
         </div>
-        <div style={{ marginTop: 6 }}>
+        <div className="mt-1.5">
           <TestResult generatorId={generator.id} />
         </div>
       </div>
@@ -307,7 +307,7 @@ export function AddGenerator() {
           />
         </div>
       </div>
-      <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+      <div className="flex gap-2 justify-end">
         <button
           type="button"
           className="q-btn ghost"
@@ -339,7 +339,7 @@ export function AddGenerator() {
         </button>
       </div>
       {saveError ? (
-        <p className="q-danger" role="alert" style={{ fontSize: 12, marginTop: 8 }}>
+        <p className="q-danger text-xs mt-2" role="alert">
           {saveError.message}
           {saveError.hint ? ` ${saveError.hint}` : ""}
         </p>
@@ -372,10 +372,10 @@ export function TextGeneratorsSettings() {
       <p className="desc">{t("textGeneration.lead", { host })}</p>
 
       {loading && generators.length === 0 ? (
-        <div className="q-skel" style={{ height: 60 }} />
+        <div className="q-skel h-15" />
       ) : error && generators.length === 0 ? (
         <div className="q-empty">
-          <p style={{ margin: 0 }}>{error.message}</p>
+          <p className="m-0">{error.message}</p>
           <p className="q-faint" style={{ margin: "4px 0 12px" }}>
             {error.hint ?? t("textGeneration.retryOnline")}
           </p>
@@ -625,7 +625,7 @@ function TitleDraftForm({ saved }: { saved: TextGenerationSettings }) {
         </>
       ) : null}
 
-      <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+      <div className="flex gap-2 justify-end">
         <button
           type="button"
           className="q-btn ghost"
@@ -657,7 +657,7 @@ function TitleDraftForm({ saved }: { saved: TextGenerationSettings }) {
         </button>
       </div>
       {saveError ? (
-        <p className="q-danger" role="alert" style={{ fontSize: 12, marginTop: 8 }}>
+        <p className="q-danger text-xs mt-2" role="alert">
           {saveError.message}
           {saveError.hint ? ` ${saveError.hint}` : ""}
         </p>
@@ -690,10 +690,10 @@ export function ThreadSettings({ children }: { children?: ReactNode }) {
       {settings ? (
         <TitleDraftForm saved={settings} />
       ) : loading ? (
-        <div className="q-skel" style={{ height: 120 }} />
+        <div className="q-skel h-30" />
       ) : error ? (
         <div className="q-empty">
-          <p style={{ margin: 0 }}>{error.message}</p>
+          <p className="m-0">{error.message}</p>
           <p className="q-faint" style={{ margin: "4px 0 12px" }}>
             {error.hint ?? t("textGeneration.retryOnline")}
           </p>

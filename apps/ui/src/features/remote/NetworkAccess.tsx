@@ -138,10 +138,8 @@ export function DirectPairingBlock({
           size={148}
         />
       </div>
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div className="q-muted" style={{ fontSize: 12 }}>
-          {expired ? t("network.expired") : t("network.scan")}
-        </div>
+      <div className="flex-1 min-w-0">
+        <div className="q-muted text-xs">{expired ? t("network.expired") : t("network.scan")}</div>
         <div className="q-faint q-num" style={{ fontSize: 12, marginTop: 4 }}>
           {expired ? (
             t("network.generateNew")
@@ -154,7 +152,7 @@ export function DirectPairingBlock({
             />
           )}
         </div>
-        <div className="q-pair-scopes" style={{ marginTop: 12 }}>
+        <div className="q-pair-scopes mt-3">
           {SCOPE_OPTIONS.map((scope) => {
             const on = scope.locked || scopes.includes(scope.id);
             return (
@@ -170,7 +168,7 @@ export function DirectPairingBlock({
                   {on ? <CheckIcon className="q-icon s12" strokeWidth={2} /> : null}
                 </span>
                 <span>
-                  <span style={{ fontWeight: 500 }}>{scopeLabel(scope.id)}</span>
+                  <span className="font-medium">{scopeLabel(scope.id)}</span>
                   {scopeSub(scope.id) ? (
                     <span className="q-faint sub">{scopeSub(scope.id)}</span>
                   ) : null}
@@ -184,7 +182,7 @@ export function DirectPairingBlock({
             {t("network.adminNote", { host: hostName ?? t("network.thisComputerLower") })}
           </div>
         ) : null}
-        <div style={{ display: "flex", gap: 6, marginTop: 12, flexWrap: "wrap" }}>
+        <div className="flex gap-1.5 mt-3 flex-wrap">
           <button
             type="button"
             className="q-btn secondary"
@@ -239,7 +237,7 @@ function DirectDeviceRow({
       <td>
         <span className="q-cell-id">
           <SmartphoneIcon className="q-icon" strokeWidth={1.5} aria-hidden />
-          <span style={{ fontWeight: 500 }} className="q-num" title={device.key}>
+          <span className="q-num font-medium" title={device.key}>
             {name}
           </span>
         </span>
@@ -262,9 +260,9 @@ function DirectDeviceRow({
           <span className="q-muted">{t("network.notConnected")}</span>
         )}
       </td>
-      <td className="r" style={{ paddingRight: 0 }}>
+      <td className="r pr-0">
         {confirming ? (
-          <span style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
+          <span className="inline-flex gap-1.5 items-center">
             <span className="q-faint" style={{ fontSize: 12 }}>
               {t("devices.confirmRevoke")}
             </span>
@@ -330,7 +328,7 @@ export function DirectDevicesTable({
       <tbody>
         {devices.length === 0 ? (
           <tr>
-            <td colSpan={5} className="q-muted" style={{ padding: "16px 0" }}>
+            <td colSpan={5} className="q-muted py-4 px-0">
               {t("network.empty")}
             </td>
           </tr>
@@ -551,7 +549,7 @@ export function NetworkAccessSettings() {
             onRevoke={revokeDirectDevice}
           />
           {state.devicesError ? (
-            <div className="q-danger" role="status" style={{ fontSize: 12, marginTop: 8 }}>
+            <div className="q-danger text-xs mt-2" role="status">
               {state.devicesError}
             </div>
           ) : null}
