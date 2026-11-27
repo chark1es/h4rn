@@ -1,9 +1,8 @@
 import type { LucideIcon } from "lucide-react";
 import type { ReactNode } from "react";
 import { Trans, useTranslation } from "react-i18next";
-
+import { Kbd } from "@/components/ui/kbd";
 import { cn } from "@/lib/utils";
-import { Kbd } from "./Kbd";
 
 /** An empty state teaches what would appear here and offers one next action. */
 export function EmptyState({

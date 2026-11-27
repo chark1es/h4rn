@@ -3,7 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { ChipSelect } from "@/components/common/ChipSelect";
-import { ShortcutCaps } from "@/components/common/Kbd";
+import { ShortcutCaps } from "@/components/ui/kbd";
 import { AccessSettings } from "@/features/access/AccessSettings";
 import { ForgeSettings } from "@/features/forge/ForgeSettings";
 import { GuestSettingsForm } from "@/features/guest/GuestSettings";

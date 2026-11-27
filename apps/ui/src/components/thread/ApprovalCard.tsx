@@ -1,7 +1,7 @@
 import { ChevronDownIcon, ShieldCheckIcon } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
-import { ShortcutCaps } from "@/components/common/Kbd";
+import { ShortcutCaps } from "@/components/ui/kbd";
 import { harnessLabel } from "@/lib/entities";
 import { tildePath } from "@/lib/format";
 import { respondApproval, useApp } from "@/lib/store/appStore";

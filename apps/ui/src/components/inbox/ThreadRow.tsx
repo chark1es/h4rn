@@ -11,6 +11,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { Kbd } from "@/components/ui/kbd";
 import { openGuestShare } from "@/features/guest/guestStore";
 import type { HostSummary, ThreadSummary } from "@/gen";
 import { glyphForThread } from "@/lib/agent";
@@ -201,7 +202,7 @@ export function ThreadRow({
                   onAcknowledge();
                 }}
               >
-                {t("row.acknowledge")} <span className="q-kbd">A</span>
+                {t("row.acknowledge")} <Kbd>A</Kbd>
               </button>
             )}
           </span>

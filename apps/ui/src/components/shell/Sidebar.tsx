@@ -29,8 +29,8 @@ import { Trans, useTranslation } from "react-i18next";
 
 import { AgentGlyph } from "@/components/agent/AgentGlyph";
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
-import { ShortcutCaps } from "@/components/common/Kbd";
 import { StateTabs } from "@/components/inbox/StateTabs";
+import { ShortcutCaps } from "@/components/ui/kbd";
 import {
   harnessUpdateCount,
   useHarnesses,

@@ -31,6 +31,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { Kbd } from "@/components/ui/kbd";
 import { ThreadPullRequestBadge } from "@/features/forge/ThreadPullRequestBadge";
 import { openGuestShare } from "@/features/guest/guestStore";
 import { useThreadSettings } from "@/features/threads/settings";
@@ -423,7 +424,7 @@ export function ThreadHeader({
               className="q-btn primary"
               onClick={() => void acknowledgeThread(summary.thread_id)}
             >
-              {t("header.acknowledge")} <span className="q-kbd">A</span>
+              {t("header.acknowledge")} <Kbd>A</Kbd>
             </button>
           </>
         ) : null}

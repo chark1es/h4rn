@@ -177,19 +177,8 @@
   opacity: 0.45;
   cursor: not-allowed;
 }
-.q-kbd {
-  font: 500 11px / 16px var(--font);
-  color: var(--fg-3);
-  padding: 0 4px;
-  border-radius: 4px;
-  box-shadow: inset 0 0 0 1px var(--line);
-  min-width: 18px;
-  text-align: center;
-  display: inline-block;
-  letter-spacing: 0.02em;
-  white-space: nowrap;
-}
-.q-btn .q-kbd {
+.q-btn > [data-slot="kbd"],
+.q-btn > [data-slot="kbd-group"] {
   margin-left: 2px;
 }
 /* Settings → Shortcuts: a binding you can click to re-record. */
@@ -221,13 +210,9 @@
   outline: 2px solid var(--focus);
   outline-offset: 1px;
 }
-.q-kbd + .q-kbd {
-  margin-left: 2px;
-}
-.q-btn.primary .q-kbd {
+.q-btn.primary [data-slot="kbd"] {
   color: var(--accent-fg);
   border-color: oklch(1 0 0 / 0.3);
-  box-shadow: inset 0 0 0 1px oklch(1 0 0 / 0.3);
 }
 
 .q-ibtn {
@@ -253,21 +238,6 @@
 .q-ibtn[disabled] {
   opacity: 0.45;
   cursor: not-allowed;
-}
-
-.q-kbd-glyph {
-  display: inline-block;
-  width: 11px;
-  height: 11px;
-  vertical-align: -1.5px;
-  stroke: currentColor;
-  fill: none;
-  stroke-width: 1.75;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-}
-.q-pal-kbd .q-kbd + .q-kbd {
-  margin-left: 0;
 }
 
 .q-seg {
@@ -4617,7 +4587,7 @@ fieldset.q-seg-fs {
     flex-wrap: wrap;
     margin-left: 0;
   }
-  .q-ask-f .q-kbd {
+  .q-ask-f [data-slot="kbd-group"] {
     display: none;
   }
   .q-ask-sub,

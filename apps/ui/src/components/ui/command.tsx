@@ -3,7 +3,7 @@ import { SearchIcon } from "lucide-react";
 import type * as React from "react";
 import { Children } from "react";
 
-import { KeyGlyphs } from "@/components/common/Kbd";
+import { Kbd } from "@/components/ui/kbd";
 import { bindingFor, type CommandId, chordKeys, useKeybindingsVersion } from "@/lib/keybindings";
 import { cn } from "@/lib/utils";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "./dialog";
@@ -163,13 +163,7 @@ function CommandShortcut({
 
   return (
     <span data-slot="command-shortcut" className={cn("q-pal-kbd", className)} {...props}>
-      {chips.length > 0
-        ? chips.map((chip) => (
-            <span className="q-kbd" key={chip.id}>
-              <KeyGlyphs value={chip.key} />
-            </span>
-          ))
-        : children}
+      {chips.length > 0 ? chips.map((chip) => <Kbd key={chip.id}>{chip.key}</Kbd>) : children}
     </span>
   );
 }

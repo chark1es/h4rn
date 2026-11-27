@@ -186,7 +186,7 @@ describe("command palette in another language", () => {
 
     const row = screen.getByText("スレッドを整理").closest("[cmdk-item]");
     if (!(row instanceof HTMLElement)) throw new Error("the settle row is not a command item");
-    const caps = [...row.querySelectorAll(".q-kbd")].map((cap) => cap.textContent);
+    const caps = [...row.querySelectorAll("[data-slot='kbd']")].map((cap) => cap.textContent);
     expect(caps).toEqual(["Ctrl", "Shift", "S"]);
 
     const footer = document.querySelector("[data-slot='command-footer']");

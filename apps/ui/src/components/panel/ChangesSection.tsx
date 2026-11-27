@@ -4,7 +4,6 @@ import { useTranslation } from "react-i18next";
 
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
 import { ConfirmDialog } from "@/components/common/ConfirmDialog";
-import { ShortcutCaps } from "@/components/common/Kbd";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -12,6 +11,7 @@ import {
   DropdownMenuLabel,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { ShortcutCaps } from "@/components/ui/kbd";
 import type { ThreadSummary } from "@/gen";
 import { harnessLabel, harnessSeed } from "@/lib/entities";
 import { absoluteTime } from "@/lib/format";

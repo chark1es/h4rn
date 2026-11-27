@@ -10,7 +10,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { ShortcutCaps } from "@/components/common/Kbd";
+import { ShortcutCaps } from "@/components/ui/kbd";
 
 import { gitBadge } from "@/features/ide/useIdeSession";
 import { isHtmlPath } from "@/features/preview/htmlPreview";

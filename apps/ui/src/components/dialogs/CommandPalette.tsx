@@ -32,7 +32,6 @@ import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { AgentGlyph } from "@/components/agent/AgentGlyph";
-import { ESC, KeyGlyphs } from "@/components/common/Kbd";
 import {
   CommandDialog,
   CommandEmpty,
@@ -43,6 +42,7 @@ import {
   CommandList,
   CommandShortcut,
 } from "@/components/ui/command";
+import { ESC, Kbd, KbdGroup } from "@/components/ui/kbd";
 import { openGuestShare } from "@/features/guest/guestStore";
 import { glyphForThread } from "@/lib/agent";
 import { harnessLabel } from "@/lib/entities";
@@ -578,22 +578,17 @@ export function CommandPalette() {
       </CommandList>
       <CommandFooter>
         <span>
-          <span className="q-kbd">
-            <KeyGlyphs value="↑" />
-          </span>{" "}
-          <span className="q-kbd">
-            <KeyGlyphs value="↓" />
-          </span>{" "}
+          <KbdGroup>
+            <Kbd>↑</Kbd>
+            <Kbd>↓</Kbd>
+          </KbdGroup>{" "}
           {t("palette.footer.move")}
         </span>
         <span>
-          <span className="q-kbd">
-            <KeyGlyphs value="↵" />
-          </span>{" "}
-          {t("palette.footer.run")}
+          <Kbd>↵</Kbd> {t("palette.footer.run")}
         </span>
         <span>
-          <span className="q-kbd">{ESC}</span> {t("palette.footer.close")}
+          <Kbd>{ESC}</Kbd> {t("palette.footer.close")}
         </span>
         <span style={{ flex: 1 }} />
         <span>

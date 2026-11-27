@@ -1,5 +1,4 @@
 import { Trans, useTranslation } from "react-i18next";
-import { ENTER, ESC, KeyCaps, SHIFT, ShortcutCaps } from "@/components/common/Kbd";
 import {
   Dialog,
   DialogContent,
@@ -7,6 +6,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { ENTER, ESC, KeyCaps, SHIFT, ShortcutCaps } from "@/components/ui/kbd";
 
 import { COMMAND_GROUPS, COMMANDS, commandGroupName, commandName } from "@/lib/keybindings";
 import { closeShortcuts, navigate, useApp } from "@/lib/store/appStore";

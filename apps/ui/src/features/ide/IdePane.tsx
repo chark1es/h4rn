@@ -16,7 +16,6 @@ import { AgentGlyph } from "@/components/agent/AgentGlyph";
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
 import { ChipSelect } from "@/components/common/ChipSelect";
 import { EmptyState } from "@/components/common/EmptyState";
-import { MOD, SHIFT } from "@/components/common/Kbd";
 import { SidebarReveal } from "@/components/shell/Sidebar";
 import { ViewCluster } from "@/components/thread/ThreadHeader";
 import { Button } from "@/components/ui/button";
@@ -28,6 +27,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { MOD, SHIFT } from "@/components/ui/kbd";
 import { TerminalPanel } from "@/features/terminal/TerminalPanel";
 import type { ThreadSummary } from "@/gen";
 import { useIsPhone } from "@/hooks/use-media-query";
