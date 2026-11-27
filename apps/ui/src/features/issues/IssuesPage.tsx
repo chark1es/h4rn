@@ -664,7 +664,7 @@ export function IssuesPage() {
           ) : null}
         </form>
         <SegmentedControl
-          className="q-issues-filters"
+          className="max-[560px]:h-auto max-[560px]:w-full max-[560px]:flex-wrap max-[560px]:[&>[data-slot=segmented-control-item]]:min-h-11 max-[560px]:[&>[data-slot=segmented-control-item]]:flex-auto"
           aria-label={t("filters.label")}
           value={filter}
           onValueChange={(value) => {

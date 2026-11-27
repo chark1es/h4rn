@@ -273,7 +273,7 @@ function ResolvePanel({ server, close }: { server: McpServerView; close: () => v
       ) : (
         <SegmentedControl
           width="full"
-          className="q-resolve-seg"
+          className="mb-2.5"
           aria-label={t("mcp.resolve.harness")}
           value={harness}
           onValueChange={(value) => {

@@ -503,7 +503,7 @@ export function PullRequestsPage() {
         ) : null}
         <span className="grow" />
         <SegmentedControl
-          className="q-pr-filters"
+          className="max-[760px]:order-last max-[760px]:basis-full max-[760px]:overflow-x-auto max-[760px]:[scrollbar-width:none]"
           aria-label={t("filters.label")}
           value={filter}
           onValueChange={(value) => {
