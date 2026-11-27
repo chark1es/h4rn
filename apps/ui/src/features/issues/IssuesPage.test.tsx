@@ -1531,13 +1531,10 @@ describe("Linear state families", () => {
 
 describe("the phone layout", () => {
   it("lets the issue filters wrap with thumb-sized targets", () => {
-    const css = readFileSync("src/styles/quiet.css", "utf8");
-    const start = css.indexOf("@media (max-width: 560px)");
-    expect(start).toBeGreaterThanOrEqual(0);
-    const block = css.slice(start, css.indexOf("\n}", start) + 2);
-    // Five involvement tabs do not fit across a 390 px screen in one row.
-    expect(block).toMatch(/\.q-issues-head \.q-seg \{[^}]*flex-wrap: wrap;/);
-    expect(block).toMatch(/\.q-issues-head \.q-seg > button \{[^}]*min-height: 44px;/);
+    const source = readFileSync("src/features/issues/IssuesPage.tsx", "utf8");
+    // Five involvement filters do not fit across a 390 px screen in one row.
+    expect(source).toMatch(/max-\[560px\]:flex-wrap/);
+    expect(source).toMatch(/max-\[560px\]:\[&>\[data-slot=segmented-control-item\]\]:min-h-11/);
   });
 });
 
