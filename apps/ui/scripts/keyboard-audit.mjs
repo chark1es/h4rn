@@ -23,6 +23,7 @@ const EXECUTABLE =
   process.env.H4RN_CHROMIUM ??
   `${process.env.HOME}/.cache/ms-playwright/chromium_headless_shell-1248/chrome-headless-shell-linux64/chrome-headless-shell`;
 const DESKTOP = { width: 1440, height: 900 };
+const PHONE = { width: 390, height: 844 };
 const ONLY = process.env.H4RN_KB?.split(",").map((s) => s.trim());
 
 /** @param {string} path @param {string} [theme] */
@@ -127,14 +128,15 @@ await mkdir(OUT, { recursive: true });
 /**
  * @param {string} surface
  * @param {string} steps
- * @param {{ path: string; wait?: string; theme?: string; touch?: boolean }} at
+ * @param {{ path: string; wait?: string; theme?: string; touch?: boolean; phone?: boolean; reducedMotion?: boolean }} at
  * @param {(page: import("playwright-core").Page, notes: string[]) => Promise<boolean | undefined>} body
  */
 async function check(surface, steps, at, body) {
   if (ONLY && !ONLY.some((o) => surface.toLowerCase().includes(o.toLowerCase()))) return;
   const context = await browser.newContext({
-    viewport: DESKTOP,
+    viewport: at.phone ? PHONE : DESKTOP,
     deviceScaleFactor: 1,
+    reducedMotion: at.reducedMotion ? "reduce" : "no-preference",
     colorScheme: /** @type {"light" | "dark"} */ (at.theme ?? "light"),
     hasTouch: at.touch ?? false,
   });
@@ -567,6 +569,67 @@ await check(
     return before !== after && closed && back && escBack;
   },
 );
+
+for (const reducedMotion of [true, false]) {
+  await check(
+    `Select sheet on screen (touch${reducedMotion ? ", reduced motion" : ""})`,
+    "Phone, touch: tap Interface language twice; listbox inside the viewport; tap an option, then Enter/ArrowDown/Enter",
+    { path: "/settings/appearance", touch: true, phone: true, reducedMotion },
+    async (page, notes) => {
+      const id = await page
+        .getByRole("combobox", { name: /Interface language/ })
+        .first()
+        .evaluate((e) => e.id);
+      // Picking a language renames the trigger, so find it by id.
+      const trigger = page.locator(`[id="${id}"]`);
+      const sheetBox = async () => {
+        const listbox = page.locator("[role=listbox][data-open]").first();
+        await listbox.waitFor({ timeout: 3_000 });
+        await page.waitForTimeout(700);
+        return listbox.evaluate((l) => {
+          const r = l.getBoundingClientRect();
+          return { top: r.top, bottom: r.bottom, sheet: l.getAttribute("data-presentation") };
+        });
+      };
+      const onScreen = (box) => box.top >= 0 && box.bottom <= PHONE.height + 1;
+      let ok = true;
+      for (const round of [0, 1]) {
+        await trigger.tap();
+        const box = await sheetBox();
+        notes.push(
+          `open ${round + 1}: ${box.sheet} at y ${Math.round(box.top)}–${Math.round(box.bottom)}`,
+        );
+        if (!onScreen(box)) ok = false;
+        const option = page.locator("[role=listbox][data-open] [role=option]").nth(1 - round);
+        const label = ((await option.textContent()) ?? "").trim();
+        await option.tap();
+        await page.waitForTimeout(400);
+        const value = ((await trigger.textContent()) ?? "").trim();
+        if (!label.startsWith(value)) {
+          notes.push(`tapped "${label}", trigger shows "${value}"`);
+          ok = false;
+        }
+      }
+      await trigger.focus();
+      await page.keyboard.press("Enter");
+      const box = await sheetBox();
+      if (!onScreen(box)) {
+        notes.push(`keyboard open at y ${Math.round(box.top)}`);
+        ok = false;
+      }
+      await page.keyboard.press("ArrowDown");
+      const target = await highlighted(page);
+      await page.keyboard.press("Enter");
+      await page.waitForTimeout(400);
+      const value = ((await trigger.textContent()) ?? "").trim();
+      if (!target.startsWith(value)) {
+        notes.push(`keyboard picked "${target}", trigger shows "${value}"`);
+        ok = false;
+      }
+      return ok;
+    },
+  );
+}
 
 await check(
   "SuggestInput (New thread model)",
