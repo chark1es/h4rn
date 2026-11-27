@@ -217,10 +217,9 @@ export function CommandPalette() {
       title={t("palette.title")}
       description={t("palette.description")}
       filter={paletteScore}
-      onCloseAutoFocus={(event) => {
-        event.preventDefault();
+      finalFocus={() => {
         const target = lastFocus.current;
-        if (target && document.contains(target)) target.focus();
+        return target && document.contains(target) ? target : undefined;
       }}
     >
       <CommandInput

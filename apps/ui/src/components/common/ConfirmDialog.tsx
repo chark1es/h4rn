@@ -1,13 +1,15 @@
 import { useTranslation } from "react-i18next";
 
 import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
+  AlertDialog,
+  AlertDialogClose,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import { buttonVariants } from "@/components/ui/button";
 
 /** A small destructive-action confirmation shared by Changes and Forges. */
 export function ConfirmDialog({
@@ -27,28 +29,27 @@ export function ConfirmDialog({
 }) {
   const { t } = useTranslation("common");
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-[420px]">
-        <DialogHeader>
-          <DialogTitle>{title}</DialogTitle>
-          <DialogDescription>{description}</DialogDescription>
-        </DialogHeader>
-        <DialogFooter>
-          <button type="button" className="q-btn ghost" onClick={() => onOpenChange(false)}>
+    <AlertDialog
+      open={open}
+      onOpenChange={(next, details) => {
+        onOpenChange(next);
+        if (!next && details.returnValue === "confirm") onConfirm();
+      }}
+    >
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>{title}</AlertDialogTitle>
+          <AlertDialogDescription>{description}</AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogClose className={buttonVariants({ variant: "secondary" })}>
             {t("cancel")}
-          </button>
-          <button
-            type="button"
-            className="q-btn primary"
-            onClick={() => {
-              onOpenChange(false);
-              onConfirm();
-            }}
-          >
+          </AlertDialogClose>
+          <AlertDialogClose value="confirm" className={buttonVariants({ variant: "destructive" })}>
             {confirmLabel}
-          </button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+          </AlertDialogClose>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
   );
 }

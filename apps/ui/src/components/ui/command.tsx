@@ -24,8 +24,7 @@ function CommandDialog({
   children,
   className,
   showCloseButton = false,
-  onOpenAutoFocus,
-  onCloseAutoFocus,
+  finalFocus,
   filter,
   ...props
 }: React.ComponentProps<typeof Dialog> & {
@@ -36,21 +35,19 @@ function CommandDialog({
   description: string;
   className?: string;
   showCloseButton?: boolean;
-  onOpenAutoFocus?: React.ComponentProps<typeof DialogContent>["onOpenAutoFocus"];
-  onCloseAutoFocus?: React.ComponentProps<typeof DialogContent>["onCloseAutoFocus"];
+  finalFocus?: React.ComponentProps<typeof DialogContent>["finalFocus"];
 }) {
   return (
-    <Dialog {...props}>
-      <DialogHeader className="sr-only">
-        <DialogTitle>{title}</DialogTitle>
-        <DialogDescription>{description}</DialogDescription>
-      </DialogHeader>
+    <Dialog {...props} presentation="dialog">
       <DialogContent
         className={cn("q-palette block gap-0 overflow-hidden p-0", className)}
         showCloseButton={showCloseButton}
-        onOpenAutoFocus={onOpenAutoFocus}
-        onCloseAutoFocus={onCloseAutoFocus}
+        {...(finalFocus ? { finalFocus } : {})}
       >
+        <DialogHeader className="sr-only">
+          <DialogTitle>{title}</DialogTitle>
+          <DialogDescription>{description}</DialogDescription>
+        </DialogHeader>
         {/* Vim-style Ctrl+J/K/N/P list movement would swallow app shortcuts such as
             Ctrl+K to close the palette; arrows move the selection instead. */}
         <Command vimBindings={false} {...(filter ? { filter } : {})}>

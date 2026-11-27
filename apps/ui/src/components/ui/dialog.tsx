@@ -1,103 +1,200 @@
-import * as DialogPrimitive from "@radix-ui/react-dialog";
+import {
+  DialogBackdrop as DialogBackdropPrimitive,
+  DialogClose as DialogClosePrimitive,
+  DialogContent as DialogContentPrimitive,
+  DialogDescription as DialogDescriptionPrimitive,
+  Dialog as DialogPrimitive,
+  type DialogProps as DialogPrimitiveProps,
+  DialogTitle as DialogTitlePrimitive,
+  DialogTrigger as DialogTriggerPrimitive,
+} from "@ui-sdk/react/dialog";
+import { cva, type VariantProps } from "class-variance-authority";
 import { XIcon } from "lucide-react";
-import type * as React from "react";
+import * as React from "react";
 import { useTranslation } from "react-i18next";
 
+import { useIsPhone } from "@/hooks/use-media-query";
 import { cn } from "@/lib/utils";
 
-function Dialog({ ...props }: React.ComponentProps<typeof DialogPrimitive.Root>) {
-  return <DialogPrimitive.Root data-slot="dialog" {...props} />;
+const DialogSheetContext = React.createContext(false);
+const DialogCloseButtonContext = React.createContext(true);
+
+/** True inside a dialog that presents as a phone bottom sheet. */
+function useDialogSheet(): boolean {
+  return React.useContext(DialogSheetContext);
 }
 
-function DialogTrigger({ ...props }: React.ComponentProps<typeof DialogPrimitive.Trigger>) {
-  return <DialogPrimitive.Trigger data-slot="dialog-trigger" {...props} />;
-}
+type DialogProps = DialogPrimitiveProps;
 
-function DialogPortal({ ...props }: React.ComponentProps<typeof DialogPrimitive.Portal>) {
-  return <DialogPrimitive.Portal data-slot="dialog-portal" {...props} />;
-}
-
-function DialogClose({ ...props }: React.ComponentProps<typeof DialogPrimitive.Close>) {
-  return <DialogPrimitive.Close data-slot="dialog-close" {...props} />;
-}
-
-function DialogOverlay({
-  className,
-  ...props
-}: React.ComponentProps<typeof DialogPrimitive.Overlay>) {
+/** A modal task. On the phone layout it presents as a bottom sheet. */
+function Dialog({ presentation, ...props }: DialogProps) {
+  const phone = useIsPhone();
+  const sheet = presentation === "sheet" || (presentation !== "dialog" && phone);
   return (
-    <DialogPrimitive.Overlay
-      data-slot="dialog-overlay"
-      className={cn(
-        "fixed inset-0 z-50 data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:animate-in data-[state=open]:fade-in-0",
-        className,
-      )}
-      style={{ background: "var(--scrim)" }}
-      {...props}
-    />
+    <DialogSheetContext value={sheet}>
+      <DialogPrimitive presentation={sheet ? "sheet" : "dialog"} {...props} />
+    </DialogSheetContext>
   );
 }
+
+const DialogTrigger = DialogTriggerPrimitive;
+
+const backdropClassName = cn(
+  "fixed inset-0 bg-scrim",
+  "transition-opacity duration-modal ease-enter data-starting-style:opacity-0",
+  "data-ending-style:opacity-0 data-ending-style:duration-modal-exit data-ending-style:ease-exit",
+  "motion-reduce:transition-none",
+);
+
+/** The modal surface both dialogs and alert dialogs share. */
+const modalSurfaceClassName = cn(
+  "flex flex-col overflow-hidden bg-popover text-sm text-popover-foreground outline-none",
+  "border border-border shadow-modal",
+);
+
+const dialogContentVariants = cva(
+  [
+    modalSurfaceClassName,
+    "fixed inset-0 m-auto h-fit max-h-[calc(100dvh-4rem)] w-[calc(100%-2rem)] rounded-xl",
+    "transition-[opacity,translate] duration-modal ease-enter",
+    "data-starting-style:translate-y-2 data-starting-style:opacity-0",
+    "data-ending-style:translate-y-1 data-ending-style:opacity-0 data-ending-style:duration-modal-exit data-ending-style:ease-exit",
+    "motion-reduce:transition-opacity",
+  ],
+  {
+    variants: {
+      size: {
+        sm: "max-w-100",
+        md: "max-w-130",
+        lg: "max-w-160",
+        xl: "max-w-200",
+      },
+    },
+    defaultVariants: { size: "md" },
+  },
+);
+
+const sheetContentClassName = cn(
+  modalSurfaceClassName,
+  "max-h-[92dvh] w-full rounded-t-xl border-x-0 border-b-0 pb-safe [--sheet-backdrop:var(--scrim)]",
+);
+
+type DialogContentProps = Omit<React.ComponentProps<typeof DialogContentPrimitive>, "className"> &
+  VariantProps<typeof dialogContentVariants> & {
+    className?: string;
+    showCloseButton?: boolean;
+  };
 
 function DialogContent({
   className,
-  children,
+  size,
   showCloseButton = true,
+  children,
   ...props
-}: React.ComponentProps<typeof DialogPrimitive.Content> & {
-  showCloseButton?: boolean;
-}) {
-  const { t } = useTranslation("common");
+}: DialogContentProps) {
+  const sheet = useDialogSheet();
   return (
-    <DialogPortal>
-      <DialogOverlay />
-      <DialogPrimitive.Content
-        data-slot="dialog-content"
-        className={cn(
-          "fixed top-1/2 left-1/2 z-50 grid max-h-[calc(100dvh-2rem)] w-full max-w-[calc(100%-2rem)] translate-x-[-50%] translate-y-[-50%] overflow-y-auto overscroll-contain gap-4 rounded-[12px] bg-bg-raised p-4 text-[13px] text-fg shadow-[var(--shadow-modal),inset_0_0_0_1px_var(--line)] duration-popup ease-enter outline-none data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-95 data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95 sm:max-w-lg",
-          className,
-        )}
+    <>
+      {sheet ? null : <DialogBackdropPrimitive className={backdropClassName} />}
+      <DialogContentPrimitive
+        className={cn(sheet ? sheetContentClassName : dialogContentVariants({ size }), className)}
+        data-size={size ?? "md"}
         {...props}
       >
-        {children}
-        {showCloseButton ? (
-          <DialogPrimitive.Close
-            data-slot="dialog-close"
-            className="absolute top-3 right-3 rounded-md text-fg-3 opacity-70 transition-opacity duration-micro hover:opacity-100 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none disabled:pointer-events-none"
-          >
-            <XIcon className="size-4" />
-            <span className="sr-only">{t("close")}</span>
-          </DialogPrimitive.Close>
-        ) : null}
-      </DialogPrimitive.Content>
-    </DialogPortal>
+        {sheet ? <SheetGrabber /> : null}
+        <DialogCloseButtonContext value={showCloseButton}>
+          {children as React.ReactNode}
+        </DialogCloseButtonContext>
+      </DialogContentPrimitive>
+    </>
   );
 }
 
-function DialogHeader({ className, ...props }: React.ComponentProps<"div">) {
+/** The sheet's grab handle. Swiping is the sheet's own; this only shows it can move. */
+function SheetGrabber() {
+  return (
+    <div data-slot="sheet-grabber" aria-hidden="true" className="flex shrink-0 justify-center pt-2">
+      <div className="h-1 w-9 rounded-full bg-fill-2" />
+    </div>
+  );
+}
+
+function DialogCloseIcon({ className }: { className?: string }) {
+  const { t } = useTranslation("common");
+  return (
+    <DialogClosePrimitive
+      aria-label={t("close")}
+      className={cn(
+        "hit-area relative -mt-1 -mr-1.5 inline-flex size-8 shrink-0 cursor-default items-center justify-center rounded-md text-muted-foreground",
+        "transition-colors duration-micro ease-enter hover:bg-accent hover:text-foreground",
+        "outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring",
+        className,
+      )}
+    >
+      <XIcon className="size-4" aria-hidden="true" />
+    </DialogClosePrimitive>
+  );
+}
+
+/** Title row: the title and description on the left, the close button on the title's line. */
+function DialogHeader({ className, children, ...props }: React.ComponentProps<"div">) {
+  const showClose = React.useContext(DialogCloseButtonContext);
+  const sheet = useDialogSheet();
   return (
     <div
       data-slot="dialog-header"
-      className={cn("flex flex-col gap-1.5 text-left", className)}
+      className={cn(
+        "flex shrink-0 items-start gap-3 px-5 pt-5 pb-3",
+        sheet && "px-4 pt-3",
+        className,
+      )}
+      {...props}
+    >
+      <div className="flex min-w-0 flex-1 flex-col gap-1">{children}</div>
+      {showClose ? <DialogCloseIcon /> : null}
+    </div>
+  );
+}
+
+/** The part between header and footer; it scrolls when the dialog is taller than the window. */
+function DialogBody({ className, ...props }: React.ComponentProps<"div">) {
+  const sheet = useDialogSheet();
+  return (
+    <div
+      data-slot="dialog-body"
+      className={cn(
+        "flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto overscroll-contain px-5 pt-1 pb-5",
+        sheet && "px-4 pb-4",
+        className,
+      )}
       {...props}
     />
   );
 }
 
+/** Actions, secondary before primary so the primary sits rightmost. Full-width 44 px on a sheet. */
 function DialogFooter({ className, ...props }: React.ComponentProps<"div">) {
+  const sheet = useDialogSheet();
   return (
     <div
       data-slot="dialog-footer"
-      className={cn("flex flex-col-reverse gap-2 sm:flex-row sm:justify-end", className)}
+      className={cn(
+        "flex shrink-0 items-center justify-end gap-2 border-t border-border px-5 py-3",
+        sheet && "gap-3 px-4 [&>button]:h-11 [&>button]:flex-1 [&>button]:justify-center",
+        className,
+      )}
       {...props}
     />
   );
 }
 
-function DialogTitle({ className, ...props }: React.ComponentProps<typeof DialogPrimitive.Title>) {
+function DialogTitle({
+  className,
+  ...props
+}: Omit<React.ComponentProps<typeof DialogTitlePrimitive>, "className"> & { className?: string }) {
   return (
-    <DialogPrimitive.Title
-      data-slot="dialog-title"
-      className={cn("text-[15px] leading-5 font-semibold tracking-[-0.01em] text-fg", className)}
+    <DialogTitlePrimitive
+      className={cn("m-0 text-lg font-semibold text-foreground", className)}
       {...props}
     />
   );
@@ -106,25 +203,32 @@ function DialogTitle({ className, ...props }: React.ComponentProps<typeof Dialog
 function DialogDescription({
   className,
   ...props
-}: React.ComponentProps<typeof DialogPrimitive.Description>) {
+}: Omit<React.ComponentProps<typeof DialogDescriptionPrimitive>, "className"> & {
+  className?: string;
+}) {
   return (
-    <DialogPrimitive.Description
-      data-slot="dialog-description"
-      className={cn("text-[12.5px] leading-[18px] text-fg-2", className)}
+    <DialogDescriptionPrimitive
+      className={cn("m-0 text-sm text-muted-foreground", className)}
       {...props}
     />
   );
 }
 
+const DialogClose = DialogClosePrimitive;
+
 export {
+  backdropClassName,
   Dialog,
+  DialogBody,
   DialogClose,
   DialogContent,
+  type DialogContentProps,
   DialogDescription,
   DialogFooter,
   DialogHeader,
-  DialogOverlay,
-  DialogPortal,
+  type DialogProps,
   DialogTitle,
   DialogTrigger,
+  modalSurfaceClassName,
+  useDialogSheet,
 };
