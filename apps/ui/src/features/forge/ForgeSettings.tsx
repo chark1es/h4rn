@@ -243,6 +243,10 @@ function AddAccountForm({
       <div className="q-field">
         <div className="lab">
           <div className="t">{t("forges.add.forge")}</div>
+          <div className="s">
+            {t(`forges.scopes.${forge}`)}
+            {forge === "bitbucket" ? ` ${t("forges.add.bitbucketNote")}` : null}
+          </div>
         </div>
         <div className="ctl">
           <ChipSelect
@@ -251,14 +255,6 @@ function AddAccountForm({
             options={FORGES.map((kind) => ({ value: kind, label: forgeLabel(kind) }))}
             onChange={changeForge}
           />
-          <span className="q-faint" style={{ fontSize: 12 }}>
-            {t(`forges.scopes.${forge}`)}
-          </span>
-          {forge === "bitbucket" ? (
-            <span className="q-faint" style={{ fontSize: 12, display: "block" }}>
-              {t("forges.add.bitbucketNote")}
-            </span>
-          ) : null}
         </div>
       </div>
       <div className="q-field">
