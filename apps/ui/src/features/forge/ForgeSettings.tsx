@@ -463,7 +463,7 @@ function DeviceFlow({ baseUrl, onComplete }: { baseUrl: string; onComplete: () =
           <div className="q-code-big mt-1 mx-0 mb-2.5">{flow.user_code}</div>
           <div className="flex gap-1.5 items-center">
             <span className="q-faint" style={{ fontSize: 12 }}>
-              <RefreshCwIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />{" "}
+              <RefreshCwIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />{" "}
               {t("forges.device.waiting")}
             </span>
             <button type="button" className="q-btn ghost" onClick={() => setFlow(null)}>

@@ -165,7 +165,7 @@ export function DirectPairingBlock({
                   onChange={() => onToggleScope(scope.id)}
                 />
                 <span className={`q-check${on ? " on" : ""}`} aria-hidden>
-                  {on ? <CheckIcon className="q-icon s12" strokeWidth={2} /> : null}
+                  {on ? <CheckIcon className="q-icon s14" strokeWidth={2} /> : null}
                 </span>
                 <span>
                   <span className="font-medium">{scopeLabel(scope.id)}</span>

@@ -178,7 +178,7 @@ export function ThreadRow({
               </span>
               {thread.branch ? (
                 <span className="q-row-branch" title={thread.branch}>
-                  <GitBranchIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+                  <GitBranchIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
                   <span className="q-mono">{thread.branch}</span>
                 </span>
               ) : null}

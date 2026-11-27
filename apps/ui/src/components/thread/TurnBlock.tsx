@@ -96,7 +96,7 @@ function UserMessage({
             title={editDisabledReason ?? t("turn.editHint")}
             onClick={() => onEdit(item)}
           >
-            <PencilLineIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+            <PencilLineIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
             {t("turn.editFromHere")}
           </button>
         ) : null}
@@ -200,11 +200,11 @@ function PlanItemView({ item }: { item: PlanItem }) {
             <li key={`${index}:${step.content}`} data-status={status} className="q-plan-step">
               <span className="q-plan-mark" aria-hidden>
                 {status === "completed" ? (
-                  <CheckIcon className="q-icon s12" strokeWidth={2} />
+                  <CheckIcon className="q-icon s14" strokeWidth={2} />
                 ) : status === "in_progress" ? (
-                  <CircleDotIcon className="q-icon s12" strokeWidth={1.75} />
+                  <CircleDotIcon className="q-icon s14" strokeWidth={1.75} />
                 ) : (
-                  <CircleIcon className="q-icon s12" strokeWidth={1.5} />
+                  <CircleIcon className="q-icon s14" strokeWidth={1.5} />
                 )}
               </span>
               <span className="q-plan-text">{step.content}</span>
@@ -337,7 +337,7 @@ export function TurnBlock({
             <CircleAlertIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
             <span>{stopped}</span>
             <button type="button" className="q-btn ghost" style={{ height: 24 }} onClick={onReply}>
-              <CornerDownLeftIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+              <CornerDownLeftIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
               {t("turn.reply")}
             </button>
           </div>
@@ -423,7 +423,7 @@ export function TurnBlock({
           <CircleAlertIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
           <span>{stopped}</span>
           <button type="button" className="q-btn ghost" style={{ height: 24 }} onClick={onReply}>
-            <CornerDownLeftIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+            <CornerDownLeftIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
             {t("turn.reply")}
           </button>
         </div>
@@ -432,7 +432,7 @@ export function TurnBlock({
           <CircleAlertIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
           <span>{turn.status === "failed" ? t("turn.failed") : t("turn.interrupted")}</span>
           <button type="button" className="q-btn ghost" style={{ height: 24 }} onClick={onReply}>
-            <CornerDownLeftIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+            <CornerDownLeftIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
             {t("turn.reply")}
           </button>
         </div>

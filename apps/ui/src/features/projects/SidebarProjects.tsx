@@ -216,7 +216,7 @@ export function ProjectGroupSection({
                 <span className="ct q-num">{formatNumber(group.threads.length)}</span>
               </>
             ) : null}
-            <ChevronDownIcon className="q-icon s12 chev" strokeWidth={1.5} aria-hidden />
+            <ChevronDownIcon className="q-icon s14 chev" strokeWidth={1.5} aria-hidden />
           </button>
         )}
         {renaming ? null : (

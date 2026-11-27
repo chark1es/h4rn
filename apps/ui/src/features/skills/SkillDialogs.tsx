@@ -1,4 +1,11 @@
-import { CheckIcon, FolderIcon, GitBranchIcon, Trash2Icon, TriangleAlertIcon } from "lucide-react";
+import {
+  ArrowRightIcon,
+  CheckIcon,
+  FolderIcon,
+  GitBranchIcon,
+  Trash2Icon,
+  TriangleAlertIcon,
+} from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { ChipSelect } from "@/components/common/ChipSelect";
@@ -443,7 +450,7 @@ export function SkillImportDialog({ open, onClose }: { open: boolean; onClose: (
               onChange={(event) => setManage(event.target.checked)}
             />
             <span className={cn("q-check", manage && "on")} aria-hidden>
-              {manage ? <CheckIcon className="q-icon s12" strokeWidth={2} /> : null}
+              {manage ? <CheckIcon className="q-icon s14" strokeWidth={2} /> : null}
             </span>
             <span>
               <span className="q-skill-manage-t">{t("skills.import.manageTitle")}</span>
@@ -504,7 +511,7 @@ export function SkillImportDialog({ open, onClose }: { open: boolean; onClose: (
                       aria-label={t("skills.import.bringIn", { name: candidate.name })}
                     />
                     <span className={cn("q-check", on && "on")} aria-hidden>
-                      {on ? <CheckIcon className="q-icon s12" strokeWidth={2} /> : null}
+                      {on ? <CheckIcon className="q-icon s14" strokeWidth={2} /> : null}
                     </span>
                     <div className="grow" style={{ minWidth: 0 }}>
                       <div className="t">{candidate.name}</div>
@@ -518,7 +525,7 @@ export function SkillImportDialog({ open, onClose }: { open: boolean; onClose: (
                           style={{ display: "flex", gap: 4, fontSize: 12, marginTop: 3 }}
                         >
                           <TriangleAlertIcon
-                            className="q-icon s12"
+                            className="q-icon s14"
                             style={{ flex: "none", marginTop: 2 }}
                             aria-hidden
                           />
@@ -699,7 +706,7 @@ export function SkillDetailsDialog({
               ]}
               onChange={setFrom}
             />
-            <span className="q-faint">→</span>
+            <ArrowRightIcon className="q-icon s14 q-faint" strokeWidth={1.5} aria-hidden />
             <ChipSelect
               label={t("skills.details.toVersion")}
               className="w-50"

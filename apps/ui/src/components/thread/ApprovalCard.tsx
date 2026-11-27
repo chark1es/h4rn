@@ -86,7 +86,7 @@ export function ApprovalCard({ threadId }: { threadId: string }) {
             onClick={(event) => event.preventDefault()}
           >
             {t("approval.alwaysAllow")}{" "}
-            <ChevronDownIcon className="q-icon s12" strokeWidth={1.75} aria-hidden />
+            <ChevronDownIcon className="q-icon s14" strokeWidth={1.75} aria-hidden />
           </button>
         )}
         <span className="grow" />

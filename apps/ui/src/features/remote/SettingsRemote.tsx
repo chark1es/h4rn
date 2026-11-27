@@ -60,7 +60,7 @@ function Health({ tone, children }: { tone: "on" | "off" | "danger"; children: R
   return (
     <span className={cn("q-health", tone === "danger" && "q-danger")}>
       {tone === "danger" ? (
-        <WifiOffIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+        <WifiOffIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
       ) : (
         <span className={cn("q-dot", tone)} aria-hidden />
       )}
@@ -858,7 +858,7 @@ function PairDeviceGroup({ onClose }: { onClose: () => void }) {
                       aria-hidden
                     >
                       {scope.locked || scopes.includes(scope.id) ? (
-                        <CheckIcon className="q-icon s12" strokeWidth={2} />
+                        <CheckIcon className="q-icon s14" strokeWidth={2} />
                       ) : null}
                     </span>
                     <span>

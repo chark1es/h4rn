@@ -78,7 +78,7 @@ export function TabStrip({
               onClick={() => onClose(tab.path)}
               className="q-ttab-x"
             >
-              <XIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+              <XIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
             </button>
           </div>
         );

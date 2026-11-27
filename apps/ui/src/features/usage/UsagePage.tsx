@@ -918,7 +918,7 @@ export function UsagePage() {
           {report ? <Breakdown report={report} /> : null}
           <ResetHistory />
           <p className="q-faint" style={{ fontSize: 12, marginTop: 16 }}>
-            <ClockIcon className="q-icon s12" aria-hidden /> {t("footnote")}
+            <ClockIcon className="q-icon s14" aria-hidden /> {t("footnote")}
           </p>
         </div>
       </div>

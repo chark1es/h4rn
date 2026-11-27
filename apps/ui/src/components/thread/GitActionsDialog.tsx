@@ -264,11 +264,11 @@ export function GitActionsDialog({
                   {status.upstream ? (
                     <>
                       <span className="q-mono">
-                        <ArrowUpIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+                        <ArrowUpIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
                         {t("git.ahead", { count: status.ahead })}
                       </span>
                       <span className="q-mono">
-                        <ArrowDownIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+                        <ArrowDownIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
                         {t("git.behind", { count: status.behind })}
                       </span>
                     </>
@@ -322,7 +322,7 @@ export function GitActionsDialog({
                   onClick={() => void generate()}
                   disabled={generating || loading || busy !== null}
                 >
-                  <SparklesIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+                  <SparklesIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
                   {generating ? t("git.generating") : t("git.generate")}
                 </button>
               </div>
@@ -351,7 +351,7 @@ export function GitActionsDialog({
                 onChange={(event) => setIncludeUnstaged(event.target.checked)}
               />
               <span className={cn("q-check", includeUnstaged && "on")} aria-hidden>
-                {includeUnstaged ? <CheckIcon className="q-icon s12" strokeWidth={2} /> : null}
+                {includeUnstaged ? <CheckIcon className="q-icon s14" strokeWidth={2} /> : null}
               </span>
               {t("git.includeUnstaged")}
             </label>
@@ -552,7 +552,7 @@ export function CreatePullRequestDialog({
                 onClick={() => void generate()}
                 disabled={generating || busy}
               >
-                <SparklesIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+                <SparklesIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
                 {generating ? t("git.generating") : t("git.generate")}
               </button>
             </div>
@@ -599,7 +599,7 @@ export function CreatePullRequestDialog({
                 onChange={(event) => setDraft(event.target.checked)}
               />
               <span className={cn("q-check", draft && "on")} aria-hidden>
-                {draft ? <CheckIcon className="q-icon s12" strokeWidth={2} /> : null}
+                {draft ? <CheckIcon className="q-icon s14" strokeWidth={2} /> : null}
               </span>
               {t("pullRequest.draft")}
             </label>

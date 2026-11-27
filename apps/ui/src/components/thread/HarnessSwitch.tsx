@@ -246,7 +246,7 @@ function SwitchPanel({ summary, onClose }: { summary: ThreadSummary; onClose: ()
           disabled={busy || !target || !modelDraft.trim()}
           onClick={() => void submit()}
         >
-          <ArrowLeftRightIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+          <ArrowLeftRightIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
           {busy ? t("harnessSwitch.switching") : t("harnessSwitch.switch")}
         </button>
       </div>
@@ -278,7 +278,7 @@ export function HarnessSwitch({ summary }: { summary: ThreadSummary }) {
         {threadHarnessLabel(summary.harness, summary.agent_id)}
       </span>
       <ChevronDownIcon
-        className={cn("q-icon s12", open && "q-rot180")}
+        className={cn("q-icon s14", open && "q-rot180")}
         strokeWidth={1.5}
         aria-hidden
       />

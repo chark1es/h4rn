@@ -114,7 +114,7 @@ export function GuestShareDialog() {
           <>
             <DialogBody>
               <div className="q-guest-off">
-                <ShieldIcon className="q-icon s16" strokeWidth={1.5} aria-hidden />
+                <ShieldIcon className="q-icon" strokeWidth={1.5} aria-hidden />
                 <div>
                   <div className="font-medium">{t("guest.off.title")}</div>
                   <p className="q-muted mt-0.5 mb-0">{t("guest.off.body")}</p>

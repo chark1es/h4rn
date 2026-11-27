@@ -93,9 +93,9 @@ function Health({ server }: { server: McpServerView }) {
       )}
     >
       {status.tone === "ok" ? (
-        <CheckCircle2Icon className="q-icon s12" aria-hidden />
+        <CheckCircle2Icon className="q-icon s14" aria-hidden />
       ) : status.tone === "danger" || status.tone === "warn" ? (
-        <TriangleAlertIcon className="q-icon s12" aria-hidden />
+        <TriangleAlertIcon className="q-icon s14" aria-hidden />
       ) : null}
       {status.label}
     </span>
@@ -343,7 +343,7 @@ function CredentialField({ server }: { server: McpServerView }) {
         {keys.length > 0 ? (
           <>
             <span className="q-secret">
-              <KeyRoundIcon className="q-icon s12" aria-hidden />{" "}
+              <KeyRoundIcon className="q-icon s14" aria-hidden />{" "}
               {t("mcp.credential.storedOn", { host: remoteHost ?? hostName })}
             </span>
             <span className="q-faint" style={{ fontSize: 12 }}>
@@ -357,7 +357,7 @@ function CredentialField({ server }: { server: McpServerView }) {
         )}
         {server.shared_to.length > 0 ? (
           <span className="q-secret">
-            <Share2Icon className="q-icon s12" aria-hidden />{" "}
+            <Share2Icon className="q-icon s14" aria-hidden />{" "}
             {t("mcp.credential.sharedWith", {
               hosts: formatList(server.shared_to.map((machine) => hosts[machine]?.name ?? machine)),
             })}
@@ -411,7 +411,7 @@ function SharedWithYou({ current }: { current: McpServerView | null }) {
                 </div>
               </button>
               <span className="q-secret">
-                <KeyRoundIcon className="q-icon s12" aria-hidden />{" "}
+                <KeyRoundIcon className="q-icon s14" aria-hidden />{" "}
                 {t("mcp.credential.storedOn", { host: host?.name ?? machine })}
               </span>
               <Toggle
@@ -422,7 +422,7 @@ function SharedWithYou({ current }: { current: McpServerView | null }) {
                 }
               />
               {current?.id === server.id ? null : (
-                <ChevronRightIcon className="q-icon s12 q-faint" aria-hidden />
+                <ChevronRightIcon className="q-icon s14 q-faint" aria-hidden />
               )}
             </div>
           );
@@ -846,7 +846,7 @@ export function McpPage() {
                   <span>{t("mcp.tools", { count: server.tool_count })}</span>
                   <span>·</span>
                   <span>{checkedLabel(checkedAt, now)}</span>
-                  {refreshing ? <RefreshCwIcon className="q-icon s12 q-faint" aria-hidden /> : null}
+                  {refreshing ? <RefreshCwIcon className="q-icon s14 q-faint" aria-hidden /> : null}
                 </div>
               </div>
               <Health server={server} />
@@ -971,9 +971,9 @@ export function McpPage() {
                               )}
                             >
                               {row.tone === "warn" ? (
-                                <TriangleAlertIcon className="q-icon s12" aria-hidden />
+                                <TriangleAlertIcon className="q-icon s14" aria-hidden />
                               ) : row.tone === "ok" ? (
-                                <CheckCircle2Icon className="q-icon s12" aria-hidden />
+                                <CheckCircle2Icon className="q-icon s14" aria-hidden />
                               ) : null}
                               {row.note}
                             </span>

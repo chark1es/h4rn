@@ -19,7 +19,7 @@ export function ThreadForkLine({ summary }: { summary: ThreadSummary }) {
   if (!forkedFrom) return null;
   return (
     <div className="q-fork-line">
-      <GitForkIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+      <GitForkIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
       {origin ? (
         <button
           type="button"

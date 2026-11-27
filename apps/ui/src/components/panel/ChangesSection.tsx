@@ -70,7 +70,7 @@ export function ChangesSection({
         </div>
         <Menu>
           <MenuTrigger className="q-btn ghost" style={{ height: 26 }}>
-            {turnLabel} <ChevronDownIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+            {turnLabel} <ChevronDownIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
           </MenuTrigger>
           <MenuContent align="start" className="w-44">
             <MenuRadioGroup
@@ -172,7 +172,7 @@ export function ChangesSection({
                         aria-label={t("changes.revertFile", { name })}
                         onClick={() => setConfirm({ kind: "file", path: file.path, name })}
                       >
-                        <RotateCcwIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+                        <RotateCcwIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
                       </button>
                     </Tip>
                   </div>

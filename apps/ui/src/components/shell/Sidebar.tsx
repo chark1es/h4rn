@@ -507,7 +507,7 @@ function SidebarFooter({
               <span className="q-dot on" />
             )}
             <span>{hostLine.text}</span>
-            <ChevronDownIcon className="q-icon s12 q-faint" strokeWidth={1.5} aria-hidden />
+            <ChevronDownIcon className="q-icon s14 q-faint" strokeWidth={1.5} aria-hidden />
           </MenuTrigger>
         </Tip>
         <HostsMenuContent

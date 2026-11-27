@@ -87,7 +87,7 @@ export function GuestSettingsForm() {
             <div className="s">{t("labs.guestSeesHint")}</div>
           </div>
           <div className="ctl">
-            <FlaskConicalIcon className="q-icon s16 q-faint" strokeWidth={1.5} aria-hidden />
+            <FlaskConicalIcon className="q-icon q-faint" strokeWidth={1.5} aria-hidden />
           </div>
         </div>
         {error ? (

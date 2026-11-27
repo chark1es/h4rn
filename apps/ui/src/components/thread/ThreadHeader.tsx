@@ -400,7 +400,7 @@ export function ThreadHeader({
           {summary.branch ? (
             <span className="br">
               <span className="q-sep">/</span>
-              <GitBranchIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+              <GitBranchIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
               <span className="q-mono" style={{ fontSize: 12 }}>
                 {summary.branch}
               </span>

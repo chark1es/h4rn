@@ -273,7 +273,7 @@ function SkillRow({
           </span>
           {skill.conflicts > 0 ? (
             <span className="q-badge warn">
-              <TriangleAlertIcon className="q-icon s12" aria-hidden />{" "}
+              <TriangleAlertIcon className="q-icon s14" aria-hidden />{" "}
               {t("skills.row.conflicts", { count: skill.conflicts })}
             </span>
           ) : null}

@@ -80,7 +80,7 @@ export function QueuedTurn({
                 : t("queue.frontTitle")
           }
         >
-          <CornerDownRightIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+          <CornerDownRightIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
           {message.delivery_unknown ? t("queue.sendAgain") : t("queue.sendNow")}
         </button>
         <button
@@ -95,7 +95,7 @@ export function QueuedTurn({
           }
           title={t("queue.editTitle")}
         >
-          <PencilIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+          <PencilIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
           {t("common:edit")}
         </button>
         <button
@@ -104,7 +104,7 @@ export function QueuedTurn({
           onClick={() => void removeQueuedMessage(threadId, message.message_id)}
           title={message.delivery_unknown ? t("queue.discardTitle") : t("queue.removeTitle")}
         >
-          <XIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+          <XIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
           {message.delivery_unknown ? t("queue.discard") : t("common:remove")}
         </button>
         <span className="grow" />
@@ -116,7 +116,7 @@ export function QueuedTurn({
             aria-label={t("queue.moveUp")}
             onClick={() => void moveQueuedMessage(threadId, message.message_id, "up")}
           >
-            <ChevronUpIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+            <ChevronUpIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
           </button>
         </Tip>
         <Tip label={t("queue.moveDown")}>
@@ -127,7 +127,7 @@ export function QueuedTurn({
             aria-label={t("queue.moveDown")}
             onClick={() => void moveQueuedMessage(threadId, message.message_id, "down")}
           >
-            <ChevronDownIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+            <ChevronDownIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
           </button>
         </Tip>
       </div>

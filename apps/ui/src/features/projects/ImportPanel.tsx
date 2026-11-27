@@ -120,7 +120,7 @@ export function ImportPanel() {
                       onChange={() => toggleImportProject(project.key)}
                     />
                     <span className={cn("q-check", checked && "on")} aria-hidden>
-                      {checked ? <CheckIcon className="q-icon s12" strokeWidth={2} /> : null}
+                      {checked ? <CheckIcon className="q-icon s14" strokeWidth={2} /> : null}
                     </span>
                     {project.git ? (
                       <FolderGit2Icon className="q-icon s14" strokeWidth={1.5} aria-hidden />

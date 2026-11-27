@@ -208,7 +208,7 @@ function Diagnostics({ diagnostics }: { diagnostics: ProxyDiagnostic[] }) {
         >
           <div className="flex gap-1.5 items-start">
             {diagnostic.level === "error" ? (
-              <TriangleAlertIcon className="q-icon s12 q-danger" strokeWidth={1.5} aria-hidden />
+              <TriangleAlertIcon className="q-icon s14 q-danger" strokeWidth={1.5} aria-hidden />
             ) : null}
             <span className="font-medium">{diagnostic.message}</span>
           </div>
@@ -369,7 +369,7 @@ function AddProfile() {
             aria-label={t("proxy.add.defaultLabel")}
             onClick={() => setIsDefault((value) => !value)}
           >
-            {isDefault ? <CheckIcon className="q-icon s12" strokeWidth={2} aria-hidden /> : null}
+            {isDefault ? <CheckIcon className="q-icon s14" strokeWidth={2} aria-hidden /> : null}
           </button>
         </div>
       </div>
@@ -492,7 +492,7 @@ function SecretField({
         ) : (
           <>
             <span className="q-secret">
-              <KeyRoundIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+              <KeyRoundIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
               {hasKey ? t("proxy.storedOn", { host }) : t("proxy.noKeyStored")}
             </span>
             <span className="flex-1" />
@@ -801,7 +801,7 @@ function ProfileDetail({ profile }: { profile: ProxyProfile }) {
                       <Fragment key={row.label}>
                         <span className={row.ok ? "q-ok" : "q-faint"}>
                           {row.ok ? (
-                            <CheckIcon className="q-icon s12" strokeWidth={2} aria-hidden />
+                            <CheckIcon className="q-icon s14" strokeWidth={2} aria-hidden />
                           ) : null}
                         </span>
                         <div className="k">{row.label}</div>

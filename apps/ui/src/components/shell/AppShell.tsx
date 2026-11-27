@@ -371,7 +371,7 @@ export function InboxDetailEmpty() {
                 <span className="q-chip-label">
                   {selectedHost?.name ?? t("start.noOnlineHost")}
                 </span>
-                <ChevronDownIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+                <ChevronDownIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
               </MenuTrigger>
               <MenuContent align="start" className="w-60">
                 <MenuRadioGroup value={host} onValueChange={(next: string) => pickHost(next)}>
@@ -421,7 +421,7 @@ export function InboxDetailEmpty() {
                   size={16}
                 />
                 <span className="q-chip-label">{harnessLabel(harness)}</span>
-                <ChevronDownIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+                <ChevronDownIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
               </MenuTrigger>
               <MenuContent align="start" className="w-60">
                 <MenuRadioGroup
@@ -490,7 +490,7 @@ export function InboxDetailEmpty() {
                     ? t("start.projects")
                     : (selectedFolder?.name ?? shortPath(workspace))}
                 </span>
-                <ChevronDownIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+                <ChevronDownIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
               </MenuTrigger>
               <MenuContent align="start" className="w-72">
                 <MenuGroup>
@@ -626,7 +626,7 @@ export function InboxDetailEmpty() {
                   <span className="truncate" style={{ maxWidth: 210 }}>
                     {model}
                   </span>
-                  <ChevronDownIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+                  <ChevronDownIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
                 </MenuTrigger>
                 <MenuContent align="end" className="w-64">
                   <MenuRadioGroup value={model} onValueChange={(next: string) => setModel(next)}>

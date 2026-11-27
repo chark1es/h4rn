@@ -330,7 +330,7 @@ export function AddProjectDialog() {
                 <span className="q-addp-mode-t">{t(`addProject.modes.${option.value}.label`)}</span>
                 <span className="q-addp-mode-s">{t(`addProject.modes.${option.value}.hint`)}</span>
                 {mode === option.value ? (
-                  <CheckIcon className="q-icon s12 tick" strokeWidth={2} aria-hidden />
+                  <CheckIcon className="q-icon s14 tick" strokeWidth={2} aria-hidden />
                 ) : null}
               </button>
             ))}
@@ -407,7 +407,7 @@ export function AddProjectDialog() {
                     onChange={(event) => setGitInit(event.target.checked)}
                   />
                   <span className={cn("q-check", gitInit && "on")} aria-hidden>
-                    {gitInit ? <CheckIcon className="q-icon s12" strokeWidth={2} /> : null}
+                    {gitInit ? <CheckIcon className="q-icon s14" strokeWidth={2} /> : null}
                   </span>
                   {t("addProject.gitInit")}
                 </label>

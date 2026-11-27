@@ -1928,7 +1928,7 @@ function PrDetail({
                       <span className="grow">{link.title}</span>
                       {link.watching ? (
                         <EyeIcon
-                          className="q-icon s12 q-faint"
+                          className="q-icon s14 q-faint"
                           strokeWidth={1.5}
                           aria-label={t("side.watching")}
                         />

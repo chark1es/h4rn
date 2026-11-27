@@ -189,9 +189,9 @@ export function LinkedPullRequestsMenu({
           aria-label={t("linked.items")}
         >
           {primary ? (
-            <GitPullRequestIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+            <GitPullRequestIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
           ) : (
-            <CircleDotIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+            <CircleDotIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
           )}
           <span>
             {primary ? linkedPullLabel(primary) : primaryIssue ? issueLabel(primaryIssue) : ""}

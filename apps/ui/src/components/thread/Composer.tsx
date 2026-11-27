@@ -953,11 +953,11 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
       <span className="t">{running && !canSteer ? t("edit.titleNoSteer") : t("edit.title")}</span>
       <span className="grow" />
       <button type="button" className="q-btn ghost" onClick={cancelEdit}>
-        <XIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+        <XIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
         {t("common:cancel")}
       </button>
       <button type="button" className="q-btn ghost" onClick={() => void saveEdit()}>
-        <CheckIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+        <CheckIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
         {t("common:save")}
       </button>
     </div>

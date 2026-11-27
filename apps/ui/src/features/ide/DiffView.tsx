@@ -305,7 +305,7 @@ function CommentNote({
   return (
     <div className="q-review-note" role="note" aria-label={t("comments.on", { range })}>
       <div className="q-review-meta">
-        <MessageSquareIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+        <MessageSquareIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
         {range} · {describeSource(comment.source, comment.sourceLabel)}
       </div>
       {editing ? (
@@ -828,7 +828,7 @@ export function DiffView({
               aria-label={t("diff.refreshLabel")}
               onClick={onRefresh}
             >
-              <RefreshCwIcon className="q-icon s12" aria-hidden />
+              <RefreshCwIcon className="q-icon s14" aria-hidden />
               {isPhone ? null : t("common:refresh")}
             </button>
           </Tip>

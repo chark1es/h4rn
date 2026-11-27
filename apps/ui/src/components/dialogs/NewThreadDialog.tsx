@@ -729,7 +729,7 @@ export function NewThreadDialog() {
                   }}
                 />
                 <span className={cn("q-check", worktreeEnabled && "on")} aria-hidden>
-                  {worktreeEnabled ? <CheckIcon className="q-icon s12" strokeWidth={2} /> : null}
+                  {worktreeEnabled ? <CheckIcon className="q-icon s14" strokeWidth={2} /> : null}
                 </span>
                 {t("newThread.worktree.toggle")}
               </label>

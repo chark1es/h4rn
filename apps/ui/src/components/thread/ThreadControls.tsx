@@ -100,7 +100,7 @@ export function ThreadControls({ summary }: { summary: ThreadSummary }) {
             <span className="q-tctrl-quiet truncate">{changed.join(" · ")}</span>
           ) : null}
           <ChevronDownIcon
-            className={cn("q-icon s12", expanded && "q-rot180")}
+            className={cn("q-icon s14", expanded && "q-rot180")}
             strokeWidth={1.5}
             aria-hidden
           />

@@ -229,7 +229,7 @@ function Details({ view }: { view: SubagentView }) {
         <dd>{t("subagents.details.inherited")}</dd>
         <dt>{t("subagents.details.credential")}</dt>
         <dd style={{ display: "flex", alignItems: "center", gap: 4 }}>
-          <KeyRoundIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />{" "}
+          <KeyRoundIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />{" "}
           {view.credential.shared_with_parent
             ? t("subagents.details.sharedWithParent", { label: view.credential.label })
             : view.credential.label}

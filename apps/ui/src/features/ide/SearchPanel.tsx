@@ -96,7 +96,7 @@ export function SearchPanel({ search, onQuery, onOption, onRun, onOpen }: Search
             }}
           />
           {search.running ? (
-            <Loader2Icon className="q-icon s12 animate-spin q-faint" aria-hidden />
+            <Loader2Icon className="q-icon s14 animate-spin q-faint" aria-hidden />
           ) : null}
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 4, marginTop: 8 }}>

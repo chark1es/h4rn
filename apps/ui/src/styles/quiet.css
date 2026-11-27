@@ -3129,7 +3129,7 @@ fieldset.q-seg-fs {
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.q-chip .q-icon.s12 {
+.q-chip .q-icon.s14 {
   color: var(--fg-3);
   flex: none;
 }

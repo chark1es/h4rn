@@ -754,7 +754,7 @@ export function IdePane() {
         <div className="q-statusbar">
           {thread?.branch ? (
             <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
-              <GitBranchIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+              <GitBranchIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
               {thread.branch}
             </span>
           ) : null}
@@ -776,7 +776,7 @@ export function IdePane() {
               style={{ display: "flex", alignItems: "center", gap: 4, color: "var(--danger)" }}
               title={t("status.daemonOffline")}
             >
-              <WifiOffIcon className="q-icon s12" aria-hidden />
+              <WifiOffIcon className="q-icon s14" aria-hidden />
               <span className={isPhone ? "hidden" : undefined}>{t("status.offline")}</span>
             </span>
           ) : null}

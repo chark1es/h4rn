@@ -82,7 +82,7 @@ function TestResult({ generatorId }: { generatorId: TextGeneratorId }) {
   if (report.ok) {
     return (
       <span className="q-ok text-xs">
-        <CircleCheckIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />{" "}
+        <CircleCheckIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />{" "}
         {report.reply
           ? t("textGeneration.repliedWith", {
               latency: formatNumber(Number(report.latency_ms), {
@@ -104,7 +104,7 @@ function TestResult({ generatorId }: { generatorId: TextGeneratorId }) {
   }
   return (
     <span className="q-danger text-xs" role="alert">
-      <TriangleAlertIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />{" "}
+      <TriangleAlertIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />{" "}
       {report.error ?? t("textGeneration.noAnswer")}
       {report.hint ? ` ${report.hint}` : ""}
     </span>
@@ -133,7 +133,7 @@ function GeneratorRow({ id }: { id: TextGeneratorId }) {
       <div className="ctl" style={{ display: "block" }}>
         <div className="flex gap-2 items-center flex-wrap">
           <span className="q-secret">
-            <KeyRoundIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+            <KeyRoundIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
             {generator.has_api_key
               ? t("textGeneration.keyStored", { host })
               : t("textGeneration.noKey")}

@@ -234,7 +234,7 @@ function FailOverMenu({
         title={reason}
       >
         {label}
-        <ChevronDownIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+        <ChevronDownIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
       </MenuTrigger>
       <MenuContent align={compact ? "center" : "end"} className="w-72 max-w-90">
         <MenuGroup>

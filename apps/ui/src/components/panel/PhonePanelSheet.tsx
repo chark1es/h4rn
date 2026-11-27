@@ -107,9 +107,9 @@ function PhoneSubagent({
       selected={waiting}
       glyph={
         failed ? (
-          <CircleXIcon className="q-icon s16 q-danger" strokeWidth={1.5} aria-hidden />
+          <CircleXIcon className="q-icon q-danger" strokeWidth={1.5} aria-hidden />
         ) : view.state === "completed" ? (
-          <CheckIcon className="q-icon s16" strokeWidth={1.5} aria-hidden />
+          <CheckIcon className="q-icon" strokeWidth={1.5} aria-hidden />
         ) : (
           <AgentGlyph glyph={glyphForAgentState(view.agent_state)} size={14} />
         )
@@ -331,7 +331,7 @@ export function PhonePanelSheet({
               <div className="q-ph-sum">
                 <span className="q-btn secondary sm">
                   {t("changes.phone.allTurns", { count: Math.max(1, changes.turns.length) })}{" "}
-                  <ChevronDownIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+                  <ChevronDownIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
                 </span>
                 <span className="grow" />
                 <span className="q-num q-pm">
@@ -390,7 +390,7 @@ export function PhonePanelSheet({
                             <span className="q-del">−{file.removed}</span>
                           </span>
                           <ChevronDownIcon
-                            className="q-icon s16 q-faint"
+                            className="q-icon q-faint"
                             strokeWidth={1.5}
                             style={{ transform: "rotate(-90deg)" }}
                             aria-hidden

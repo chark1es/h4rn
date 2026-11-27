@@ -83,7 +83,7 @@ function Chip({ task, onRemove }: { task: AttachmentDraft; onRemove: () => void 
           aria-label={t("attachments.remove", { name: task.file.name })}
           className="q-att-x"
         >
-          <XIcon className="q-icon s12" strokeWidth={2} aria-hidden />
+          <XIcon className="q-icon s14" strokeWidth={2} aria-hidden />
         </button>
       </Tip>
       {busy ? <span aria-hidden className="q-att-bar" style={{ width: `${percent}%` }} /> : null}

@@ -47,7 +47,7 @@ function GuestRequestRow({
     <section className="q-guest-req" aria-label={t("guest.waiting")}>
       <div className="q-guest-req-head">
         <span className="q-guest-req-tag">
-          <UserRoundIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+          <UserRoundIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
           {t("guest.tag")}
         </span>
         <span className="q-faint" style={{ fontSize: 12 }}>
@@ -59,7 +59,7 @@ function GuestRequestRow({
         <ul className="q-guest-req-files" aria-label={t("guest.files")}>
           {attachments.map((attachment) => (
             <li key={`${attachment.name}:${attachment.size}`} className="q-guest-req-file">
-              <PaperclipIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+              <PaperclipIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
               <span className="q-guest-req-name">{attachment.name}</span>
               <span className="q-faint">{formatBytes(attachment.size)}</span>
             </li>
