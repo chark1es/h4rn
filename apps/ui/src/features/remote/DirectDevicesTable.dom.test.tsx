@@ -18,13 +18,19 @@ const device = (key: string): DirectDevice => ({
 
 const KEYS = ["a1b2c3d4e5f6a7b8", "f0e1d2c3b4a59687"];
 
-function Table({ onRevoke }: { onRevoke: (key: string) => Promise<boolean> }) {
+function Table({
+  onRevoke,
+  revoking = null,
+}: {
+  onRevoke: (key: string) => Promise<boolean>;
+  revoking?: string | null;
+}) {
   const [devices, setDevices] = useState(KEYS.map(device));
   return (
     <DirectDevicesTable
       devices={devices}
       now={Date.now()}
-      revoking={null}
+      revoking={revoking}
       onRevoke={async (key) => {
         const ok = await onRevoke(key);
         if (ok) setDevices((list) => list.filter((d) => d.key !== key));
@@ -72,6 +78,18 @@ describe("DirectDevicesTable", () => {
     await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
     await waitFor(() =>
       expect(document.activeElement).toBe(screen.getByRole("button", { name: `Revoke ${second}` })),
+    );
+  });
+
+  it("disables a row's Revoke while its request runs", () => {
+    render(<Table onRevoke={async () => true} revoking={KEYS[0] as string} />);
+    const first = directDeviceName(KEYS[0] as string);
+    const second = directDeviceName(KEYS[1] as string);
+    expect(screen.getByRole("button", { name: `Revoke ${first}` }).hasAttribute("disabled")).toBe(
+      true,
+    );
+    expect(screen.getByRole("button", { name: `Revoke ${second}` }).hasAttribute("disabled")).toBe(
+      false,
     );
   });
 });

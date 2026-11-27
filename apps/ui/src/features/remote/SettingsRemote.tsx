@@ -588,6 +588,7 @@ function DeviceRow({
             <button
               type="button"
               className="q-btn danger"
+              disabled={busy}
               onClick={(event) => {
                 restoreFocus.current = rememberNeighbours(event.currentTarget);
                 setConfirming(true);

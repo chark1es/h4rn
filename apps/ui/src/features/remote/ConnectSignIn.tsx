@@ -265,6 +265,7 @@ export function SignOutButton({ onDone }: { onDone?: () => void }) {
       <button
         type="button"
         className="q-btn danger"
+        disabled={busy !== null}
         onClick={(event) => {
           restoreFocus.current = rememberNeighbours(event.currentTarget);
           setConfirming(true);

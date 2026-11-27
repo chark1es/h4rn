@@ -244,6 +244,7 @@ function DirectDeviceRow({
         <button
           type="button"
           className="q-btn danger"
+          disabled={busy}
           aria-label={t("access.revokeLabel", { name })}
           onClick={(event) => {
             restoreFocus.current = rememberNeighbours(event.currentTarget);
