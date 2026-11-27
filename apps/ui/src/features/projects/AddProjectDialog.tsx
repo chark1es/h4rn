@@ -112,37 +112,29 @@ function FolderBrowser({
           }}
         />
       </div>
-      <div
-        className="q-fb-list"
-        role="group"
-        aria-label={t("addProject.folders")}
-        aria-busy={loading}
-      >
+      <ul className="q-fb-list" aria-label={t("addProject.folders")} aria-busy={loading}>
         {error ? (
-          <div className="q-fb-msg err">{error}</div>
+          <li className="q-fb-msg err">{error}</li>
         ) : loading && !listing ? (
-          <div className="q-fb-msg">{t("addProject.readingFolders")}</div>
+          <li className="q-fb-msg">{t("addProject.readingFolders")}</li>
         ) : listing && listing.entries.length === 0 ? (
-          <div className="q-fb-msg">{t("addProject.noFolders")}</div>
+          <li className="q-fb-msg">{t("addProject.noFolders")}</li>
         ) : (
           listing?.entries.map((entry) => (
-            <button
-              key={entry.path}
-              type="button"
-              className="q-fb-row"
-              onClick={() => onOpen(entry.path)}
-            >
-              {entry.git ? (
-                <FolderGit2Icon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-              ) : (
-                <FolderIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-              )}
-              <span className="q-fb-nm">{entry.name}</span>
-              {entry.git ? <span className="q-faint tag">git</span> : null}
-            </button>
+            <li key={entry.path}>
+              <button type="button" className="q-fb-row" onClick={() => onOpen(entry.path)}>
+                {entry.git ? (
+                  <FolderGit2Icon className="q-icon s14" strokeWidth={1.5} aria-hidden />
+                ) : (
+                  <FolderIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
+                )}
+                <span className="q-fb-nm">{entry.name}</span>
+                {entry.git ? <span className="q-faint tag">git</span> : null}
+              </button>
+            </li>
           ))
         )}
-      </div>
+      </ul>
     </div>
   );
 }
