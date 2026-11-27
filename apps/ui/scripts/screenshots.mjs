@@ -405,7 +405,7 @@ const SHOTS = [
     wait: '[aria-label="Thread stream"]',
     action: async (page) => {
       await page.getByRole("button", { name: "Changes and subagents" }).click();
-      const sheet = page.getByRole("dialog", { name: "Changes and subagents" });
+      const sheet = page.getByRole("dialog", { name: "Thread panel" });
       await sheet.getByText("tests/setup.ts").first().waitFor({ timeout: 10_000 });
       await page.waitForTimeout(500);
     },
@@ -448,7 +448,7 @@ const SHOTS = [
     wait: '[aria-label="Thread stream"]',
     action: async (page) => {
       await page.getByRole("button", { name: "Changes and subagents" }).click();
-      const sheet = page.getByRole("dialog", { name: "Changes and subagents" });
+      const sheet = page.getByRole("dialog", { name: "Thread panel" });
       await sheet.getByRole("tab", { name: /Subagents/ }).click();
       await sheet
         .getByText("Bisect the auth fixture change on CI")
@@ -533,7 +533,7 @@ const AUDIT_SHOTS = [
     path: "/t/thr_a",
     wait: '[aria-label="Thread stream"]',
     action: async (page) => {
-      await page.keyboard.press("Shift+?");
+      await page.keyboard.press("ControlOrMeta+/");
       await page.getByRole("dialog").waitFor({ state: "visible" });
       await page.waitForTimeout(400);
     },
@@ -579,7 +579,8 @@ const AUDIT_SHOTS = [
     wait: '[aria-label="Thread stream"]',
     action: async (page) => {
       await page.getByRole("button", { name: "Right panel" }).hover();
-      await page.waitForTimeout(1200);
+      await page.getByRole("tooltip").waitFor({ state: "visible" });
+      await page.waitForTimeout(250);
     },
   },
   {

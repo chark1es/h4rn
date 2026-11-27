@@ -661,7 +661,7 @@ export function NewThreadDialog() {
               </Field>
             ) : null}
 
-            <Field htmlFor="new-thread-mode" label={t("newThread.mode")}>
+            <Field htmlFor="new-thread-mode" label={t("newThread.mode")} className="sm:col-start-1">
               {modeManagedByAgent ? (
                 <>
                   <span id="new-thread-mode" className="flex h-7 items-center text-sm text-fg-2">
@@ -804,7 +804,7 @@ export function NewThreadDialog() {
 
             <Textarea
               id="new-thread-task"
-              autoFocus
+              data-autofocus
               disabled={!boundHost}
               value={prompt}
               onChange={(event) => {

@@ -131,7 +131,7 @@ export function LinkPullRequestDialog({
               }}
               placeholder="https://github.com/owner/repo/pull/12"
               aria-label={t("linkDialog.urlLabel")}
-              autoFocus
+              data-autofocus
             />
             <button
               type="button"

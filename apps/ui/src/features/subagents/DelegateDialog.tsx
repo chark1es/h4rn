@@ -156,7 +156,7 @@ export function DelegateDialog({ thread }: { thread: ThreadSummary }) {
             <Textarea
               id="delegate-task"
               value={task}
-              autoFocus
+              data-autofocus
               placeholder={t("delegate.taskPlaceholder")}
               className="min-h-[84px] resize-none"
               onChange={(event) => setTask(event.target.value)}

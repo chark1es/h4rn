@@ -85,18 +85,39 @@ type DialogContentProps = Omit<React.ComponentProps<typeof DialogContentPrimitiv
     showCloseButton?: boolean;
   };
 
+const FIRST_FIELD = [
+  "[data-autofocus]",
+  '[data-slot="dialog-body"] :is(input, textarea, select, [contenteditable="true"]):not(:disabled, [type="hidden"], [tabindex="-1"])',
+  '[data-slot="dialog-footer"] button:not(:disabled)',
+];
+
 function DialogContent({
   className,
   size,
   showCloseButton = true,
+  initialFocus,
   children,
   ...props
 }: DialogContentProps) {
   const sheet = useDialogSheet();
+  const content = React.useRef<HTMLDivElement>(null);
+  // The close button comes first in the header, so the default "first focusable"
+  // would land there; start on the task instead, as React's autoFocus intends.
+  const firstField = React.useCallback(() => {
+    const node = content.current;
+    if (!node) return null;
+    for (const selector of FIRST_FIELD) {
+      const found = node.querySelector<HTMLElement>(selector);
+      if (found) return found;
+    }
+    return node;
+  }, []);
   return (
     <>
       {sheet ? null : <DialogBackdropPrimitive className={backdropClassName} />}
       <DialogContentPrimitive
+        ref={content}
+        initialFocus={initialFocus ?? firstField}
         className={cn(sheet ? sheetContentClassName : dialogContentVariants({ size }), className)}
         data-size={size ?? "md"}
         {...props}

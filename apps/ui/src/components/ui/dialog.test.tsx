@@ -78,7 +78,11 @@ describe("Dialog", () => {
     trigger.focus();
     fireEvent.click(trigger);
     const dialog = await screen.findByRole("dialog", { name: "Rename thread" });
-    await waitFor(() => expect(dialog.contains(document.activeElement)).toBe(true));
+    // Focus starts on the task, not on the close button that leads the header.
+    await waitFor(() =>
+      expect(document.activeElement).toBe(screen.getByRole("textbox", { name: "Title" })),
+    );
+    expect(dialog.contains(document.activeElement)).toBe(true);
     fireEvent.keyDown(document.activeElement as Element, { key: "Escape" });
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
     expect(document.activeElement).toBe(trigger);
