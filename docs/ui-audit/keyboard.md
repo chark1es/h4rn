@@ -12,7 +12,7 @@ H4RN_KB_OUT=<dir> node scripts/keyboard-audit.mjs http://127.0.0.1:<port>
 H4RN_KB="file tree" node scripts/keyboard-audit.mjs http://127.0.0.1:<port>
 ```
 
-It prints the table below and exits 1 if any surface fails. Final run: **40 of 40 surfaces pass**. The two that failed on the first run (toaster, inline revoke confirm) were fixed afterwards; see "Fixed after the first run".
+It prints the table below and exits 1 if any surface fails. Final run: **42 of 42 surfaces pass**. The two that failed on the first run (toaster, inline revoke confirm) were fixed afterwards; see "Fixed after the first run".
 
 ## Results
 
@@ -40,6 +40,8 @@ It prints the table below and exits 1 if any surface fails. Final run: **40 of 4
 | Turn picker | Right panel, Tab to Turn, Enter, ArrowDown, Esc | Pass | trigger is button; 1 enabled item(s) |
 | Composer model chip | Tab to the model chip, Enter, Tab to Model, ArrowDown, Esc ×2 | Pass | chip "claude-sonnet-5-5" |
 | Select (settings) | Tab to Longest wait, Enter, ArrowDown, Enter, check value | Pass | trigger "Longest wait: 6 hours" |
+| Select sheet on screen (touch, reduced motion) | Phone, touch: tap Interface language twice; listbox inside the viewport; tap an option, then Enter/ArrowDown/Enter | Pass | open 1: sheet at y 607–844; open 2: sheet at y 607–844 (was: stayed at y 964, off screen) |
+| Select sheet on screen (touch) | Phone, touch: tap Interface language twice; listbox inside the viewport; tap an option, then Enter/ArrowDown/Enter | Pass | open 1: sheet at y 607–844; open 2: sheet at y 607–844 |
 | SuggestInput (New thread model) | New thread, Tab to Model, ArrowDown ×2, Esc, Esc | Pass |  |
 | Command palette | Tab to Search or run, Enter, type, ArrowDown, End, Home, Esc | Pass | End → Show Settled, Home → Settle thread; one Esc closed with the query typed |
 | Command palette (Ctrl+K) | Ctrl+K from the composer, Esc | Pass |  |
@@ -94,3 +96,11 @@ Both failures from the first run are fixed, and the audit passes on all 40 surfa
 |---|---|---|
 | `7b4f5f38` | **The toaster trapped Tab.** Sonner's list `onBlur` refocuses the element focused before the toast whenever focus leaves the stack, so Tab after Dismiss went back there and the next Tab went into the toast again. | `components/ui/sonner.tsx` watches Tab at the edges of the stack. When the stack was reached by Tab or a click, Tab past the last toast control moves to the next control in document order (wrapping to the first on the page) and Shift+Tab before the first moves to the previous one. Sonner's one refocus call is skipped for that move. Entry by Alt+T still returns focus to where it came from. `aria-live`, hover expand, de-duplication and positions are untouched. `sonner.test.tsx` "lets Tab leave the stack in document order" fails without the fix. |
 | `44c6b8a8` | **Inline confirms dropped focus, with no Alert Dialog.** Revoke in `NetworkAccess.tsx`, Revoke / Sign out on the device row in `SettingsRemote.tsx` and Sign out in `ConnectSignIn.tsx` replaced the button with an inline Cancel / confirm pair, and focus fell to `<body>`. | All three open the shared `ConfirmDialog` (UI SDK Alert Dialog), as Forges' Remove does: focus starts on Cancel, is trapped, and Esc or Cancel returns it to the trigger. If the confirmed action removes the row, focus moves to the next control after it, or the one before (`rememberNeighbours` in `lib/focus.ts`). If the trigger outlives the action (a failed revoke), focus goes back to it once it's enabled again, rather than staying on the next row's button where the dialog left it while the trigger was disabled. The titles reuse the existing questions (`devices.confirmRevoke` now names the device) and a new `devices.confirmDescription.*` line says what happens, in all four catalogues. Test in `DirectDevicesTable.dom.test.tsx`; `e2e-remote.mjs` confirms Sign out in the dialog. |
+
+## Fixed in council round 3
+
+| Commit | Problem | Fix |
+|---|---|---|
+| `7efd5848` | **A Select sheet never came on screen on a touch phone with reduced motion.** The listbox opened (`data-presentation=sheet`, `data-driver=scroll-snap`) but stayed below the viewport, so it couldn't be tapped. The cause is in UI SDK's scroll-snap driver (see `upstream-ui-sdk.md`). Menu and Dialog sheets weren't affected. | `skipReducedSheetMotion` (`lib/sheet-motion.ts`) now runs on every open, because Select content stays mounted between opens. After the open, if a scroll-snap sheet is still at its closed snap position, it moves to its first open snap point, with no animation. This covers every Select and ChipSelect (checked on Appearance, Forges, Auto-resume and Providers). The two "Select sheet on screen" rows above check it, and the reduced-motion row fails without the fix. Tests in `sheet-motion.test.ts`. |
+| `25782e87` | **Revoking the last direct device sent focus back to "Allow devices on this network"** instead of on to Refresh. The table emptied and the controls after it were remounted, so the remembered "after" nodes were gone. The Alert Dialog's own fallback had also already put focus on the switch, so focus didn't count as lost. | `rememberNeighbours` looks the next control up again after the update: the tabbable that now follows the nearest surviving control before the row. It also treats focus as unclaimed when it is on the element the closing dialog fell back to (the first focus outside a dialog after the trigger). Tests in `focus.test.ts` and `DirectDevicesTable.dom.test.tsx`. |
+| `9d71c73b` | **A failed revoke could pull focus back.** When the trigger outlived the action, focus went back to it even if the person had moved on while the request ran. | Focus returns to the trigger only when focus is on `<body>` or still where the dialog fell back to. Test in `focus.test.ts`. |
