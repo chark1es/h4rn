@@ -1,4 +1,5 @@
 import { type ReactNode, useLayoutEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { Resizable, ResizableHandle, ResizablePanel } from "@/components/ui/resizable";
 
@@ -29,6 +30,7 @@ export function ShellSplit({
   onWidth: (width: number) => void;
   children: ReactNode;
 }) {
+  const { t } = useTranslation("common");
   const groupRef = useRef<HTMLDivElement | null>(null);
   const [groupWidth, setGroupWidth] = useState(0);
   const open = pane !== null && pane !== false && pane !== undefined;
@@ -43,7 +45,10 @@ export function ShellSplit({
     return () => observer?.disconnect();
   }, []);
 
-  const share = groupWidth > 0 ? (Math.min(Math.max(width, min), max) / groupWidth) * 100 : 0;
+  const clamped = Math.min(Math.max(width, min), max);
+  // UI SDK reports the share as a percentage; say the width people set.
+  const valueText = t("pixelWidth", { width: Math.round(clamped) });
+  const share = groupWidth > 0 ? (clamped / groupWidth) * 100 : 0;
   const layout =
     groupWidth <= 0
       ? undefined
@@ -55,7 +60,9 @@ export function ShellSplit({
 
   const paneCell = open
     ? [
-        side === "end" ? <ResizableHandle key="handle" aria-label={label} /> : null,
+        side === "end" ? (
+          <ResizableHandle key="handle" aria-label={label} aria-valuetext={valueText} />
+        ) : null,
         <ResizablePanel
           key={PANE}
           id={PANE}
@@ -65,7 +72,9 @@ export function ShellSplit({
         >
           {pane}
         </ResizablePanel>,
-        side === "start" ? <ResizableHandle key="handle" aria-label={label} /> : null,
+        side === "start" ? (
+          <ResizableHandle key="handle" aria-label={label} aria-valuetext={valueText} />
+        ) : null,
       ]
     : null;
 

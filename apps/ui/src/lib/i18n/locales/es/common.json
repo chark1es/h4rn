@@ -48,5 +48,6 @@
   "orPress": "o pulsa <kbd/>",
   "acpAgent": "Agente ACP",
   "choose": "Elegir…",
-  "showSuggestions": "Mostrar sugerencias"
+  "showSuggestions": "Mostrar sugerencias",
+  "pixelWidth": "{{width}} px"
 }

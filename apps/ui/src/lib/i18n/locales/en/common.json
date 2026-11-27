@@ -48,5 +48,6 @@
   "orPress": "or press <kbd/>",
   "acpAgent": "ACP agent",
   "choose": "Choose…",
-  "showSuggestions": "Show suggestions"
+  "showSuggestions": "Show suggestions",
+  "pixelWidth": "{{width}} px"
 }
