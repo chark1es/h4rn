@@ -86,7 +86,9 @@ function Chip({ task, onRemove }: { task: AttachmentDraft; onRemove: () => void 
           <XIcon className="q-icon s14" strokeWidth={2} aria-hidden />
         </button>
       </Tip>
-      {busy ? <span aria-hidden className="q-att-bar" style={{ width: `${percent}%` }} /> : null}
+      {busy ? (
+        <span aria-hidden className="q-att-bar" style={{ transform: `scaleX(${percent / 100})` }} />
+      ) : null}
     </div>
   );
 }

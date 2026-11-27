@@ -178,7 +178,9 @@ export function ImportPanel() {
         <div className="q-imp-progress" aria-hidden>
           <div
             className="q-imp-progress-bar"
-            style={{ width: `${progress.running ? Math.max(percent, 4) : 100}%` }}
+            style={{
+              transform: `scaleX(${(progress.running ? Math.max(percent, 4) : 100) / 100})`,
+            }}
           />
         </div>
       ) : null}

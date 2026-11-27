@@ -1578,13 +1578,16 @@ fieldset.q-seg-fs {
   outline: 2px solid var(--focus);
   outline-offset: 1px;
 }
+/* Progress grows from the left by scale, never by animating width. */
 .q-att-bar {
   position: absolute;
   left: 0;
+  right: 0;
   bottom: 0;
   height: 2px;
   background: var(--accent);
-  transition: width var(--duration-popup);
+  transform-origin: left;
+  transition: transform var(--duration-popup) var(--ease-enter);
 }
 @media (pointer: coarse) {
   .q-att-x {
@@ -6247,7 +6250,8 @@ fieldset.q-seg-fs {
   display: block;
   height: 100%;
   background: var(--fg-3);
-  transition: width 160ms ease;
+  transform-origin: left;
+  transition: transform var(--duration-popup) var(--ease-enter);
 }
 
 .q-imp-note {
