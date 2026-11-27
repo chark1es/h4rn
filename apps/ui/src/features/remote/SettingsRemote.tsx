@@ -16,6 +16,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Trans, useTranslation } from "react-i18next";
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
 import { ChipSelect } from "@/components/common/ChipSelect";
+import { ConfirmDialog } from "@/components/common/ConfirmDialog";
 import type {
   ConnectDevice,
   HostSummary,
@@ -25,6 +26,7 @@ import type {
 } from "@/gen";
 import { useNow } from "@/hooks/use-now";
 import { harnessLabel, machineSeed } from "@/lib/entities";
+import { rememberNeighbours } from "@/lib/focus";
 import { formatList, formatNumber, formatRelativeTime, i18n } from "@/lib/i18n";
 import { getClient, navigate, pushToast, useApp } from "@/lib/store/appStore";
 import { cn } from "@/lib/utils";
@@ -508,6 +510,7 @@ function DeviceRow({
   const [draft, setDraft] = useState(device.name);
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
+  const restoreFocus = useRef<(() => Promise<void>) | null>(null);
   const Icon = deviceIcon(device);
 
   const nameInput = useRef<HTMLInputElement>(null);
@@ -572,34 +575,7 @@ function DeviceRow({
         )}
       </td>
       <td className="r pr-0">
-        {editing ? null : confirming ? (
-          <span className="inline-flex gap-1.5 items-center">
-            <span className="q-faint" style={{ fontSize: 12 }}>
-              {current
-                ? t("devices.confirmSignOut")
-                : device.kind === "daemon"
-                  ? t("devices.confirmDisconnect")
-                  : t("devices.confirmRevoke")}
-            </span>
-            <button type="button" className="q-btn ghost" onClick={() => setConfirming(false)}>
-              {t("common:cancel")}
-            </button>
-            <button
-              type="button"
-              className="q-btn danger"
-              disabled={busy}
-              onClick={() => {
-                setBusy(true);
-                void onRevoke().then((ok) => {
-                  setBusy(false);
-                  if (!ok) setConfirming(false);
-                });
-              }}
-            >
-              {current ? t("devices.signOut") : t("common:revoke")}
-            </button>
-          </span>
-        ) : (
+        {editing ? null : (
           <span className="inline-flex gap-1 items-center">
             <button
               type="button"
@@ -609,11 +585,45 @@ function DeviceRow({
             >
               <PencilIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
             </button>
-            <button type="button" className="q-btn danger" onClick={() => setConfirming(true)}>
+            <button
+              type="button"
+              className="q-btn danger"
+              onClick={(event) => {
+                restoreFocus.current = rememberNeighbours(event.currentTarget);
+                setConfirming(true);
+              }}
+            >
               {current ? t("devices.signOut") : t("common:revoke")}
             </button>
           </span>
         )}
+        <ConfirmDialog
+          open={confirming}
+          title={
+            current
+              ? t("devices.confirmSignOut")
+              : device.kind === "daemon"
+                ? t("devices.confirmDisconnect")
+                : t("devices.confirmRevoke", { name: device.name })
+          }
+          description={
+            current
+              ? t("devices.confirmDescription.signOut")
+              : device.kind === "daemon"
+                ? t("devices.confirmDescription.disconnect", { name: device.name })
+                : t("devices.confirmDescription.revoke", { name: device.name })
+          }
+          confirmLabel={current ? t("devices.signOut") : t("common:revoke")}
+          onOpenChange={setConfirming}
+          onConfirm={() => {
+            if (busy) return;
+            setBusy(true);
+            void onRevoke().finally(() => {
+              setBusy(false);
+              void restoreFocus.current?.();
+            });
+          }}
+        />
       </td>
     </tr>
   );

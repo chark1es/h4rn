@@ -14,6 +14,7 @@ type ToastIcons = NonNullable<ToasterProps["icons"]>;
 
 import { buttonVariants } from "@/components/ui/button";
 import { useIsPhone } from "@/hooks/use-media-query";
+import { tabbables } from "@/lib/focus";
 import { cn } from "@/lib/utils";
 
 type Theme = "light" | "dark";
@@ -79,19 +80,6 @@ function toastClearance(node: HTMLElement | null): (() => void) | undefined {
     observer.disconnect();
     root.style.removeProperty("--toast-dock");
   };
-}
-
-const TABBABLE =
-  'a[href], button, input, select, textarea, summary, [contenteditable=""], [contenteditable="true"], [tabindex]';
-
-function tabbables(root: ParentNode): HTMLElement[] {
-  return Array.from(root.querySelectorAll<HTMLElement>(TABBABLE)).filter(
-    (el) =>
-      el.tabIndex >= 0 &&
-      !el.matches(":disabled") &&
-      !el.closest("[inert], [hidden]") &&
-      (typeof el.checkVisibility !== "function" || el.checkVisibility()),
-  );
 }
 
 function toasterOf(node: EventTarget | null): HTMLElement | null {

@@ -6,11 +6,13 @@ import {
   LoaderIcon,
   LogOutIcon,
 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Trans, useTranslation } from "react-i18next";
 
+import { ConfirmDialog } from "@/components/common/ConfirmDialog";
 import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "@/components/ui/collapsible";
 import type { ProviderInfo } from "@/gen";
+import { rememberNeighbours } from "@/lib/focus";
 import { i18n } from "@/lib/i18n";
 import { listProviders } from "./connect";
 import { remoteErrorText } from "./remoteError";
@@ -256,39 +258,35 @@ export function ConnectSignIn() {
 export function SignOutButton({ onDone }: { onDone?: () => void }) {
   const { t } = useTranslation(["settings", "common"]);
   const [confirming, setConfirming] = useState(false);
+  const restoreFocus = useRef<(() => Promise<void>) | null>(null);
   const busy = useRemote((state) => state.busy);
-  if (!confirming) {
-    return (
-      <button type="button" className="q-btn danger" onClick={() => setConfirming(true)}>
-        <LogOutIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-        {t("devices.signOut")}
-      </button>
-    );
-  }
   return (
-    <span className="inline-flex items-center gap-2">
-      <span className="q-faint text-xs">{t("connect.forgetDevice")}</span>
-      <button
-        type="button"
-        className="q-btn ghost"
-        onClick={() => setConfirming(false)}
-        disabled={busy !== null}
-      >
-        {t("common:cancel")}
-      </button>
+    <>
       <button
         type="button"
         className="q-btn danger"
-        disabled={busy !== null}
-        onClick={async () => {
-          const { signOut } = await import("./remoteStore");
-          await signOut();
-          setConfirming(false);
-          onDone?.();
+        onClick={(event) => {
+          restoreFocus.current = rememberNeighbours(event.currentTarget);
+          setConfirming(true);
         }}
       >
+        <LogOutIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
         {t("devices.signOut")}
       </button>
-    </span>
+      <ConfirmDialog
+        open={confirming}
+        title={t("connect.forgetDevice")}
+        description={t("devices.confirmDescription.signOut")}
+        confirmLabel={t("devices.signOut")}
+        onOpenChange={setConfirming}
+        onConfirm={async () => {
+          if (busy !== null) return;
+          const { signOut } = await import("./remoteStore");
+          await signOut();
+          onDone?.();
+          void restoreFocus.current?.();
+        }}
+      />
+    </>
   );
 }

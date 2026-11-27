@@ -383,20 +383,23 @@ await check(
 );
 
 await check(
-  "Inline confirm (revoke device)",
-  "Hosts, Tab to Revoke, Enter, check focus",
+  "Confirm dialog (revoke device)",
+  "Hosts, Tab to Revoke, Enter, Tab ×20, Esc; again, Tab to Revoke, Enter",
   { path: "/settings/hosts" },
   async (page, notes) => {
     await tabTo(page, byName(/^Revoke /));
+    const flow = await dialogFlow(page, notes, () => page.keyboard.press("Enter"));
     await page.keyboard.press("Enter");
-    await page.waitForTimeout(300);
-    const a = await active(page);
-    const kept = a.tag !== "body";
-    if (!kept)
-      notes.push(
-        "the inline confirm replaces the button and focus drops to the body; no Alert Dialog",
-      );
-    return kept;
+    const dialog = page.locator('[role="alertdialog"]:visible').first();
+    await dialog.waitFor({ timeout: 5_000 });
+    await tabTo(page, byName(/^Revoke$/), { max: 4 });
+    await page.keyboard.press("Enter");
+    await dialog.waitFor({ state: "hidden", timeout: 3_000 });
+    await page.waitForTimeout(400);
+    const after = await active(page);
+    const kept = after.tag !== "body";
+    notes.push(`after revoking, focus on ${after.role || after.tag} "${after.name.slice(0, 30)}"`);
+    return flow && kept;
   },
 );
 
@@ -834,6 +837,9 @@ await check(
     await tabTo(page, byName(/^Dismiss$/));
     await page.keyboard.press("Tab");
     const after = await active(page);
+    const left = await page.evaluate(
+      () => !document.activeElement?.closest("[data-sonner-toaster]"),
+    );
     notes.push(
       `after Dismiss, Tab went to ${after.role || after.tag} "${after.name.slice(0, 30)}" (focus-visible ${after.fv})`,
     );
@@ -842,6 +848,7 @@ await check(
     const looped = /Dismiss|Couldn't read/.test(again.name);
     if (looped)
       notes.push("Tab loops back into the toast (Sonner refocuses the last element on blur)");
+    if (!left || !after.fv) return false;
     return !looped;
   },
 );

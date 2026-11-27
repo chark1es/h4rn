@@ -21,9 +21,11 @@ import {
 import { useEffect, useRef, useState } from "react";
 import { Trans, useTranslation } from "react-i18next";
 
+import { ConfirmDialog } from "@/components/common/ConfirmDialog";
 import { Switch } from "@/components/ui/switch";
 import type { DirectDevice, PairScope } from "@/gen";
 import { useNow } from "@/hooks/use-now";
+import { rememberNeighbours } from "@/lib/focus";
 import { formatRelativeTime, i18n } from "@/lib/i18n";
 import { useApp } from "@/lib/store/appStore";
 import {
@@ -208,6 +210,7 @@ function DirectDeviceRow({
 }) {
   const { t } = useTranslation(["settings", "common"]);
   const [confirming, setConfirming] = useState(false);
+  const restoreFocus = useRef<(() => Promise<void>) | null>(null);
   const name = directDeviceName(device.key);
   return (
     <tr className="hov">
@@ -238,38 +241,28 @@ function DirectDeviceRow({
         )}
       </td>
       <td className="r pr-0">
-        {confirming ? (
-          <span className="inline-flex gap-1.5 items-center">
-            <span className="q-faint" style={{ fontSize: 12 }}>
-              {t("devices.confirmRevoke")}
-            </span>
-            <button type="button" className="q-btn ghost" onClick={() => setConfirming(false)}>
-              {t("common:cancel")}
-            </button>
-            <button
-              type="button"
-              className="q-btn danger"
-              disabled={busy}
-              aria-label={t("access.revokeLabel", { name })}
-              onClick={() => {
-                void onRevoke().then((ok) => {
-                  if (!ok) setConfirming(false);
-                });
-              }}
-            >
-              {t("common:revoke")}
-            </button>
-          </span>
-        ) : (
-          <button
-            type="button"
-            className="q-btn danger"
-            aria-label={t("access.revokeLabel", { name })}
-            onClick={() => setConfirming(true)}
-          >
-            {t("common:revoke")}
-          </button>
-        )}
+        <button
+          type="button"
+          className="q-btn danger"
+          aria-label={t("access.revokeLabel", { name })}
+          onClick={(event) => {
+            restoreFocus.current = rememberNeighbours(event.currentTarget);
+            setConfirming(true);
+          }}
+        >
+          {t("common:revoke")}
+        </button>
+        <ConfirmDialog
+          open={confirming}
+          title={t("devices.confirmRevoke", { name })}
+          description={t("devices.confirmDescription.direct", { name })}
+          confirmLabel={t("common:revoke")}
+          onOpenChange={setConfirming}
+          onConfirm={() => {
+            if (busy) return;
+            void onRevoke().finally(() => void restoreFocus.current?.());
+          }}
+        />
       </td>
     </tr>
   );

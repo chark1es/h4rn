@@ -516,7 +516,13 @@
     "neverConnected": "Nunca se ha conectado",
     "confirmSignOut": "¿Cerrar sesión en este dispositivo?",
     "confirmDisconnect": "¿Desconectar este host?",
-    "confirmRevoke": "¿Revocar?",
+    "confirmRevoke": "¿Revocar {{name}}?",
+    "confirmDescription": {
+      "direct": "{{name}} ya no podrá conectarse a este equipo. Vuelve a emparejarlo para usarlo.",
+      "revoke": "{{name}} pierde el acceso a tu cuenta hasta que vuelva a iniciar sesión.",
+      "disconnect": "{{name}} sale de tu cuenta. Sus hilos dejan de mostrarse aquí hasta que vuelva a iniciar sesión.",
+      "signOut": "Este dispositivo deja de llegar a tus hosts hasta que vuelvas a iniciar sesión."
+    },
     "signOut": "Cerrar sesión",
     "scopes": {
       "all": "Todos",

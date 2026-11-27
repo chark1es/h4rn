@@ -686,7 +686,10 @@ async function main() {
     const logMark = logs.length;
     // This device offers Sign out (the same revoke) instead of Revoke.
     await deviceRow.getByRole("button", { name: "Sign out", exact: true }).click();
-    await deviceRow.getByRole("button", { name: "Sign out", exact: true }).click();
+    await page
+      .getByRole("alertdialog")
+      .getByRole("button", { name: "Sign out", exact: true })
+      .click();
     await deviceRow.waitFor({ state: "detached", timeout: 20_000 });
 
     // Server-side proof the session ended: the daemon dropped the allowlisted
