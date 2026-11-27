@@ -16,7 +16,7 @@ import { cva, type VariantProps } from "class-variance-authority";
 import { CheckIcon, ChevronDownIcon } from "lucide-react";
 import type * as React from "react";
 
-import { itemRow, popupSurface } from "@/components/ui/menu";
+import { itemRow, popupSurface, sheetSurface } from "@/components/ui/menu";
 import { cn } from "@/lib/utils";
 
 type WithClassName<P> = Omit<P, "className" | "children" | "disabled"> & {
@@ -99,12 +99,7 @@ function SelectContent({
     <SelectContentPrimitive
       sideOffset={sideOffset}
       collisionPadding={collisionPadding}
-      className={cn(
-        popupSurface,
-        "min-w-(--anchor-width)",
-        "data-[presentation=sheet]:max-h-[80dvh] data-[presentation=sheet]:w-full data-[presentation=sheet]:max-w-none data-[presentation=sheet]:rounded-none data-[presentation=sheet]:rounded-t-xl data-[presentation=sheet]:p-2 data-[presentation=sheet]:pb-[max(--spacing(2),env(safe-area-inset-bottom))]",
-        className,
-      )}
+      className={cn(popupSurface, "min-w-(--anchor-width)", sheetSurface, className)}
       {...props}
     />
   );

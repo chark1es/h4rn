@@ -5,6 +5,14 @@ import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { ChipSelect } from "@/components/common/ChipSelect";
+import { Menu, MenuContent, MenuItem, MenuTrigger } from "@/components/ui/menu";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 
 afterEach(cleanup);
 
@@ -93,5 +101,40 @@ describe("ChipSelect", () => {
       fireEvent.click(screen.getByRole("option", { name: "Apple" }));
     });
     expect(onChange).toHaveBeenCalledWith("apple");
+  });
+});
+
+describe("Select as a sheet", () => {
+  it("uses the same sheet surface as Menu", async () => {
+    render(
+      <>
+        <Select presentation="sheet" defaultValue="apple">
+          <SelectTrigger aria-label="Fruit">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="apple">Apple</SelectItem>
+          </SelectContent>
+        </Select>
+        <Menu presentation="sheet">
+          <MenuTrigger>Actions</MenuTrigger>
+          <MenuContent>
+            <MenuItem>Rename</MenuItem>
+          </MenuContent>
+        </Menu>
+      </>,
+    );
+    await act(async () => {
+      fireEvent.click(screen.getByRole("combobox", { name: "Fruit" }));
+    });
+    const select = document.querySelector('[data-slot="select-content"]');
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Actions" }));
+    });
+    const menu = document.querySelector('[data-slot="menu-content"]');
+    const sheetClasses = (el: Element | null) =>
+      [...(el?.classList ?? [])].filter((name) => name.startsWith("data-[presentation=sheet]:"));
+    expect(sheetClasses(menu).length).toBeGreaterThan(0);
+    expect(sheetClasses(select)).toEqual(sheetClasses(menu));
   });
 });

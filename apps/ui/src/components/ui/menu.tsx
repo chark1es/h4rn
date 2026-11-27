@@ -48,12 +48,19 @@ const popupSurface = [
   "motion-reduce:transition-opacity",
 ];
 
-/** A phone bottom sheet: full width, top corners, 44 px rows, clear of the home indicator. */
+/**
+ * A phone bottom sheet: full width, top corners, 44 px rows, clear of the
+ * home indicator, the modal shadow, and a slide from the bottom edge in place
+ * of the popup's scale and fade.
+ */
 const sheetSurface = [
   "data-[presentation=sheet]:max-h-[80dvh] data-[presentation=sheet]:w-full data-[presentation=sheet]:max-w-none",
   "data-[presentation=sheet]:rounded-none data-[presentation=sheet]:rounded-t-xl data-[presentation=sheet]:border-x-0 data-[presentation=sheet]:border-b-0",
   "data-[presentation=sheet]:p-2 data-[presentation=sheet]:pb-[max(--spacing(2),env(safe-area-inset-bottom))] data-[presentation=sheet]:shadow-modal",
-  "data-[presentation=sheet]:transition-none data-[presentation=sheet]:data-starting-style:scale-100 data-[presentation=sheet]:data-starting-style:opacity-100",
+  "data-[presentation=sheet]:transition-[translate] data-[presentation=sheet]:duration-modal",
+  "data-[presentation=sheet]:data-starting-style:translate-y-full data-[presentation=sheet]:data-starting-style:scale-100 data-[presentation=sheet]:data-starting-style:opacity-100",
+  "data-[presentation=sheet]:data-ending-style:translate-y-full data-[presentation=sheet]:data-ending-style:scale-100 data-[presentation=sheet]:data-ending-style:opacity-100 data-[presentation=sheet]:data-ending-style:duration-modal-exit",
+  "motion-reduce:data-[presentation=sheet]:transition-none",
 ];
 
 /**
@@ -365,4 +372,5 @@ export {
   MenuSubTrigger,
   MenuTrigger,
   popupSurface,
+  sheetSurface,
 };
