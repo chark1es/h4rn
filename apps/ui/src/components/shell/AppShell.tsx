@@ -40,7 +40,6 @@ import {
 } from "@/components/ui/menu";
 import { selectTriggerVariants } from "@/components/ui/select";
 import { Toaster } from "@/components/ui/sonner";
-import { Tip } from "@/components/ui/tooltip";
 import { AttachmentTray } from "@/features/attachments/AttachmentTray";
 import { FILE_ACCEPT } from "@/features/attachments/picker";
 import { useAttachmentDrafts, useAttachShortcut } from "@/features/attachments/use-attachments";
@@ -74,6 +73,7 @@ import {
 } from "@/lib/drafts";
 import { HARNESS_LABELS, harnessLabel, harnessSeed, machineSeed } from "@/lib/entities";
 import { projectName } from "@/lib/grouping";
+import { titleWithShortcut } from "@/lib/keybindings";
 import { HARNESS_MODELS } from "@/lib/models";
 import { NewThreadDraftSession } from "@/lib/newThreadDraft";
 import {
@@ -600,28 +600,26 @@ export function InboxDetailEmpty() {
               onChange={(event) => attachments.onInputChange(event.target.files)}
             />
             <div className="q-comp-f">
-              <Tip label={t("composer:attach.label")} command="composer.attach">
-                <button
-                  type="button"
-                  disabled={!writable}
-                  onClick={attachments.openPicker}
-                  aria-label={t("composer:attach.label")}
-                  className="q-ibtn"
-                >
-                  <PaperclipIcon className="q-icon" strokeWidth={1.5} aria-hidden />
-                </button>
-              </Tip>
-              <Tip label={t("composer:mention")}>
-                <button
-                  type="button"
-                  disabled={!writable}
-                  onClick={insertMention}
-                  aria-label={t("composer:mention")}
-                  className="q-ibtn"
-                >
-                  <AtSignIcon className="q-icon" strokeWidth={1.5} aria-hidden />
-                </button>
-              </Tip>
+              <button
+                type="button"
+                disabled={!writable}
+                onClick={attachments.openPicker}
+                aria-label={t("composer:attach.label")}
+                title={titleWithShortcut(t("composer:attach.label"), "composer.attach")}
+                className="q-ibtn"
+              >
+                <PaperclipIcon className="q-icon" strokeWidth={1.5} aria-hidden />
+              </button>
+              <button
+                type="button"
+                disabled={!writable}
+                onClick={insertMention}
+                aria-label={t("composer:mention")}
+                title={t("composer:mention")}
+                className="q-ibtn"
+              >
+                <AtSignIcon className="q-icon" strokeWidth={1.5} aria-hidden />
+              </button>
               <span className="grow" />
 
               <Menu>
