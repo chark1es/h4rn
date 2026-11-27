@@ -20,6 +20,7 @@ import { useTranslation } from "react-i18next";
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
 import { Popover } from "@/components/common/Popover";
 import { LibraryErrorBanner } from "@/components/pages/LibraryErrorBanner";
+import { PhoneLargeTitle, PhoneNavButton } from "@/components/shell/PhoneNav";
 import { Button } from "@/components/ui/button";
 import { Menu, MenuContent, MenuItem, MenuSeparator, MenuTrigger } from "@/components/ui/menu";
 import type { HarnessKind, HostId, McpServerView } from "@/gen";
@@ -563,22 +564,38 @@ function ServerList({
   const { t } = useTranslation(["library", "settings", "common"]);
   return (
     <main className="q-main" aria-label={t("settings:nav.mcpServers")}>
+      {isPhone ? (
+        <PhoneLargeTitle
+          title={t("settings:nav.mcpServers")}
+          summary={t("mcp.summary", { count: servers.length })}
+          actions={
+            <>
+              <PhoneNavButton label={t("mcp.import")} onClick={onImport}>
+                <UploadIcon className="q-icon s22" strokeWidth={1.5} aria-hidden />
+              </PhoneNavButton>
+              <PhoneNavButton label={t("settings:nav.addMcp")} onClick={onAdd}>
+                <PlusIcon className="q-icon s22" strokeWidth={1.5} aria-hidden />
+              </PhoneNavButton>
+            </>
+          }
+        />
+      ) : null}
       <div className="q-page">
         <div className="q-form wide">
-          <div className="mb-5 flex flex-wrap items-start gap-3">
-            <div className="grow basis-0">
-              <h1 className={isPhone ? "text-2xl font-semibold" : "text-xl font-semibold"}>
-                {t("settings:nav.mcpServers")}
-              </h1>
-              <div className="q-muted mt-1">{t("mcp.summary", { count: servers.length })}</div>
+          {isPhone ? null : (
+            <div className="mb-5 flex flex-wrap items-start gap-3">
+              <div className="grow basis-0">
+                <h1 className="text-xl font-semibold">{t("settings:nav.mcpServers")}</h1>
+                <div className="q-muted mt-1">{t("mcp.summary", { count: servers.length })}</div>
+              </div>
+              <Button variant="secondary" onClick={onImport}>
+                <UploadIcon className="q-icon s14" aria-hidden /> {t("mcp.import")}
+              </Button>
+              <Button onClick={onAdd}>
+                <PlusIcon className="q-icon s14" aria-hidden /> {t("common:add")}
+              </Button>
             </div>
-            <Button variant="secondary" onClick={onImport}>
-              <UploadIcon className="q-icon s14" aria-hidden /> {t("mcp.import")}
-            </Button>
-            <Button onClick={onAdd}>
-              <PlusIcon className="q-icon s14" aria-hidden /> {t("common:add")}
-            </Button>
-          </div>
+          )}
 
           <LibraryErrorBanner
             error={error}

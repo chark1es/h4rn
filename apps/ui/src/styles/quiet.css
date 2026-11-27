@@ -4120,7 +4120,7 @@ fieldset.q-seg-fs {
     align-items: center;
   }
   .q-ph-nav-actions .navbtn {
-    min-width: 40px;
+    min-width: 44px;
     height: 44px;
     padding: 0 6px;
     color: var(--accent-tx);
@@ -4132,7 +4132,7 @@ fieldset.q-seg-fs {
     color: var(--accent-tx);
   }
   .q-ph-th-title {
-    padding: 0 20px 10px;
+    padding: 0 16px 10px;
     border-bottom: 1px solid var(--line);
     flex: none;
   }
@@ -4390,6 +4390,14 @@ fieldset.q-seg-fs {
   font-weight: 600;
   letter-spacing: -0.02em;
   padding: 2px 16px 10px;
+  flex: none;
+}
+.q-ph-sub {
+  margin: -6px 0 0;
+  padding: 0 16px 12px;
+  color: var(--fg-2);
+  font-size: 13px;
+  line-height: 18px;
   flex: none;
 }
 .q-ph-seg {

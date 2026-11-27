@@ -13,6 +13,7 @@ import { Trans, useTranslation } from "react-i18next";
 
 import { ChipSelect } from "@/components/common/ChipSelect";
 import { LibraryErrorBanner } from "@/components/pages/LibraryErrorBanner";
+import { PhoneLargeTitle, PhoneNavButton } from "@/components/shell/PhoneNav";
 import { Button } from "@/components/ui/button";
 import type { HarnessKind, SkillConflict, SkillInstallState, SkillSummary } from "@/gen";
 import { useIsPhone } from "@/hooks/use-media-query";
@@ -351,27 +352,52 @@ export function SkillsPage() {
   return (
     <>
       <main className="q-main" aria-label={t("settings:nav.skills")}>
+        {isPhone ? (
+          <PhoneLargeTitle
+            title={t("settings:nav.skills")}
+            summary={
+              loading && !inventory
+                ? t("skills.loadingRegistry")
+                : t("skills.summaryShort", { installed: skills.length, count: detected })
+            }
+            actions={
+              <>
+                <PhoneNavButton
+                  label={t("skills.findExisting")}
+                  onClick={() => setImportOpen(true)}
+                >
+                  <DownloadIcon className="q-icon s22" strokeWidth={1.5} aria-hidden />
+                </PhoneNavButton>
+                <PhoneNavButton
+                  label={t("dialogs:skills.add.submit")}
+                  onClick={() => setAddOpen(true)}
+                >
+                  <PlusIcon className="q-icon s22" strokeWidth={1.5} aria-hidden />
+                </PhoneNavButton>
+              </>
+            }
+          />
+        ) : null}
         <div className="q-page">
           <div className="q-form wide">
-            <div className="mb-5 flex flex-wrap items-start gap-3">
-              <div className="grow basis-0">
-                <h1 className="text-xl font-semibold">{t("settings:nav.skills")}</h1>
-                <div className="q-muted mt-1">
-                  {loading && !inventory
-                    ? t("skills.loadingRegistry")
-                    : t(isPhone ? "skills.summaryShort" : "skills.summary", {
-                        installed: skills.length,
-                        count: detected,
-                      })}
+            {isPhone ? null : (
+              <div className="mb-5 flex flex-wrap items-start gap-3">
+                <div className="grow basis-0">
+                  <h1 className="text-xl font-semibold">{t("settings:nav.skills")}</h1>
+                  <div className="q-muted mt-1">
+                    {loading && !inventory
+                      ? t("skills.loadingRegistry")
+                      : t("skills.summary", { installed: skills.length, count: detected })}
+                  </div>
                 </div>
+                <Button variant="secondary" onClick={() => setImportOpen(true)}>
+                  <DownloadIcon className="q-icon s14" aria-hidden /> {t("skills.findExisting")}
+                </Button>
+                <Button onClick={() => setAddOpen(true)}>
+                  <PlusIcon className="q-icon s14" aria-hidden /> {t("dialogs:skills.add.submit")}
+                </Button>
               </div>
-              <Button variant="secondary" onClick={() => setImportOpen(true)}>
-                <DownloadIcon className="q-icon s14" aria-hidden /> {t("skills.findExisting")}
-              </Button>
-              <Button onClick={() => setAddOpen(true)}>
-                <PlusIcon className="q-icon s14" aria-hidden /> {t("dialogs:skills.add.submit")}
-              </Button>
-            </div>
+            )}
 
             <SyncBanner />
 

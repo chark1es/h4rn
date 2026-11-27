@@ -14,10 +14,10 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-
 import { AgentGlyph } from "@/components/agent/AgentGlyph";
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
 import { ChipSelect } from "@/components/common/ChipSelect";
+import { PhoneLargeTitle, PhoneNavButton } from "@/components/shell/PhoneNav";
 import { Markdown } from "@/components/thread/Markdown";
 import { Button } from "@/components/ui/button";
 import {
@@ -29,6 +29,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { Tip } from "@/components/ui/tooltip";
 import {
   accountForRepo,
   appendComment,
@@ -65,6 +66,7 @@ import type {
   PrLinkedThread,
   ThreadSummary,
 } from "@/gen";
+import { useIsPhone } from "@/hooks/use-media-query";
 import { glyphForThread } from "@/lib/agent";
 import { userSeed } from "@/lib/entities";
 import { formatAge, formatList, formatNumber, formatRelativeTime } from "@/lib/i18n";
@@ -283,6 +285,7 @@ function NoRepo({ onSettings }: { onSettings: () => void }) {
 
 export function PullRequestsPage() {
   const { t } = useTranslation(["pullRequests", "common"]);
+  const isPhone = useIsPhone();
   const threads = useApp((state) => state.threads);
   // A cold deep link mounts this page before the socket handshake finishes.
   const connection = useApp((state) => state.connection.status);
@@ -473,9 +476,22 @@ export function PullRequestsPage() {
 
   return (
     <main className="q-main" aria-label={t("title")}>
+      {isPhone ? (
+        <PhoneLargeTitle
+          title={t("title")}
+          actions={
+            <PhoneNavButton
+              label={t("refresh")}
+              onClick={() => setReloadNonce((value) => value + 1)}
+            >
+              <RotateCwIcon className="q-icon s22" strokeWidth={1.5} aria-hidden />
+            </PhoneNavButton>
+          }
+        />
+      ) : null}
       <header className="q-page-head q-pr-list-head">
-        <h1>{t("title")}</h1>
-        <span className="q-faint" style={{ fontSize: 12 }}>
+        {isPhone ? null : <h1>{t("title")}</h1>}
+        <span className="q-faint text-xs">
           {repo.owner}/{repo.repo}
         </span>
         {repos.length > 1 ? (
@@ -526,14 +542,18 @@ export function PullRequestsPage() {
             setSelected(pr.summary.number);
           }}
         />
-        <button
-          type="button"
-          className="q-ibtn"
-          aria-label={t("refresh")}
-          onClick={() => setReloadNonce((value) => value + 1)}
-        >
-          <RotateCwIcon className="q-icon" strokeWidth={1.5} aria-hidden />
-        </button>
+        {isPhone ? null : (
+          <Tip label={t("refresh")}>
+            <button
+              type="button"
+              className="q-ibtn"
+              aria-label={t("refresh")}
+              onClick={() => setReloadNonce((value) => value + 1)}
+            >
+              <RotateCwIcon className="q-icon" strokeWidth={1.5} aria-hidden />
+            </button>
+          </Tip>
+        )}
       </header>
       <div className="q-scroll">
         {listError ? (

@@ -3,6 +3,7 @@ import { useEffect } from "react";
 import { useTranslation } from "react-i18next";
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
 import { ChipSelect } from "@/components/common/ChipSelect";
+import { PhoneLargeTitle } from "@/components/shell/PhoneNav";
 import { Tip } from "@/components/ui/tooltip";
 import type {
   LimitStatus,
@@ -815,14 +816,9 @@ export function UsagePage() {
   if (isPhone) {
     return (
       <main className="q-main" aria-label={t("title")}>
-        <div className="q-ph-nav">
-          <span style={{ width: 44 }} />
-          <span className="ttl" />
-          <ScopePicker compact />
-        </div>
-        <h1 className="q-ph-lt">{t("title")}</h1>
+        <PhoneLargeTitle title={t("title")} actions={<ScopePicker compact />} />
         <div className="q-ph-body">
-          <div style={{ padding: "0 16px 10px" }}>
+          <div className="px-4 pb-2.5">
             <RangePicker compact />
           </div>
           <OfflineNote />
@@ -831,15 +827,7 @@ export function UsagePage() {
             <Stats report={report} phone />
           </div>
           <div className="q-ph-group" style={{ padding: "14px 16px" }}>
-            <div
-              style={{
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "space-between",
-                gap: 8,
-                marginBottom: 10,
-              }}
-            >
+            <div className="mb-2.5 flex items-center justify-between gap-2">
               <GroupPicker />
               <MetricPicker />
             </div>
