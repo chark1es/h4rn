@@ -50,7 +50,7 @@ function DownloadButton({ attachment, className }: { attachment: Attachment; cla
       aria-label={t("attachments.download", { name: attachment.name })}
       title={t("attachments.download", { name: attachment.name })}
       className={cn(
-        "flex size-10 shrink-0 items-center justify-center rounded-md text-fg-3 transition-colors duration-[var(--dur-instant)] hover:bg-bg hover:text-fg focus-visible:ring-2 focus-visible:ring-focus focus-visible:outline-none disabled:opacity-60 sm:size-7",
+        "flex size-10 shrink-0 items-center justify-center rounded-md text-fg-3 transition-colors duration-micro hover:bg-bg hover:text-fg focus-visible:ring-2 focus-visible:ring-focus focus-visible:outline-none disabled:opacity-60 sm:size-7",
         className,
       )}
       disabled={busy}
@@ -92,7 +92,7 @@ function Thumbnail({ attachment, onOpen }: { attachment: Attachment; onOpen: () 
           src={url}
           alt={attachment.name}
           loading="lazy"
-          className="size-full object-cover transition-transform duration-[var(--dur-base)] ease-[var(--ease-out)] group-hover:scale-[1.015]"
+          className="size-full object-cover transition-transform duration-popup ease-enter group-hover:scale-[1.015]"
         />
       )}
       <span className="absolute inset-x-0 bottom-0 truncate bg-[var(--scrim)] px-1.5 py-0.5 text-left text-small text-fg">
@@ -146,7 +146,7 @@ function LightboxBody({ attachment, onClose }: { attachment: Attachment; onClose
           <button
             type="button"
             onClick={onClose}
-            className="h-8 rounded-md border border-line px-2.5 text-small font-medium text-fg transition-colors duration-[var(--dur-instant)] hover:bg-bg-side focus-visible:ring-2 focus-visible:ring-focus focus-visible:outline-none"
+            className="h-8 rounded-md border border-line px-2.5 text-small font-medium text-fg transition-colors duration-micro hover:bg-bg-side focus-visible:ring-2 focus-visible:ring-focus focus-visible:outline-none"
           >
             {t("common:close")}
           </button>

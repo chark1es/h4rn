@@ -66,6 +66,16 @@
 
   --radius: 8px;
 
+  /* Exits run at about two thirds of the entrance, on an ease-in curve. */
+  --duration-micro: 120ms;
+  --duration-popup: 180ms;
+  --duration-modal: 240ms;
+  --duration-micro-exit: 80ms;
+  --duration-popup-exit: 120ms;
+  --duration-modal-exit: 160ms;
+  --ease-enter: cubic-bezier(0.2, 0, 0, 1);
+  --ease-exit: cubic-bezier(0.4, 0, 1, 1);
+
   /*
    * shadcn names over the Quiet native palette. One clash: Quiet's --accent is
    * the blue that means "you're needed" and quiet.css reads it everywhere, so
@@ -253,6 +263,15 @@
 
   --shadow-popup: var(--shadow-popup);
   --shadow-modal: var(--shadow-modal);
+
+  --transition-duration-micro: var(--duration-micro);
+  --transition-duration-popup: var(--duration-popup);
+  --transition-duration-modal: var(--duration-modal);
+  --transition-duration-micro-exit: var(--duration-micro-exit);
+  --transition-duration-popup-exit: var(--duration-popup-exit);
+  --transition-duration-modal-exit: var(--duration-modal-exit);
+  --ease-enter: var(--ease-enter);
+  --ease-exit: var(--ease-exit);
 }
 
 /* 13 px is the default UI size; line heights are fixed so rows don't drift. */

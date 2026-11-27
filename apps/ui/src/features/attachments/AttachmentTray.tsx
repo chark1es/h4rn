@@ -134,7 +134,7 @@ export function AttachmentTray({
               <button
                 type="button"
                 onClick={() => onRetry(task.key)}
-                className="flex h-8 shrink-0 items-center gap-1 rounded-md border border-danger/40 px-1.5 text-small font-medium text-danger transition-colors duration-[var(--dur-instant)] hover:bg-danger-soft focus-visible:ring-2 focus-visible:ring-focus focus-visible:outline-none sm:h-6"
+                className="flex h-8 shrink-0 items-center gap-1 rounded-md border border-danger/40 px-1.5 text-small font-medium text-danger transition-colors duration-micro hover:bg-danger-soft focus-visible:ring-2 focus-visible:ring-focus focus-visible:outline-none sm:h-6"
               >
                 <RotateCcwIcon className="size-3" aria-hidden />
                 {t("common:retry")}

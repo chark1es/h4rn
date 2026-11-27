@@ -185,36 +185,36 @@ button {
   /* Radix state animation utilities used by the shadcn skins. */
   [data-slot="dialog-overlay"][data-state="open"],
   [data-slot="sheet-overlay"][data-state="open"] {
-    animation: h4rn-fade-in var(--dur-fast) var(--ease-out);
+    animation: h4rn-fade-in var(--duration-modal) var(--ease-enter);
   }
 
   [data-slot="dialog-overlay"][data-state="closed"],
   [data-slot="sheet-overlay"][data-state="closed"] {
-    animation: h4rn-fade-out var(--dur-fast) var(--ease-in) forwards;
+    animation: h4rn-fade-out var(--duration-modal-exit) var(--ease-exit) forwards;
   }
 
   [data-slot="dialog-content"][data-state="open"] {
-    animation: h4rn-dialog-in var(--dur-base) var(--ease-out);
+    animation: h4rn-dialog-in var(--duration-modal) var(--ease-enter);
   }
 
   [data-slot="dialog-content"][data-state="closed"] {
-    animation: h4rn-fade-out var(--dur-fast) var(--ease-in) forwards;
+    animation: h4rn-fade-out var(--duration-modal-exit) var(--ease-exit) forwards;
   }
 
   [data-slot="dropdown-menu-content"][data-state="open"] {
-    animation: h4rn-pop-in var(--dur-fast) var(--ease-out);
+    animation: h4rn-pop-in var(--duration-popup) var(--ease-enter);
   }
 
   [data-slot="sheet-content"][data-side="bottom"][data-state="open"] {
-    animation: h4rn-sheet-up var(--dur-slow) var(--ease-out);
+    animation: h4rn-sheet-up var(--duration-modal) var(--ease-enter);
   }
 
   [data-slot="sheet-content"][data-side="bottom"][data-state="closed"] {
-    animation: h4rn-sheet-down var(--dur-fast) var(--ease-in) forwards;
+    animation: h4rn-sheet-down var(--duration-modal-exit) var(--ease-exit) forwards;
   }
 
   [data-slot="sheet-content"][data-side="right"][data-state="open"] {
-    animation: h4rn-sheet-right var(--dur-slow) var(--ease-out);
+    animation: h4rn-sheet-right var(--duration-modal) var(--ease-enter);
   }
 
   [data-slot="skeleton"] {

@@ -138,9 +138,9 @@
   font-size: 13px;
   white-space: nowrap;
   transition:
-    background var(--dur-1) var(--ease-out),
-    box-shadow var(--dur-1) var(--ease-out),
-    color var(--dur-1);
+    background var(--duration-micro) var(--ease-enter),
+    box-shadow var(--duration-micro) var(--ease-enter),
+    color var(--duration-micro);
 }
 .q-btn.primary {
   background: var(--accent);
@@ -204,8 +204,8 @@
   border-radius: 6px;
   box-shadow: inset 0 0 0 1px transparent;
   transition:
-    background var(--dur-1),
-    box-shadow var(--dur-1);
+    background var(--duration-micro),
+    box-shadow var(--duration-micro);
 }
 .q-keybind:hover {
   background: var(--hover);
@@ -239,8 +239,8 @@
   color: var(--fg-2);
   flex: none;
   transition:
-    background var(--dur-1),
-    color var(--dur-1);
+    background var(--duration-micro),
+    color var(--duration-micro);
 }
 .q-ibtn:hover {
   background: var(--hover);
@@ -290,8 +290,8 @@
   gap: 6px;
   padding: 0 10px;
   transition:
-    background var(--dur-1),
-    color var(--dur-1);
+    background var(--duration-micro),
+    color var(--duration-micro);
   white-space: nowrap;
 }
 .q-seg > button:hover {
@@ -385,7 +385,7 @@ fieldset.q-seg-fs {
   position: relative;
   flex: none;
   box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--fg) 12%, transparent);
-  transition: background var(--dur-2) var(--ease-out);
+  transition: background var(--duration-popup) var(--ease-enter);
 }
 .q-switch::after {
   content: "";
@@ -397,7 +397,7 @@ fieldset.q-seg-fs {
   border-radius: 50%;
   background: #fff;
   box-shadow: 0 1px 2px oklch(0 0 0 / 0.25);
-  transition: transform var(--dur-2) var(--ease-out);
+  transition: transform var(--duration-popup) var(--ease-enter);
 }
 .q-switch[aria-checked="true"] {
   background: var(--accent);
@@ -672,7 +672,7 @@ fieldset.q-seg-fs {
   border-radius: 6px;
   color: var(--fg-2);
   font-weight: 500;
-  transition: background var(--dur-1);
+  transition: background var(--duration-micro);
   width: 100%;
   text-align: left;
 }
@@ -781,7 +781,7 @@ fieldset.q-seg-fs {
   padding: 0 8px 0 10px;
   border-radius: 6px;
   color: var(--fg-2);
-  transition: background var(--dur-1);
+  transition: background var(--duration-micro);
   text-align: left;
 }
 .q-pg-tog:hover {
@@ -815,19 +815,19 @@ fieldset.q-seg-fs {
 .q-pg-tog .chev {
   color: var(--fg-3);
   flex: none;
-  transition: transform var(--dur-2) var(--ease-out);
+  transition: transform var(--duration-popup) var(--ease-enter);
 }
 .q-tool .chev {
   color: var(--fg-3);
   opacity: 0;
   transition:
-    opacity var(--dur-1),
-    transform var(--dur-2) var(--ease-out);
+    opacity var(--duration-micro),
+    transform var(--duration-popup) var(--ease-enter);
   flex: none;
 }
 .q-ph-pg-h .chev {
   color: var(--fg-3);
-  transition: transform var(--dur-2) var(--ease-out);
+  transition: transform var(--duration-popup) var(--ease-enter);
 }
 .q-pg-tog[aria-expanded="false"] .chev {
   transform: rotate(-90deg);
@@ -839,7 +839,7 @@ fieldset.q-seg-fs {
   height: 24px;
   opacity: 0;
   background: var(--bg-side);
-  transition: opacity var(--dur-1);
+  transition: opacity var(--duration-micro);
 }
 .q-pg-h:hover .q-pg-add,
 .q-pg-h:focus-within .q-pg-add {
@@ -879,7 +879,7 @@ fieldset.q-seg-fs {
   padding: 9px 10px 10px;
   border-radius: 8px;
   position: relative;
-  transition: background var(--dur-1);
+  transition: background var(--duration-micro);
   text-align: left;
   cursor: pointer;
 }
@@ -1095,7 +1095,7 @@ fieldset.q-seg-fs {
   left: 3.5px;
   width: 1px;
   background: transparent;
-  transition: background var(--dur-1) var(--ease-out);
+  transition: background var(--duration-micro) var(--ease-enter);
 }
 .q-resizer:hover::after,
 .q-resizer.drag::after,
@@ -1677,8 +1677,8 @@ fieldset.q-seg-fs {
   border-radius: 999px;
   color: var(--fg-3);
   transition:
-    background var(--dur-1),
-    color var(--dur-1);
+    background var(--duration-micro),
+    color var(--duration-micro);
 }
 .q-att-x:hover {
   background: var(--fill-2);
@@ -1694,7 +1694,7 @@ fieldset.q-seg-fs {
   bottom: 0;
   height: 2px;
   background: var(--accent);
-  transition: width var(--dur-2);
+  transition: width var(--duration-popup);
 }
 @media (pointer: coarse) {
   .q-att-x {
@@ -1753,9 +1753,9 @@ fieldset.q-seg-fs {
   color: var(--fg-3);
   opacity: 0;
   transition:
-    opacity var(--dur-1),
-    background var(--dur-1),
-    color var(--dur-1);
+    opacity var(--duration-micro),
+    background var(--duration-micro),
+    color var(--duration-micro);
 }
 .q-turn:hover .q-turn-menu,
 .q-you-msg:hover .q-turn-menu,
@@ -2315,8 +2315,8 @@ fieldset.q-seg-fs {
     var(--shadow-popup);
   padding: 14px 14px 12px 16px;
   transition:
-    opacity var(--dur-2) var(--ease-out),
-    transform var(--dur-2) var(--ease-out);
+    opacity var(--duration-popup) var(--ease-enter),
+    transform var(--duration-popup) var(--ease-enter);
 }
 .q-ask-h {
   display: flex;
@@ -2406,7 +2406,7 @@ fieldset.q-seg-fs {
     inset 0 0 0 1px var(--line),
     var(--shadow-popup);
   padding: 4px;
-  animation: q-fade var(--dur-1) var(--ease-out);
+  animation: q-fade var(--duration-micro) var(--ease-enter);
 }
 .dark .q-comp-menu {
   background: oklch(0.215 0.005 260);
@@ -3353,7 +3353,7 @@ fieldset.q-seg-fs {
   inset: 0;
   background: var(--scrim);
   z-index: 20;
-  animation: q-fade var(--dur-2) var(--ease-out);
+  animation: q-fade var(--duration-popup) var(--ease-enter);
 }
 @keyframes q-fade {
   from {
@@ -3383,7 +3383,7 @@ fieldset.q-seg-fs {
     var(--shadow-modal),
     inset 0 0 0 1px var(--line);
   overflow: hidden;
-  animation: q-pop var(--dur-2) var(--ease-out);
+  animation: q-pop var(--duration-popup) var(--ease-enter);
 }
 @media (max-width: 720px) {
   .q-palette {
@@ -3542,7 +3542,7 @@ fieldset.q-seg-fs {
   background: var(--hover);
 }
 .q-fchev {
-  transition: transform var(--dur-1) var(--ease-out);
+  transition: transform var(--duration-micro) var(--ease-enter);
 }
 .q-fchev.open {
   transform: rotate(90deg);
@@ -5008,7 +5008,7 @@ fieldset.q-seg-fs {
   border: 0;
   padding: 0;
   background: var(--scrim);
-  animation: q-fade var(--dur-2) var(--ease-out);
+  animation: q-fade var(--duration-popup) var(--ease-enter);
 }
 .q-ph-sheet-head {
   display: flex;
@@ -5043,7 +5043,7 @@ fieldset.q-seg-fs {
   border-radius: 14px 14px 0 0;
   box-shadow: var(--shadow-modal);
   padding: 8px 0 max(34px, env(safe-area-inset-bottom, 0px));
-  animation: q-rise var(--dur-3) var(--ease-out);
+  animation: q-rise var(--duration-modal) var(--ease-enter);
 }
 .dark .q-ph-sheet {
   background: oklch(0.215 0.005 260);
@@ -5290,7 +5290,7 @@ fieldset.q-seg-fs {
   max-width: 340px;
   min-width: 0;
   flex: 0 1 auto;
-  transition: background var(--dur-1);
+  transition: background var(--duration-micro);
 }
 .q-tchip:hover {
   background: var(--hover);
@@ -5346,7 +5346,7 @@ fieldset.q-seg-fs {
   white-space: nowrap;
   min-width: 0;
   flex-shrink: 1;
-  transition: color var(--dur-1);
+  transition: color var(--duration-micro);
 }
 .q-rp-tab-name {
   min-width: 0;
@@ -5535,7 +5535,7 @@ fieldset.q-seg-fs {
   padding: 10px 12px 10px 16px;
   border-top: 1px solid var(--line);
   text-align: left;
-  transition: background var(--dur-1);
+  transition: background var(--duration-micro);
 }
 .q-agentchg:hover {
   background: var(--hover);
@@ -5573,9 +5573,9 @@ fieldset.q-seg-fs {
   color: var(--fg-3);
   opacity: 0.55;
   transition:
-    opacity var(--dur-1),
-    background var(--dur-1),
-    color var(--dur-1);
+    opacity var(--duration-micro),
+    background var(--duration-micro),
+    color var(--duration-micro);
 }
 .q-frow:hover .q-fopen,
 .q-fopen:focus-visible {
@@ -6187,7 +6187,7 @@ fieldset.q-seg-fs {
   mask:
     url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m9 18 6-6-6-6'/%3E%3C/svg%3E")
     center / contain no-repeat;
-  transition: transform var(--dur-1) var(--ease-out);
+  transition: transform var(--duration-micro) var(--ease-enter);
 }
 .q-disclosure[open] > summary::before {
   transform: rotate(90deg);
@@ -6302,7 +6302,7 @@ fieldset.q-seg-fs {
   height: 24px;
   opacity: 0;
   background: var(--bg-side);
-  transition: opacity var(--dur-1);
+  transition: opacity var(--duration-micro);
 }
 .q-pg-h:hover .q-pg-more,
 .q-pg-h:focus-within .q-pg-more,
@@ -6378,8 +6378,8 @@ fieldset.q-seg-fs {
   color: var(--fg-2);
   text-align: left;
   transition:
-    background var(--dur-1),
-    box-shadow var(--dur-1);
+    background var(--duration-micro),
+    box-shadow var(--duration-micro);
 }
 .q-addp-mode:hover {
   background: var(--hover);
@@ -7075,7 +7075,7 @@ fieldset.q-seg-fs {
   border: 0;
   padding: 0;
   background: var(--scrim);
-  animation: q-fade var(--dur-2) var(--ease-out);
+  animation: q-fade var(--duration-popup) var(--ease-enter);
 }
 .q-switch-dialog {
   position: fixed;
