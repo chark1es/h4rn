@@ -26,13 +26,16 @@ function Table({
   revoking?: string | null;
 }) {
   const [devices, setDevices] = useState(KEYS.map(device));
+  const [running, setRunning] = useState<string | null>(null);
   return (
     <DirectDevicesTable
       devices={devices}
       now={Date.now()}
-      revoking={revoking}
+      revoking={revoking ?? running}
       onRevoke={async (key) => {
+        setRunning(key);
         const ok = await onRevoke(key);
+        setRunning(null);
         if (ok) setDevices((list) => list.filter((d) => d.key !== key));
         return ok;
       }}
@@ -79,6 +82,34 @@ describe("DirectDevicesTable", () => {
     await waitFor(() =>
       expect(document.activeElement).toBe(screen.getByRole("button", { name: `Revoke ${second}` })),
     );
+  });
+
+  it("returns focus to the row's Revoke when a slow revoke fails", async () => {
+    let fail = () => {};
+    const onRevoke = vi.fn(
+      () =>
+        new Promise<boolean>((resolve) => {
+          fail = () => resolve(false);
+        }),
+    );
+    render(<Table onRevoke={onRevoke} />);
+    const first = directDeviceName(KEYS[0] as string);
+    const trigger = screen.getByRole("button", { name: `Revoke ${first}` });
+    act(() => trigger.focus());
+    fireEvent.click(trigger);
+
+    const dialog = await screen.findByRole("alertdialog");
+    await act(async () => {
+      fireEvent.click(
+        Array.from(dialog.querySelectorAll("button")).find(
+          (b) => b.textContent === "Revoke",
+        ) as HTMLElement,
+      );
+    });
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
+    expect(trigger.hasAttribute("disabled")).toBe(true);
+    await act(async () => fail());
+    await waitFor(() => expect(document.activeElement).toBe(trigger));
   });
 
   it("disables a row's Revoke while its request runs", () => {

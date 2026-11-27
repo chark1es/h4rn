@@ -19,9 +19,11 @@ function focusLost(): boolean {
 
 /**
  * Remembers the controls around `trigger` before an action that may remove it
- * (and the row around it). Call the result once the action has finished: if
- * the trigger is gone and focus went with it, focus moves to the next control
- * after the row, or else the one before.
+ * (and the row around it). Call the result once the action has finished. If
+ * the trigger is still there (the action failed or kept the row), focus goes
+ * back to it: it was disabled while the action ran, so the dialog closing put
+ * focus somewhere else. If the trigger is gone and focus went with it, focus
+ * moves to the next control after the row, or else the one before.
  */
 export function rememberNeighbours(trigger: HTMLElement): () => Promise<void> {
   const row = trigger.closest<HTMLElement>("tr, li, [role='row']") ?? trigger;
@@ -32,7 +34,15 @@ export function rememberNeighbours(trigger: HTMLElement): () => Promise<void> {
   const before = at === -1 ? [] : all.slice(0, at).filter(outsideRow).reverse();
   return async () => {
     await new Promise((resolve) => requestAnimationFrame(resolve));
-    if (trigger.isConnected || !focusLost()) return;
+    if (trigger.isConnected) {
+      // A busy flag can clear a render after the action settles; wait a few frames for it.
+      for (let frame = 0; frame < 5 && trigger.matches(":disabled"); frame++) {
+        await new Promise((resolve) => requestAnimationFrame(resolve));
+      }
+      if (trigger.isConnected && !trigger.matches(":disabled")) trigger.focus();
+      return;
+    }
+    if (!focusLost()) return;
     [...after, ...before].find((el) => el.isConnected)?.focus();
   };
 }
