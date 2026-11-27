@@ -1,6 +1,3 @@
-import { stubPhoneLayout, stubPopupApis } from "@/test/popups";
+import { installPopupStubs } from "@/test/popups";
 
-if (typeof window !== "undefined") {
-  if (typeof window.matchMedia !== "function") stubPhoneLayout(false);
-  stubPopupApis();
-}
+if (typeof window !== "undefined") installPopupStubs();

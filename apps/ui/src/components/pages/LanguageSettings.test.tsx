@@ -37,8 +37,8 @@ describe("Settings → Appearance → Language", () => {
 
   it("offers System and each language in its own name", async () => {
     render(<SettingsPage section="appearance" />);
-    openChip(screen.getByRole("button", { name: "Interface language: System" }));
-    const names = (await screen.findAllByRole("menuitem")).map((item) => item.textContent);
+    openChip(screen.getByRole("combobox", { name: "Interface language: System" }));
+    const names = (await screen.findAllByRole("option")).map((item) => item.textContent);
     // System names the language it resolves to as its hint.
     expect(names).toEqual(["SystemEnglish", "English", "简体中文", "Español", "日本語"]);
     fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" });
@@ -48,13 +48,13 @@ describe("Settings → Appearance → Language", () => {
     render(<SettingsPage section="appearance" />);
     expect(screen.getByRole("heading", { level: 1, name: "Appearance" })).toBeTruthy();
 
-    openChip(screen.getByRole("button", { name: "Interface language: System" }));
+    openChip(screen.getByRole("combobox", { name: "Interface language: System" }));
     await act(async () => {
-      fireEvent.click(await screen.findByRole("menuitem", { name: "日本語" }));
+      fireEvent.click(await screen.findByRole("option", { name: "日本語" }));
     });
 
     expect(await screen.findByRole("heading", { level: 1, name: "外観" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "表示言語: 日本語" })).toBeTruthy();
+    expect(screen.getByRole("combobox", { name: "表示言語: 日本語" })).toBeTruthy();
     expect(screen.getByRole("main", { name: "設定" })).toBeTruthy();
     expect(document.documentElement.lang).toBe("ja");
     expect(window.localStorage.getItem("h4rn.locale")).toBe("ja");

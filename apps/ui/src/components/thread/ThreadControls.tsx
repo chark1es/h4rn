@@ -1,8 +1,10 @@
-import { CheckIcon, ChevronDownIcon } from "lucide-react";
+import { ChevronDownIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { Popover } from "@/components/common/Popover";
+import { SuggestInput } from "@/components/ui/autocomplete";
+import { Listbox, ListboxItem } from "@/components/ui/listbox";
 import { useHarnesses } from "@/features/harnesses/harnessStore";
 import { proxyModelsFor, useProxyCatalog } from "@/features/proxy/proxyStore";
 import { useThreadSettings } from "@/features/threads/settings";
@@ -25,35 +27,8 @@ import {
 } from "@/lib/threadControls";
 import { cn } from "@/lib/utils";
 
-function Choice({
-  checked,
-  label,
-  hint,
-  onSelect,
-}: {
-  checked: boolean;
-  label: string;
-  hint?: string;
-  onSelect: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      role="menuitemradio"
-      aria-checked={checked}
-      className="q-tctrl-row"
-      onClick={onSelect}
-    >
-      <span className="q-tctrl-check" aria-hidden>
-        {checked ? <CheckIcon className="q-icon s12" strokeWidth={2} /> : null}
-      </span>
-      <span className="grow min-w-0">
-        <span className="block truncate">{label}</span>
-        {hint ? <span className="q-tctrl-hint truncate">{hint}</span> : null}
-      </span>
-    </button>
-  );
-}
+const HARNESS_DEFAULT = "";
+const FAST = "fast";
 
 /**
  * The compact thread controls in the composer: the current model, permission
@@ -147,18 +122,15 @@ export function ThreadControls({ summary }: { summary: ThreadSummary }) {
               applyModel();
             }}
           >
-            <input
+            <SuggestInput
               aria-label={t("controls.model")}
-              list={`h4rn-thread-models-${summary.thread_id}`}
               value={modelDraft}
-              onChange={(event) => setModelDraft(event.target.value)}
-              className="q-mono"
+              onValueChange={setModelDraft}
+              suggestions={models}
+              showLabel={t("common:showSuggestions")}
+              mono
+              className="flex-1"
             />
-            <datalist id={`h4rn-thread-models-${summary.thread_id}`}>
-              {models.map((model) => (
-                <option key={model} value={model} />
-              ))}
-            </datalist>
             <button
               type="submit"
               className="q-btn secondary"
@@ -171,20 +143,23 @@ export function ThreadControls({ summary }: { summary: ThreadSummary }) {
           {modes.length > 0 ? (
             <>
               <div className="q-tctrl-head">{t("controls.permissions")}</div>
-              <div role="menu" aria-label={t("controls.permissionMode")} className="q-tctrl-list">
+              <Listbox
+                aria-label={t("controls.permissionMode")}
+                activation="manual"
+                value={mode}
+                onValueChange={(next) => {
+                  if (next === null) return;
+                  void setThreadRuntimeMode(summary.thread_id, next).then((ok) => {
+                    if (ok) setOpen(false);
+                  });
+                }}
+              >
                 {modes.map((choice) => (
-                  <Choice
-                    key={choice.value}
-                    checked={choice.value === mode}
-                    label={choice.label}
-                    onSelect={() => {
-                      void setThreadRuntimeMode(summary.thread_id, choice.value).then((ok) => {
-                        if (ok) setOpen(false);
-                      });
-                    }}
-                  />
+                  <ListboxItem key={choice.value} value={choice.value}>
+                    {choice.label}
+                  </ListboxItem>
                 ))}
-              </div>
+              </Listbox>
             </>
           ) : (
             <>
@@ -198,32 +173,32 @@ export function ThreadControls({ summary }: { summary: ThreadSummary }) {
           {efforts.length > 0 ? (
             <>
               <div className="q-tctrl-head">{t("controls.effort")}</div>
-              <div role="menu" aria-label={t("controls.effort")} className="q-tctrl-list">
+              <Listbox
+                aria-label={t("controls.effort")}
+                activation="manual"
+                value={summary.reasoning_effort ?? null}
+                onValueChange={(next) => {
+                  if (next === null) return;
+                  const effort = next === HARNESS_DEFAULT ? null : next;
+                  void setThreadReasoningEffort(summary.thread_id, effort).then((ok) => {
+                    if (ok) setOpen(false);
+                  });
+                }}
+              >
                 {efforts.map((effort) => (
-                  <Choice
-                    key={effort}
-                    checked={summary.reasoning_effort === effort}
-                    label={effortLabel(effort)}
-                    onSelect={() => {
-                      void setThreadReasoningEffort(summary.thread_id, effort).then((ok) => {
-                        if (ok) setOpen(false);
-                      });
-                    }}
-                  />
+                  <ListboxItem key={effort} value={effort}>
+                    {effortLabel(effort)}
+                  </ListboxItem>
                 ))}
                 {summary.reasoning_effort ? (
-                  <Choice
-                    checked={false}
-                    label={t("controls.harnessDefault")}
-                    hint={t("controls.harnessDefaultHint")}
-                    onSelect={() => {
-                      void setThreadReasoningEffort(summary.thread_id, null).then((ok) => {
-                        if (ok) setOpen(false);
-                      });
-                    }}
-                  />
+                  <ListboxItem
+                    value={HARNESS_DEFAULT}
+                    description={t("controls.harnessDefaultHint")}
+                  >
+                    {t("controls.harnessDefault")}
+                  </ListboxItem>
                 ) : null}
-              </div>
+              </Listbox>
             </>
           ) : summary.reasoning_effort ? (
             <>
@@ -235,22 +210,30 @@ export function ThreadControls({ summary }: { summary: ThreadSummary }) {
           {fast || (summary.fast ?? false) ? (
             <>
               <div className="q-tctrl-head">{t("controls.speed")}</div>
-              <Choice
-                checked={summary.fast ?? false}
-                label={t("common:fast")}
-                hint={
-                  fast
-                    ? t("controls.fastHint")
-                    : summary.fast_available === false
-                      ? t("controls.noFastTier")
-                      : t("controls.unknownFastTier")
-                }
-                onSelect={() => {
-                  void setThreadFast(summary.thread_id, !(summary.fast ?? false)).then((ok) => {
+              <Listbox
+                aria-label={t("controls.speed")}
+                activation="manual"
+                deselectable
+                value={summary.fast ? FAST : null}
+                onValueChange={(next) => {
+                  void setThreadFast(summary.thread_id, next === FAST).then((ok) => {
                     if (ok) setOpen(false);
                   });
                 }}
-              />
+              >
+                <ListboxItem
+                  value={FAST}
+                  description={
+                    fast
+                      ? t("controls.fastHint")
+                      : summary.fast_available === false
+                        ? t("controls.noFastTier")
+                        : t("controls.unknownFastTier")
+                  }
+                >
+                  {t("common:fast")}
+                </ListboxItem>
+              </Listbox>
             </>
           ) : null}
         </div>

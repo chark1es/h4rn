@@ -117,16 +117,16 @@ describe("the coding-agent choice", () => {
   it("defaults to following the thread's agent and can pick one agent instead", async () => {
     render(<ThreadSettings />);
 
-    const trigger = screen.getByRole("button", {
+    const trigger = screen.getByRole("combobox", {
       name: "Coding agent for titles: Follow the thread's agent",
     });
     openChip(trigger);
     // Codex is installed on this host but is not offered as a title agent.
-    expect(screen.queryByRole("menuitem", { name: /^Codex/ })).toBeNull();
-    fireEvent.click(await screen.findByRole("menuitem", { name: /^Claude Code/ }));
+    expect(screen.queryByRole("option", { name: /^Codex/ })).toBeNull();
+    fireEvent.click(await screen.findByRole("option", { name: /^Claude Code/ }));
 
     expect(
-      screen.getByRole("button", { name: "Coding agent for titles: Claude Code" }),
+      screen.getByRole("combobox", { name: "Coding agent for titles: Claude Code" }),
     ).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() =>

@@ -3,14 +3,15 @@ import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
 import { ConfirmDialog } from "@/components/common/ConfirmDialog";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
 import { ShortcutCaps } from "@/components/ui/kbd";
+import {
+  Menu,
+  MenuContent,
+  MenuGroupLabel,
+  MenuRadioGroup,
+  MenuRadioItem,
+  MenuTrigger,
+} from "@/components/ui/menu";
 import { Tip } from "@/components/ui/tooltip";
 import type { ThreadSummary } from "@/gen";
 import { harnessLabel, harnessSeed } from "@/lib/entities";
@@ -67,21 +68,24 @@ export function ChangesSection({
             {t("changes.vsHead")}
           </button>
         </div>
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <button type="button" className="q-btn ghost" style={{ height: 26 }}>
-              {turnLabel} <ChevronDownIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
-            </button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="start" className="w-44">
-            <DropdownMenuLabel>{t("changes.turn")}</DropdownMenuLabel>
-            {turns.map((turn) => (
-              <DropdownMenuItem key={turn.id} onSelect={() => changes.selectTurn(turn.id)}>
-                {turn.label}
-              </DropdownMenuItem>
-            ))}
-          </DropdownMenuContent>
-        </DropdownMenu>
+        <Menu>
+          <MenuTrigger className="q-btn ghost" style={{ height: 26 }}>
+            {turnLabel} <ChevronDownIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+          </MenuTrigger>
+          <MenuContent align="start" className="w-44">
+            <MenuRadioGroup
+              value={turnId ?? null}
+              onValueChange={(id: string) => changes.selectTurn(id)}
+            >
+              <MenuGroupLabel>{t("changes.turn")}</MenuGroupLabel>
+              {turns.map((turn) => (
+                <MenuRadioItem key={turn.id} value={turn.id} closeOnSelect>
+                  {turn.label}
+                </MenuRadioItem>
+              ))}
+            </MenuRadioGroup>
+          </MenuContent>
+        </Menu>
         <span className="grow" />
         <span className="q-num q-pm">
           <span className="q-add">+{changes.added}</span>{" "}

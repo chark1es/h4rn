@@ -551,7 +551,7 @@ function HarnessRow({ profile, harness }: { profile: ProxyProfile; harness: Harn
           />
           <ChipSelect
             label={t("proxy.harness.defaultModel", { harness: HARNESS_LABELS[harness] })}
-            width={190}
+            className="w-47.5"
             disabled={!enabled}
             value={defaultModel}
             options={[
@@ -977,7 +977,7 @@ export function ProxySettings() {
         {profiles.length > 1 ? (
           <ChipSelect
             label={t("proxy.profile")}
-            width={160}
+            className="w-40"
             value={selected?.id ?? ""}
             options={profiles.map((profile) => ({
               value: profile.id,

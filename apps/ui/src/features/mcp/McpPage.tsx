@@ -4,6 +4,7 @@ import {
   ChevronRightIcon,
   KeyRoundIcon,
   MoreHorizontalIcon,
+  PencilIcon,
   PlugIcon,
   PlusIcon,
   RefreshCwIcon,
@@ -20,13 +21,7 @@ import { EntityAvatar } from "@/components/agent/EntityAvatar";
 import { Popover } from "@/components/common/Popover";
 import { LibraryErrorBanner } from "@/components/pages/LibraryErrorBanner";
 import { Button } from "@/components/ui/button";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
+import { Menu, MenuContent, MenuItem, MenuSeparator, MenuTrigger } from "@/components/ui/menu";
 import type { HarnessKind, HostId, McpServerView } from "@/gen";
 import { useIsPhone } from "@/hooks/use-media-query";
 import { useNow } from "@/hooks/use-now";
@@ -873,35 +868,38 @@ export function McpPage() {
                   {t("common:edit")}
                 </Button>
               </div>
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <button type="button" className="q-ibtn" aria-label={t("mcp.actions")}>
-                    <MoreHorizontalIcon className="q-icon" aria-hidden />
-                  </button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="end" className="w-48">
-                  <DropdownMenuItem onSelect={() => setToolsServer(server)}>
-                    <WrenchIcon className="q-icon s14" aria-hidden /> {t("mcp.menu.tools")}
-                  </DropdownMenuItem>
-                  <DropdownMenuItem
+              <Menu>
+                <MenuTrigger className="q-ibtn" aria-label={t("mcp.actions")}>
+                  <MoreHorizontalIcon className="q-icon" aria-hidden />
+                </MenuTrigger>
+                <MenuContent align="end" className="w-48">
+                  <MenuItem icon={<WrenchIcon />} onSelect={() => setToolsServer(server)}>
+                    {t("mcp.menu.tools")}
+                  </MenuItem>
+                  <MenuItem
+                    icon={<PencilIcon />}
                     onSelect={() => {
                       setEditing(server);
                       setAddOpen(true);
                     }}
                   >
                     {t("mcp.menu.edit")}
-                  </DropdownMenuItem>
+                  </MenuItem>
                   {server.runs_on ? null : (
-                    <DropdownMenuItem onSelect={() => setShareServer(server)}>
-                      <Share2Icon className="q-icon s14" aria-hidden /> {t("mcp.menu.share")}
-                    </DropdownMenuItem>
+                    <MenuItem icon={<Share2Icon />} onSelect={() => setShareServer(server)}>
+                      {t("mcp.menu.share")}
+                    </MenuItem>
                   )}
-                  <DropdownMenuSeparator />
-                  <DropdownMenuItem variant="destructive" onSelect={() => setRemoveServer(server)}>
-                    <Trash2Icon className="q-icon s14" aria-hidden /> {t("mcp.menu.remove")}
-                  </DropdownMenuItem>
-                </DropdownMenuContent>
-              </DropdownMenu>
+                  <MenuSeparator />
+                  <MenuItem
+                    icon={<Trash2Icon />}
+                    destructive
+                    onSelect={() => setRemoveServer(server)}
+                  >
+                    {t("mcp.menu.remove")}
+                  </MenuItem>
+                </MenuContent>
+              </Menu>
             </div>
 
             {isPhone ? (

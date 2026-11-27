@@ -559,7 +559,7 @@ async function main() {
     await page.getByRole("button", { name: "New thread" }).first().click();
     await page.locator("#new-thread-workspace").fill(workspace);
     await page.locator("#new-thread-harness").click();
-    await page.getByRole("menuitem", { name: "Claude Code" }).click();
+    await page.getByRole("option", { name: "Claude Code" }).click();
     await page.locator("#new-thread-task").fill("Reply with exactly: remote pong");
     await page.waitForFunction(() => {
       const button = [...document.querySelectorAll("button")].find(

@@ -551,7 +551,7 @@ export function McpImportDialog({
                         <div className="flex items-center gap-1.5" style={{ marginTop: 8 }}>
                           <ChipSelect
                             label={t("mcp.import.resolutionFor", { name: conflict.name })}
-                            width={160}
+                            className="w-40"
                             value={resolutions[conflict.name] ?? "keep_mine"}
                             options={[
                               { value: "keep_mine", label: t("mcp.import.keepMine") },

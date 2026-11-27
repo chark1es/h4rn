@@ -516,12 +516,12 @@ describe("the diff pane stays on the file the person picked", () => {
     await openDiff();
 
     // Turn mode on a phone offers the turn's files as a picker.
-    openChip(screen.getByRole("button", { name: "Diff source: Uncommitted" }));
-    fireEvent.click(await screen.findByRole("menuitem", { name: /Turn/ }));
-    const picker = await screen.findByRole("button", { name: "File: a.ts" });
+    openChip(screen.getByRole("combobox", { name: "Diff source: Uncommitted" }));
+    fireEvent.click(await screen.findByRole("option", { name: /Turn/ }));
+    const picker = await screen.findByRole("combobox", { name: "File: a.ts" });
     const afterTurn = diffRequests().length;
     openChip(picker);
-    fireEvent.click(await screen.findByRole("menuitem", { name: /b\.ts/ }));
+    fireEvent.click(await screen.findByRole("option", { name: /b\.ts/ }));
 
     await waitFor(() =>
       expect(within(diffLines()).getByRole("button", { name: /Line 1: bnew/ })).toBeTruthy(),
@@ -541,8 +541,8 @@ describe("the diff pane stays on the file the person picked", () => {
   it("follows the editor tab in a Branch review", async () => {
     await mount();
     await openDiff();
-    openChip(screen.getByRole("button", { name: "Diff source: Uncommitted" }));
-    fireEvent.click(await screen.findByRole("menuitem", { name: /Branch/ }));
+    openChip(screen.getByRole("combobox", { name: "Diff source: Uncommitted" }));
+    fireEvent.click(await screen.findByRole("option", { name: /Branch/ }));
     await waitFor(() =>
       expect(within(diffLines()).getByRole("button", { name: /Line 1: anew branch/ })).toBeTruthy(),
     );
@@ -569,8 +569,8 @@ describe("the diff pane stays on the file the person picked", () => {
   it("follows the editor tab in a Commits review", async () => {
     await mount();
     await openDiff();
-    openChip(screen.getByRole("button", { name: "Diff source: Uncommitted" }));
-    fireEvent.click(await screen.findByRole("menuitem", { name: /Commits/ }));
+    openChip(screen.getByRole("combobox", { name: "Diff source: Uncommitted" }));
+    fireEvent.click(await screen.findByRole("option", { name: /Commits/ }));
     await waitFor(() =>
       expect(within(diffLines()).getByRole("button", { name: /Line 1: anew commit/ })).toBeTruthy(),
     );
@@ -599,8 +599,8 @@ describe("the diff pane stays on the file the person picked", () => {
 
     // The commit list is still out when the person moves to another tab.
     const releaseCommits = holdNext("fs_diff_commits");
-    openChip(screen.getByRole("button", { name: "Diff source: Uncommitted" }));
-    fireEvent.click(await screen.findByRole("menuitem", { name: /Commits/ }));
+    openChip(screen.getByRole("combobox", { name: "Diff source: Uncommitted" }));
+    fireEvent.click(await screen.findByRole("option", { name: /Commits/ }));
     await waitFor(() =>
       expect(mock.requests.some((request) => request.type === "fs_diff_commits")).toBe(true),
     );
@@ -632,8 +632,8 @@ describe("the diff pane stays on the file the person picked", () => {
     mock.emptyCommits = true;
     await mount();
     await openDiff();
-    openChip(screen.getByRole("button", { name: "Diff source: Uncommitted" }));
-    fireEvent.click(await screen.findByRole("menuitem", { name: /Commits/ }));
+    openChip(screen.getByRole("combobox", { name: "Diff source: Uncommitted" }));
+    fireEvent.click(await screen.findByRole("option", { name: /Commits/ }));
 
     await waitFor(() => expect(screen.getByText("No commits beyond main.")).toBeTruthy());
     act(() => {
@@ -656,8 +656,8 @@ describe("the diff pane stays on the file the person picked", () => {
     await openDiff();
 
     const releaseFiles = holdNext("fs_diff_files");
-    openChip(screen.getByRole("button", { name: "Diff source: Uncommitted" }));
-    fireEvent.click(await screen.findByRole("menuitem", { name: /Branch/ }));
+    openChip(screen.getByRole("combobox", { name: "Diff source: Uncommitted" }));
+    fireEvent.click(await screen.findByRole("option", { name: /Branch/ }));
     await waitFor(() =>
       expect(mock.requests.some((request) => request.type === "fs_diff_files")).toBe(true),
     );
@@ -690,8 +690,8 @@ describe("the diff pane stays on the file the person picked", () => {
     // The mock holds one request at a time: arm the second hold once the
     // entry's list read has taken the first.
     const releaseEntry = holdNext("fs_diff_files");
-    openChip(screen.getByRole("button", { name: "Diff source: Uncommitted" }));
-    fireEvent.click(await screen.findByRole("menuitem", { name: /Branch/ }));
+    openChip(screen.getByRole("combobox", { name: "Diff source: Uncommitted" }));
+    fireEvent.click(await screen.findByRole("option", { name: /Branch/ }));
     await waitFor(() =>
       expect(mock.requests.some((request) => request.type === "fs_diff_files")).toBe(true),
     );
@@ -730,8 +730,8 @@ describe("the diff pane stays on the file the person picked", () => {
   it("reopening the pane in Branch mode asks for the diff once", async () => {
     await mount();
     await openDiff();
-    openChip(screen.getByRole("button", { name: "Diff source: Uncommitted" }));
-    fireEvent.click(await screen.findByRole("menuitem", { name: /Branch/ }));
+    openChip(screen.getByRole("combobox", { name: "Diff source: Uncommitted" }));
+    fireEvent.click(await screen.findByRole("option", { name: /Branch/ }));
     await waitFor(() =>
       expect(within(diffLines()).getByRole("button", { name: /Line 1: anew branch/ })).toBeTruthy(),
     );
@@ -783,8 +783,8 @@ describe("the diff pane stays on the file the person picked", () => {
     // of the editor; the pane's follow effect must not read it a second time.
     const before = diffRequests().length;
     const filesBefore = mock.requests.filter((request) => request.type === "fs_diff_files").length;
-    openChip(screen.getByRole("button", { name: "Diff source: Uncommitted" }));
-    fireEvent.click(await screen.findByRole("menuitem", { name: /Branch/ }));
+    openChip(screen.getByRole("combobox", { name: "Diff source: Uncommitted" }));
+    fireEvent.click(await screen.findByRole("option", { name: /Branch/ }));
     await waitFor(() =>
       expect(within(diffLines()).getByRole("button", { name: /Line 1: bnew branch/ })).toBeTruthy(),
     );
@@ -801,21 +801,21 @@ describe("the diff pane stays on the file the person picked", () => {
     await openDiff();
 
     // Pick a non-default base in Branch mode.
-    openChip(screen.getByRole("button", { name: "Diff source: Uncommitted" }));
-    fireEvent.click(await screen.findByRole("menuitem", { name: /Branch/ }));
+    openChip(screen.getByRole("combobox", { name: "Diff source: Uncommitted" }));
+    fireEvent.click(await screen.findByRole("option", { name: /Branch/ }));
     await waitFor(() =>
       expect(within(diffLines()).getByRole("button", { name: /Line 1: anew branch/ })).toBeTruthy(),
     );
-    openChip(await screen.findByRole("button", { name: "Base branch: main" }));
-    fireEvent.click(await screen.findByRole("menuitem", { name: "release" }));
+    openChip(await screen.findByRole("combobox", { name: "Base branch: main" }));
+    fireEvent.click(await screen.findByRole("option", { name: "release" }));
     await waitFor(() =>
       expect(diffRequests().at(-1)?.against).toEqual({ kind: "base", base: "release" }),
     );
 
     // Commit mode reuses it; the header must name it rather than leave the
     // range implicit.
-    openChip(screen.getByRole("button", { name: "Diff source: Branch" }));
-    fireEvent.click(await screen.findByRole("menuitem", { name: /Commits/ }));
+    openChip(screen.getByRole("combobox", { name: "Diff source: Branch" }));
+    fireEvent.click(await screen.findByRole("option", { name: /Commits/ }));
 
     await waitFor(() => expect(screen.getByText(/since release/)).toBeTruthy());
     expect(mock.requests.filter((request) => request.type === "fs_diff_commits").at(-1)?.base).toBe(
@@ -874,8 +874,8 @@ describe("the diff pane stays on the file the person picked", () => {
     await mount();
     await openDiff();
 
-    openChip(screen.getByRole("button", { name: "Diff source: Uncommitted" }));
-    fireEvent.click(await screen.findByRole("menuitem", { name: /Turn/ }));
+    openChip(screen.getByRole("combobox", { name: "Diff source: Uncommitted" }));
+    fireEvent.click(await screen.findByRole("option", { name: /Turn/ }));
 
     await waitFor(() =>
       expect(diffRequests().at(-1)?.against).toEqual({
@@ -895,8 +895,8 @@ describe("the diff pane stays on the file the person picked", () => {
     await mount();
     await openDiff();
 
-    openChip(screen.getByRole("button", { name: "Diff source: Uncommitted" }));
-    fireEvent.click(await screen.findByRole("menuitem", { name: /Turn/ }));
+    openChip(screen.getByRole("combobox", { name: "Diff source: Uncommitted" }));
+    fireEvent.click(await screen.findByRole("option", { name: /Turn/ }));
     const added = await waitFor(() =>
       within(diffLines()).getByRole("button", { name: /Line 1: anew/ }),
     );
@@ -921,18 +921,18 @@ describe("a slower reply never overrides a later choice", () => {
     await openDiff();
 
     const releaseList = holdNext("fs_diff_files");
-    openChip(screen.getByRole("button", { name: "Diff source: Uncommitted" }));
-    fireEvent.click(await screen.findByRole("menuitem", { name: /Branch/ }));
+    openChip(screen.getByRole("combobox", { name: "Diff source: Uncommitted" }));
+    fireEvent.click(await screen.findByRole("option", { name: /Branch/ }));
 
     // The picker shows the new source while its list is still loading.
-    const branchChip = await screen.findByRole("button", { name: "Diff source: Branch" });
+    const branchChip = await screen.findByRole("combobox", { name: "Diff source: Branch" });
     await waitFor(() =>
       expect(mock.requests.some((request) => request.type === "fs_diff_files")).toBe(true),
     );
 
     // Meanwhile the person picks Turn; that choice came after the Branch list.
     openChip(branchChip);
-    fireEvent.click(await screen.findByRole("menuitem", { name: /Turn/ }));
+    fireEvent.click(await screen.findByRole("option", { name: /Turn/ }));
     await waitFor(() =>
       expect(within(diffLines()).getByRole("button", { name: /Line 1: anew turn/ })).toBeTruthy(),
     );
@@ -948,7 +948,7 @@ describe("a slower reply never overrides a later choice", () => {
       ).toHaveLength(0),
     );
     expect(within(diffLines()).getByRole("button", { name: /Line 1: anew turn/ })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Diff source: Turn" })).toBeTruthy();
+    expect(screen.getByRole("combobox", { name: "Diff source: Turn" })).toBeTruthy();
   });
 
   it("names the newest choice in the body, the path bar and the comment", async () => {
@@ -969,8 +969,8 @@ describe("a slower reply never overrides a later choice", () => {
     // Picking Turn asks for the same file's turn diff, and that reply lands
     // first: the two answers arrive in reverse order.
     const releaseTurn = holdNext("fs_diff");
-    openChip(screen.getByRole("button", { name: "Diff source: Uncommitted" }));
-    fireEvent.click(await screen.findByRole("menuitem", { name: /Turn/ }));
+    openChip(screen.getByRole("combobox", { name: "Diff source: Uncommitted" }));
+    fireEvent.click(await screen.findByRole("option", { name: /Turn/ }));
     await waitFor(() =>
       expect(diffRequests().at(-1)?.against).toMatchObject({ kind: "agent_turn" }),
     );
@@ -1013,8 +1013,8 @@ describe("comments are keyed on the turn, not its label", () => {
 
     await mount();
     await openDiff();
-    openChip(screen.getByRole("button", { name: "Diff source: Uncommitted" }));
-    fireEvent.click(await screen.findByRole("menuitem", { name: /Turn/ }));
+    openChip(screen.getByRole("combobox", { name: "Diff source: Uncommitted" }));
+    fireEvent.click(await screen.findByRole("option", { name: /Turn/ }));
     const added = await waitFor(() =>
       within(diffLines()).getByRole("button", { name: /Line 1: anew/ }),
     );
@@ -1058,8 +1058,8 @@ describe("a branch review resumed after a workspace round-trip", () => {
   it("asks again with the base this workspace had picked", async () => {
     await mount();
     await openDiff();
-    openChip(screen.getByRole("button", { name: "Diff source: Uncommitted" }));
-    fireEvent.click(await screen.findByRole("menuitem", { name: /Branch/ }));
+    openChip(screen.getByRole("combobox", { name: "Diff source: Uncommitted" }));
+    fireEvent.click(await screen.findByRole("option", { name: /Branch/ }));
     await waitFor(() =>
       expect(within(diffLines()).getByRole("button", { name: /Line 1: anew branch/ })).toBeTruthy(),
     );
@@ -1068,8 +1068,8 @@ describe("a branch review resumed after a workspace round-trip", () => {
     // Picking `release` starts a new file list, which is held back.
     const filesRequests = () => mock.requests.filter((request) => request.type === "fs_diff_files");
     const releaseFiles = holdNext("fs_diff_files");
-    openChip(await screen.findByRole("button", { name: "Base branch: main" }));
-    fireEvent.click(await screen.findByRole("menuitem", { name: "release" }));
+    openChip(await screen.findByRole("combobox", { name: "Base branch: main" }));
+    fireEvent.click(await screen.findByRole("option", { name: "release" }));
     await waitFor(() =>
       expect(filesRequests().at(-1)?.against).toEqual({ kind: "base", base: "release" }),
     );
@@ -1114,8 +1114,8 @@ describe("a review that was still loading when its workspace left", () => {
    */
   async function startHeldReview(source: "Branch" | "Commits", type: string): Promise<() => void> {
     const release = holdNext(type);
-    openChip(screen.getByRole("button", { name: "Diff source: Uncommitted" }));
-    fireEvent.click(await screen.findByRole("menuitem", { name: new RegExp(source) }));
+    openChip(screen.getByRole("combobox", { name: "Diff source: Uncommitted" }));
+    fireEvent.click(await screen.findByRole("option", { name: new RegExp(source) }));
     await waitFor(() =>
       expect(mock.requests.filter((request) => request.type === type).length).toBeGreaterThan(0),
     );
@@ -1233,8 +1233,8 @@ describe("one comparison has one branch list and one comment key", () => {
     await openDiff();
 
     const releaseBranches = holdNext("fs_branches");
-    openChip(screen.getByRole("button", { name: "Diff source: Uncommitted" }));
-    fireEvent.click(await screen.findByRole("menuitem", { name: /Branch/ }));
+    openChip(screen.getByRole("combobox", { name: "Diff source: Uncommitted" }));
+    fireEvent.click(await screen.findByRole("option", { name: /Branch/ }));
 
     // The file list and the diff answer while the branch list is still out.
     await waitFor(() =>
@@ -1245,17 +1245,17 @@ describe("one comparison has one branch list and one comment key", () => {
 
     // The branch list does not depend on the open file, so it still arrives
     // and the picker offers the repository's other branches.
-    const baseChip = await screen.findByRole("button", { name: "Base branch: main" });
+    const baseChip = await screen.findByRole("combobox", { name: "Base branch: main" });
     expect(screen.queryByRole("button", { name: /Loading branches/ })).toBeNull();
     openChip(baseChip);
-    expect(await screen.findByRole("menuitem", { name: "release" })).toBeTruthy();
+    expect(await screen.findByRole("option", { name: "release" })).toBeTruthy();
   });
 
   it("keys a branch comment on the resolved base, not on the request", async () => {
     await mount();
     await openDiff();
-    openChip(screen.getByRole("button", { name: "Diff source: Uncommitted" }));
-    fireEvent.click(await screen.findByRole("menuitem", { name: /Branch/ }));
+    openChip(screen.getByRole("combobox", { name: "Diff source: Uncommitted" }));
+    fireEvent.click(await screen.findByRole("option", { name: /Branch/ }));
     const added = await waitFor(() =>
       within(diffLines()).getByRole("button", { name: /Line 1: anew branch/ }),
     );
@@ -1273,9 +1273,9 @@ describe("one comparison has one branch list and one comment key", () => {
 
     // Picking `main` by name is the same comparison, so the comment stays
     // inline instead of moving to "another diff source".
-    const baseChip = await screen.findByRole("button", { name: "Base branch: main" });
+    const baseChip = await screen.findByRole("combobox", { name: "Base branch: main" });
     openChip(baseChip);
-    fireEvent.click(await screen.findByRole("menuitem", { name: "main" }));
+    fireEvent.click(await screen.findByRole("option", { name: "main" }));
     await waitFor(() =>
       expect(diffRequests().at(-1)?.against).toEqual({ kind: "base", base: "main" }),
     );

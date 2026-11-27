@@ -176,7 +176,7 @@ async function main() {
     await page.getByRole("button", { name: "New thread" }).first().click();
     await page.locator("#new-thread-workspace").fill(workspace);
     await page.locator("#new-thread-harness").click();
-    await page.getByRole("menuitem", { name: "Claude Code" }).click();
+    await page.getByRole("option", { name: "Claude Code" }).click();
     await page.locator("#new-thread-task").fill("Reply with exactly: pong");
     await page.waitForFunction(() => {
       const button = [...document.querySelectorAll("button")].find(
@@ -194,8 +194,8 @@ async function main() {
       .getByRole("button", { name: "Forges", exact: true })
       .click();
     await page.getByRole("heading", { name: "Forges" }).waitFor({ timeout: 10_000 });
-    await page.getByRole("button", { name: /^Forge:/ }).click();
-    await page.getByRole("menuitem", { name: "Gitea" }).click();
+    await page.getByRole("combobox", { name: /^Forge:/ }).click();
+    await page.getByRole("option", { name: "Gitea" }).click();
     await page.getByLabel("Forge base URL").fill(forgeUrl.replace(/\/$/, ""));
     await page.getByLabel("Forge token").fill(token);
     await page.getByRole("button", { name: "Add account" }).click();

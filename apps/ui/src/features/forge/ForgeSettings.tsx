@@ -248,7 +248,7 @@ function AddAccountForm({
           <ChipSelect
             label={t("forges.add.forge")}
             value={forge}
-            width={190}
+            className="w-47.5"
             options={FORGES.map((kind) => ({ value: kind, label: forgeLabel(kind) }))}
             onChange={changeForge}
           />
@@ -318,7 +318,7 @@ function AddAccountForm({
             <ChipSelect
               label={t("forges.add.validateAgainstLabel")}
               value={detectedRepo ? repositoryName(detectedRepo) : ""}
-              width={300}
+              className="w-75"
               options={candidateRepos.map((repo) => ({
                 value: repositoryName(repo),
                 label: repositoryName(repo),

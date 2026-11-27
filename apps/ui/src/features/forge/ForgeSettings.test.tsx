@@ -98,22 +98,22 @@ describe("Bitbucket token validation repository", () => {
   it("defaults to the first detected remote and can pick the second", async () => {
     render(<ForgeSettings />);
 
-    expect(screen.getByRole("button", { name: "Forge: GitHub" })).toBeTruthy();
-    openChip(screen.getByRole("button", { name: "Forge: GitHub" }));
-    fireEvent.click(await screen.findByRole("menuitem", { name: /Bitbucket Cloud/ }));
+    expect(screen.getByRole("combobox", { name: "Forge: GitHub" })).toBeTruthy();
+    openChip(screen.getByRole("combobox", { name: "Forge: GitHub" }));
+    fireEvent.click(await screen.findByRole("option", { name: /Bitbucket Cloud/ }));
 
     // The token help matches docs/forges.md.
     expect(screen.getByText(/Pull requests: read and write/)).toBeTruthy();
 
     // Two checkouts, so the form defaults to the first detected repository.
-    const picker = await screen.findByRole("button", {
+    const picker = await screen.findByRole("combobox", {
       name: "Bitbucket repository to validate against: alpha/widget",
     });
     openChip(picker);
-    fireEvent.click(await screen.findByRole("menuitem", { name: /beta\/gizmo/ }));
+    fireEvent.click(await screen.findByRole("option", { name: /beta\/gizmo/ }));
     await waitFor(() =>
       expect(
-        screen.getByRole("button", {
+        screen.getByRole("combobox", {
           name: "Bitbucket repository to validate against: beta/gizmo",
         }),
       ).toBeTruthy(),

@@ -223,7 +223,7 @@ async function main() {
     // The fake adapter registers as Claude Code; pick it explicitly so a real
     // Codex/OpenCode install on the test machine cannot take the turn.
     await page.locator("#new-thread-harness").click();
-    await page.getByRole("menuitem", { name: "Claude Code" }).click();
+    await page.getByRole("option", { name: "Claude Code" }).click();
     await page.locator("#new-thread-task").fill("[[write:notes.txt]]hello from the fake harness");
     await page.waitForFunction(() => {
       const button = [...document.querySelectorAll("button")].find(
@@ -389,7 +389,7 @@ async function main() {
     await page.getByRole("button", { name: "New thread" }).first().click();
     await page.locator("#new-thread-workspace").fill(workspace);
     await page.locator("#new-thread-harness").click();
-    await page.getByRole("menuitem", { name: "Claude Code" }).click();
+    await page.getByRole("option", { name: "Claude Code" }).click();
     await page.locator("#new-thread-task").fill("Keep going [h4rn-limit]");
     await page.waitForFunction(() => {
       const button = [...document.querySelectorAll("button")].find(
@@ -450,7 +450,7 @@ async function main() {
     await page.getByRole("button", { name: "New thread" }).first().click();
     await page.locator("#new-thread-workspace").fill(workspace);
     await page.locator("#new-thread-harness").click();
-    await page.getByRole("menuitem", { name: "Claude Code" }).click();
+    await page.getByRole("option", { name: "Claude Code" }).click();
     await page.locator("#new-thread-task").fill("Fail me over [h4rn-limit]");
     await page.waitForFunction(() => {
       const button = [...document.querySelectorAll("button")].find(

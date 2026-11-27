@@ -1,10 +1,11 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
 import type { ThreadSummary } from "@/gen";
 import type { StreamTurn } from "@/lib/store/projection";
 import { createThreadLog } from "@/lib/store/projection";
+import { installPopupStubs } from "@/test/popups";
 
 vi.mock("@/lib/store/appStore", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/store/appStore")>();
@@ -91,34 +92,13 @@ function renderHeader(turns: StreamTurn[]) {
   render(<ThreadHeader summary={summary} host={undefined} onBack={() => {}} />);
 }
 
-function openMenu() {
-  const trigger = screen.getByRole("button", { name: "Thread actions" });
-  fireEvent.pointerDown(trigger, {
-    button: 0,
-    ctrlKey: false,
-    pointerType: "mouse",
+async function openMenu() {
+  await act(async () => {
+    fireEvent.click(screen.getByRole("button", { name: "Thread actions" }));
   });
-  fireEvent.click(trigger);
 }
 
-beforeAll(() => {
-  Element.prototype.hasPointerCapture ??= () => false;
-  Element.prototype.setPointerCapture ??= () => undefined;
-  Element.prototype.releasePointerCapture ??= () => undefined;
-  Object.defineProperty(window, "matchMedia", {
-    writable: true,
-    value: (query: string) => ({
-      matches: false,
-      media: query,
-      onchange: null,
-      addListener: () => undefined,
-      removeListener: () => undefined,
-      addEventListener: () => undefined,
-      removeEventListener: () => undefined,
-      dispatchEvent: () => false,
-    }),
-  });
-});
+beforeAll(installPopupStubs);
 
 describe("ThreadHeader fork from latest turn", () => {
   afterEach(() => {
@@ -128,7 +108,7 @@ describe("ThreadHeader fork from latest turn", () => {
 
   it("is disabled while the newest turn is running", async () => {
     renderHeader([turn({ status: "running" })]);
-    openMenu();
+    await openMenu();
     const item = await screen.findByRole("menuitem", { name: "Fork from latest turn" });
     expect(item.getAttribute("data-disabled")).not.toBeNull();
     fireEvent.click(item);
@@ -137,7 +117,7 @@ describe("ThreadHeader fork from latest turn", () => {
 
   it("forks the latest settled turn", async () => {
     renderHeader([turn()]);
-    openMenu();
+    await openMenu();
     const item = await screen.findByRole("menuitem", { name: "Fork from latest turn" });
     expect(item.getAttribute("data-disabled")).toBeNull();
     fireEvent.click(item);

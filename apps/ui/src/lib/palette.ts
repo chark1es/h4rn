@@ -12,7 +12,7 @@ function fold(text: string): string {
 }
 
 /**
- * Ranks a palette item against what was typed. cmdk hides items that score 0
+ * Ranks a palette item against what was typed. The palette hides items that score 0
  * and sorts the rest by score, so a prefix or a word start outranks letters
  * that merely appear in order ("deny" must not lead with "Audit dependency").
  */

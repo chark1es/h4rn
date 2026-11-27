@@ -168,8 +168,8 @@ const SHOTS = [
       await page.keyboard.press("Control+End");
       await page.keyboard.type(" ");
       await page.getByRole("tab", { name: "Diff" }).click();
-      await page.getByRole("button", { name: /Diff source/ }).click();
-      await page.getByRole("menuitem", { name: /^Turn/ }).click();
+      await page.getByRole("combobox", { name: /Diff source/ }).click();
+      await page.getByRole("option", { name: /^Turn/ }).click();
       await page.waitForTimeout(700);
     },
   },
@@ -568,7 +568,12 @@ const AUDIT_SHOTS = [
     path: "/t/thr_a",
     wait: '[aria-label="Thread stream"]',
     action: async (page) => {
-      await page.getByRole("button", { name: "Harness and model" }).click();
+      // The composer's model chip opens the thread settings; show the model suggestions in it.
+      await page.locator("button.q-model").first().click();
+      const settings = page.getByRole("dialog", { name: "Thread settings" });
+      await settings.waitFor({ state: "visible" });
+      await settings.getByRole("button", { name: "Show suggestions" }).click();
+      await page.getByRole("listbox").first().waitFor({ state: "visible" });
       await page.waitForTimeout(450);
     },
   },

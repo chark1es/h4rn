@@ -2,6 +2,7 @@ import { LoaderIcon } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { ChipSelect } from "@/components/common/ChipSelect";
+import { SuggestInput } from "@/components/ui/autocomplete";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -173,7 +174,7 @@ export function DelegateDialog({ thread }: { thread: ThreadSummary }) {
                 label={t("fields.host")}
                 value={host}
                 placeholder={t("fields.noOnlineHosts")}
-                width={160}
+                className="w-40"
                 options={localOnlyHostOptions(
                   onlineHosts,
                   thread.host,
@@ -200,7 +201,7 @@ export function DelegateDialog({ thread }: { thread: ThreadSummary }) {
                 id="delegate-harness"
                 label={t("fields.harness")}
                 value={harness}
-                width={160}
+                className="w-40"
                 options={harnessChoices.map((option) => ({
                   value: option,
                   label: HARNESS_LABELS[option],
@@ -218,11 +219,13 @@ export function DelegateDialog({ thread }: { thread: ThreadSummary }) {
               <label htmlFor="delegate-model" className="text-[12px] text-[var(--fg-3)]">
                 {t("fields.model")}
               </label>
-              <Input
+              <SuggestInput
                 id="delegate-model"
                 value={model}
-                className="font-mono"
-                onChange={(event) => setModel(event.target.value)}
+                onValueChange={setModel}
+                suggestions={HARNESS_MODELS[harness].models}
+                showLabel={t("common:showSuggestions")}
+                mono
               />
             </div>
           </div>
@@ -236,7 +239,7 @@ export function DelegateDialog({ thread }: { thread: ThreadSummary }) {
                 id="delegate-isolation"
                 label={t("fields.workspace")}
                 value={isolation}
-                width={160}
+                className="w-40"
                 options={[
                   { value: "worktree", label: t("delegate.isolated") },
                   { value: "shared", label: t("delegate.shared") },

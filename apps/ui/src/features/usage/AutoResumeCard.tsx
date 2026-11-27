@@ -3,12 +3,13 @@ import { useEffect } from "react";
 import { useTranslation } from "react-i18next";
 
 import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
+  Menu,
+  MenuContent,
+  MenuGroup,
+  MenuGroupLabel,
+  MenuItem,
+  MenuTrigger,
+} from "@/components/ui/menu";
 import type { FailoverOptions, HarnessKind } from "@/gen";
 import { useNow } from "@/hooks/use-now";
 import { harnessLabel } from "@/lib/entities";
@@ -226,47 +227,40 @@ function FailOverMenu({
   const reasons = new Set(options?.options.map((choice) => choice.reason));
   const perRow = reasons.size > 1;
   return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <button
-          type="button"
-          className="q-btn ghost"
-          disabled={busy || options === undefined || none}
-          title={reason}
-        >
-          {label}
-          <ChevronDownIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
-        </button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent
-        align={compact ? "center" : "end"}
-        className="min-w-[260px] max-w-[360px]"
+    <Menu>
+      <MenuTrigger
+        className="q-btn ghost"
+        disabled={busy || options === undefined || none}
+        title={reason}
       >
-        <DropdownMenuLabel className="font-normal text-fg-3">
-          {harness
-            ? t("resume.resumeOn", { harness: harnessLabel(harness) })
-            : t("resume.resumeOnUnknown")}
-        </DropdownMenuLabel>
-        {options?.options.map((choice, index) => (
-          <DropdownMenuItem
-            key={`${choice.model}:${choice.account ?? ""}`}
-            onSelect={() => onChoose({ model: choice.model, account: choice.account })}
-          >
-            <span className="min-w-0 flex-1">
-              <span className="block truncate">
-                <span className="q-mono">{choice.model}</span>
-                {choice.account_label ? (
-                  <span className="text-fg-3"> · {choice.account_label}</span>
-                ) : null}
-                {index === 0 ? <span className="text-fg-3"> · {t("resume.default")}</span> : null}
-              </span>
-              {perRow ? (
-                <span className="block text-[11.5px] text-fg-3">{choice.reason}</span>
+        {label}
+        <ChevronDownIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+      </MenuTrigger>
+      <MenuContent align={compact ? "center" : "end"} className="w-72 max-w-90">
+        <MenuGroup>
+          <MenuGroupLabel>
+            {harness
+              ? t("resume.resumeOn", { harness: harnessLabel(harness) })
+              : t("resume.resumeOnUnknown")}
+          </MenuGroupLabel>
+          {options?.options.map((choice, index) => (
+            <MenuItem
+              key={`${choice.model}:${choice.account ?? ""}`}
+              label={choice.model}
+              description={perRow ? choice.reason : undefined}
+              onSelect={() => onChoose({ model: choice.model, account: choice.account })}
+            >
+              <span className="font-mono">{choice.model}</span>
+              {choice.account_label ? (
+                <span className="text-muted-foreground"> · {choice.account_label}</span>
               ) : null}
-            </span>
-          </DropdownMenuItem>
-        ))}
-      </DropdownMenuContent>
-    </DropdownMenu>
+              {index === 0 ? (
+                <span className="text-muted-foreground"> · {t("resume.default")}</span>
+              ) : null}
+            </MenuItem>
+          ))}
+        </MenuGroup>
+      </MenuContent>
+    </Menu>
   );
 }

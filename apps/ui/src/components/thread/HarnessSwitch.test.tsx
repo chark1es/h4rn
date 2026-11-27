@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { CommandPalette } from "@/components/dialogs/CommandPalette";
 import type { ThreadSummary } from "@/gen";
 import type { SwitchHarnessResult } from "@/lib/store/appStore";
+import { suggestionsOf } from "@/test/popups";
 import { HarnessSwitch, HarnessSwitchCommand } from "./HarnessSwitch";
 
 const mock = vi.hoisted(() => ({
@@ -137,7 +138,7 @@ describe("HarnessSwitch", () => {
     fireEvent.click(screen.getByRole("button", { name: /Switch harness/i }));
     expect(screen.getByRole("dialog", { name: "Switch harness" })).toBeTruthy();
     // Only the other installed harness is offered.
-    expect(screen.queryByRole("menuitemradio", { name: "Claude Code" })).toBeNull();
+    expect(screen.queryByRole("option", { name: "Claude Code" })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Switch" }));
 
     expect(mock.switchThreadHarness).toHaveBeenCalledWith(
@@ -183,7 +184,7 @@ describe("HarnessSwitch", () => {
     expect(input.value).toBe("gpt-5.4");
   });
 
-  it("lists an ACP target's own models, never a sibling agent's", () => {
+  it("lists an ACP target's own models, never a sibling agent's", async () => {
     mock.agents = [
       { id: "agent-a", name: "Agent A", installed: true, models: [{ id: "model-a" }] },
       { id: "agent-b", name: "Agent B", installed: true, models: [{ id: "model-b" }] },
@@ -202,13 +203,11 @@ describe("HarnessSwitch", () => {
     };
     render(<HarnessSwitch summary={summary()} />);
     fireEvent.click(screen.getByRole("button", { name: /Switch harness/i }));
-    fireEvent.click(screen.getByRole("menuitemradio", { name: "ACP · Agent B" }));
+    fireEvent.click(screen.getByRole("option", { name: "ACP · Agent B" }));
 
     const input = screen.getByLabelText("Model for the new harness") as HTMLInputElement;
     expect(input.value).toBe("model-b");
-    const options = Array.from(
-      document.querySelectorAll('datalist[id="h4rn-switch-models-th_1"] option'),
-    ).map((option) => option.getAttribute("value"));
+    const options = await suggestionsOf(input);
     expect(options).toContain("model-b");
     expect(options).not.toContain("model-a");
     expect(options).not.toContain("model-a-old");
