@@ -41,7 +41,7 @@ It prints the table below and exits 1 if any surface fails. Final run: **40 of 4
 | Composer model chip | Tab to the model chip, Enter, Tab to Model, ArrowDown, Esc ×2 | Pass | chip "claude-sonnet-5-5" |
 | Select (settings) | Tab to Longest wait, Enter, ArrowDown, Enter, check value | Pass | trigger "Longest wait: 6 hours" |
 | SuggestInput (New thread model) | New thread, Tab to Model, ArrowDown ×2, Esc, Esc | Pass |  |
-| Command palette | Tab to Search or run, Enter, type, ArrowDown, Esc | Pass | first Esc cleared the query, second closed (UI SDK Command behaviour) |
+| Command palette | Tab to Search or run, Enter, type, ArrowDown, End, Home, Esc | Pass | End → Show Settled, Home → Settle thread; one Esc closed with the query typed |
 | Command palette (Ctrl+K) | Ctrl+K from the composer, Esc | Pass |  |
 | Segmented control (inbox state) | Tab to Working, ArrowRight, check Done | Pass | Working → Done (aria-checked=true) |
 | Tabs (Thread / IDE) | Tab to Thread tab, ArrowRight, Enter or auto-select | Pass |  |
@@ -49,7 +49,7 @@ It prints the table below and exits 1 if any surface fails. Final run: **40 of 4
 | Switch | Appearance, Tab to Terminal switch, Space ×2 | Pass | true → false → true |
 | Segmented control (color scheme) | Appearance, Tab to the scheme radios, ArrowRight | Pass | Light → Dark |
 | File tree | Right panel, Files tab, Tab into tree, ArrowDown, ArrowRight, ArrowLeft | Pass | api → src; folder expanded false → true |
-| Resizer (sidebar) | Tab to Resize sidebar, ArrowRight ×3, check width | Pass | width 288 → 336, valuenow 20 → 23, focus line in the ring colour |
+| Resizer (sidebar) | Tab to Resize sidebar, ArrowRight ×3, check width | Pass | width 288 → 336, valuenow 20 → 23 (percent), `aria-valuetext` "336 px", focus line in the ring colour |
 | Settings form (Forges) | Tab through Forge select, Base URL, Token, Add account | Pass | Forge: GitHub → Forge base URL → Forge token |
 | Settings nav | Tab into the settings nav, Enter on Appearance | Pass |  |
 | Toaster | Tab past the last control into the toast, then Tab again | Pass | after Dismiss, Tab went to button "Back to threads" (focus-visible true), the first control on the page (was Fail: Tab looped back into the toast) |
@@ -63,7 +63,7 @@ Notes on the table:
 
 - "starts on dialog" (Shortcuts, Guest share): those dialogs have no field, so UI SDK focuses the dialog itself. Tab moves into it and stays trapped.
 - The shortcuts sheet opens from anywhere except a text field: `shortcuts.open` is bound with `inInputs: false`, so Ctrl+/ in the composer types a slash. That's by design (see the sheet's own copy).
-- Command palette: after typing, the first Escape clears the query and the second closes. That's the documented UI SDK Command behaviour. With an empty query one Escape closes, and focus returns to the trigger either way.
+- Command palette: the keys match the cmdk palette on main. One Escape closes even with a query typed (UI SDK Command would clear the query first). Home and End move the highlight to the first and last result, arrows stop at the ends, and Ctrl+N/J/P/K, ⌘+arrow and Alt+arrow work as in cmdk. Focus returns to the trigger.
 - Turn picker: the mock thread has one turn, so the menu has a single enabled item. It opens with Enter and closes with Escape, and focus returns to the trigger.
 - Tooltips open after about 320 ms, move between triggers in about 20 ms, also open on keyboard focus, and never open on tap in a `hasTouch` context.
 
