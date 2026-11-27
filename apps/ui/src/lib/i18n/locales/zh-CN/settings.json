@@ -642,6 +642,7 @@
     "update": "更新",
     "updating": "正在更新…",
     "updateLabel": "更新 {{harness}}",
+    "updateLog": "更新日志",
     "manual": "h4rn 不会修改此安装。请在终端中运行 <code>{{command}}</code>。",
     "failed": "失败",
     "acp": {

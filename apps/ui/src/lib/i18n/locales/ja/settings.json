@@ -642,6 +642,7 @@
     "update": "アップデート",
     "updating": "アップデート中…",
     "updateLabel": "{{harness}} をアップデート",
+    "updateLog": "アップデートログ",
     "manual": "h4rn はこのインストールを変更しません。ターミナルで <code>{{command}}</code> を実行してください。",
     "failed": "失敗",
     "acp": {
