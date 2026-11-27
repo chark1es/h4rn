@@ -14,7 +14,7 @@ function Switch({ className, ...props }: SwitchProps) {
         "hit-area group/switch relative inline-flex h-4.5 w-8 shrink-0 cursor-default items-center rounded-full p-0.5 align-middle",
         "transition-[background-color,box-shadow] duration-micro ease-enter",
         "data-unchecked:bg-input data-checked:bg-foreground",
-        "outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring",
+        "outline-none focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-offset-2 focus-visible:outline-ring",
         "data-disabled:opacity-45 data-readonly:cursor-not-allowed",
         "data-invalid:shadow-[0_0_0_1px_var(--danger)]",
         className,

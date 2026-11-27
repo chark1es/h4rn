@@ -21,7 +21,7 @@ function ScrollArea({ className, label, children, ...props }: ScrollAreaProps) {
     <ScrollAreaPrimitive className={cn("relative overflow-hidden", className)} {...props}>
       <ScrollAreaViewport
         {...(label ? { role: "region", "aria-label": label } : {})}
-        className="size-full overscroll-contain rounded-[inherit] outline-none focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring"
+        className="size-full overscroll-contain rounded-[inherit] outline-none focus-visible:outline-2 focus-visible:outline-solid focus-visible:-outline-offset-2 focus-visible:outline-ring"
       >
         <ScrollAreaContent>{children as React.ReactNode}</ScrollAreaContent>
       </ScrollAreaViewport>

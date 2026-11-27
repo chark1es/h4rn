@@ -148,7 +148,7 @@ function DialogCloseIcon({ className }: { className?: string }) {
       className={cn(
         "hit-area relative -mt-1 -mr-1.5 inline-flex size-8 shrink-0 cursor-default items-center justify-center rounded-md text-muted-foreground",
         "transition-colors duration-micro ease-enter hover:bg-accent hover:text-foreground",
-        "outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring",
+        "outline-none focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-offset-2 focus-visible:outline-ring",
         className,
       )}
     >

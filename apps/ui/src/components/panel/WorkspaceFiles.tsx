@@ -132,7 +132,7 @@ export function WorkspaceFileRow({
           <Tip label={t("workspace.openPreview")}>
             <button
               type="button"
-              className="hit-area absolute end-1 top-0.5 grid size-5.5 place-items-center rounded-sm text-fg-3 opacity-55 transition-opacity duration-micro ease-enter outline-none group-hover/row:opacity-100 hover:bg-fill hover:text-foreground focus-visible:opacity-100 focus-visible:outline-2 focus-visible:outline-ring"
+              className="hit-area absolute end-1 top-0.5 grid size-5.5 place-items-center rounded-sm text-fg-3 opacity-55 transition-opacity duration-micro ease-enter outline-none group-hover/row:opacity-100 hover:bg-fill hover:text-foreground focus-visible:opacity-100 focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-ring"
               aria-label={t("workspace.openPreviewOf", { name: entry.name })}
               onClick={(event) => {
                 event.stopPropagation();

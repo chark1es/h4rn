@@ -328,7 +328,7 @@ export function AddProjectDialog() {
               <Radio
                 key={option.value}
                 value={option.value}
-                className="q-addp-mode outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+                className="q-addp-mode outline-none focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-offset-2 focus-visible:outline-ring"
               >
                 <option.icon className="q-icon" strokeWidth={1.5} aria-hidden />
                 <span className="q-addp-mode-t">{t(`addProject.modes.${option.value}.label`)}</span>

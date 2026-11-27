@@ -16,7 +16,7 @@ function Checkbox({ className, ...props }: CheckboxProps) {
         "hit-area peer relative inline-grid size-4 shrink-0 cursor-default place-items-center rounded-sm bg-card text-primary-foreground shadow-[inset_0_0_0_1px_var(--input)]",
         "transition-[background-color,box-shadow] duration-micro ease-enter",
         "data-checked:bg-primary data-checked:shadow-none data-indeterminate:bg-primary data-indeterminate:shadow-none",
-        "outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring",
+        "outline-none focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-offset-2 focus-visible:outline-ring",
         "data-disabled:opacity-45",
         className,
       )}

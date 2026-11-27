@@ -65,7 +65,7 @@ function SegmentedControlItem({ className, ...props }: SegmentedControlItemProps
         "relative inline-flex shrink-0 cursor-default items-center justify-center gap-1.5 rounded-sm px-2.5 text-sm font-medium whitespace-nowrap text-muted-foreground select-none",
         "transition-colors duration-micro ease-enter",
         "hover:text-foreground data-checked:text-foreground",
-        "outline-none focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-ring",
+        "outline-none focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-offset-1 focus-visible:outline-ring",
         "data-disabled:pointer-events-none data-disabled:opacity-45",
         "phone:px-3",
         "[&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-3.5",

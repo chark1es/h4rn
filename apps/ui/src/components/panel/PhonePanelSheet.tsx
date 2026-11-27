@@ -204,7 +204,7 @@ export function PhonePanelSheet({
             <span className="min-w-0 flex-1 truncate text-center text-lg font-semibold">
               {thread.title}
             </span>
-            <SheetClose className="hit-area relative inline-flex h-11 min-w-16 shrink-0 items-center justify-end rounded-md px-3 text-lg text-accent-tx outline-none focus-visible:outline-2 focus-visible:outline-ring">
+            <SheetClose className="hit-area relative inline-flex h-11 min-w-16 shrink-0 items-center justify-end rounded-md px-3 text-lg text-accent-tx outline-none focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-ring">
               {t("common:done")}
             </SheetClose>
           </div>

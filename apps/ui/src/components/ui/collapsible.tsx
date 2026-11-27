@@ -28,7 +28,7 @@ function CollapsibleTrigger({
       className={cn(
         "hit-area relative inline-flex cursor-default items-center gap-1.5 rounded-sm text-sm font-medium text-muted-foreground select-none",
         "transition-colors duration-micro ease-enter hover:text-foreground data-open:text-foreground",
-        "outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring",
+        "outline-none focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-offset-2 focus-visible:outline-ring",
         "data-disabled:opacity-45",
         className,
       )}

@@ -76,7 +76,7 @@ function TabsTab({ className, ...props }: TabsTabProps) {
       className={cn(
         "relative inline-flex min-w-0 shrink-0 cursor-default items-center justify-center gap-1.5 text-sm font-medium whitespace-nowrap text-muted-foreground select-none",
         "transition-colors duration-micro ease-enter hover:text-foreground data-selected:text-foreground",
-        "outline-none focus-visible:outline-2 focus-visible:outline-ring",
+        "outline-none focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-ring",
         "data-disabled:pointer-events-none data-disabled:opacity-45",
         "group-data-[variant=underline]/tabs:focus-visible:-outline-offset-2 group-data-[variant=underline]/tabs:rounded-sm",
         "group-data-[variant=segmented]/tabs:rounded-sm group-data-[variant=segmented]/tabs:px-2.5 group-data-[variant=segmented]/tabs:focus-visible:outline-offset-1 phone:group-data-[variant=segmented]/tabs:px-3",
@@ -105,7 +105,7 @@ function TabsPanel({ className, ...props }: TabsPanelProps) {
   return (
     <TabsPanelPrimitive
       className={cn(
-        "flex min-h-0 flex-1 flex-col outline-none focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring",
+        "flex min-h-0 flex-1 flex-col outline-none focus-visible:outline-2 focus-visible:outline-solid focus-visible:-outline-offset-2 focus-visible:outline-ring",
         className,
       )}
       {...props}
