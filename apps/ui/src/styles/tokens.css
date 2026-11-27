@@ -49,8 +49,10 @@
   --syn-cm: oklch(0.52 0.01 260);
 
   --scrim: oklch(0.2 0.01 260 / 0.28);
-  --sh-pop: 0 1px 2px oklch(0.2 0.01 260 / 0.06), 0 10px 28px -10px oklch(0.2 0.01 260 / 0.22);
-  --sh-dlg: 0 2px 8px oklch(0.2 0.01 260 / 0.08), 0 28px 64px -16px oklch(0.2 0.01 260 / 0.32);
+  --shadow-popup:
+    0 1px 2px oklch(0.2 0.01 260 / 0.06), 0 10px 28px -10px oklch(0.2 0.01 260 / 0.22);
+  --shadow-modal:
+    0 2px 8px oklch(0.2 0.01 260 / 0.08), 0 28px 64px -16px oklch(0.2 0.01 260 / 0.32);
 
   --s1: #2a78d6;
   --s2: #eb6834;
@@ -62,14 +64,14 @@
     "Geist Variable", "Geist", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   --mono: "Geist Mono Variable", "Geist Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
 
-  /* Motion */
-  --dur-1: 120ms;
-  --dur-2: 180ms;
-  --dur-3: 240ms;
-  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
-  --ease-in: cubic-bezier(0.4, 0, 1, 1);
+  --radius: 8px;
 
-  /* shadcn/ui semantic mapping */
+  /*
+   * shadcn names over the Quiet native palette. One clash: Quiet's --accent is
+   * the blue that means "you're needed" and quiet.css reads it everywhere, so
+   * it keeps that meaning. shadcn's accent role (the hover/highlight fill) is
+   * --accent-surface here and `bg-accent` in Tailwind.
+   */
   --background: var(--bg);
   --foreground: var(--fg);
   --card: var(--bg-raised);
@@ -82,7 +84,8 @@
   --secondary-foreground: var(--fg);
   --muted: var(--fill);
   --muted-foreground: var(--fg-2);
-  --accent-foreground: var(--accent-tx);
+  --accent-surface: var(--fill);
+  --accent-foreground: var(--fg);
   --destructive: var(--danger);
   --destructive-foreground: var(--bg-raised);
   --border: var(--line);
@@ -129,8 +132,8 @@
   --syn-cm: oklch(0.62 0.01 260);
 
   --scrim: oklch(0.05 0.01 260 / 0.5);
-  --sh-pop: 0 1px 2px oklch(0 0 0 / 0.3), 0 12px 32px -10px oklch(0 0 0 / 0.6);
-  --sh-dlg: 0 2px 8px oklch(0 0 0 / 0.35), 0 28px 64px -16px oklch(0 0 0 / 0.7);
+  --shadow-popup: 0 1px 2px oklch(0 0 0 / 0.3), 0 12px 32px -10px oklch(0 0 0 / 0.6);
+  --shadow-modal: 0 2px 8px oklch(0 0 0 / 0.35), 0 28px 64px -16px oklch(0 0 0 / 0.7);
 
   --s1: #3987e5;
   --s2: #d95926;
@@ -177,8 +180,8 @@
     --syn-fn: oklch(0.79 0.1 250);
     --syn-cm: oklch(0.62 0.01 260);
     --scrim: oklch(0.05 0.01 260 / 0.5);
-    --sh-pop: 0 1px 2px oklch(0 0 0 / 0.3), 0 12px 32px -10px oklch(0 0 0 / 0.6);
-    --sh-dlg: 0 2px 8px oklch(0 0 0 / 0.35), 0 28px 64px -16px oklch(0 0 0 / 0.7);
+    --shadow-popup: 0 1px 2px oklch(0 0 0 / 0.3), 0 12px 32px -10px oklch(0 0 0 / 0.6);
+    --shadow-modal: 0 2px 8px oklch(0 0 0 / 0.35), 0 28px 64px -16px oklch(0 0 0 / 0.7);
     --s1: #3987e5;
     --s2: #d95926;
     --s3: #199e70;
@@ -186,7 +189,7 @@
   }
 }
 
-@theme inline {
+@theme inline reference {
   --color-bg: var(--bg);
   --color-bg-side: var(--bg-side);
   --color-bg-raised: var(--bg-raised);
@@ -200,7 +203,6 @@
   --color-fg: var(--fg);
   --color-fg-2: var(--fg-2);
   --color-fg-3: var(--fg-3);
-  --color-accent: var(--accent);
   --color-accent-hi: var(--accent-hi);
   --color-accent-fg: var(--accent-fg);
   --color-accent-tx: var(--accent-tx);
@@ -218,6 +220,7 @@
   --color-add-tx: var(--add-tx);
   --color-del-bg: var(--del-bg);
   --color-del-tx: var(--del-tx);
+  --color-scrim: var(--scrim);
 
   --color-background: var(--background);
   --color-foreground: var(--foreground);
@@ -231,6 +234,8 @@
   --color-secondary-foreground: var(--secondary-foreground);
   --color-muted: var(--muted);
   --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent-surface);
+  --color-accent-foreground: var(--accent-foreground);
   --color-destructive: var(--destructive);
   --color-destructive-foreground: var(--destructive-foreground);
   --color-border: var(--border);
@@ -240,19 +245,66 @@
   --font-sans: var(--font);
   --font-mono: var(--mono);
 
-  --radius-xs: 4px;
-  --radius-sm: 6px;
-  --radius-md: 8px;
-  --radius-lg: 12px;
-  --radius-xl: 14px;
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --radius-2xl: calc(var(--radius) + 6px);
 
-  --shadow-pop: var(--sh-pop);
-  --shadow-dialog: var(--sh-dlg);
-  --shadow-overlay-low: var(--sh-pop);
-  --shadow-overlay-high: var(--sh-dlg);
+  --shadow-popup: var(--shadow-popup);
+  --shadow-modal: var(--shadow-modal);
+}
 
-  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
-  --ease-in: cubic-bezier(0.4, 0, 1, 1);
+/* 13 px is the default UI size; line heights are fixed so rows don't drift. */
+@theme static {
+  --text-xs: 12px;
+  --text-xs--line-height: 16px;
+  --text-sm: 13px;
+  --text-sm--line-height: 18px;
+  --text-base: 14px;
+  --text-base--line-height: 20px;
+  --text-lg: 16px;
+  --text-lg--line-height: 22px;
+  --text-lg--letter-spacing: -0.01em;
+  --text-xl: 20px;
+  --text-xl--line-height: 26px;
+  --text-xl--letter-spacing: -0.015em;
+  --text-2xl: 24px;
+  --text-2xl--line-height: 30px;
+  --text-2xl--letter-spacing: -0.02em;
+}
+
+/* The phone layout (AppShell's .q-ph root), for sizes a coarse pointer alone doesn't imply. */
+@custom-variant phone (&:where(.q-ph *));
+
+/*
+ * A hit area of at least 32 px (44 px on touch or the phone layout) around
+ * a smaller control, without changing how it looks or lays out.
+ */
+@utility hit-area {
+  position: relative;
+
+  &::after {
+    content: "";
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: max(100%, 2rem);
+    height: max(100%, 2rem);
+    translate: -50% -50%;
+  }
+
+  @media (pointer: coarse) {
+    &::after {
+      width: max(100%, 2.75rem);
+      height: max(100%, 2.75rem);
+    }
+  }
+
+  &:where(.q-ph *)::after {
+    width: max(100%, 2.75rem);
+    height: max(100%, 2.75rem);
+  }
 }
 
 @layer base {
@@ -276,8 +328,8 @@
     min-height: 100vh;
     background: var(--bg);
     color: var(--fg);
-    font-size: 13px;
-    line-height: 18px;
+    font-size: var(--text-sm);
+    line-height: var(--text-sm--line-height);
     font-feature-settings:
       "tnum" 1,
       "cv11" 1;

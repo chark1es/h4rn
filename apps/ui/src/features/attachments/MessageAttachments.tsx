@@ -50,7 +50,7 @@ function DownloadButton({ attachment, className }: { attachment: Attachment; cla
       aria-label={t("attachments.download", { name: attachment.name })}
       title={t("attachments.download", { name: attachment.name })}
       className={cn(
-        "flex size-10 shrink-0 items-center justify-center rounded-sm text-fg-3 transition-colors duration-[var(--dur-instant)] hover:bg-bg hover:text-fg focus-visible:ring-2 focus-visible:ring-focus focus-visible:outline-none disabled:opacity-60 sm:size-7",
+        "flex size-10 shrink-0 items-center justify-center rounded-md text-fg-3 transition-colors duration-[var(--dur-instant)] hover:bg-bg hover:text-fg focus-visible:ring-2 focus-visible:ring-focus focus-visible:outline-none disabled:opacity-60 sm:size-7",
         className,
       )}
       disabled={busy}
@@ -66,7 +66,7 @@ function Thumbnail({ attachment, onOpen }: { attachment: Attachment; onOpen: () 
 
   if (error) {
     return (
-      <div className="flex min-h-24 flex-col items-start justify-between gap-1 rounded-md border border-line bg-bg-side p-2">
+      <div className="flex min-h-24 flex-col items-start justify-between gap-1 rounded-lg border border-line bg-bg-side p-2">
         <ImageOffIcon className="size-4 text-fg-3" aria-hidden />
         <div className="min-w-0">
           <p className="truncate text-small text-fg-2">{attachment.name}</p>
@@ -83,7 +83,7 @@ function Thumbnail({ attachment, onOpen }: { attachment: Attachment; onOpen: () 
       onClick={onOpen}
       aria-label={t("attachments.open", { name: attachment.name })}
       title={`${attachment.name} · ${formatBytes(attachment.size)}`}
-      className="group relative aspect-[4/3] min-h-24 w-full overflow-hidden rounded-md border border-line bg-bg-side focus-visible:ring-2 focus-visible:ring-focus focus-visible:outline-none"
+      className="group relative aspect-[4/3] min-h-24 w-full overflow-hidden rounded-lg border border-line bg-bg-side focus-visible:ring-2 focus-visible:ring-focus focus-visible:outline-none"
     >
       {loading || !url ? (
         <span className="absolute inset-0 animate-pulse bg-bg-side" aria-hidden />
@@ -146,7 +146,7 @@ function LightboxBody({ attachment, onClose }: { attachment: Attachment; onClose
           <button
             type="button"
             onClick={onClose}
-            className="h-8 rounded-sm border border-line px-2.5 text-small font-medium text-fg transition-colors duration-[var(--dur-instant)] hover:bg-bg-side focus-visible:ring-2 focus-visible:ring-focus focus-visible:outline-none"
+            className="h-8 rounded-md border border-line px-2.5 text-small font-medium text-fg transition-colors duration-[var(--dur-instant)] hover:bg-bg-side focus-visible:ring-2 focus-visible:ring-focus focus-visible:outline-none"
           >
             {t("common:close")}
           </button>
@@ -189,7 +189,7 @@ export function MessageAttachments({
           {files.map((attachment) => (
             <div
               key={attachment.id}
-              className="flex h-12 items-center gap-2 rounded-md border border-line bg-bg-side px-2 sm:h-9"
+              className="flex h-12 items-center gap-2 rounded-lg border border-line bg-bg-side px-2 sm:h-9"
             >
               <FileTextIcon className="size-4 shrink-0 text-fg-3" aria-hidden />
               <div className="min-w-0 flex-1">

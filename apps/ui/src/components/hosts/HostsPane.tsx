@@ -43,7 +43,7 @@ export function HostsPane() {
               {["a", "b", "c", "d"].map((key) => (
                 <div
                   key={key}
-                  className="h-16 animate-pulse rounded-md border border-line bg-bg-side"
+                  className="h-16 animate-pulse rounded-lg border border-line bg-bg-side"
                 />
               ))}
             </div>
@@ -59,7 +59,7 @@ export function HostsPane() {
               }
             />
           ) : (
-            <ul className="divide-y divide-line rounded-md border border-line bg-bg-raised">
+            <ul className="divide-y divide-line rounded-lg border border-line bg-bg-raised">
               {list.map((host) => (
                 <li key={host.host_id} className="flex items-center gap-3 px-3 py-3">
                   <EntityAvatar

@@ -1,4 +1,6 @@
 /* biome-ignore-all lint/complexity/noImportantStyles: shiki + reduced-motion overrides must win the cascade */
+@layer ui-sdk;
+
 @import "tailwindcss";
 @import "./tokens.css";
 @import "./quiet.css";

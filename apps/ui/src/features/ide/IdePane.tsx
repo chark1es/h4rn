@@ -828,7 +828,7 @@ export function IdePane() {
             </DialogDescription>
           </DialogHeader>
           {state.conflict ? (
-            <div className="max-h-64 overflow-auto rounded-md border border-line bg-bg-side font-mono text-[10px] leading-4">
+            <div className="max-h-64 overflow-auto rounded-lg border border-line bg-bg-side font-mono text-[10px] leading-4">
               {computeDiff(state.conflict.theirs, state.conflict.mine)
                 .slice(0, 80)
                 .map((line) => (

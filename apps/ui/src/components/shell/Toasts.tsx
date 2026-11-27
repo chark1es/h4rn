@@ -20,9 +20,9 @@ export function Toasts() {
           key={toast.id}
           role={toast.variant === "error" ? "alert" : "status"}
           className={cn(
-            "pointer-events-auto flex items-start gap-2.5 rounded-[10px] bg-[var(--bg-raised)] px-3 py-2.5 shadow-[var(--sh-pop),inset_0_0_0_1px_var(--line)]",
+            "pointer-events-auto flex items-start gap-2.5 rounded-[10px] bg-[var(--bg-raised)] px-3 py-2.5 shadow-[var(--shadow-popup),inset_0_0_0_1px_var(--line)]",
             toast.variant === "error" &&
-              "shadow-[var(--sh-pop),inset_0_0_0_1px_color-mix(in_oklch,var(--danger)_35%,var(--line))]",
+              "shadow-[var(--shadow-popup),inset_0_0_0_1px_color-mix(in_oklch,var(--danger)_35%,var(--line))]",
           )}
         >
           {toast.variant === "error" ? (

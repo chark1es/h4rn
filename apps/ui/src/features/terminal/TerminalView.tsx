@@ -183,7 +183,7 @@ export function TerminalView({
             </p>
             <button
               type="button"
-              className="mt-1 inline-flex h-7 items-center gap-1.5 rounded-md border border-[var(--line-2)] px-2.5 text-[12px] font-medium text-[var(--fg)] transition-colors hover:bg-[var(--hover)]"
+              className="mt-1 inline-flex h-7 items-center gap-1.5 rounded-lg border border-[var(--line-2)] px-2.5 text-[12px] font-medium text-[var(--fg)] transition-colors hover:bg-[var(--hover)]"
               onClick={() => {
                 if (showOffline) client.reconnectNow();
                 setAttempt((value) => value + 1);

@@ -51,7 +51,7 @@ function CodeBlock({ code, language }: { code: string; language: string | null }
   };
 
   return (
-    <div className="group/code relative my-2 overflow-hidden rounded-md border border-line bg-bg-sunk">
+    <div className="group/code relative my-2 overflow-hidden rounded-lg border border-line bg-bg-sunk">
       <div className="flex h-7 items-center gap-2 border-b border-line px-2.5">
         <span className="text-caption text-fg-3">{language ?? "text"}</span>
         <button
