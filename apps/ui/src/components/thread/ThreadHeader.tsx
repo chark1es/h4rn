@@ -282,14 +282,10 @@ export function ThreadHeader({
             {t("header.menu.openInIde")}
           </MenuItem>
         )}
-        {isPhone ? null : (
-          <>
-            <MenuSeparator />
-            <MenuItem icon={<SunMoonIcon />} command="theme.toggle" onSelect={toggleTheme}>
-              {t("header.menu.toggleTheme")}
-            </MenuItem>
-          </>
-        )}
+        <MenuSeparator />
+        <MenuItem icon={<SunMoonIcon />} command="theme.toggle" onSelect={toggleTheme}>
+          {t("header.menu.toggleTheme")}
+        </MenuItem>
         <MenuSeparator />
         <MenuFooter>
           {t("header.menu.started", { time: absoluteDateTime(summary.last_activity) })}

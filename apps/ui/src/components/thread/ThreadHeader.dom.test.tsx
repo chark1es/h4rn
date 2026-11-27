@@ -5,7 +5,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { ThreadSummary } from "@/gen";
 import type { StreamTurn } from "@/lib/store/projection";
 import { createThreadLog } from "@/lib/store/projection";
-import { installPopupStubs } from "@/test/popups";
+import { installPopupStubs, stubPhoneLayout } from "@/test/popups";
 
 vi.mock("@/lib/store/appStore", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/store/appStore")>();
@@ -122,6 +122,21 @@ describe("ThreadHeader fork from latest turn", () => {
     expect(item.getAttribute("data-disabled")).toBeNull();
     fireEvent.click(item);
     await waitFor(() => expect(forkThread).toHaveBeenCalledWith("thread_1", "turn_1"));
+  });
+});
+
+describe("ThreadHeader menu on phone", () => {
+  afterEach(() => {
+    cleanup();
+    stubPhoneLayout(false);
+  });
+
+  it("keeps Toggle theme and hides only Open in IDE", async () => {
+    stubPhoneLayout(true);
+    renderHeader([turn()]);
+    await openMenu();
+    expect(await screen.findByRole("menuitem", { name: /Toggle theme/ })).toBeTruthy();
+    expect(screen.queryByRole("menuitem", { name: /Open in IDE/ })).toBeNull();
   });
 });
 
