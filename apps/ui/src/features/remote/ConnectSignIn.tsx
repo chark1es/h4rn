@@ -48,7 +48,7 @@ function providerLabel(provider: ProviderInfo): string {
  * The browser redirect, the desktop loopback and the mobile custom scheme all
  * resolve back into `remoteStore`, so this form never handles a token.
  */
-export function ConnectSignIn({ compact = false }: { compact?: boolean }) {
+export function ConnectSignIn() {
   const { t } = useTranslation(["settings", "common"]);
   const phase = useRemote((state) => state.phase);
   const connectUrl = useRemote((state) => state.connectUrl);
@@ -236,7 +236,7 @@ export function ConnectSignIn({ compact = false }: { compact?: boolean }) {
         </>
       )}
 
-      {error && !compact ? (
+      {error ? (
         <div className="q-field" style={{ alignItems: "flex-start" }}>
           <div className="lab">
             <div className="t">{t("connect.failed")}</div>

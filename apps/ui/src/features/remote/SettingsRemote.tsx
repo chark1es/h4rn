@@ -343,7 +343,7 @@ export function LiveHostsForm({ pairing: pairFirst = false }: { pairing?: boolea
         <div className="q-group">
           <h2>{t("hosts.remoteAccess")}</h2>
           <p className="desc">{t("hosts.remoteAccessHint")}</p>
-          <ConnectSignIn compact />
+          <ConnectSignIn />
         </div>
       ) : null}
 
@@ -1155,7 +1155,7 @@ export function LiveAccountForm() {
           </div>
         </>
       ) : (
-        <ConnectSignIn compact />
+        <ConnectSignIn />
       )}
     </div>
   );
