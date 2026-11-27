@@ -12,13 +12,10 @@ function popupDuration(): number {
  * inbox and thread). Nothing remounts and nothing moves; reduced motion skips it.
  */
 export function useViewFade(ref: RefObject<HTMLElement | null>, view: string) {
-  const first = useRef(true);
-  // biome-ignore lint/correctness/useExhaustiveDependencies: the fade runs on each view change.
+  const shown = useRef(view);
   useLayoutEffect(() => {
-    if (first.current) {
-      first.current = false;
-      return;
-    }
+    if (shown.current === view) return;
+    shown.current = view;
     const node = ref.current?.firstElementChild;
     if (!(node instanceof HTMLElement) || typeof node.animate !== "function") return;
     if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return;
@@ -26,7 +23,7 @@ export function useViewFade(ref: RefObject<HTMLElement | null>, view: string) {
       duration: popupDuration(),
       easing: "cubic-bezier(0.2, 0, 0, 1)",
     });
-  }, [view]);
+  }, [ref, view]);
 }
 
 /** The view a route shows, coarse enough that in-page selections don't fade. */

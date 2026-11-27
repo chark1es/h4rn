@@ -46,7 +46,7 @@ function measure(segment: HTMLElement): boolean {
 
 /**
  * True while the segment's labels are too long for its width, so the caller
- * lets the labels shrink with an ellipsis  instead of pushing
+ * lets the labels shrink with an ellipsis instead of pushing
  * the last tab out of view. Short labels keep the usual equal tabs.
  *
  * `key` changes whenever the text does (the language, a count).
