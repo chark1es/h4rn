@@ -5,7 +5,6 @@ import "./styles/globals.css";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { App } from "./App";
-import { TooltipProvider } from "./components/ui/tooltip";
 // UI translations: reads the saved language (or the system's) and loads its
 // catalogue before the first render, so a non-English reader never sees an
 // English flash. English is bundled; never rejects.
@@ -26,9 +25,7 @@ const languageReady = prepareI18n();
 void Promise.allSettled([preparePlatform(languageReady), languageReady]).finally(() => {
   createRoot(container).render(
     <StrictMode>
-      <TooltipProvider>
-        <App />
-      </TooltipProvider>
+      <App />
     </StrictMode>,
   );
 });
