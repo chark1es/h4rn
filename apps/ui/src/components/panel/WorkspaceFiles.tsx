@@ -11,6 +11,7 @@ import {
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { ShortcutCaps } from "@/components/ui/kbd";
+import { Tip } from "@/components/ui/tooltip";
 
 import { gitBadge } from "@/features/ide/useIdeSession";
 import { isHtmlPath } from "@/features/preview/htmlPreview";
@@ -114,15 +115,16 @@ export function WorkspaceFileRow({
   return (
     <div className="q-frow" role="presentation">
       {row}
-      <button
-        type="button"
-        className="q-fopen"
-        aria-label={t("workspace.openPreviewOf", { name: entry.name })}
-        title={t("workspace.openPreview")}
-        onClick={() => onOpenPreview(entry.path)}
-      >
-        <EyeIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-      </button>
+      <Tip label={t("workspace.openPreview")}>
+        <button
+          type="button"
+          className="q-fopen"
+          aria-label={t("workspace.openPreviewOf", { name: entry.name })}
+          onClick={() => onOpenPreview(entry.path)}
+        >
+          <EyeIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
+        </button>
+      </Tip>
     </div>
   );
 }

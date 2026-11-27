@@ -9,6 +9,7 @@ import {
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Trans, useTranslation } from "react-i18next";
 
+import { Tip } from "@/components/ui/tooltip";
 import type { ThreadSummary } from "@/gen";
 import { formatNumber, i18n } from "@/lib/i18n";
 import { openExternalUrl } from "@/lib/platform/openExternal";
@@ -296,16 +297,21 @@ function ReloadButton({
 }) {
   const { t } = useTranslation("preview");
   return (
-    <button
-      type="button"
-      className="q-ibtn"
-      aria-label={t("reloadPreview")}
-      title={t("reloadPreview")}
-      disabled={disabled}
-      onClick={onClick}
-    >
-      <RefreshCwIcon className={cn("q-icon", loading && "q-spin")} strokeWidth={1.5} aria-hidden />
-    </button>
+    <Tip label={t("reloadPreview")}>
+      <button
+        type="button"
+        className="q-ibtn"
+        aria-label={t("reloadPreview")}
+        disabled={disabled}
+        onClick={onClick}
+      >
+        <RefreshCwIcon
+          className={cn("q-icon", loading && "q-spin")}
+          strokeWidth={1.5}
+          aria-hidden
+        />
+      </button>
+    </Tip>
   );
 }
 
@@ -371,26 +377,28 @@ export function PreviewPanel({
             loading={preview.loading}
             onClick={preview.reload}
           />
-          <button
-            type="button"
-            className="q-ibtn"
-            aria-label={t("openFullWidthLabel")}
-            title={t("openFullWidth")}
-            disabled={!path}
-            onClick={expandPreview}
-          >
-            <Maximize2Icon className="q-icon" strokeWidth={1.5} aria-hidden />
-          </button>
-          <button
-            type="button"
-            className="q-ibtn"
-            aria-label={t("close")}
-            title={t("close")}
-            disabled={!path}
-            onClick={closePreview}
-          >
-            <XIcon className="q-icon" strokeWidth={1.5} aria-hidden />
-          </button>
+          <Tip label={t("openFullWidth")}>
+            <button
+              type="button"
+              className="q-ibtn"
+              aria-label={t("openFullWidthLabel")}
+              disabled={!path}
+              onClick={expandPreview}
+            >
+              <Maximize2Icon className="q-icon" strokeWidth={1.5} aria-hidden />
+            </button>
+          </Tip>
+          <Tip label={t("close")}>
+            <button
+              type="button"
+              className="q-ibtn"
+              aria-label={t("close")}
+              disabled={!path}
+              onClick={closePreview}
+            >
+              <XIcon className="q-icon" strokeWidth={1.5} aria-hidden />
+            </button>
+          </Tip>
         </div>
       ) : null}
 
@@ -424,15 +432,16 @@ export function PreviewPanel({
             loading={preview.loading}
             onClick={preview.reload}
           />
-          <button
-            type="button"
-            className="q-ibtn"
-            aria-label={t("returnToPanelLabel")}
-            title={t("returnToPanel")}
-            onClick={collapsePreview}
-          >
-            <Minimize2Icon className="q-icon" strokeWidth={1.5} aria-hidden />
-          </button>
+          <Tip label={t("returnToPanel")}>
+            <button
+              type="button"
+              className="q-ibtn"
+              aria-label={t("returnToPanelLabel")}
+              onClick={collapsePreview}
+            >
+              <Minimize2Icon className="q-icon" strokeWidth={1.5} aria-hidden />
+            </button>
+          </Tip>
         </div>
       ) : null}
 

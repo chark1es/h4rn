@@ -2,6 +2,7 @@ import type { TFunction } from "i18next";
 import { CircleAlertIcon, FileTextIcon, RotateCcwIcon, XIcon } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
+import { Tip } from "@/components/ui/tooltip";
 import { formatNumber, i18n } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 import { describeUploadFailure, formatBytes } from "./upload";
@@ -75,15 +76,16 @@ function Chip({ task, onRemove }: { task: AttachmentDraft; onRemove: () => void 
         <span className="q-att-nm">{task.file.name}</span>
         <span className="q-att-meta q-num">{statusLine(t, task)}</span>
       </span>
-      <button
-        type="button"
-        onClick={onRemove}
-        aria-label={t("attachments.remove", { name: task.file.name })}
-        title={t("common:remove")}
-        className="q-att-x"
-      >
-        <XIcon className="q-icon s12" strokeWidth={2} aria-hidden />
-      </button>
+      <Tip label={t("common:remove")}>
+        <button
+          type="button"
+          onClick={onRemove}
+          aria-label={t("attachments.remove", { name: task.file.name })}
+          className="q-att-x"
+        >
+          <XIcon className="q-icon s12" strokeWidth={2} aria-hidden />
+        </button>
+      </Tip>
       {busy ? <span aria-hidden className="q-att-bar" style={{ width: `${percent}%` }} /> : null}
     </div>
   );

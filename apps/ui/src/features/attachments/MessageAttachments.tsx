@@ -11,6 +11,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { Tip } from "@/components/ui/tooltip";
 import type { Attachment } from "@/gen";
 import { getClient, pushToast } from "@/lib/store/appStore";
 import { cn } from "@/lib/utils";
@@ -45,19 +46,20 @@ function DownloadButton({ attachment, className }: { attachment: Attachment; cla
   };
 
   return (
-    <button
-      type="button"
-      onClick={() => void download()}
-      aria-label={t("attachments.download", { name: attachment.name })}
-      title={t("attachments.download", { name: attachment.name })}
-      className={cn(
-        "flex size-10 shrink-0 items-center justify-center rounded-md text-fg-3 transition-colors duration-micro hover:bg-bg hover:text-fg focus-visible:ring-2 focus-visible:ring-focus focus-visible:outline-none disabled:opacity-60 sm:size-7",
-        className,
-      )}
-      disabled={busy}
-    >
-      <DownloadIcon className="size-3.5" aria-hidden />
-    </button>
+    <Tip label={t("attachments.download", { name: attachment.name })}>
+      <button
+        type="button"
+        onClick={() => void download()}
+        aria-label={t("attachments.download", { name: attachment.name })}
+        className={cn(
+          "flex size-10 shrink-0 items-center justify-center rounded-md text-fg-3 transition-colors duration-micro hover:bg-bg hover:text-fg focus-visible:ring-2 focus-visible:ring-focus focus-visible:outline-none disabled:opacity-60 sm:size-7",
+          className,
+        )}
+        disabled={busy}
+      >
+        <DownloadIcon className="size-3.5" aria-hidden />
+      </button>
+    </Tip>
   );
 }
 

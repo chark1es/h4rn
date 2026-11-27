@@ -12,7 +12,6 @@ import {
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-
 import { ThreadRow } from "@/components/inbox/ThreadRow";
 import {
   DropdownMenu,
@@ -22,6 +21,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { Tip } from "@/components/ui/tooltip";
 import type { HostSummary } from "@/gen";
 import { monogram } from "@/lib/grouping";
 import { formatNumber } from "@/lib/i18n";
@@ -69,11 +69,11 @@ export function ProjectsHeader() {
           <DropdownMenuTrigger asChild>
             <button
               type="button"
+              title={t("projects.sortTitle")}
               className="q-ibtn s22"
               aria-label={t("projects.sortLabel", {
                 sort: t(`projects.projectSort.${projectSort}`),
               })}
-              title={t("projects.sortTitle")}
             >
               <ArrowUpDownIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
             </button>
@@ -104,15 +104,16 @@ export function ProjectsHeader() {
             ))}
           </DropdownMenuContent>
         </DropdownMenu>
-        <button
-          type="button"
-          className="q-ibtn s22"
-          aria-label={t("projects.add")}
-          title={t("projects.add")}
-          onClick={openAddProject}
-        >
-          <FolderPlusIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-        </button>
+        <Tip label={t("projects.add")}>
+          <button
+            type="button"
+            className="q-ibtn s22"
+            aria-label={t("projects.add")}
+            onClick={openAddProject}
+          >
+            <FolderPlusIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
+          </button>
+        </Tip>
       </span>
     </div>
   );
@@ -223,9 +224,9 @@ export function ProjectGroupSection({
               <DropdownMenuTrigger asChild>
                 <button
                   type="button"
+                  title={t("projects.actionsTitle")}
                   className="q-ibtn q-pg-more"
                   aria-label={t("projects.actionsLabel", { name: group.name })}
-                  title={t("projects.actionsTitle")}
                 >
                   <EllipsisIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
                 </button>
@@ -299,15 +300,16 @@ export function ProjectGroupSection({
                 ) : null}
               </DropdownMenuContent>
             </DropdownMenu>
-            <button
-              type="button"
-              className="q-ibtn q-pg-add"
-              aria-label={t("projects.newThreadInLabel", { name: group.name, host: hostName })}
-              title={t("projects.newThreadInTitle", { name: group.name })}
-              onClick={newThreadHere}
-            >
-              <SquarePenIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-            </button>
+            <Tip label={t("projects.newThreadInTitle", { name: group.name })}>
+              <button
+                type="button"
+                className="q-ibtn q-pg-add"
+                aria-label={t("projects.newThreadInLabel", { name: group.name, host: hostName })}
+                onClick={newThreadHere}
+              >
+                <SquarePenIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
+              </button>
+            </Tip>
           </>
         )}
       </div>

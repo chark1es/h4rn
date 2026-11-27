@@ -1,6 +1,5 @@
 import { ShieldCheckIcon } from "lucide-react";
 import { useTranslation } from "react-i18next";
-
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
 import { buttonVariants } from "@/components/ui/button";
 import {
@@ -13,6 +12,7 @@ import {
   SheetHeader,
   SheetTitle,
 } from "@/components/ui/sheet";
+import { Tip } from "@/components/ui/tooltip";
 import type { ThreadSummary } from "@/gen";
 import { harnessLabel, harnessSeed } from "@/lib/entities";
 import { respondApproval } from "@/lib/store/appStore";
@@ -113,15 +113,16 @@ export function PhoneApprovalSheet({
             </div>
             <div className="q-ph-li">
               <span className="grow">{t("approval.phone.alwaysAllow")}</span>
-              <button
-                type="button"
-                className="q-switch"
-                role="switch"
-                aria-checked={false}
-                disabled
-                title={t("approval.notAvailable")}
-                aria-label={t("approval.phone.alwaysAllow")}
-              />
+              <Tip label={t("approval.notAvailable")}>
+                <button
+                  type="button"
+                  className="q-switch"
+                  role="switch"
+                  aria-checked={false}
+                  disabled
+                  aria-label={t("approval.phone.alwaysAllow")}
+                />
+              </Tip>
             </div>
           </div>
         </SheetBody>

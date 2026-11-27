@@ -8,9 +8,9 @@ import {
 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
-
 import { AgentGlyph } from "@/components/agent/AgentGlyph";
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
+import { Tip } from "@/components/ui/tooltip";
 import type { SubagentState, SubagentView, ThreadSummary } from "@/gen";
 import { glyphForAgentState } from "@/lib/agent";
 import { harnessLabel, harnessSeed, machineSeed, subagentSeed } from "@/lib/entities";
@@ -332,15 +332,16 @@ export function SubagentsPanel({ thread }: { thread: ThreadSummary }) {
               : t("subagents.count", { count: views.length })}
         </span>
         <span className="grow" />
-        <button
-          type="button"
-          className="q-ibtn"
-          aria-label={t("subagents.refresh")}
-          title={t("subagents.refresh")}
-          onClick={() => void loadSubagents(thread.thread_id, true)}
-        >
-          <RefreshCwIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-        </button>
+        <Tip label={t("subagents.refresh")}>
+          <button
+            type="button"
+            className="q-ibtn"
+            aria-label={t("subagents.refresh")}
+            onClick={() => void loadSubagents(thread.thread_id, true)}
+          >
+            <RefreshCwIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
+          </button>
+        </Tip>
         <button type="button" className="q-btn ghost" onClick={openDelegate}>
           <PlusIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
           {t("subagents.delegate")}

@@ -3,6 +3,7 @@ import { useEffect } from "react";
 import { useTranslation } from "react-i18next";
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
 import { ChipSelect } from "@/components/common/ChipSelect";
+import { Tip } from "@/components/ui/tooltip";
 import type {
   LimitStatus,
   UsageBucketPoint,
@@ -867,15 +868,16 @@ export function UsagePage() {
         <span className="grow" />
         <ScopePicker />
         <RangePicker />
-        <button
-          type="button"
-          className="q-btn secondary"
-          title={t("refresh")}
-          aria-label={t("refresh")}
-          onClick={refreshUsage}
-        >
-          <RefreshCwIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-        </button>
+        <Tip label={t("refresh")}>
+          <button
+            type="button"
+            className="q-btn secondary"
+            aria-label={t("refresh")}
+            onClick={refreshUsage}
+          >
+            <RefreshCwIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
+          </button>
+        </Tip>
       </header>
 
       <div className="q-page">

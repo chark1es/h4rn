@@ -1,7 +1,6 @@
 import { ChevronDownIcon, Code2Icon, FileIcon, RotateCcwIcon } from "lucide-react";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
-
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
 import { ConfirmDialog } from "@/components/common/ConfirmDialog";
 import {
@@ -12,6 +11,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { ShortcutCaps } from "@/components/ui/kbd";
+import { Tip } from "@/components/ui/tooltip";
 import type { ThreadSummary } from "@/gen";
 import { harnessLabel, harnessSeed } from "@/lib/entities";
 import { absoluteTime } from "@/lib/format";
@@ -161,15 +161,16 @@ export function ChangesSection({
                         {file.removed > 0 ? <span className="q-del"> −{file.removed}</span> : null}
                       </span>
                     </button>
-                    <button
-                      type="button"
-                      className="q-ibtn"
-                      aria-label={t("changes.revertFile", { name })}
-                      title={t("changes.revertFile", { name: file.path })}
-                      onClick={() => setConfirm({ kind: "file", path: file.path, name })}
-                    >
-                      <RotateCcwIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
-                    </button>
+                    <Tip label={t("changes.revertFile", { name: file.path })}>
+                      <button
+                        type="button"
+                        className="q-ibtn"
+                        aria-label={t("changes.revertFile", { name })}
+                        onClick={() => setConfirm({ kind: "file", path: file.path, name })}
+                      >
+                        <RotateCcwIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+                      </button>
+                    </Tip>
                   </div>
                 );
               })}

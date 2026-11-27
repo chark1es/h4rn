@@ -11,7 +11,6 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -22,6 +21,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { Tip } from "@/components/ui/tooltip";
 import type { DirectoryListing, ProjectSource } from "@/gen";
 import { closeAddProject, pushToast, useApp } from "@/lib/store/appStore";
 import { cn } from "@/lib/utils";
@@ -76,25 +76,27 @@ function FolderBrowser({
   return (
     <div className="q-fb">
       <div className="q-fb-bar">
-        <button
-          type="button"
-          className="q-ibtn"
-          aria-label={t("addProject.upFolder")}
-          title={t("addProject.upFolder")}
-          disabled={!listing?.parent}
-          onClick={() => onOpen(listing?.parent ?? null)}
-        >
-          <ArrowUpIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-        </button>
-        <button
-          type="button"
-          className="q-ibtn"
-          aria-label={t("addProject.homeFolder")}
-          title={t("addProject.homeFolder")}
-          onClick={() => onOpen("~")}
-        >
-          <HomeIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-        </button>
+        <Tip label={t("addProject.upFolder")}>
+          <button
+            type="button"
+            className="q-ibtn"
+            aria-label={t("addProject.upFolder")}
+            disabled={!listing?.parent}
+            onClick={() => onOpen(listing?.parent ?? null)}
+          >
+            <ArrowUpIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
+          </button>
+        </Tip>
+        <Tip label={t("addProject.homeFolder")}>
+          <button
+            type="button"
+            className="q-ibtn"
+            aria-label={t("addProject.homeFolder")}
+            onClick={() => onOpen("~")}
+          >
+            <HomeIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
+          </button>
+        </Tip>
         <input
           className="q-input q-mono"
           aria-label={t("addProject.folderPath")}

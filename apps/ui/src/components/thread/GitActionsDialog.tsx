@@ -20,6 +20,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { Tip } from "@/components/ui/tooltip";
 import { ForgeApi, forgeLabel } from "@/features/forge/store";
 import { gitActionsApi, type PullRequestText } from "@/features/git-actions/store";
 import type { ForgeRepoRef, GitThreadStatus, ThreadSummary } from "@/gen";
@@ -273,20 +274,21 @@ export function GitActionsDialog({
                     </>
                   ) : null}
                   <span className="grow" />
-                  <button
-                    type="button"
-                    className="q-ibtn"
-                    aria-label={t("git.refresh")}
-                    title={t("common:refresh")}
-                    onClick={() => void refresh()}
-                    disabled={loading}
-                  >
-                    <RefreshCwIcon
-                      className={cn("q-icon s14", loading && "animate-spin")}
-                      strokeWidth={1.5}
-                      aria-hidden
-                    />
-                  </button>
+                  <Tip label={t("common:refresh")}>
+                    <button
+                      type="button"
+                      className="q-ibtn"
+                      aria-label={t("git.refresh")}
+                      onClick={() => void refresh()}
+                      disabled={loading}
+                    >
+                      <RefreshCwIcon
+                        className={cn("q-icon s14", loading && "animate-spin")}
+                        strokeWidth={1.5}
+                        aria-hidden
+                      />
+                    </button>
+                  </Tip>
                 </div>
                 <div className="q-git-changes">
                   <ChangeSet

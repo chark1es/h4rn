@@ -7,6 +7,7 @@ import {
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
+import { Tip } from "@/components/ui/tooltip";
 import { MessageAttachments } from "@/features/attachments/MessageAttachments";
 import type { QueuedMessage, ThreadSummary } from "@/gen";
 import { isTurnRunning } from "@/lib/agent";
@@ -107,26 +108,28 @@ export function QueuedTurn({
           {message.delivery_unknown ? t("queue.discard") : t("common:remove")}
         </button>
         <span className="grow" />
-        <button
-          type="button"
-          className="q-ibtn"
-          disabled={index === 0}
-          aria-label={t("queue.moveUp")}
-          title={t("queue.moveUp")}
-          onClick={() => void moveQueuedMessage(threadId, message.message_id, "up")}
-        >
-          <ChevronUpIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
-        </button>
-        <button
-          type="button"
-          className="q-ibtn"
-          disabled={index === total - 1}
-          aria-label={t("queue.moveDown")}
-          title={t("queue.moveDown")}
-          onClick={() => void moveQueuedMessage(threadId, message.message_id, "down")}
-        >
-          <ChevronDownIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
-        </button>
+        <Tip label={t("queue.moveUp")}>
+          <button
+            type="button"
+            className="q-ibtn"
+            disabled={index === 0}
+            aria-label={t("queue.moveUp")}
+            onClick={() => void moveQueuedMessage(threadId, message.message_id, "up")}
+          >
+            <ChevronUpIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+          </button>
+        </Tip>
+        <Tip label={t("queue.moveDown")}>
+          <button
+            type="button"
+            className="q-ibtn"
+            disabled={index === total - 1}
+            aria-label={t("queue.moveDown")}
+            onClick={() => void moveQueuedMessage(threadId, message.message_id, "down")}
+          >
+            <ChevronDownIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+          </button>
+        </Tip>
       </div>
     </div>
   );
