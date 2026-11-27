@@ -345,42 +345,6 @@ fieldset.q-seg-fs {
     0 0 0 3px color-mix(in oklch, var(--focus) 25%, transparent);
 }
 
-.q-switch {
-  display: inline-block;
-  vertical-align: middle;
-  width: 30px;
-  height: 18px;
-  border-radius: 8px;
-  background: var(--fill-2);
-  position: relative;
-  flex: none;
-  box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--fg) 12%, transparent);
-  transition: background var(--duration-popup) var(--ease-enter);
-}
-.q-switch::after {
-  content: "";
-  position: absolute;
-  top: 2px;
-  left: 2px;
-  width: 14px;
-  height: 14px;
-  border-radius: 50%;
-  background: #fff;
-  box-shadow: 0 1px 2px oklch(0 0 0 / 0.25);
-  transition: transform var(--duration-popup) var(--ease-enter);
-}
-.q-switch[aria-checked="true"] {
-  background: var(--accent);
-  box-shadow: none;
-}
-.q-switch[aria-checked="true"]::after {
-  transform: translateX(12px);
-}
-.q-switch[aria-disabled="true"],
-.q-switch[disabled] {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
 
 .q-check {
   width: 16px;
@@ -5068,20 +5032,6 @@ fieldset.q-seg-fs {
   font-size: 14px;
   padding: 0 12px;
 }
-.q-ph .q-switch {
-  width: 51px;
-  height: 31px;
-  border-radius: 16px;
-}
-.q-ph .q-switch::after {
-  width: 27px;
-  height: 27px;
-  top: 2px;
-  left: 2px;
-}
-.q-ph .q-switch[aria-checked="true"]::after {
-  transform: translateX(20px);
-}
 
 /* Pairing flow (static shell) */
 .q-pair-body {
@@ -5978,14 +5928,14 @@ fieldset.q-seg-fs {
     justify-content: flex-start;
   }
   /* A lone switch stays on the label's row, at its trailing edge. */
-  .q-field:has(> .ctl > .q-switch:only-child) {
+  .q-field:has(> .ctl > [data-slot="switch"]:only-child) {
     flex-direction: row;
     align-items: center;
   }
-  .q-field:has(> .ctl > .q-switch:only-child) .lab {
+  .q-field:has(> .ctl > [data-slot="switch"]:only-child) .lab {
     flex: 1;
   }
-  .q-field:has(> .ctl > .q-switch:only-child) .ctl {
+  .q-field:has(> .ctl > [data-slot="switch"]:only-child) .ctl {
     flex: none;
   }
   .q-field .ctl > .q-input,

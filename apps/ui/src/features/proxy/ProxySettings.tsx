@@ -11,6 +11,7 @@ import { Fragment, useEffect, useMemo, useState } from "react";
 import { Trans, useTranslation } from "react-i18next";
 
 import { ChipSelect } from "@/components/common/ChipSelect";
+import { Switch } from "@/components/ui/switch";
 import type {
   AgentState,
   HarnessKind,
@@ -24,7 +25,6 @@ import { HARNESS_LABELS } from "@/lib/entities";
 import { formatList, formatNumber, formatRelativeTime, i18n } from "@/lib/i18n";
 import { useApp } from "@/lib/store/appStore";
 import { cn } from "@/lib/utils";
-
 import {
   addProxyProfile,
   applyProxyOverrides,
@@ -533,14 +533,11 @@ function HarnessRow({ profile, harness }: { profile: ProxyProfile; harness: Harn
           <div className="s">{enabled ? t("proxy.harness.routed") : t("proxy.harness.own")}</div>
         </div>
         <div className="ctl">
-          <button
-            type="button"
-            className="q-switch"
-            role="switch"
-            aria-checked={enabled}
+          <Switch
+            checked={enabled}
             aria-label={t("proxy.harness.routeLabel", { harness: HARNESS_LABELS[harness] })}
             disabled={saving}
-            onClick={() =>
+            onCheckedChange={() =>
               void setHarnessOverride(
                 profile.id,
                 harness,

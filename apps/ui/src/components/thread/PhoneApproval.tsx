@@ -12,6 +12,7 @@ import {
   SheetHeader,
   SheetTitle,
 } from "@/components/ui/sheet";
+import { Switch } from "@/components/ui/switch";
 import { Tip } from "@/components/ui/tooltip";
 import type { ThreadSummary } from "@/gen";
 import { harnessLabel, harnessSeed } from "@/lib/entities";
@@ -114,14 +115,7 @@ export function PhoneApprovalSheet({
             <div className="q-ph-li">
               <span className="grow">{t("approval.phone.alwaysAllow")}</span>
               <Tip label={t("approval.notAvailable")}>
-                <button
-                  type="button"
-                  className="q-switch"
-                  role="switch"
-                  aria-checked={false}
-                  disabled
-                  aria-label={t("approval.phone.alwaysAllow")}
-                />
+                <Switch checked={false} disabled aria-label={t("approval.phone.alwaysAllow")} />
               </Tip>
             </div>
           </div>

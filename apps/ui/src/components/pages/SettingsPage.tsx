@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 
 import { ChipSelect } from "@/components/common/ChipSelect";
 import { ShortcutCaps } from "@/components/ui/kbd";
+import { Switch } from "@/components/ui/switch";
 import { AccessSettings } from "@/features/access/AccessSettings";
 import { ForgeSettings } from "@/features/forge/ForgeSettings";
 import { GuestSettingsForm } from "@/features/guest/GuestSettings";
@@ -105,15 +106,11 @@ function Toggle({
   disabled?: boolean;
 }) {
   return (
-    <button
-      type="button"
-      className="q-switch"
-      role="switch"
-      aria-checked={checked}
+    <Switch
+      checked={checked}
       aria-label={label}
-      aria-disabled={disabled || undefined}
       disabled={disabled}
-      onClick={() => onChange?.(!checked)}
+      onCheckedChange={() => onChange?.(!checked)}
     />
   );
 }

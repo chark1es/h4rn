@@ -14,6 +14,7 @@ import { Trans, useTranslation } from "react-i18next";
 import { ChipSelect } from "@/components/common/ChipSelect";
 import { LibraryErrorBanner } from "@/components/pages/LibraryErrorBanner";
 import { Button } from "@/components/ui/button";
+import { Switch } from "@/components/ui/switch";
 import type { HarnessKind, SkillConflict, SkillInstallState, SkillSummary } from "@/gen";
 import { useIsPhone } from "@/hooks/use-media-query";
 import { useNow } from "@/hooks/use-now";
@@ -205,12 +206,8 @@ function HarnessMatrix({ skill, isPhone }: { skill: SkillSummary; isPhone: boole
         const failed = enabled && !install?.installed;
         return (
           <div className="flex min-w-0 flex-col items-center gap-1" key={harness}>
-            <button
-              type="button"
-              role="switch"
-              className="q-switch"
-              aria-checked={enabled}
-              aria-disabled={pending[`${skill.id}:${harness}`] ? "true" : undefined}
+            <Switch
+              checked={enabled}
               disabled={!install || Boolean(pending[`${skill.id}:${harness}`])}
               aria-label={t("skills.row.toggle", {
                 skill: skill.name,
@@ -224,7 +221,7 @@ function HarnessMatrix({ skill, isPhone }: { skill: SkillSummary; isPhone: boole
                       version: install.version ?? t("skills.row.notInstalled"),
                     })
               }
-              onClick={() => {
+              onCheckedChange={() => {
                 if (!install) return;
                 void setSkillEnabled(skill.id, harness, !enabled);
               }}

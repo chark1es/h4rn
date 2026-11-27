@@ -21,6 +21,7 @@ import {
 import { useEffect, useRef, useState } from "react";
 import { Trans, useTranslation } from "react-i18next";
 
+import { Switch } from "@/components/ui/switch";
 import type { DirectDevice, PairScope } from "@/gen";
 import { useNow } from "@/hooks/use-now";
 import { formatRelativeTime, i18n } from "@/lib/i18n";
@@ -62,30 +63,6 @@ export function networkAccessVisible(
   if (shell === "mobile") return false;
   if (remoteActive) return false;
   return transport !== "relay" && transport !== "tailscale";
-}
-
-function Switch({
-  checked,
-  disabled,
-  label,
-  onChange,
-}: {
-  checked: boolean;
-  disabled: boolean;
-  label: string;
-  onChange: (next: boolean) => void;
-}) {
-  return (
-    <button
-      type="button"
-      className="q-switch"
-      role="switch"
-      aria-checked={checked}
-      aria-label={label}
-      disabled={disabled}
-      onClick={() => onChange(!checked)}
-    />
-  );
 }
 
 function remainingText(ms: number): string {
@@ -445,8 +422,8 @@ export function NetworkAccessSettings() {
           <Switch
             checked={enabled}
             disabled={state.saving || !access}
-            label={t("network.allow")}
-            onChange={(next) => void setNetworkAccess(next)}
+            aria-label={t("network.allow")}
+            onCheckedChange={(next) => void setNetworkAccess(next)}
           />
         </div>
       </div>

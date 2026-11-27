@@ -27,6 +27,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { Switch } from "@/components/ui/switch";
 import type { HarnessKind, HostId, McpServerView } from "@/gen";
 import { useIsPhone } from "@/hooks/use-media-query";
 import { useNow } from "@/hooks/use-now";
@@ -118,15 +119,11 @@ function Toggle({
   onToggle: () => void;
 }) {
   return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={checked}
+    <Switch
+      checked={checked}
       aria-label={label}
-      aria-disabled={busy ? "true" : undefined}
-      disabled={busy}
-      className="q-switch"
-      onClick={onToggle}
+      disabled={busy ?? false}
+      onCheckedChange={onToggle}
     />
   );
 }
