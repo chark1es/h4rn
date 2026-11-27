@@ -3475,17 +3475,6 @@ fieldset.q-seg-fs {
      the way an English one is. Latin text is unaffected. */
   word-break: keep-all;
 }
-.q-pop {
-  position: absolute;
-  z-index: 15;
-  background: var(--bg-raised);
-  border-radius: 12px;
-  box-shadow:
-    var(--shadow-popup),
-    inset 0 0 0 1px var(--line);
-  padding: 14px;
-}
-
 /* IDE */
 .q-ftree {
   width: 244px;
