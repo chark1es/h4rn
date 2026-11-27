@@ -108,7 +108,14 @@ function DialogContent({
       content.current = node;
       if (typeof ref === "function") ref(node);
       else if (ref) ref.current = node;
-      return skipReducedSheetMotion(node);
+      // React 19 calls a ref's returned cleanup instead of calling it with null.
+      const stop = skipReducedSheetMotion(node);
+      return () => {
+        content.current = null;
+        if (typeof ref === "function") ref(null);
+        else if (ref) ref.current = null;
+        stop?.();
+      };
     },
     [ref],
   );

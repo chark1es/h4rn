@@ -107,6 +107,9 @@ describe("Dialog", () => {
     await waitFor(() =>
       expect(document.activeElement).toBe(screen.getByRole("textbox", { name: "Title" })),
     );
+    fireEvent.keyDown(document.activeElement as Element, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(ref.current).toBeNull();
   });
 
   it("closes from the close button and from Cancel, and runs Save", async () => {
