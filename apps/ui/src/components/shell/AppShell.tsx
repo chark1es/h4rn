@@ -779,7 +779,20 @@ function PhoneIdeNotice() {
   );
 }
 
+/**
+ * One toaster outside the layout switch, so toasts on screen stay put when
+ * the window crosses the phone breakpoint; it moves itself between corners.
+ */
 export function AppShell() {
+  return (
+    <>
+      <ShellLayout />
+      <Toaster />
+    </>
+  );
+}
+
+function ShellLayout() {
   const { t } = useTranslation(["sidebar", "thread"]);
   const route = useApp((state) => state.ui.route);
   const layout = useApp((state) => state.ui.layout);
@@ -842,7 +855,6 @@ export function AppShell() {
           onClose={closeLinkPullRequest}
         />
         <ShortcutsDialog />
-        <Toaster />
       </div>
     );
   }
@@ -912,7 +924,6 @@ export function AppShell() {
         onClose={closeLinkPullRequest}
       />
       <ShortcutsDialog />
-      <Toaster />
     </div>
   );
 }
