@@ -1147,8 +1147,8 @@ fieldset.q-seg-fs {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 10px 12px 10px 24px;
-  min-height: 60px;
+  padding: 0 12px 0 24px;
+  height: var(--header-height);
   border-bottom: 1px solid var(--line);
   flex: none;
 }
@@ -1171,8 +1171,9 @@ fieldset.q-seg-fs {
   align-items: center;
   gap: 6px;
   font-size: 12px;
+  line-height: 16px;
   color: var(--fg-2);
-  margin-top: 3px;
+  margin-top: 2px;
   white-space: nowrap;
   overflow: hidden;
 }
@@ -1236,7 +1237,7 @@ fieldset.q-seg-fs {
 .q-th-actions {
   display: flex;
   align-items: center;
-  gap: 2px;
+  gap: 8px;
 }
 .q-vsep {
   width: 1px;
@@ -2781,17 +2782,25 @@ fieldset.q-seg-fs {
   overflow: auto;
   min-height: 0;
 }
+/* A page header lines its title and actions up with the page body below:
+   the same centred width (--page-w) and gutter (--page-gutter). */
 .q-page-head {
+  --page-w: 1080px;
+  --page-gutter: 32px;
   display: flex;
   align-items: center;
-  gap: 10px;
-  height: 52px;
-  padding: 0 16px 0 24px;
+  gap: 8px;
+  height: var(--header-height);
+  padding-inline: max(var(--page-gutter), calc((100% - var(--page-w)) / 2 + var(--page-gutter)));
   border-bottom: 1px solid var(--line);
   flex: none;
 }
+.q-pr-list-head {
+  --page-w: 880px;
+  --page-gutter: 16px;
+}
 .q-page-head h1 {
-  margin: 0;
+  margin: 0 4px 0 0;
   font-size: 16px;
   font-weight: 600;
   letter-spacing: -0.01em;
@@ -3546,8 +3555,9 @@ fieldset.q-seg-fs {
   flex: none;
 }
 .q-pr-head {
+  --page-w: 1040px;
   height: auto;
-  padding: 14px 16px 14px 32px;
+  padding-block: 14px;
   align-items: flex-start;
 }
 .q-pr-meta {
@@ -4112,7 +4122,7 @@ fieldset.q-seg-fs {
     right: 0;
   }
   .q-th-head {
-    min-height: 0;
+    height: auto;
     padding: 0 16px 10px;
     border-bottom: 1px solid var(--line);
   }
@@ -4955,7 +4965,7 @@ fieldset.q-seg-fs {
   display: flex;
   align-items: stretch;
   gap: 18px;
-  height: 60px;
+  height: var(--header-height);
   padding: 0 10px 0 16px;
   border-bottom: 1px solid var(--line);
   flex: none;
@@ -5478,7 +5488,7 @@ fieldset.q-seg-fs {
     min-height: 52px;
     flex-wrap: wrap;
     row-gap: 8px;
-    padding: 10px 14px;
+    padding: 10px 16px;
     align-items: flex-start;
   }
   .q-pr-head {

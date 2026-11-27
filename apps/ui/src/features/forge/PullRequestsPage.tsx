@@ -1231,7 +1231,7 @@ function PrDetail({
   if (loading) {
     return (
       <main className="q-main" aria-label={t("detail.label")} aria-busy="true">
-        <header className="q-page-head" style={{ height: "auto", padding: "14px 16px 14px 32px" }}>
+        <header className="q-page-head q-pr-head">
           <div style={{ flex: 1 }}>
             <div className="q-skel" style={{ width: 320, height: 22 }} />
           </div>

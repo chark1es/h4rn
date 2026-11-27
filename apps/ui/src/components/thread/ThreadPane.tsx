@@ -40,10 +40,10 @@ function HeaderSkeleton({ hostName }: { hostName?: string | undefined }) {
   return (
     <header className="q-th-head">
       <div className="q-th-titles">
-        <div className="q-skel" style={{ width: 240, height: 12, marginBottom: 8 }} />
-        <div className="q-skel" style={{ width: 360, height: 9 }} />
+        <div className="q-skel mb-2 h-3 w-60" />
+        <div className="q-skel h-2.5 w-90 max-w-full" />
       </div>
-      <div className="q-th-state q-faint" style={{ fontWeight: 400 }}>
+      <div className="q-th-state q-faint font-normal">
         {hostName ? t("pane.connectingTo", { host: hostName }) : t("pane.connecting")}
       </div>
     </header>
