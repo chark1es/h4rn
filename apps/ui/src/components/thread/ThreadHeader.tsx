@@ -38,7 +38,7 @@ import {
   MenuSeparator,
   MenuTrigger,
 } from "@/components/ui/menu";
-import { Tip } from "@/components/ui/tooltip";
+import { Tip, TruncatedText } from "@/components/ui/tooltip";
 import { ThreadPullRequestBadge } from "@/features/forge/ThreadPullRequestBadge";
 import { openGuestShare } from "@/features/guest/guestStore";
 import { useThreadSettings } from "@/features/threads/settings";
@@ -336,7 +336,9 @@ export function ThreadHeader({
           </div>
         </div>
         <div className="q-ph-th-title">
-          <div className="q-ph-th-name">{summary.title}</div>
+          <div className="q-ph-th-name" title={summary.title}>
+            {summary.title}
+          </div>
           <ThreadForkLine summary={summary} />
           <div className="q-ph-th-meta">
             <EntityAvatar
@@ -372,7 +374,7 @@ export function ThreadHeader({
       {gitDialog}
       <SidebarReveal />
       <div className="q-th-titles">
-        <h1>{summary.title}</h1>
+        <TruncatedText render={<h1 />}>{summary.title}</TruncatedText>
         <div className="q-prov">
           <EntityAvatar
             seed={machineSeed(summary.host)}
@@ -401,9 +403,7 @@ export function ThreadHeader({
             <span className="br">
               <span className="q-sep">/</span>
               <GitBranchIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-              <span className="q-mono" style={{ fontSize: 12 }}>
-                {summary.branch}
-              </span>
+              <TruncatedText className="q-mono">{summary.branch}</TruncatedText>
             </span>
           ) : null}
         </div>
