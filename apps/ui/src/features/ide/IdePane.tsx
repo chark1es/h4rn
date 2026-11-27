@@ -439,7 +439,7 @@ export function IdePane() {
               />
               <span>{workspace.host}</span>
               <span className="q-sep">/</span>
-              <span className="q-mono" style={{ fontSize: 11.5 }}>
+              <span className="q-mono" style={{ fontSize: 12 }}>
                 {workspace.path}
               </span>
             </div>
@@ -827,7 +827,7 @@ export function IdePane() {
           </DialogHeader>
           <DialogBody>
             {state.conflict ? (
-              <div className="max-h-64 overflow-auto rounded-lg border border-line bg-bg-side font-mono text-[10px] leading-4">
+              <div className="max-h-64 overflow-auto rounded-lg border border-line bg-bg-side font-mono text-xs leading-4">
                 {computeDiff(state.conflict.theirs, state.conflict.mine)
                   .slice(0, 80)
                   .map((line) => (

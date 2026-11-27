@@ -183,7 +183,7 @@ export function ThreadPane({ threadId }: { threadId: string }) {
             <span className="q-danger">
               <CircleAlertIcon className="q-icon s22" strokeWidth={1.5} aria-hidden />
             </span>
-            <h3 style={{ fontSize: 17, lineHeight: "24px", marginTop: 10 }}>
+            <h3 style={{ fontSize: 16, lineHeight: "24px", marginTop: 10 }}>
               {t("pane.loadFailed")}
             </h3>
             <p style={{ margin: 0 }}>
@@ -300,7 +300,7 @@ export function ThreadPane({ threadId }: { threadId: string }) {
             <span className="q-danger">
               <CircleAlertIcon className="q-icon s22" strokeWidth={1.5} aria-hidden />
             </span>
-            <h3 style={{ fontSize: 17, lineHeight: "24px", marginTop: 10 }}>
+            <h3 style={{ fontSize: 16, lineHeight: "24px", marginTop: 10 }}>
               {t("pane.loadFailed")}
             </h3>
             <p style={{ margin: 0 }}>
@@ -368,7 +368,7 @@ export function ThreadPane({ threadId }: { threadId: string }) {
         <div className="q-center-empty">
           <div className="q-empty" style={{ width: 460, maxWidth: "100%", padding: 0 }}>
             <InboxIcon className="q-icon s22 q-faint" strokeWidth={1.5} aria-hidden />
-            <h3 style={{ fontSize: 17, lineHeight: "24px" }}>{t("pane.emptyTitle")}</h3>
+            <h3 style={{ fontSize: 16, lineHeight: "24px" }}>{t("pane.emptyTitle")}</h3>
             <p style={{ margin: 0 }}>
               {summary.agent_state === "done"
                 ? t("pane.emptyFinished", { host: host?.name ?? summary.host })

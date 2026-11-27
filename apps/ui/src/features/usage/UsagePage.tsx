@@ -259,7 +259,7 @@ function UsageChart({ report, metric }: { report: UsageReport; metric: ChartMetr
               bottom: `calc(24px + ${(tick / max) * 190}px)`,
               width: 42,
               textAlign: "right",
-              fontSize: 11,
+              fontSize: 12,
               color: "var(--fg-3)",
               transform: "translateY(50%)",
             }}
@@ -316,7 +316,7 @@ function UsageChart({ report, metric }: { report: UsageReport; metric: ChartMetr
               {index % 2 === 0 || index === report.buckets.length - 1 ? (
                 <span
                   className="num"
-                  style={{ fontSize: 11, color: "var(--fg-3)", position: "absolute", bottom: -18 }}
+                  style={{ fontSize: 12, color: "var(--fg-3)", position: "absolute", bottom: -18 }}
                 >
                   {labels[index]}
                 </span>

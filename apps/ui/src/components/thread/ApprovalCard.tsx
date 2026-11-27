@@ -50,7 +50,7 @@ export function ApprovalCard({ threadId }: { threadId: string }) {
       </div>
       {summary?.workspace_path ? (
         <div className="q-ask-sub">
-          <span className="q-mono" style={{ fontSize: 11.5 }}>
+          <span className="q-mono" style={{ fontSize: 12 }}>
             {tildePath(summary.workspace_path)}
           </span>
         </div>

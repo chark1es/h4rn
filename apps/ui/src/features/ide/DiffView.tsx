@@ -601,7 +601,7 @@ export function DiffView({
       <div className="q-center-empty" style={{ flex: 1 }}>
         <div className="q-empty" style={{ padding: 0 }}>
           <FileTextIcon className="q-icon s18 q-faint" aria-hidden />
-          <h3 style={{ fontSize: 13.5 }}>
+          <h3 style={{ fontSize: 14 }}>
             {emptyBranch
               ? files?.base
                 ? t("diff.noBranchChanges", { base: files.base })

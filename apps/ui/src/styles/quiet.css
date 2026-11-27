@@ -1087,7 +1087,7 @@ fieldset.q-seg-fs {
   flex: 0 1 auto;
   min-width: 0;
   max-width: 46%;
-  font-size: 11.5px;
+  font-size: 12px;
   line-height: 16px;
   color: var(--fg-3);
   white-space: nowrap;
@@ -1158,7 +1158,7 @@ fieldset.q-seg-fs {
 }
 .q-th-titles h1 {
   margin: 0;
-  font-size: 15px;
+  font-size: 16px;
   line-height: 20px;
   font-weight: 600;
   letter-spacing: -0.01em;
@@ -1189,7 +1189,7 @@ fieldset.q-seg-fs {
 .q-signin-details .q-mono {
   display: block;
   margin-top: 4px;
-  font-size: 11.5px;
+  font-size: 12px;
   overflow-wrap: anywhere;
 }
 .q-ph-sheet .q-mono,
@@ -1369,7 +1369,7 @@ fieldset.q-seg-fs {
   height: 22px;
   padding: 0 6px;
   margin-right: -6px;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 500;
   color: var(--fg-3);
   gap: 4px;
@@ -1519,7 +1519,7 @@ fieldset.q-seg-fs {
   text-overflow: ellipsis;
 }
 .q-att-meta {
-  font-size: 11.5px;
+  font-size: 12px;
   line-height: 15px;
   color: var(--fg-3);
   white-space: nowrap;
@@ -1586,7 +1586,7 @@ fieldset.q-seg-fs {
   gap: 5px;
   min-width: 0;
   margin-top: 2px;
-  font-size: 11.5px;
+  font-size: 12px;
   color: var(--fg-3);
 }
 .q-fork-link {
@@ -1913,7 +1913,7 @@ fieldset.q-seg-fs {
   padding: 7px 12px;
   border-bottom: 1px solid var(--line);
   background: var(--bg);
-  font-size: 11px;
+  font-size: 12px;
   color: var(--fg-3);
 }
 .q-diff-file {
@@ -1967,7 +1967,7 @@ fieldset.q-seg-fs {
 .q-diff-files-note {
   margin: 0;
   padding: 8px 12px;
-  font-size: 11.5px;
+  font-size: 12px;
   line-height: 16px;
   color: var(--fg-3);
 }
@@ -2000,7 +2000,7 @@ fieldset.q-seg-fs {
   align-items: center;
   gap: 6px;
   margin: 0 0 4px;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--fg-3);
 }
 .q-review-note textarea {
@@ -2106,7 +2106,7 @@ fieldset.q-seg-fs {
   align-items: center;
   gap: 4px;
   color: var(--accent-tx);
-  font-size: 11.5px;
+  font-size: 12px;
   font-weight: 500;
 }
 .q-guest-req-text {
@@ -2132,7 +2132,7 @@ fieldset.q-seg-fs {
   border-radius: 6px;
   background: var(--fill);
   color: var(--fg-2);
-  font-size: 11.5px;
+  font-size: 12px;
   max-width: 100%;
 }
 .q-guest-req-name {
@@ -2162,7 +2162,7 @@ fieldset.q-seg-fs {
   border: 1px solid var(--line);
   background: var(--bg-sunk);
   color: var(--fg-2);
-  font-size: 12.5px;
+  font-size: 13px;
 }
 .q-guest-off svg {
   flex: none;
@@ -2287,7 +2287,7 @@ fieldset.q-seg-fs {
   padding: 4px 8px;
   border-radius: 6px;
   text-align: left;
-  font-size: 12.5px;
+  font-size: 13px;
   color: var(--fg);
 }
 .q-comp-menu-item[aria-selected="true"] {
@@ -2298,7 +2298,7 @@ fieldset.q-seg-fs {
   max-width: 52%;
   padding-left: 12px;
   color: var(--fg-3);
-  font-size: 11.5px;
+  font-size: 12px;
 }
 .q-comp-menu-empty {
   padding: 10px;
@@ -2307,7 +2307,7 @@ fieldset.q-seg-fs {
 }
 .q-comp-menu-note {
   padding: 6px 10px 8px;
-  font-size: 11.5px;
+  font-size: 12px;
   color: var(--fg-3);
 }
 .q-comp-menu-foot {
@@ -2316,7 +2316,7 @@ fieldset.q-seg-fs {
   margin-top: 2px;
   padding: 5px 8px 3px;
   border-top: 1px solid var(--line);
-  font-size: 11px;
+  font-size: 12px;
   color: var(--fg-3);
 }
 .q-comp-menu .q-comp-menu-item .q-mono {
@@ -2373,7 +2373,7 @@ fieldset.q-seg-fs {
   align-items: center;
   gap: 10px;
   margin: 10px 0;
-  font-size: 11.5px;
+  font-size: 12px;
   color: var(--fg-3);
 }
 .q-switch-rule {
@@ -2437,7 +2437,7 @@ fieldset.q-seg-fs {
   display: flex;
   gap: 14px;
   white-space: nowrap;
-  font-size: 11.5px;
+  font-size: 12px;
   color: var(--fg-3);
   padding: 0 4px;
 }
@@ -2792,7 +2792,7 @@ fieldset.q-seg-fs {
 }
 .q-page-head h1 {
   margin: 0;
-  font-size: 15px;
+  font-size: 16px;
   font-weight: 600;
   letter-spacing: -0.01em;
 }
@@ -3215,7 +3215,7 @@ fieldset.q-seg-fs {
   padding: 0 10px 0 12px;
   border-radius: 6px 6px 0 0;
   color: var(--fg-2);
-  font-size: 12.5px;
+  font-size: 13px;
   position: relative;
 }
 .q-etab[aria-selected="true"] {
@@ -3274,7 +3274,7 @@ fieldset.q-seg-fs {
   gap: 16px;
   padding: 0 16px;
   border-top: 1px solid var(--line);
-  font-size: 11.5px;
+  font-size: 12px;
   color: var(--fg-3);
   background: var(--bg);
   flex: none;
@@ -3439,7 +3439,7 @@ fieldset.q-seg-fs {
   background: var(--bg-raised);
 }
 .q-resume .cd {
-  font-size: 22px;
+  font-size: 24px;
   font-weight: 600;
   letter-spacing: -0.015em;
 }
@@ -3855,7 +3855,7 @@ fieldset.q-seg-fs {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 11.5px;
+  font-size: 12px;
 }
 .q-envprev {
   margin: 0 0 8px;
@@ -4016,7 +4016,7 @@ fieldset.q-seg-fs {
   padding: 0;
 }
 .q-sas-host .q-sas-code {
-  font-size: 22px;
+  font-size: 24px;
   line-height: 28px;
   padding: 2px 0 2px;
 }
@@ -4050,7 +4050,7 @@ fieldset.q-seg-fs {
     padding: 0 8px;
   }
   .q-pane-head h2 {
-    font-size: 17px;
+    font-size: 16px;
   }
   .q-rows {
     padding: 0 0 16px;
@@ -4307,7 +4307,7 @@ fieldset.q-seg-fs {
   flex-direction: column;
   align-items: center;
   gap: 3px;
-  font-size: 11px;
+  font-size: 12px;
   line-height: 13px;
   font-weight: 500;
   color: var(--fg-3);
@@ -4328,7 +4328,7 @@ fieldset.q-seg-fs {
   border-radius: 8px;
   background: var(--accent);
   color: var(--accent-fg);
-  font-size: 11px;
+  font-size: 12px;
   line-height: 18px;
   text-align: center;
   padding: 0 5px;
@@ -4350,7 +4350,7 @@ fieldset.q-seg-fs {
   justify-content: center;
   gap: 2px;
   color: var(--accent-tx);
-  font-size: 17px;
+  font-size: 16px;
   padding: 0 8px;
 }
 .q-ph-back-glyph {
@@ -4360,7 +4360,7 @@ fieldset.q-seg-fs {
   font-weight: 400;
 }
 .q-ph-nav .ttl {
-  font-size: 17px;
+  font-size: 16px;
   font-weight: 600;
   flex: 1;
   text-align: center;
@@ -4369,11 +4369,11 @@ fieldset.q-seg-fs {
   text-overflow: ellipsis;
 }
 .q-ph-lt {
-  font-size: 30px;
-  line-height: 36px;
+  font-size: 24px;
+  line-height: 30px;
   font-weight: 600;
   letter-spacing: -0.02em;
-  padding: 2px 20px 10px;
+  padding: 2px 16px 10px;
   flex: none;
 }
 .q-ph-seg {
@@ -4429,7 +4429,7 @@ fieldset.q-seg-fs {
   line-height: 20px;
 }
 .q-ph-resume .cd {
-  font-size: 30px;
+  font-size: 24px;
   line-height: 36px;
   font-weight: 600;
 }
@@ -4616,7 +4616,7 @@ fieldset.q-seg-fs {
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 15px;
+  font-size: 16px;
   font-weight: 600;
 }
 .q-ph-ask-cmd {
@@ -4644,7 +4644,7 @@ fieldset.q-seg-fs {
 }
 .q-ph-sheet-cmd {
   margin: 14px 20px 4px;
-  font-size: 13.5px;
+  font-size: 13px;
   line-height: 21px;
   padding: 12px 14px;
   border-radius: 12px;
@@ -4781,7 +4781,7 @@ fieldset.q-seg-fs {
   padding: 18px 24px 24px;
 }
 .q-pair-hero .ttl {
-  font-size: 22px;
+  font-size: 20px;
   font-weight: 600;
   margin-top: 8px;
   letter-spacing: -0.015em;
@@ -4799,13 +4799,13 @@ fieldset.q-seg-fs {
 .q-pair-empty {
   padding: 8px 24px 0;
   text-align: center;
-  font-size: 15px;
+  font-size: 16px;
   line-height: 22px;
   color: var(--fg-2);
 }
 .q-pair-empty h3 {
   margin: 0 0 6px;
-  font-size: 17px;
+  font-size: 16px;
   line-height: 24px;
   font-weight: 600;
   color: var(--fg);
@@ -5247,7 +5247,7 @@ fieldset.q-seg-fs {
   padding: 8px 12px;
   border-bottom: 1px solid var(--line);
   background: var(--bg-sunk);
-  font-size: 11.5px;
+  font-size: 12px;
   line-height: 16px;
   color: var(--fg-3);
 }
@@ -5358,7 +5358,7 @@ fieldset.q-seg-fs {
   width: 100%;
   height: 40px;
   padding: 10px 20px 0;
-  font-size: 15px;
+  font-size: 16px;
   color: var(--fg-2);
   text-align: left;
 }
@@ -5366,7 +5366,7 @@ fieldset.q-seg-fs {
   width: 20px;
   height: 20px;
   border-radius: 5px;
-  font-size: 11px;
+  font-size: 12px;
 }
 .q-ph-pg-h .hn {
   font-size: 14px;
@@ -5408,7 +5408,7 @@ fieldset.q-seg-fs {
   margin: 4px 0 14px;
   border-radius: 12px;
   box-shadow: inset 0 0 0 1px var(--line);
-  font-size: 15px;
+  font-size: 16px;
   font-weight: 500;
   width: 100%;
   text-align: left;
@@ -5555,14 +5555,14 @@ fieldset.q-seg-fs {
     display: none;
   }
   .q-ph .q-stats .q-stat .v {
-    font-size: 22px;
+    font-size: 20px;
     line-height: 28px;
   }
 }
 
 /* Remote account + live subagent additions */
 .q-account-name {
-  font-size: 12.5px;
+  font-size: 13px;
   font-weight: 500;
   color: var(--fg);
   white-space: nowrap;
@@ -5727,7 +5727,7 @@ fieldset.q-seg-fs {
     border: 0;
     white-space: normal;
     min-width: 0;
-    font-size: 12.5px;
+    font-size: 13px;
     color: var(--fg-2);
   }
   .q-tbl td:first-child {
@@ -5831,7 +5831,7 @@ fieldset.q-seg-fs {
   overflow: auto;
   border-radius: 6px;
   background: var(--bg-sunk);
-  font-size: 11.5px;
+  font-size: 12px;
   line-height: 1.5;
   white-space: pre-wrap;
 }
@@ -6065,7 +6065,7 @@ fieldset.q-seg-fs {
   white-space: nowrap;
 }
 .q-fb-row .tag {
-  font-size: 11px;
+  font-size: 12px;
 }
 .q-fb-msg {
   padding: 12px 8px;
@@ -6133,7 +6133,7 @@ fieldset.q-seg-fs {
 
 .q-imp-group-h {
   padding: 6px 8px 2px;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--fg-3);
 }
 
@@ -6175,13 +6175,13 @@ fieldset.q-seg-fs {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--fg-3);
 }
 
 .q-imp-meta {
   flex: none;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--fg-3);
   font-variant-numeric: tabular-nums;
 }
@@ -6219,7 +6219,7 @@ fieldset.q-seg-fs {
 }
 .q-imp .q-imp-warn p {
   margin: 0;
-  font-size: 11px;
+  font-size: 12px;
   line-height: 15px;
   color: var(--fg-3);
   text-wrap: pretty;
@@ -6316,7 +6316,7 @@ fieldset.q-seg-fs {
   gap: 2px;
 }
 .q-git-paths li {
-  font-size: 11.5px;
+  font-size: 12px;
   color: var(--fg-3);
   overflow-wrap: anywhere;
 }
@@ -6362,7 +6362,7 @@ fieldset.q-seg-fs {
   background: transparent;
   color: inherit;
   font: inherit;
-  font-size: 12.5px;
+  font-size: 13px;
 }
 .q-issues-search:focus-within {
   outline: 2px solid var(--focus);
@@ -6430,7 +6430,7 @@ fieldset.q-seg-fs {
 .q-issue-repo,
 .q-issue-meta {
   color: var(--fg-3);
-  font-size: 11.5px;
+  font-size: 12px;
   white-space: nowrap;
 }
 .q-issues-more {
@@ -6439,7 +6439,7 @@ fieldset.q-seg-fs {
 .q-issues-note {
   margin: 12px 16px;
   color: var(--fg-3);
-  font-size: 12.5px;
+  font-size: 13px;
   display: flex;
   align-items: center;
   gap: 6px;
@@ -6504,7 +6504,7 @@ fieldset.q-seg-fs {
   border: 1px solid var(--line);
   border-radius: 4px;
   color: var(--fg-2, var(--fg));
-  font-size: 11px;
+  font-size: 12px;
 }
 .q-issue-body-input {
   width: 100%;
@@ -6514,12 +6514,12 @@ fieldset.q-seg-fs {
   background: var(--bg-raised);
   color: inherit;
   font: inherit;
-  font-size: 13.5px;
+  font-size: 14px;
   line-height: 1.55;
   resize: vertical;
 }
 .q-issue-description {
-  font-size: 13.5px;
+  font-size: 14px;
 }
 .q-issues-fields {
   display: grid;
@@ -6530,7 +6530,7 @@ fieldset.q-seg-fs {
   display: grid;
   gap: 4px;
   color: var(--fg-3);
-  font-size: 11.5px;
+  font-size: 12px;
 }
 .q-issues-fields input,
 .q-issues-actions select,
@@ -6542,7 +6542,7 @@ fieldset.q-seg-fs {
   background: var(--bg-raised);
   color: inherit;
   font: inherit;
-  font-size: 12.5px;
+  font-size: 13px;
 }
 .q-issues-actions {
   display: flex;
@@ -6584,7 +6584,7 @@ fieldset.q-seg-fs {
   align-items: baseline;
   gap: 8px;
   margin-bottom: 4px;
-  font-size: 12.5px;
+  font-size: 13px;
 }
 .q-issues-comment-form {
   display: grid;

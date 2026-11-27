@@ -340,7 +340,7 @@ export function InboxDetailEmpty() {
           <h2
             style={{
               margin: "0 0 6px",
-              fontSize: 17,
+              fontSize: 16,
               lineHeight: "24px",
               fontWeight: 600,
               color: "var(--fg)",
@@ -757,7 +757,7 @@ function PhoneIdeNotice() {
     <main className="q-main" aria-label="IDE">
       <div className="q-center-empty">
         <div className="q-empty" style={{ width: 340, padding: 0 }}>
-          <h3 style={{ fontSize: 17, lineHeight: "24px" }}>{t("phoneIde.title")}</h3>
+          <h3 style={{ fontSize: 16, lineHeight: "24px" }}>{t("phoneIde.title")}</h3>
           <p style={{ margin: 0 }}>{t("phoneIde.body")}</p>
           <button
             type="button"

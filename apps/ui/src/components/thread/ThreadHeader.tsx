@@ -394,7 +394,7 @@ export function ThreadHeader({
             <span className="q-sep">/</span> {summary.model}
           </span>
           {changedSettings.length > 0 ? (
-            <span className="q-faint" style={{ fontSize: 11.5 }}>
+            <span className="q-faint" style={{ fontSize: 12 }}>
               {changedSettings.join(" · ")}
             </span>
           ) : null}
@@ -402,7 +402,7 @@ export function ThreadHeader({
             <span className="br">
               <span className="q-sep">/</span>
               <GitBranchIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
-              <span className="q-mono" style={{ fontSize: 11.5 }}>
+              <span className="q-mono" style={{ fontSize: 12 }}>
                 {summary.branch}
               </span>
             </span>

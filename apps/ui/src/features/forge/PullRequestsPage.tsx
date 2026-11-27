@@ -167,7 +167,7 @@ function TabError({
 /** One tab's request still in flight, shown inside the tab. */
 function TabLoading({ label }: { label: string }) {
   return (
-    <p className="q-faint" role="status" style={{ margin: "12px 0", fontSize: 12.5 }}>
+    <p className="q-faint" role="status" style={{ margin: "12px 0", fontSize: 13 }}>
       {label}
     </p>
   );
@@ -1292,7 +1292,7 @@ function PrDetail({
             </span>
             <span aria-current="page">#{number}</span>
           </nav>
-          <h1 style={{ fontSize: 17, lineHeight: "22px" }}>
+          <h1 style={{ fontSize: 16, lineHeight: "22px" }}>
             {pr.summary.title}{" "}
             <span className="q-faint" style={{ fontWeight: 400 }}>
               #{number}
@@ -1302,11 +1302,11 @@ function PrDetail({
             <span className={`q-badge ${state.tone}`} style={{ height: 18 }}>
               {state.label}
             </span>
-            <span className="mono" style={{ fontSize: 11.5 }}>
+            <span className="mono" style={{ fontSize: 12 }}>
               {pr.summary.head_branch}
             </span>{" "}
             →{" "}
-            <span className="mono" style={{ fontSize: 11.5 }}>
+            <span className="mono" style={{ fontSize: 12 }}>
               {pr.summary.base_branch}
             </span>{" "}
             · {t("detail.commits", { count: pr.commits })} ·{" "}
@@ -1558,7 +1558,7 @@ function PrDetail({
                         />
                         <div className="q-comp-f">
                           <span className="grow" />
-                          <span className="q-faint" style={{ fontSize: 11.5 }}>
+                          <span className="q-faint" style={{ fontSize: 12 }}>
                             {forgeLabel(repo.forge)}
                           </span>
                           <button

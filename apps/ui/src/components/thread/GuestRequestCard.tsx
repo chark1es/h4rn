@@ -50,7 +50,7 @@ function GuestRequestRow({
           <UserRoundIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
           {t("guest.tag")}
         </span>
-        <span className="q-faint" style={{ fontSize: 11.5 }}>
+        <span className="q-faint" style={{ fontSize: 12 }}>
           {t("guest.from", { time: absoluteTime(request.created_at) })}
         </span>
       </div>
@@ -67,7 +67,7 @@ function GuestRequestRow({
         </ul>
       ) : null}
       <div className="q-guest-req-foot">
-        <span className="q-faint" style={{ fontSize: 11.5 }}>
+        <span className="q-faint" style={{ fontSize: 12 }}>
           {t("guest.sendHint")}
         </span>
         <button

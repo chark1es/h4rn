@@ -193,7 +193,7 @@ export function TerminalPanel({
           <span
             className={cn("q-health", online ? "q-ok" : "q-danger")}
             title={online ? t("terminal.connected") : t("terminal.disconnected")}
-            style={{ flex: "none", marginRight: 4, fontSize: 11 }}
+            style={{ flex: "none", marginRight: 4, fontSize: 12 }}
           >
             <span className={cn("q-dot", online ? "on" : "off")} aria-hidden />
             {online ? t("terminal.live") : t("terminal.offline")}

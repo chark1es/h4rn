@@ -1070,7 +1070,7 @@ export function LiveAccountForm() {
                 <div className="t">{t("account.relayUrl")}</div>
               </div>
               <div className="ctl">
-                <span className="q-faint q-mono" style={{ fontSize: 11.5 }}>
+                <span className="q-faint q-mono" style={{ fontSize: 12 }}>
                   {connectUrl}
                 </span>
               </div>

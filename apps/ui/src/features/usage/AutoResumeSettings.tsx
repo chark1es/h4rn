@@ -165,7 +165,7 @@ export function AutoResumeSettings() {
               style={{
                 width: "100%",
                 maxWidth: 520,
-                fontSize: 12.5,
+                fontSize: 13,
                 padding: 8,
                 resize: "none",
                 overflow: "hidden",

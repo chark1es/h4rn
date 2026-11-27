@@ -229,11 +229,11 @@ function HarnessMatrix({ skill, isPhone }: { skill: SkillSummary; isPhone: boole
                 void setSkillEnabled(skill.id, harness, !enabled);
               }}
             />
-            <span className="text-[10.5px] whitespace-nowrap text-[var(--fg-3)]">
+            <span className="text-xs whitespace-nowrap text-[var(--fg-3)]">
               {isPhone ? SHORT_HARNESS[harness] : HARNESS_LABELS[harness]}
             </span>
             <span
-              className={cn("q-mono text-[10px]", failed ? "q-warn" : "text-[var(--fg-3)]")}
+              className={cn("q-mono text-xs", failed ? "q-warn" : "text-[var(--fg-3)]")}
               title={failed ? t("skills.row.missingCopy") : undefined}
             >
               {shortVersion(install?.version ?? null)}
@@ -278,7 +278,7 @@ function SkillRow({
           ) : null}
         </div>
         <div className="s">{skill.description}</div>
-        <div className="q-faint mt-1 text-[11.5px]">
+        <div className="q-faint mt-1 text-xs">
           {t("skills.row.installs", {
             installed,
             count: skill.installs.length,
@@ -355,7 +355,7 @@ export function SkillsPage() {
           <div className="q-wrap" style={{ maxWidth: 920 }}>
             <div className="mb-5 flex flex-wrap items-start gap-3">
               <div className="grow basis-0">
-                <h1 className="text-[20px] leading-[26px] font-semibold tracking-[-0.015em]">
+                <h1 className="text-xl font-semibold">
                   {t("settings:nav.skills")}
                 </h1>
                 <div className="q-muted mt-1">

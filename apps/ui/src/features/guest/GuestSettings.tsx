@@ -60,7 +60,7 @@ export function GuestSettingsForm() {
             {errorWords(rewindError).message}
           </p>
         ) : null}
-        <p className="q-muted" style={{ fontSize: 12.5 }}>
+        <p className="q-muted" style={{ fontSize: 13 }}>
           {t("labs.rewindOffNote")}
         </p>
       </div>
@@ -97,7 +97,7 @@ export function GuestSettingsForm() {
             {guestErrorText(error)}
           </p>
         ) : null}
-        <p className="q-muted" style={{ fontSize: 12.5 }}>
+        <p className="q-muted" style={{ fontSize: 13 }}>
           {t("labs.guestOffNote")}
         </p>
       </div>
@@ -126,7 +126,7 @@ export function GuestSettingsForm() {
             {outsideError.hint ? ` ${outsideError.hint}` : ""}
           </p>
         ) : null}
-        <p className="q-faint" style={{ margin: "8px 0 0", fontSize: 12.5 }}>
+        <p className="q-faint" style={{ margin: "8px 0 0", fontSize: 13 }}>
           {t("labs.outsideOffNote")}
         </p>
       </div>

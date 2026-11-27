@@ -151,7 +151,7 @@ export function DelegateDialog({ thread }: { thread: ThreadSummary }) {
         </DialogHeader>
         <DialogBody>
           <div className="flex flex-col gap-1">
-            <label htmlFor="delegate-task" className="text-[12px] text-[var(--fg-3)]">
+            <label htmlFor="delegate-task" className="text-xs text-[var(--fg-3)]">
               {t("fields.task")}
             </label>
             <Textarea
@@ -166,7 +166,7 @@ export function DelegateDialog({ thread }: { thread: ThreadSummary }) {
 
           <div className="grid gap-3 sm:grid-cols-3">
             <div className="flex flex-col gap-1">
-              <label htmlFor="delegate-host" className="text-[12px] text-[var(--fg-3)]">
+              <label htmlFor="delegate-host" className="text-xs text-[var(--fg-3)]">
                 {t("fields.host")}
               </label>
               <ChipSelect
@@ -194,7 +194,7 @@ export function DelegateDialog({ thread }: { thread: ThreadSummary }) {
               />
             </div>
             <div className="flex flex-col gap-1">
-              <label htmlFor="delegate-harness" className="text-[12px] text-[var(--fg-3)]">
+              <label htmlFor="delegate-harness" className="text-xs text-[var(--fg-3)]">
                 {t("fields.harness")}
               </label>
               <ChipSelect
@@ -216,7 +216,7 @@ export function DelegateDialog({ thread }: { thread: ThreadSummary }) {
               />
             </div>
             <div className="flex flex-col gap-1">
-              <label htmlFor="delegate-model" className="text-[12px] text-[var(--fg-3)]">
+              <label htmlFor="delegate-model" className="text-xs text-[var(--fg-3)]">
                 {t("fields.model")}
               </label>
               <SuggestInput
@@ -232,7 +232,7 @@ export function DelegateDialog({ thread }: { thread: ThreadSummary }) {
 
           <div className="grid gap-3 sm:grid-cols-3">
             <div className="flex flex-col gap-1">
-              <label htmlFor="delegate-isolation" className="text-[12px] text-[var(--fg-3)]">
+              <label htmlFor="delegate-isolation" className="text-xs text-[var(--fg-3)]">
                 {t("fields.workspace")}
               </label>
               <ChipSelect<SubagentIsolation>
@@ -248,7 +248,7 @@ export function DelegateDialog({ thread }: { thread: ThreadSummary }) {
               />
             </div>
             <div className="flex flex-col gap-1">
-              <label htmlFor="delegate-turns" className="text-[12px] text-[var(--fg-3)]">
+              <label htmlFor="delegate-turns" className="text-xs text-[var(--fg-3)]">
                 {t("delegate.maxTurns")}
               </label>
               <Input
@@ -260,7 +260,7 @@ export function DelegateDialog({ thread }: { thread: ThreadSummary }) {
               />
             </div>
             <div className="flex flex-col gap-1">
-              <label htmlFor="delegate-minutes" className="text-[12px] text-[var(--fg-3)]">
+              <label htmlFor="delegate-minutes" className="text-xs text-[var(--fg-3)]">
                 {t("delegate.maxMinutes")}
               </label>
               <Input
@@ -275,7 +275,7 @@ export function DelegateDialog({ thread }: { thread: ThreadSummary }) {
 
           <div className="grid gap-3 sm:grid-cols-2">
             <div className="flex flex-col gap-1">
-              <label htmlFor="delegate-tokens" className="text-[12px] text-[var(--fg-3)]">
+              <label htmlFor="delegate-tokens" className="text-xs text-[var(--fg-3)]">
                 {t("delegate.maxTokens")}
               </label>
               <Input
@@ -287,7 +287,7 @@ export function DelegateDialog({ thread }: { thread: ThreadSummary }) {
               />
             </div>
             <div className="flex flex-col gap-1">
-              <label htmlFor="delegate-summary" className="text-[12px] text-[var(--fg-3)]">
+              <label htmlFor="delegate-summary" className="text-xs text-[var(--fg-3)]">
                 {t("delegate.summary")}
               </label>
               <Input
@@ -299,7 +299,7 @@ export function DelegateDialog({ thread }: { thread: ThreadSummary }) {
             </div>
           </div>
 
-          <p className="text-[11.5px] leading-[16px] text-[var(--fg-3)]">{t("delegate.note")}</p>
+          <p className="text-xs leading-[16px] text-[var(--fg-3)]">{t("delegate.note")}</p>
         </DialogBody>
         <DialogFooter>
           <Button variant="ghost" onClick={closeDelegate}>

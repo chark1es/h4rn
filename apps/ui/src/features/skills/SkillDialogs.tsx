@@ -53,8 +53,8 @@ function FieldLabel({
 }) {
   return (
     <label htmlFor={htmlFor} className="flex items-baseline justify-between">
-      <span className="text-[12px] text-[var(--fg-3)]">{children}</span>
-      {hint ? <span className="text-[11.5px] text-[var(--fg-3)]">{hint}</span> : null}
+      <span className="text-xs text-[var(--fg-3)]">{children}</span>
+      {hint ? <span className="text-xs text-[var(--fg-3)]">{hint}</span> : null}
     </label>
   );
 }
@@ -207,7 +207,7 @@ export function SkillAddDialog({ open, onClose }: { open: boolean; onClose: () =
                   spellCheck={false}
                   autoComplete="off"
                 />
-                <span className="text-[11.5px] text-[var(--fg-3)]">
+                <span className="text-xs text-[var(--fg-3)]">
                   {t("skills.add.folderHint")}
                 </span>
               </div>
@@ -270,7 +270,7 @@ export function SkillAddDialog({ open, onClose }: { open: boolean; onClose: () =
             </div>
 
             <div className="flex flex-col gap-1.5">
-              <span className="text-[12px] text-[var(--fg-3)]">{t("skills.add.installFor")}</span>
+              <span className="text-xs text-[var(--fg-3)]">{t("skills.add.installFor")}</span>
               <div className="grid grid-cols-2 gap-1.5">
                 {ALL_HARNESSES.map((harness) => {
                   const state = availability.find((entry) => entry.harness === harness);
@@ -278,7 +278,7 @@ export function SkillAddDialog({ open, onClose }: { open: boolean; onClose: () =
                   return (
                     <label
                       key={harness}
-                      className="flex flex-wrap items-center gap-x-2 rounded-[6px] bg-bg-raised px-2 py-1.5 text-[12.5px] text-fg shadow-[inset_0_0_0_1px_var(--line-2)]"
+                      className="flex flex-wrap items-center gap-x-2 rounded-[6px] bg-bg-raised px-2 py-1.5 text-sm text-fg shadow-[inset_0_0_0_1px_var(--line-2)]"
                     >
                       <input
                         type="checkbox"
@@ -290,7 +290,7 @@ export function SkillAddDialog({ open, onClose }: { open: boolean; onClose: () =
                       />
                       <span className="grow">{HARNESS_LABELS[harness]}</span>
                       {state && !state.detected ? (
-                        <span className="text-[11px] text-[var(--fg-3)]">
+                        <span className="text-xs text-[var(--fg-3)]">
                           {t("skills.add.notDetected")}
                         </span>
                       ) : null}
@@ -626,7 +626,7 @@ export function SkillDetailsDialog({
           <DialogDescription>{skill.description}</DialogDescription>
         </DialogHeader>
         <DialogBody>
-          <div className="grid gap-1 text-[12.5px]">
+          <div className="grid gap-1 text-sm">
             <div className="flex items-baseline gap-2">
               <span className="w-24 text-[var(--fg-3)]">{t("skills.details.version")}</span>
               <span className="q-mono">{skill.version.slice(0, 12)}</span>
@@ -735,7 +735,7 @@ export function SkillDetailsDialog({
                     <span className="grow q-mono" style={{ fontSize: 12 }}>
                       {file.path}
                     </span>
-                    <span className="q-faint q-num" style={{ fontSize: 11.5 }}>
+                    <span className="q-faint q-num" style={{ fontSize: 12 }}>
                       {file.old_size !== null ? bytes(file.old_size) : "—"} →{" "}
                       {file.new_size !== null ? bytes(file.new_size) : "—"}
                     </span>

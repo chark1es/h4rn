@@ -56,8 +56,8 @@ function FieldLabel({
 }) {
   return (
     <label htmlFor={htmlFor} className="flex items-baseline justify-between">
-      <span className="text-[12px] text-[var(--fg-3)]">{children}</span>
-      {hint ? <span className="text-[11.5px] text-[var(--fg-3)]">{hint}</span> : null}
+      <span className="text-xs text-[var(--fg-3)]">{children}</span>
+      {hint ? <span className="text-xs text-[var(--fg-3)]">{hint}</span> : null}
     </label>
   );
 }
@@ -246,7 +246,7 @@ export function McpServerDialog({
                     onChange={(event) => setArgs(event.target.value)}
                     placeholder={EXAMPLE_ARGS}
                     spellCheck={false}
-                    className="min-h-[64px] font-mono text-[12px]"
+                    className="min-h-[64px] font-mono text-xs"
                   />
                 </div>
                 <div className="flex flex-col gap-1">
@@ -601,7 +601,7 @@ export function McpImportDialog({
           </Button>
         </DialogFooter>
         {host ? (
-          <div className="q-faint" style={{ fontSize: 11.5 }}>
+          <div className="q-faint" style={{ fontSize: 12 }}>
             {t("mcp.import.readingOn", { host: host.name })}
           </div>
         ) : null}
@@ -721,7 +721,7 @@ export function McpShareDialog({
                 spellCheck={false}
               />
             </div>
-            <label className="flex items-center gap-2 text-[12.5px] text-[var(--fg-2)]">
+            <label className="flex items-center gap-2 text-sm text-[var(--fg-2)]">
               <input
                 type="checkbox"
                 checked={confirmAll}
@@ -849,7 +849,7 @@ export function McpToolsDialog({
                 value={args}
                 onChange={(event) => setArgs(event.target.value)}
                 spellCheck={false}
-                className="min-h-[72px] font-mono text-[12px]"
+                className="min-h-[72px] font-mono text-xs"
               />
             </div>
 

@@ -158,7 +158,7 @@ export function TerminalView({
 
         {showOpening ? (
           <div
-            className="pointer-events-none absolute inset-0 flex items-center justify-center text-[12px] text-[var(--fg-3)]"
+            className="pointer-events-none absolute inset-0 flex items-center justify-center text-xs text-[var(--fg-3)]"
             style={{ background: "color-mix(in oklch, var(--bg-sunk) 85%, transparent)" }}
           >
             {t("terminal.opening")}
@@ -175,15 +175,15 @@ export function TerminalView({
             ) : (
               <CircleAlertIcon className="size-5 text-[var(--danger)]" aria-hidden />
             )}
-            <p className="text-[13px] font-medium text-[var(--fg)]">
+            <p className="text-sm font-medium text-[var(--fg)]">
               {showOffline ? t("terminal.daemonOffline") : status.message}
             </p>
-            <p className="max-w-[46ch] text-[12px] text-[var(--fg-2)]">
+            <p className="max-w-[46ch] text-xs text-[var(--fg-2)]">
               {status.hint ?? (showOffline ? t("terminal.reconnectHint") : t("terminal.closeHint"))}
             </p>
             <button
               type="button"
-              className="mt-1 inline-flex h-7 items-center gap-1.5 rounded-lg border border-[var(--line-2)] px-2.5 text-[12px] font-medium text-[var(--fg)] transition-colors hover:bg-[var(--hover)]"
+              className="mt-1 inline-flex h-7 items-center gap-1.5 rounded-lg border border-[var(--line-2)] px-2.5 text-xs font-medium text-[var(--fg)] transition-colors hover:bg-[var(--hover)]"
               onClick={() => {
                 if (showOffline) client.reconnectNow();
                 setAttempt((value) => value + 1);
@@ -244,7 +244,7 @@ export function TerminalView({
       </div>
 
       {status.phase === "exited" ? (
-        <div className="flex h-8 shrink-0 items-center justify-center border-t border-[var(--line)] bg-[var(--bg-sunk)] text-[12px] text-[var(--fg-3)]">
+        <div className="flex h-8 shrink-0 items-center justify-center border-t border-[var(--line)] bg-[var(--bg-sunk)] text-xs text-[var(--fg-3)]">
           {status.exit
             ? status.exit.signal
               ? t("terminal.exitedSignal", { signal: status.exit.signal })

@@ -496,7 +496,7 @@ function Activity({ server }: { server: McpServerView }) {
               )}
             </span>
             <div className="grow">
-              <div className="t q-mono" style={{ fontSize: 12.5 }}>
+              <div className="t q-mono" style={{ fontSize: 13 }}>
                 {entry.qualifiedName}
               </div>
               <div className="s">
@@ -576,8 +576,8 @@ function ServerList({
               <h1
                 className={
                   isPhone
-                    ? "text-[30px] leading-[36px] font-semibold tracking-[-0.02em]"
-                    : "text-[20px] leading-[26px] font-semibold tracking-[-0.015em]"
+                    ? "text-2xl font-semibold"
+                    : "text-xl font-semibold"
                 }
               >
                 {t("settings:nav.mcpServers")}
@@ -839,7 +839,7 @@ export function McpPage() {
 
             <div className="mb-5 flex items-start gap-4">
               <div className="min-w-0 flex-1">
-                <h1 className="text-[20px] leading-[26px] font-semibold tracking-[-0.015em]">
+                <h1 className="text-xl font-semibold">
                   {server.name}
                 </h1>
                 <div className="q-muted mt-1 flex flex-wrap items-center gap-1.5">
