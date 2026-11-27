@@ -38,6 +38,7 @@ export function installPopupStubs(): void {
   if (!document.head.querySelector("style[data-popup-stubs]")) {
     const style = document.createElement("style");
     style.dataset.popupStubs = "";
+    // i18n-ignore-next-line: CSS, not copy
     style.textContent = "[popover] { display: block !important }";
     document.head.append(style);
   }

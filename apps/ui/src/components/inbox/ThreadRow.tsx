@@ -1,17 +1,29 @@
-import { GitBranchIcon, MoreHorizontalIcon, PlayIcon } from "lucide-react";
-import type { MouseEvent } from "react";
+import {
+  AlarmClockIcon,
+  ArchiveIcon,
+  CheckIcon,
+  GitBranchIcon,
+  MoreHorizontalIcon,
+  PinIcon,
+  PlayIcon,
+  RotateCcwIcon,
+  Share2Icon,
+  SunriseIcon,
+} from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { AgentGlyph } from "@/components/agent/AgentGlyph";
+import { ShortcutCaps } from "@/components/ui/kbd";
 import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import { Kbd } from "@/components/ui/kbd";
+  Menu,
+  MenuContent,
+  MenuContextTrigger,
+  MenuGroup,
+  MenuGroupLabel,
+  MenuItem,
+  MenuSeparator,
+  MenuTrigger,
+} from "@/components/ui/menu";
 import { openGuestShare } from "@/features/guest/guestStore";
 import type { HostSummary, ThreadSummary } from "@/gen";
 import { glyphForThread } from "@/lib/agent";
@@ -19,6 +31,7 @@ import { harnessLabel } from "@/lib/entities";
 import { absoluteTime, tokensPerSecond } from "@/lib/format";
 import { formatAge, formatNumber } from "@/lib/i18n";
 import type enSidebar from "@/lib/i18n/locales/en/sidebar.json";
+import type { CommandId } from "@/lib/keybindings";
 import { cn } from "@/lib/utils";
 
 type ThreadRowProps = {
@@ -127,141 +140,145 @@ export function ThreadRow({
   const isSettled = thread.tab === "settled";
   const needsResume = isDone && thread.needs_attention;
 
-  const stop = (event: MouseEvent) => event.stopPropagation();
+  const shortcut = (command: CommandId) => (selected ? command : undefined);
 
   return (
-    <div
-      role="option"
-      aria-selected={selected}
-      tabIndex={tabStop ? 0 : -1}
-      data-thread-id={thread.thread_id}
-      className={cn("q-row", selected && "sel", isSettled && "dim")}
-      onClick={onOpen}
-      onFocus={onFocus}
-      onKeyDown={(event) => {
-        if (event.key === "Enter" || event.key === " ") {
-          event.preventDefault();
-          onOpen();
-        }
-      }}
-    >
-      <span className="q-row-st">
-        <AgentGlyph glyph={glyph} size={14} />
-      </span>
-      <span className="q-row-main">
-        <span className="q-row-l1">
-          <span className="q-row-title">{thread.title}</span>
-          <span className="q-row-time q-num">{formatAge(thread.last_activity, now)}</span>
-        </span>
-        <span className="q-row-l2">
-          <span className="q-row-meta">
-            {compact
-              ? harnessLabel(thread.harness)
-              : `${host?.name ?? thread.host} · ${harnessLabel(thread.harness)}`}
+    <Menu>
+      <div className={cn("q-row flex-wrap", selected && "sel", isSettled && "dim")}>
+        <MenuContextTrigger
+          role="option"
+          aria-selected={selected}
+          tabIndex={tabStop ? 0 : -1}
+          data-thread-id={thread.thread_id}
+          className="flex min-w-0 basis-full gap-2.5 rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          onClick={onOpen}
+          onFocus={onFocus}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" || event.key === " ") {
+              event.preventDefault();
+              onOpen();
+            }
+          }}
+        >
+          <span className="q-row-st">
+            <AgentGlyph glyph={glyph} size={14} />
           </span>
-          {thread.branch ? (
-            <span className="q-row-branch" title={thread.branch}>
-              <GitBranchIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
-              <span className="q-mono">{thread.branch}</span>
+          <span className="q-row-main">
+            <span className="q-row-l1">
+              <span className="q-row-title">{thread.title}</span>
+              <span className="q-row-time q-num">{formatAge(thread.last_activity, now)}</span>
             </span>
-          ) : null}
-          <span className={cn("q-row-status", status.tone)}>{statusText}</span>
-        </span>
+            <span className="q-row-l2">
+              <span className="q-row-meta">
+                {compact
+                  ? harnessLabel(thread.harness)
+                  : `${host?.name ?? thread.host} · ${harnessLabel(thread.harness)}`}
+              </span>
+              {thread.branch ? (
+                <span className="q-row-branch" title={thread.branch}>
+                  <GitBranchIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+                  <span className="q-mono">{thread.branch}</span>
+                </span>
+              ) : null}
+              <span className={cn("q-row-status", status.tone)}>{statusText}</span>
+            </span>
+          </span>
+        </MenuContextTrigger>
         {isDone ? (
-          <span className="q-row-act">
+          <span className="q-row-act ps-6 in-[.q-side]:ps-6.5">
             {needsResume ? (
               <>
-                <button
-                  type="button"
-                  className="q-btn secondary"
-                  onClick={(event) => {
-                    stop(event);
-                    onReopen();
-                  }}
-                >
+                <button type="button" className="q-btn secondary" onClick={onReopen}>
                   <PlayIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
                   {t("row.resumeNow")}
                 </button>
-                <button
-                  type="button"
-                  className="q-btn ghost"
-                  onClick={(event) => {
-                    stop(event);
-                    onAcknowledge();
-                  }}
-                >
+                <button type="button" className="q-btn ghost" onClick={onAcknowledge}>
                   {t("row.acknowledge")}
                 </button>
               </>
             ) : (
-              <button
-                type="button"
-                className="q-btn secondary"
-                onClick={(event) => {
-                  stop(event);
-                  onAcknowledge();
-                }}
-              >
-                {t("row.acknowledge")} <Kbd>A</Kbd>
+              <button type="button" className="q-btn secondary" onClick={onAcknowledge}>
+                {t("row.acknowledge")}
+                {selected ? <ShortcutCaps command="thread.acknowledge" /> : null}
               </button>
             )}
           </span>
         ) : null}
-      </span>
-
-      <DropdownMenu>
-        <DropdownMenuTrigger asChild>
-          <button
-            type="button"
-            aria-label={t("row.actionsFor", { title: thread.title })}
-            className="q-ibtn q-row-more"
-            tabIndex={-1}
-            onClick={stop}
-          >
-            <MoreHorizontalIcon className="q-icon" strokeWidth={1.5} />
-          </button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="end" className="w-52" onClick={stop}>
-          <DropdownMenuLabel>
+        <MenuTrigger
+          aria-label={t("row.actionsFor", { title: thread.title })}
+          className="q-ibtn q-row-more"
+          tabIndex={tabStop ? 0 : -1}
+        >
+          <MoreHorizontalIcon className="q-icon" strokeWidth={1.5} aria-hidden />
+        </MenuTrigger>
+      </div>
+      <MenuContent align="end" className="w-60">
+        <MenuGroup>
+          <MenuGroupLabel>
             {t("row.harnessOn", {
               harness: harnessLabel(thread.harness),
               host: host?.name ?? thread.host,
             })}
-          </DropdownMenuLabel>
-          <DropdownMenuSeparator />
+          </MenuGroupLabel>
+          <MenuItem icon={<PinIcon />} command={shortcut("thread.pin")} onSelect={onPin}>
+            {thread.pinned ? t("row.unpin") : t("row.keep")}
+          </MenuItem>
           {isDone ? (
-            <DropdownMenuItem onSelect={onAcknowledge}>
+            <MenuItem
+              icon={<CheckIcon />}
+              command={shortcut("thread.acknowledge")}
+              onSelect={onAcknowledge}
+            >
               {t("row.acknowledge")}
-              <span className="ml-auto text-small text-fg-3">A</span>
-            </DropdownMenuItem>
+            </MenuItem>
           ) : null}
           {isSettled ? (
-            <DropdownMenuItem onSelect={onReopen}>{t("row.reopen")}</DropdownMenuItem>
-          ) : null}
-          {!isSettled ? (
-            <DropdownMenuItem onSelect={onSettle}>{t("row.settleNow")}</DropdownMenuItem>
-          ) : null}
-          {!isSettled ? (
-            <DropdownMenuItem onSelect={() => openGuestShare(thread.thread_id)}>
-              {t("row.share")}
-            </DropdownMenuItem>
-          ) : null}
-          <DropdownMenuItem onSelect={onPin}>
-            {thread.pinned ? t("row.unpin") : t("row.keep")}
-            <span className="ml-auto text-small text-fg-3">P</span>
-          </DropdownMenuItem>
-          <DropdownMenuSeparator />
-          <DropdownMenuItem onSelect={() => onSnooze(snoozeUntil(1))}>
+            <MenuItem
+              icon={<RotateCcwIcon />}
+              command={shortcut("thread.reopen")}
+              onSelect={onReopen}
+            >
+              {t("row.reopen")}
+            </MenuItem>
+          ) : (
+            <MenuItem
+              icon={<ArchiveIcon />}
+              command={shortcut("thread.settle")}
+              onSelect={onSettle}
+            >
+              {t("row.settleNow")}
+            </MenuItem>
+          )}
+        </MenuGroup>
+        <MenuSeparator />
+        <MenuGroup>
+          <MenuItem
+            icon={<AlarmClockIcon />}
+            command={shortcut("thread.snooze")}
+            onSelect={() => onSnooze(snoozeUntil(1))}
+          >
             {t("row.snoozeHours", { count: 1 })}
-          </DropdownMenuItem>
-          <DropdownMenuItem onSelect={() => onSnooze(snoozeUntil(3))}>
+          </MenuItem>
+          <MenuItem icon={<AlarmClockIcon />} onSelect={() => onSnooze(snoozeUntil(3))}>
             {t("row.snoozeHours", { count: 3 })}
-          </DropdownMenuItem>
-          <DropdownMenuItem onSelect={() => onSnooze(tomorrowMorning())}>
+          </MenuItem>
+          <MenuItem icon={<SunriseIcon />} onSelect={() => onSnooze(tomorrowMorning())}>
             {t("row.snoozeTomorrow")}
-          </DropdownMenuItem>
-        </DropdownMenuContent>
-      </DropdownMenu>
-    </div>
+          </MenuItem>
+        </MenuGroup>
+        {!isSettled ? (
+          <>
+            <MenuSeparator />
+            <MenuItem
+              icon={<Share2Icon />}
+              command={shortcut("guest.share")}
+              onSelect={() => openGuestShare(thread.thread_id)}
+            >
+              {t("row.share")}
+            </MenuItem>
+          </>
+        ) : null}
+      </MenuContent>
+    </Menu>
   );
 }

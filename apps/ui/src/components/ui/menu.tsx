@@ -20,7 +20,6 @@ import { CheckIcon, ChevronRightIcon } from "lucide-react";
 import type * as React from "react";
 
 import { ShortcutCaps } from "@/components/ui/kbd";
-import { useIsPhone } from "@/hooks/use-media-query";
 import {
   ariaKeyShortcut,
   bindingFor,
@@ -69,11 +68,8 @@ const itemRow = [
   "[&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-3.5",
 ];
 
-function Menu({ presentation, ...props }: React.ComponentProps<typeof MenuPrimitive>) {
-  const isPhone = useIsPhone();
-  return (
-    <MenuPrimitive presentation={presentation ?? (isPhone ? "sheet" : "popover")} {...props} />
-  );
+function Menu({ presentation = "auto", ...props }: React.ComponentProps<typeof MenuPrimitive>) {
+  return <MenuPrimitive presentation={presentation} {...props} />;
 }
 
 function MenuContent({
@@ -230,7 +226,11 @@ function MenuSeparator({
 
 /** A command's keys, right-aligned in muted keycaps. */
 function MenuShortcut({ command, className }: { command: CommandId; className?: string }) {
-  return <ShortcutCaps command={command} className={cn("ms-auto ps-4 phone:hidden", className)} />;
+  return (
+    <span aria-hidden="true" className={cn("ms-auto inline-flex ps-4 phone:hidden", className)}>
+      <ShortcutCaps command={command} />
+    </span>
+  );
 }
 
 /** Non-interactive text at the foot of a menu, like when a thread started. */

@@ -1238,7 +1238,7 @@ fieldset.q-seg-fs {
   line-height: 20px;
 }
 .q-row-act {
-  margin-top: 6px;
+  margin-top: 0;
   display: flex;
   gap: 6px;
 }
