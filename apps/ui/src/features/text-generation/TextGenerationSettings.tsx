@@ -260,7 +260,7 @@ export function AddGenerator() {
         </div>
         <div className="ctl">
           <input
-            className="q-input q-mono text-xs"
+            className="q-input q-mono"
             value={baseUrl}
             aria-label={t("textGeneration.baseUrlLabel")}
             placeholder={
@@ -283,7 +283,7 @@ export function AddGenerator() {
         </div>
         <div className="ctl">
           <input
-            className="q-input q-mono text-xs"
+            className="q-input q-mono"
             value={model}
             aria-label={t("textGeneration.modelLabel")}
             placeholder="gpt-5.4-mini"
@@ -298,7 +298,7 @@ export function AddGenerator() {
         </div>
         <div className="ctl">
           <input
-            className="q-input q-mono text-xs"
+            className="q-input q-mono"
             type="password"
             value={apiKey}
             aria-label={t("textGeneration.apiKeyLabel")}
@@ -595,7 +595,7 @@ function TitleDraftForm({ saved }: { saved: TextGenerationSettings }) {
             </div>
             <div className="ctl">
               <input
-                className="q-input q-mono text-xs"
+                className="q-input q-mono"
                 value={model}
                 aria-label={t("textGeneration.titleModelLabel")}
                 onChange={(event) => patchSetting({ model: event.target.value })}

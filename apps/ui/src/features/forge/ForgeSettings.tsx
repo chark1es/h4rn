@@ -274,7 +274,7 @@ function AddAccountForm({
         </div>
         <div className="ctl">
           <input
-            className="q-input q-mono text-xs"
+            className="q-input q-mono"
             aria-label={t("forges.add.baseUrlLabel")}
             value={baseUrl}
             onChange={(event) => setBaseUrl(event.target.value)}
@@ -290,7 +290,7 @@ function AddAccountForm({
           </div>
           <div className="ctl">
             <input
-              className="q-input q-mono text-xs"
+              className="q-input q-mono"
               autoComplete="username"
               aria-label={t("forges.add.email")}
               value={username}
@@ -331,7 +331,7 @@ function AddAccountForm({
         </div>
         <div className="ctl">
           <input
-            className="q-input q-mono text-xs"
+            className="q-input q-mono"
             type="password"
             autoComplete="off"
             aria-label={t("forges.add.tokenLabel")}

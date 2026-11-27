@@ -202,7 +202,7 @@ export function WorktreeSettings() {
           <div className="ctl">
             <input
               id="worktree-location"
-              className="q-input q-mono text-xs"
+              className="q-input q-mono"
               value={location}
               disabled={!online || !settingsCurrent || settingsLoading || settingsSaving}
               placeholder="~/worktrees"
@@ -221,7 +221,7 @@ export function WorktreeSettings() {
           <div className="ctl">
             <input
               id="worktree-branch-prefix"
-              className="q-input q-mono text-xs"
+              className="q-input q-mono"
               value={prefix}
               disabled={!online || !settingsCurrent || settingsLoading || settingsSaving}
               placeholder="h4rn/"

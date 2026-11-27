@@ -43,7 +43,7 @@ function HeaderSkeleton({ hostName }: { hostName?: string | undefined }) {
         <div className="q-skel mb-2 h-3 w-60" />
         <div className="q-skel h-2.5 w-90 max-w-full" />
       </div>
-      <div className="q-th-state q-faint font-normal">
+      <div className="q-th-state q-faint" style={{ fontWeight: 400 }}>
         {hostName ? t("pane.connectingTo", { host: hostName }) : t("pane.connecting")}
       </div>
     </header>

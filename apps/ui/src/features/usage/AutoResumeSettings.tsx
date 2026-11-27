@@ -159,7 +159,8 @@ export function AutoResumeSettings() {
                 }
               }}
               onChange={(event) => patch({ prompt: event.target.value })}
-              className="q-input resize-none overflow-hidden p-2 text-sm"
+              className="q-input"
+              style={{ fontSize: 13, padding: 8, resize: "none", overflow: "hidden" }}
             />
           </div>
         </div>

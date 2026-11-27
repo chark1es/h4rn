@@ -317,7 +317,7 @@ function AddProfile() {
         </div>
         <div className="ctl">
           <input
-            className="q-input q-mono text-xs"
+            className="q-input q-mono"
             value={baseUrl}
             onChange={(event) => setBaseUrl(event.target.value)}
             aria-label={t("proxy.add.baseUrlLabel")}
@@ -331,7 +331,7 @@ function AddProfile() {
         </div>
         <div className="ctl">
           <input
-            className="q-input q-mono text-xs"
+            className="q-input q-mono"
             type="password"
             value={managementKey}
             onChange={(event) => setManagementKey(event.target.value)}
@@ -347,7 +347,7 @@ function AddProfile() {
         </div>
         <div className="ctl">
           <input
-            className="q-input q-mono text-xs"
+            className="q-input q-mono"
             type="password"
             value={apiKey}
             onChange={(event) => setApiKey(event.target.value)}
@@ -421,7 +421,7 @@ function ProfileField({
       </div>
       <div className="ctl">
         <input
-          className="q-input q-mono text-xs"
+          className="q-input q-mono"
           value={draft}
           onChange={(event) => setDraft(event.target.value)}
           aria-label={label}
@@ -466,7 +466,7 @@ function SecretField({
         {editing ? (
           <>
             <input
-              className="q-input q-mono text-xs"
+              className="q-input q-mono"
               type="password"
               value={value}
               onChange={(event) => setValue(event.target.value)}
