@@ -114,7 +114,7 @@ function FolderBrowser({
       </div>
       <div
         className="q-fb-list"
-        role="listbox"
+        role="group"
         aria-label={t("addProject.folders")}
         aria-busy={loading}
       >
@@ -129,8 +129,6 @@ function FolderBrowser({
             <button
               key={entry.path}
               type="button"
-              role="option"
-              aria-selected={false}
               className="q-fb-row"
               onClick={() => onOpen(entry.path)}
             >
