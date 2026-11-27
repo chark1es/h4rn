@@ -374,7 +374,9 @@ export function ThreadHeader({
       {gitDialog}
       <SidebarReveal />
       <div className="q-th-titles">
-        <TruncatedText render={<h1 />}>{summary.title}</TruncatedText>
+        <h1>
+          <TruncatedText>{summary.title}</TruncatedText>
+        </h1>
         <div className="q-prov">
           <EntityAvatar
             seed={machineSeed(summary.host)}
