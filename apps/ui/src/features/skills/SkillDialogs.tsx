@@ -9,7 +9,6 @@ import {
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { ChipSelect } from "@/components/common/ChipSelect";
-
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -21,6 +20,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { SegmentedControl, SegmentedControlItem } from "@/components/ui/segmented-control";
 import type {
   HarnessKind,
   ProtoError,
@@ -183,24 +183,21 @@ export function SkillAddDialog({ open, onClose }: { open: boolean; onClose: () =
           <div className="grid gap-3">
             <div className="flex flex-col gap-1">
               <FieldLabel>{t("skills.add.source")}</FieldLabel>
-              <div className="q-seg inline" role="tablist" aria-label={t("skills.add.sourceLabel")}>
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={mode === "local_folder"}
-                  onClick={() => setMode("local_folder")}
-                >
-                  <FolderIcon className="q-icon s14" aria-hidden /> {t("skills.add.folder")}
-                </button>
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={mode === "git"}
-                  onClick={() => setMode("git")}
-                >
-                  <GitBranchIcon className="q-icon s14" aria-hidden /> {t("skills.add.git")}
-                </button>
-              </div>
+              <SegmentedControl
+                className="self-start"
+                aria-label={t("skills.add.sourceLabel")}
+                value={mode}
+                onValueChange={(value) => {
+                  if (value === "local_folder" || value === "git") setMode(value);
+                }}
+              >
+                <SegmentedControlItem value="local_folder">
+                  <FolderIcon aria-hidden /> {t("skills.add.folder")}
+                </SegmentedControlItem>
+                <SegmentedControlItem value="git">
+                  <GitBranchIcon aria-hidden /> {t("skills.add.git")}
+                </SegmentedControlItem>
+              </SegmentedControl>
             </div>
 
             {mode === "local_folder" ? (

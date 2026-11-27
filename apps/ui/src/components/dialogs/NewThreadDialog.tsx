@@ -16,6 +16,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { ENTER, Kbd, MOD } from "@/components/ui/kbd";
+import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { AttachmentTray } from "@/features/attachments/AttachmentTray";
 import { FILE_ACCEPT } from "@/features/attachments/picker";
@@ -645,14 +646,11 @@ export function NewThreadDialog() {
             ) : null}
             {fastAvailable ? (
               <Field htmlFor="new-thread-fast" label={t("newThread.speed")}>
-                <button
-                  type="button"
+                <Switch
                   id="new-thread-fast"
-                  className="q-switch"
-                  role="switch"
-                  aria-checked={fast}
+                  checked={fast}
                   aria-label={t("newThread.fastMode")}
-                  onClick={() => setFast((value) => !value)}
+                  onCheckedChange={() => setFast((value) => !value)}
                 />
                 <FieldNote>{t("newThread.fastHint")}</FieldNote>
               </Field>

@@ -32,6 +32,7 @@ function measure(segment: HTMLElement): boolean {
   const available = segment.clientWidth - px(style.paddingLeft) - px(style.paddingRight);
   const items: SegmentItem[] = [];
   for (const button of Array.from(segment.children) as HTMLElement[]) {
+    if (button.dataset.slot?.endsWith("-indicator")) continue;
     const own = getComputedStyle(button);
     items.push({
       padding: px(own.paddingLeft) + px(own.paddingRight),
@@ -45,7 +46,7 @@ function measure(segment: HTMLElement): boolean {
 
 /**
  * True while the segment's labels are too long for its width, so the caller
- * lets the labels shrink with an ellipsis (`.q-seg.fit`) instead of pushing
+ * lets the labels shrink with an ellipsis  instead of pushing
  * the last tab out of view. Short labels keep the usual equal tabs.
  *
  * `key` changes whenever the text does (the language, a count).

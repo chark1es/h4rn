@@ -94,6 +94,7 @@
     "openOn": "在 {{forge}} 上打开"
   },
   "tabs": {
+    "label": "拉取请求分区",
     "conversation": "讨论",
     "commits": "提交",
     "checks": "检查",

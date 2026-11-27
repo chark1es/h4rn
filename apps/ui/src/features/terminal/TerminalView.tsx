@@ -1,3 +1,5 @@
+import { Toggle } from "@ui-sdk/react/toggle";
+import { Toolbar, ToolbarButton } from "@ui-sdk/react/toolbar";
 import {
   ArrowDownIcon,
   ArrowLeftIcon,
@@ -7,16 +9,8 @@ import {
   RefreshCwIcon,
   WifiOffIcon,
 } from "lucide-react";
-import {
-  type ButtonHTMLAttributes,
-  type ReactNode,
-  useCallback,
-  useEffect,
-  useRef,
-  useState,
-} from "react";
+import { type ReactNode, useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-
 import type { H4rnClient } from "@/lib/client/client";
 import { cn } from "@/lib/utils";
 
@@ -203,19 +197,20 @@ export function TerminalView({
         </div>
       ) : null}
 
-      <div
+      <Toolbar
         className={cn("q-keybar sm:hidden", status.phase !== "attached" && "opacity-60")}
-        role="toolbar"
         aria-label={t("terminal.keys")}
       >
         <KeyButton label={KEYCAP.esc} onPress={() => sendKey("\u001b")} />
         <KeyButton label={KEYCAP.tab} onPress={() => sendKey("\t")} />
-        <KeyButton
-          label={KEYCAP.ctrl}
-          active={ctrlArmed}
-          aria-pressed={ctrlArmed}
-          onPress={() => setCtrlArmed((value) => !value)}
-        />
+        <Toggle
+          aria-label={KEYCAP.ctrl}
+          className={cn("q-key", ctrlArmed && "on")}
+          pressed={ctrlArmed}
+          onPressedChange={setCtrlArmed}
+        >
+          {KEYCAP.ctrl}
+        </Toggle>
         <KeyButton
           icon={<ArrowUpIcon strokeWidth={1.75} aria-hidden />}
           label="↑"
@@ -241,7 +236,7 @@ export function TerminalView({
           onPress={() => arrow("ArrowRight")}
         />
         <KeyButton label={t("terminal.paste")} onPress={() => void paste()} />
-      </div>
+      </Toolbar>
 
       {status.phase === "exited" ? (
         <div className="flex h-8 shrink-0 items-center justify-center border-t border-[var(--line)] bg-[var(--bg-sunk)] text-xs text-[var(--fg-3)]">
@@ -260,25 +255,16 @@ function KeyButton({
   label,
   ariaLabel,
   icon,
-  active,
   onPress,
-  ...rest
 }: {
   label: string;
   ariaLabel?: string;
   icon?: ReactNode;
-  active?: boolean;
   onPress: () => void;
-} & Pick<ButtonHTMLAttributes<HTMLButtonElement>, "aria-pressed">) {
+}) {
   return (
-    <button
-      type="button"
-      aria-label={ariaLabel ?? label}
-      className={cn("q-key", active && "on")}
-      onClick={onPress}
-      {...rest}
-    >
+    <ToolbarButton aria-label={ariaLabel ?? label} className="q-key" onClick={onPress}>
       {icon ?? label}
-    </button>
+    </ToolbarButton>
   );
 }

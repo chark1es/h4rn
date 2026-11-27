@@ -1,6 +1,7 @@
 import { FlaskConicalIcon } from "lucide-react";
 import { useEffect } from "react";
 import { useTranslation } from "react-i18next";
+import { Switch } from "@/components/ui/switch";
 import { errorWords } from "@/lib/client/errors";
 import { loadOutsideAgentSettings, setOutsideAgentEnabled, useAccess } from "../access/store";
 import { loadRewindSettings, setRewindFilesEnabled, useRewindSettings } from "../rewind/settings";
@@ -44,14 +45,11 @@ export function GuestSettingsForm() {
             <div className="s">{t("labs.rewindFilesHint")}</div>
           </div>
           <div className="ctl">
-            <button
-              type="button"
-              className="q-switch"
-              role="switch"
-              aria-checked={rewindFilesEnabled === true}
+            <Switch
+              checked={rewindFilesEnabled === true}
               aria-label={t("labs.rewindFiles")}
               disabled={rewindLoading || rewindSaving || rewindFilesEnabled === null}
-              onClick={() => void setRewindFilesEnabled(rewindFilesEnabled !== true)}
+              onCheckedChange={() => void setRewindFilesEnabled(rewindFilesEnabled !== true)}
             />
           </div>
         </div>
@@ -70,14 +68,11 @@ export function GuestSettingsForm() {
             <div className="s">{t("labs.guestLinksHint")}</div>
           </div>
           <div className="ctl">
-            <button
-              type="button"
-              className="q-switch"
-              role="switch"
-              aria-checked={settingsEnabled === true}
+            <Switch
+              checked={settingsEnabled === true}
               aria-label={t("labs.guestLinks")}
               disabled={settingsLoading || settingsSaving || settingsEnabled === null}
-              onClick={() => void setGuestLinksEnabled(settingsEnabled !== true)}
+              onCheckedChange={() => void setGuestLinksEnabled(settingsEnabled !== true)}
             />
           </div>
         </div>
@@ -105,14 +100,11 @@ export function GuestSettingsForm() {
             <div className="s">{t("labs.outsideAgentsHint")}</div>
           </div>
           <div className="ctl">
-            <button
-              type="button"
-              className="q-switch"
-              role="switch"
-              aria-checked={outsideEnabled === true}
+            <Switch
+              checked={outsideEnabled === true}
               aria-label={t("labs.outsideAgentsOAuth")}
               disabled={outsideSaving || outsideEnabled === null}
-              onClick={() => void setOutsideAgentEnabled(outsideEnabled !== true)}
+              onCheckedChange={() => void setOutsideAgentEnabled(outsideEnabled !== true)}
             />
           </div>
         </div>

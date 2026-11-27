@@ -1,9 +1,9 @@
 import { CircleAlertIcon, CopyIcon, InboxIcon, RefreshCwIcon, ServerIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
-
 import { AgentGlyph } from "@/components/agent/AgentGlyph";
 import { PhonePanelSheet } from "@/components/panel/PhonePanelSheet";
+import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { toastClearance } from "@/components/ui/sonner";
 import { TerminalPanel } from "@/features/terminal/TerminalPanel";
 import { AutoResumeCards } from "@/features/usage/AutoResumeCard";
@@ -320,40 +320,41 @@ export function ThreadPane({ threadId }: { threadId: string }) {
                 {t("pane.openHost")}
               </button>
             </div>
-            <details
-              className="q-disclosure"
-              style={{ fontSize: 12, color: "var(--fg-2)", alignSelf: "stretch" }}
-            >
-              <summary style={{ cursor: "pointer" }}>{t("pane.details")}</summary>
-              <dl className="q-kv" style={{ marginTop: 10, textAlign: "left" }}>
-                <dt>{t("pane.host")}</dt>
-                <dd>{hostName}</dd>
-                <dt>{t("pane.lastSeen")}</dt>
-                <dd className="q-num">{absoluteTime(host?.last_seen ?? summary.last_activity)}</dd>
-                <dt>{t("pane.status")}</dt>
-                <dd>{threadError.code.replace(/_/g, " ")}</dd>
-                <dt>{t("pane.lastEvent")}</dt>
-                <dd className="q-num">{absoluteTime(summary.last_activity)}</dd>
-              </dl>
-              <button
-                type="button"
-                className="q-btn ghost"
-                style={{ marginTop: 8, marginLeft: -10 }}
-                onClick={() => {
-                  void navigator.clipboard?.writeText(
-                    [
-                      `thread: ${threadId}`,
-                      `host: ${hostName}`,
-                      `status: ${threadError.code}`,
-                      `message: ${threadError.message}`,
-                    ].join("\n"),
-                  );
-                }}
-              >
-                <CopyIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-                {t("pane.copyDiagnostics")}
-              </button>
-            </details>
+            <Collapsible className="self-stretch text-xs text-muted-foreground">
+              <CollapsibleTrigger className="text-xs">{t("pane.details")}</CollapsibleTrigger>
+              <CollapsiblePanel>
+                <dl className="q-kv" style={{ marginTop: 10, textAlign: "left" }}>
+                  <dt>{t("pane.host")}</dt>
+                  <dd>{hostName}</dd>
+                  <dt>{t("pane.lastSeen")}</dt>
+                  <dd className="q-num">
+                    {absoluteTime(host?.last_seen ?? summary.last_activity)}
+                  </dd>
+                  <dt>{t("pane.status")}</dt>
+                  <dd>{threadError.code.replace(/_/g, " ")}</dd>
+                  <dt>{t("pane.lastEvent")}</dt>
+                  <dd className="q-num">{absoluteTime(summary.last_activity)}</dd>
+                </dl>
+                <button
+                  type="button"
+                  className="q-btn ghost"
+                  style={{ marginTop: 8, marginLeft: -10 }}
+                  onClick={() => {
+                    void navigator.clipboard?.writeText(
+                      [
+                        `thread: ${threadId}`,
+                        `host: ${hostName}`,
+                        `status: ${threadError.code}`,
+                        `message: ${threadError.message}`,
+                      ].join("\n"),
+                    );
+                  }}
+                >
+                  <CopyIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
+                  {t("pane.copyDiagnostics")}
+                </button>
+              </CollapsiblePanel>
+            </Collapsible>
           </div>
         </div>
       ) : !loaded ? (

@@ -60,9 +60,9 @@ const openPanelTab = async (page, name) => {
 const expandTree = async (page, path) => {
   const tree = page.getByRole("tree", { name: "Workspace files" });
   await tree.waitFor({ timeout: 10_000 });
-  const node = tree.locator(`button[title="${path}"]`).first();
+  const node = tree.locator(`[data-slot="tree-label"][title="${path}"]`).first();
   if (!(await node.count())) return;
-  if ((await node.getAttribute("aria-expanded")) === "false") {
+  if ((await node.locator("xpath=..").getAttribute("aria-expanded")) === "false") {
     await node.click();
     await page.waitForTimeout(250);
   }
@@ -72,7 +72,7 @@ const expandTree = async (page, path) => {
 const openTreeFile = async (page, path) => {
   const tree = page.getByRole("tree", { name: "Workspace files" });
   await tree.waitFor({ timeout: 10_000 });
-  const node = tree.locator(`button[title="${path}"]`).first();
+  const node = tree.locator(`[data-slot="tree-label"][title="${path}"]`).first();
   const appeared = await node
     .waitFor({ state: "visible", timeout: 5_000 })
     .then(() => true)
@@ -108,7 +108,7 @@ const SHOTS = [
     path: "/t/thr_h",
     wait: '[aria-label="Thread stream"]',
     action: async (page) => {
-      await page.getByRole("tab", { name: /Done/ }).click();
+      await page.getByRole("radio", { name: /Done/ }).click();
       await page.waitForTimeout(400);
     },
   },
@@ -196,7 +196,8 @@ const SHOTS = [
         .getByRole("tab", { name: /session\.test\.ts/ })
         .first()
         .click();
-      await page.getByRole("tab", { name: "vs agent" }).click();
+      await page.getByRole("tab", { name: /Changes/ }).click();
+      await page.getByRole("radio", { name: "vs agent" }).click();
       await sidebar.locator('[data-thread-id="thr_a"]').click();
       await page.getByRole("heading", { name: "api" }).waitFor({ timeout: 10_000 });
       await sidebar.locator('[data-thread-id="thr_b"]').click();
@@ -285,6 +286,7 @@ const SHOTS = [
     settle: 1200,
     action: async (page) => {
       await page.getByRole("button", { name: "Update Codex" }).click();
+      await page.getByRole("button", { name: "Update log" }).click({ timeout: 10_000 });
       await page.getByText("added 1 package in 4s").waitFor({ timeout: 5_000 });
     },
   },

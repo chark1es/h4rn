@@ -381,6 +381,7 @@
     "back": "Volver al hilo",
     "thread": "Hilo",
     "title": "Terminal",
+    "tabs": "Terminales",
     "new": "Nueva terminal",
     "close": "Cerrar {{name}}",
     "find": "Buscar en la terminal",

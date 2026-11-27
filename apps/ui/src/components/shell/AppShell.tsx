@@ -22,6 +22,7 @@ import { SettingsPage } from "@/components/pages/SettingsPage";
 import { RightPanel } from "@/components/panel/RightPanel";
 import { OfflineBanner } from "@/components/shell/OfflineBanner";
 import { PhoneNav } from "@/components/shell/PhoneNav";
+import { ShellSplit } from "@/components/shell/ShellSplit";
 import { Sidebar } from "@/components/shell/Sidebar";
 import { HarnessSwitchCommand } from "@/components/thread/HarnessSwitch";
 import { ThreadPane } from "@/components/thread/ThreadPane";
@@ -81,6 +82,8 @@ import {
   navigate,
   openAddProject,
   panelFits,
+  setPanelWidth,
+  setSidebarWidth,
   useApp,
 } from "@/lib/store/appStore";
 import { defaultThreadHostId, localOnlyHostOptions } from "@/lib/thread-hosts";
@@ -777,6 +780,7 @@ function PhoneIdeNotice() {
 }
 
 export function AppShell() {
+  const { t } = useTranslation(["sidebar", "thread"]);
   const route = useApp((state) => state.ui.route);
   const layout = useApp((state) => state.ui.layout);
   const threads = useApp((state) => state.threads);
@@ -870,16 +874,32 @@ export function AppShell() {
 
   return (
     <div className="q-app">
-      {layout.sidebarOpen ? <Sidebar /> : null}
-      <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", minHeight: 0 }}>
+      <ShellSplit
+        side="start"
+        pane={layout.sidebarOpen ? <Sidebar /> : null}
+        width={layout.sidebarWidth}
+        min={240}
+        max={420}
+        label={t("sidebar:resize")}
+        onWidth={setSidebarWidth}
+      >
         {surface ? <OfflineBanner /> : null}
         <AppUpdateNotice />
         <McpApprovalCard />
-        <div ref={viewRef} className="flex min-h-0 flex-1">
-          {main}
-          {showPanel && thread ? <RightPanel thread={thread} ide={ide} /> : null}
-        </div>
-      </div>
+        <ShellSplit
+          side="end"
+          pane={showPanel && thread ? <RightPanel thread={thread} ide={ide} /> : null}
+          width={layout.panelWidth}
+          min={320}
+          max={640}
+          label={t("thread:panel.resize")}
+          onWidth={setPanelWidth}
+        >
+          <div ref={viewRef} className="flex min-h-0 min-w-0 flex-1">
+            {main}
+          </div>
+        </ShellSplit>
+      </ShellSplit>
 
       <NewThreadDialog />
       <AddProjectDialog />

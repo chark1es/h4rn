@@ -367,6 +367,7 @@
     "back": "Back to thread",
     "thread": "Thread",
     "title": "Terminal",
+    "tabs": "Terminals",
     "new": "New terminal",
     "close": "Close {{name}}",
     "find": "Find in terminal",

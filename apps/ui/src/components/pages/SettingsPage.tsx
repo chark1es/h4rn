@@ -1,9 +1,10 @@
 import type * as React from "react";
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-
 import { ChipSelect } from "@/components/common/ChipSelect";
 import { ShortcutCaps } from "@/components/ui/kbd";
+import { SegmentedControl, SegmentedControlItem } from "@/components/ui/segmented-control";
+import { Switch } from "@/components/ui/switch";
 import { AccessSettings } from "@/features/access/AccessSettings";
 import { ForgeSettings } from "@/features/forge/ForgeSettings";
 import { GuestSettingsForm } from "@/features/guest/GuestSettings";
@@ -105,15 +106,11 @@ function Toggle({
   disabled?: boolean;
 }) {
   return (
-    <button
-      type="button"
-      className="q-switch"
-      role="switch"
-      aria-checked={checked}
+    <Switch
+      checked={checked}
       aria-label={label}
-      aria-disabled={disabled || undefined}
       disabled={disabled}
-      onClick={() => onChange?.(!checked)}
+      onCheckedChange={() => onChange?.(!checked)}
     />
   );
 }
@@ -339,22 +336,16 @@ function ChatForm() {
             <div className="s">{t("chat.sendWhileWorkingHint")}</div>
           </div>
           <div className="ctl">
-            <fieldset className="q-seg inline q-seg-fs" aria-labelledby="follow-up-label">
-              <button
-                type="button"
-                aria-pressed={followUp === "queue"}
-                onClick={() => setFollowUpBehavior("queue")}
-              >
-                {t("chat.queue")}
-              </button>
-              <button
-                type="button"
-                aria-pressed={followUp === "steer"}
-                onClick={() => setFollowUpBehavior("steer")}
-              >
-                {t("chat.steer")}
-              </button>
-            </fieldset>
+            <SegmentedControl
+              aria-labelledby="follow-up-label"
+              value={followUp}
+              onValueChange={(value) => {
+                if (value === "queue" || value === "steer") setFollowUpBehavior(value);
+              }}
+            >
+              <SegmentedControlItem value="queue">{t("chat.queue")}</SegmentedControlItem>
+              <SegmentedControlItem value="steer">{t("chat.steer")}</SegmentedControlItem>
+            </SegmentedControl>
           </div>
         </div>
         <div className="q-field">
@@ -439,18 +430,19 @@ function AppearanceForm() {
             </div>
           </div>
           <div className="ctl">
-            <fieldset className="q-seg inline q-seg-fs" aria-labelledby="color-scheme-label">
+            <SegmentedControl
+              aria-labelledby="color-scheme-label"
+              value={theme}
+              onValueChange={(value) => {
+                if (value) setTheme(value as Theme);
+              }}
+            >
               {SCHEMES.map((scheme) => (
-                <button
-                  key={scheme}
-                  type="button"
-                  aria-pressed={theme === scheme}
-                  onClick={() => setTheme(scheme)}
-                >
+                <SegmentedControlItem key={scheme} value={scheme}>
                   {t(`appearance.schemes.${scheme}`)}
-                </button>
+                </SegmentedControlItem>
               ))}
-            </fieldset>
+            </SegmentedControl>
           </div>
         </div>
         <div className="q-field">

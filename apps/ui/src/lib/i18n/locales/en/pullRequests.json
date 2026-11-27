@@ -96,6 +96,7 @@
     "openOn": "Open on {{forge}}"
   },
   "tabs": {
+    "label": "Pull request sections",
     "conversation": "Conversation",
     "commits": "Commits",
     "checks": "Checks",

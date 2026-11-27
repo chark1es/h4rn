@@ -22,6 +22,7 @@
   --sel: oklch(0.94 0.004 260);
   --line: oklch(0.915 0.003 260);
   --line-2: oklch(0.86 0.004 260);
+  --line-strong: oklch(0.62 0.006 260);
   --fg: oklch(0.21 0.006 260);
   --fg-2: oklch(0.44 0.007 260);
   --fg-3: oklch(0.51 0.007 260);
@@ -99,7 +100,7 @@
   --destructive: var(--danger);
   --destructive-foreground: var(--bg-raised);
   --border: var(--line);
-  --input: var(--line-2);
+  --input: var(--line-strong);
   --ring: var(--focus);
 }
 
@@ -116,6 +117,7 @@
   --sel: oklch(0.252 0.006 260);
   --line: oklch(0.268 0.005 260);
   --line-2: oklch(0.345 0.006 260);
+  --line-strong: oklch(0.56 0.006 260);
   --fg: oklch(0.945 0.003 260);
   --fg-2: oklch(0.76 0.005 260);
   --fg-3: oklch(0.64 0.006 260);
@@ -165,6 +167,7 @@
     --sel: oklch(0.252 0.006 260);
     --line: oklch(0.268 0.005 260);
     --line-2: oklch(0.345 0.006 260);
+    --line-strong: oklch(0.56 0.006 260);
     --fg: oklch(0.945 0.003 260);
     --fg-2: oklch(0.76 0.005 260);
     --fg-3: oklch(0.64 0.006 260);
@@ -210,6 +213,7 @@
   --color-sel: var(--sel);
   --color-line: var(--line);
   --color-line-2: var(--line-2);
+  --color-line-strong: var(--line-strong);
   --color-fg: var(--fg);
   --color-fg-2: var(--fg-2);
   --color-fg-3: var(--fg-3);

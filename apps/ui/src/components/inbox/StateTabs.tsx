@@ -1,6 +1,11 @@
 import { useRef } from "react";
 import { useTranslation } from "react-i18next";
 
+import {
+  SegmentedControl,
+  SegmentedControlCount,
+  SegmentedControlItem,
+} from "@/components/ui/segmented-control";
 import type { ThreadTab } from "@/gen";
 import { useSegmentFit } from "@/hooks/use-segment-fit";
 import { formatNumber, useActiveLocale } from "@/lib/i18n";
@@ -12,7 +17,7 @@ import { cn } from "@/lib/utils";
  *
  * It always stays on one line. When a language's labels are too long for the
  * sidebar's width, the labels shrink with an ellipsis (the counts stay) and
- * each tab's full name moves into its tooltip.
+ * each segment's full name moves into its tooltip.
  */
 export function StateTabs({
   tab,
@@ -31,22 +36,29 @@ export function StateTabs({
   const shown = TAB_ORDER.map((value) => (loading ? "—" : formatNumber(counts[value])));
   const fit = useSegmentFit(ref, `${locale}|${shown.join("|")}`);
   return (
-    <div ref={ref} className={cn("q-seg", fit && "fit")} role="tablist" aria-label={t("stateTabs")}>
+    <SegmentedControl
+      ref={ref}
+      width="full"
+      aria-label={t("stateTabs")}
+      value={tab}
+      onValueChange={(value) => {
+        if (value) onSelect(value as ThreadTab);
+      }}
+    >
       {TAB_ORDER.map((value, index) => {
         const label = t(`common:states.${value}`);
         return (
-          <button
+          <SegmentedControlItem
             key={value}
-            type="button"
-            role="tab"
-            aria-selected={tab === value}
+            value={value}
             title={fit ? label : undefined}
-            onClick={() => onSelect(value)}
+            className={cn("px-1.5", fit && "flex-auto")}
           >
-            <span className="l">{label}</span> <span className="c q-num">{shown[index]}</span>
-          </button>
+            <span className={cn(fit && "min-w-0 truncate")}>{label}</span>
+            <SegmentedControlCount>{shown[index]}</SegmentedControlCount>
+          </SegmentedControlItem>
         );
       })}
-    </div>
+    </SegmentedControl>
   );
 }

@@ -2,7 +2,6 @@ import { PlusIcon, Trash2Icon } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { ChipSelect } from "@/components/common/ChipSelect";
-
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -14,6 +13,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { SegmentedControl, SegmentedControlItem } from "@/components/ui/segmented-control";
 import { Textarea } from "@/components/ui/textarea";
 import type {
   HarnessKind,
@@ -209,19 +209,20 @@ export function McpServerDialog({
 
             <div className="flex flex-col gap-1">
               <FieldLabel>{t("mcp.server.transport")}</FieldLabel>
-              <div className="q-seg inline" role="tablist" aria-label={t("mcp.server.transport")}>
+              <SegmentedControl
+                className="self-start"
+                aria-label={t("mcp.server.transport")}
+                value={kind}
+                onValueChange={(value) => {
+                  if (value) setKind(value as typeof kind);
+                }}
+              >
                 {(["stdio", "http", "sse"] as const).map((option) => (
-                  <button
-                    key={option}
-                    type="button"
-                    role="tab"
-                    aria-selected={kind === option}
-                    onClick={() => setKind(option)}
-                  >
+                  <SegmentedControlItem key={option} value={option}>
                     {option === "stdio" ? "stdio" : option.toUpperCase()}
-                  </button>
+                  </SegmentedControlItem>
                 ))}
-              </div>
+              </SegmentedControl>
             </div>
 
             {isStdio ? (

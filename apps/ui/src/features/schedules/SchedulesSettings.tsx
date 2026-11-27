@@ -11,6 +11,7 @@ import { useTranslation } from "react-i18next";
 import { ChipSelect } from "@/components/common/ChipSelect";
 import { ConfirmDialog } from "@/components/common/ConfirmDialog";
 import { SuggestInput } from "@/components/ui/autocomplete";
+import { Switch } from "@/components/ui/switch";
 import {
   loadAcpAgents,
   loadHarnessVersions,
@@ -24,7 +25,6 @@ import { i18n } from "@/lib/i18n";
 import { HARNESS_MODELS } from "@/lib/models";
 import { openThread, pushToast, useApp } from "@/lib/store/appStore";
 import { MODE_CHOICES } from "@/lib/threadControls";
-
 import {
   applyScheduleEvent,
   createSchedule,
@@ -609,13 +609,10 @@ function ScheduleEditor({
           <div className="s">{t("schedules.editor.enabledHint")}</div>
         </div>
         <div className="ctl">
-          <button
-            type="button"
-            className="q-switch"
-            role="switch"
-            aria-checked={draft.enabled}
+          <Switch
+            checked={draft.enabled}
             aria-label={t("schedules.editor.enabledLabel")}
-            onClick={() => patch({ enabled: !draft.enabled })}
+            onCheckedChange={() => patch({ enabled: !draft.enabled })}
           />
         </div>
       </div>
@@ -733,18 +730,15 @@ function TaskRow({
         ) : null}
       </div>
       <div className="ctl" style={{ flex: "0 1 auto", justifyContent: "flex-end" }}>
-        <button
-          type="button"
-          className="q-switch"
-          role="switch"
-          aria-checked={task.enabled}
+        <Switch
+          checked={task.enabled}
           aria-label={
             task.enabled
               ? t("schedules.task.pause", { name: task.name })
               : t("schedules.task.resume", { name: task.name })
           }
           disabled={busy}
-          onClick={() => void toggle()}
+          onCheckedChange={() => void toggle()}
         />
         {task.schedule.kind !== "webhook" ? (
           <button

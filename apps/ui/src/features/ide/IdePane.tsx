@@ -28,6 +28,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { MOD, SHIFT } from "@/components/ui/kbd";
+import { Tabs, TabsList, TabsTab } from "@/components/ui/tabs";
 import { Tip } from "@/components/ui/tooltip";
 import { TerminalPanel } from "@/features/terminal/TerminalPanel";
 import type { ThreadSummary } from "@/gen";
@@ -404,6 +405,13 @@ export function IdePane() {
   })();
 
   const showDiff = panel === "diff";
+  const enterDiff = () => {
+    // Entering the pane already asks for the tab's file; mark the tab as
+    // handled so the follow effect does not ask twice.
+    followedTabRef.current = active?.path ?? null;
+    setPanel("diff");
+    void session.selectDiffSource(state.diffSource);
+  };
   const shownPath = showDiff
     ? (state.diffPath ?? active?.path ?? workspace.path)
     : (active?.path ?? workspace.path);
@@ -494,31 +502,30 @@ export function IdePane() {
             {shownPath}
           </span>
           <span className="grow" />
-          <div className="q-seg inline" role="tablist" aria-label={t("bar.mode")}>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={!showDiff}
-              onClick={() => setPanel((current) => (current === "diff" ? null : current))}
-            >
-              {t("common:edit")}
-            </button>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={showDiff}
-              disabled={!active && !state.diffPath}
-              onClick={() => {
-                // Entering the pane already asks for the tab's file; mark the
-                // tab as handled so the follow effect does not ask twice.
-                followedTabRef.current = active?.path ?? null;
-                setPanel("diff");
-                void session.selectDiffSource(state.diffSource);
-              }}
-            >
-              {t("bar.diff")}
-            </button>
-          </div>
+          <Tabs
+            className="flex-row"
+            value={showDiff ? "diff" : "edit"}
+            onValueChange={(value) => {
+              if (value === "edit") {
+                setPanel((current) => (current === "diff" ? null : current));
+              } else if (value === "diff") {
+                enterDiff();
+              }
+            }}
+          >
+            <TabsList variant="segmented" aria-label={t("bar.mode")}>
+              <TabsTab value="edit">{t("common:edit")}</TabsTab>
+              <TabsTab
+                value="diff"
+                disabled={!active && !state.diffPath}
+                onClick={() => {
+                  if (showDiff) enterDiff();
+                }}
+              >
+                {t("bar.diff")}
+              </TabsTab>
+            </TabsList>
+          </Tabs>
           <ChipSelect<DiffSource>
             label={t("bar.source")}
             value={state.diffSource}

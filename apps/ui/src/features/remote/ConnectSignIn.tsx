@@ -9,6 +9,7 @@ import {
 import { useEffect, useState } from "react";
 import { Trans, useTranslation } from "react-i18next";
 
+import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "@/components/ui/collapsible";
 import type { ProviderInfo } from "@/gen";
 import { i18n } from "@/lib/i18n";
 import { listProviders } from "./connect";
@@ -171,10 +172,14 @@ export function ConnectSignIn() {
                   values={{ host: relayHost(connectUrl) }}
                   components={{ b: <b /> }}
                 />
-                <details className="q-signin-details">
-                  <summary>{t("proxy.probe.details")}</summary>
-                  <span className="q-mono">{providersError}</span>
-                </details>
+                <Collapsible className="q-signin-details">
+                  <CollapsibleTrigger className="text-xs">
+                    {t("proxy.probe.details")}
+                  </CollapsibleTrigger>
+                  <CollapsiblePanel>
+                    <span className="q-mono">{providersError}</span>
+                  </CollapsiblePanel>
+                </Collapsible>
               </div>
               <button
                 type="button"

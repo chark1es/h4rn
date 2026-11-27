@@ -10,6 +10,7 @@ import { useEffect, useState } from "react";
 import { Trans, useTranslation } from "react-i18next";
 
 import { ConfirmDialog } from "@/components/common/ConfirmDialog";
+import { Switch } from "@/components/ui/switch";
 import { readActiveRemote } from "@/features/remote/active";
 import type { HarnessKind, OutsideAgentLevel, OutsideAgentSignIn, OutsideAgentView } from "@/gen";
 import { HARNESS_LABELS } from "@/lib/entities";
@@ -17,7 +18,6 @@ import { absoluteDateTime } from "@/lib/format";
 import { formatRelativeTime } from "@/lib/i18n";
 import { useApp } from "@/lib/store/appStore";
 import { cn } from "@/lib/utils";
-
 import {
   levelDescription,
   levelLabel,
@@ -298,15 +298,11 @@ export function AccessSettings() {
                 <div className="s">{enabled ? t("access.toolsOn") : t("access.toolsOff")}</div>
               </div>
               <div className="ctl" style={{ flex: "0 1 auto", justifyContent: "flex-end" }}>
-                <button
-                  type="button"
-                  className={cn("q-switch", busy && "busy")}
-                  role="switch"
-                  aria-checked={enabled}
+                <Switch
+                  checked={enabled}
                   aria-label={t("access.toolsIn", { harness: HARNESS_LABELS[harness] })}
-                  aria-disabled={busy || undefined}
                   disabled={busy}
-                  onClick={() => void setAgentToolsEnabled(harness, !enabled)}
+                  onCheckedChange={() => void setAgentToolsEnabled(harness, !enabled)}
                 />
               </div>
             </div>

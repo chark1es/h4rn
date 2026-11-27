@@ -9,7 +9,6 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Trans, useTranslation } from "react-i18next";
-
 import { ChipSelect } from "@/components/common/ChipSelect";
 import { Markdown } from "@/components/thread/Markdown";
 import {
@@ -22,6 +21,7 @@ import {
   MenuRadioItem,
   MenuTrigger,
 } from "@/components/ui/menu";
+import { SegmentedControl, SegmentedControlItem } from "@/components/ui/segmented-control";
 import { accountsForRepo, forgeLabel } from "@/features/forge/store";
 import { useProjects } from "@/features/projects/store";
 import type {
@@ -662,19 +662,20 @@ export function IssuesPage() {
             </button>
           ) : null}
         </form>
-        <div className="q-seg" role="tablist" aria-label={t("filters.label")}>
+        <SegmentedControl
+          className="max-[560px]:h-auto max-[560px]:w-full max-[560px]:flex-wrap max-[560px]:[&>[data-slot=segmented-control-item]]:min-h-11 max-[560px]:[&>[data-slot=segmented-control-item]]:flex-auto"
+          aria-label={t("filters.label")}
+          value={filter}
+          onValueChange={(value) => {
+            if (value) changeFilter(value as typeof filter);
+          }}
+        >
           {filters.map((key) => (
-            <button
-              key={key}
-              type="button"
-              role="tab"
-              aria-selected={filter === key}
-              onClick={() => changeFilter(key)}
-            >
+            <SegmentedControlItem key={key} value={key}>
               {t(`filters.${key}`)}
-            </button>
+            </SegmentedControlItem>
           ))}
-        </div>
+        </SegmentedControl>
         <span className="grow" />
         <Menu>
           <MenuTrigger className="q-btn ghost" aria-label={t("projects.label")}>

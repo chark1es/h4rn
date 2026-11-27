@@ -9,8 +9,10 @@ import {
 } from "lucide-react";
 import { Fragment, useEffect, useMemo, useState } from "react";
 import { Trans, useTranslation } from "react-i18next";
-
 import { ChipSelect } from "@/components/common/ChipSelect";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "@/components/ui/collapsible";
+import { Switch } from "@/components/ui/switch";
 import type {
   AgentState,
   HarnessKind,
@@ -24,7 +26,6 @@ import { HARNESS_LABELS } from "@/lib/entities";
 import { formatList, formatNumber, formatRelativeTime, i18n } from "@/lib/i18n";
 import { useApp } from "@/lib/store/appStore";
 import { cn } from "@/lib/utils";
-
 import {
   addProxyProfile,
   applyProxyOverrides,
@@ -361,16 +362,11 @@ function AddProfile() {
           <div className="t">{t("common:default")}</div>
         </div>
         <div className="ctl">
-          <button
-            type="button"
-            className={cn("q-check", isDefault && "on")}
-            role="switch"
-            aria-checked={isDefault}
+          <Checkbox
+            checked={isDefault}
             aria-label={t("proxy.add.defaultLabel")}
-            onClick={() => setIsDefault((value) => !value)}
-          >
-            {isDefault ? <CheckIcon className="q-icon s14" strokeWidth={2} aria-hidden /> : null}
-          </button>
+            onCheckedChange={(next) => setIsDefault(next === true)}
+          />
         </div>
       </div>
       <div className="flex gap-2 justify-end">
@@ -527,14 +523,11 @@ function HarnessRow({ profile, harness }: { profile: ProxyProfile; harness: Harn
           <div className="s">{enabled ? t("proxy.harness.routed") : t("proxy.harness.own")}</div>
         </div>
         <div className="ctl">
-          <button
-            type="button"
-            className="q-switch"
-            role="switch"
-            aria-checked={enabled}
+          <Switch
+            checked={enabled}
             aria-label={t("proxy.harness.routeLabel", { harness: HARNESS_LABELS[harness] })}
             disabled={saving}
-            onClick={() =>
+            onCheckedChange={() =>
               void setHarnessOverride(
                 profile.id,
                 harness,
@@ -793,29 +786,33 @@ function ProfileDetail({ profile }: { profile: ProxyProfile }) {
               </div>
             ) : null}
             {details.length > 0 || report ? (
-              <details className="q-details">
-                <summary>{t("proxy.probe.details")}</summary>
-                {details.length > 0 ? (
-                  <div className="q-probe">
-                    {details.map((row) => (
-                      <Fragment key={row.label}>
-                        <span className={row.ok ? "q-ok" : "q-faint"}>
-                          {row.ok ? (
-                            <CheckIcon className="q-icon s14" strokeWidth={2} aria-hidden />
-                          ) : null}
-                        </span>
-                        <div className="k">{row.label}</div>
-                        <div className={cn("v", !row.ok && "q-faint")}>{row.value}</div>
-                      </Fragment>
-                    ))}
-                  </div>
-                ) : null}
-                {report ? (
-                  <div className="mt-3">
-                    <Diagnostics diagnostics={report.diagnostics} />
-                  </div>
-                ) : null}
-              </details>
+              <Collapsible className="mt-2 text-xs">
+                <CollapsibleTrigger className="text-xs">
+                  {t("proxy.probe.details")}
+                </CollapsibleTrigger>
+                <CollapsiblePanel className="mt-2">
+                  {details.length > 0 ? (
+                    <div className="q-probe">
+                      {details.map((row) => (
+                        <Fragment key={row.label}>
+                          <span className={row.ok ? "q-ok" : "q-faint"}>
+                            {row.ok ? (
+                              <CheckIcon className="q-icon s14" strokeWidth={2} aria-hidden />
+                            ) : null}
+                          </span>
+                          <div className="k">{row.label}</div>
+                          <div className={cn("v", !row.ok && "q-faint")}>{row.value}</div>
+                        </Fragment>
+                      ))}
+                    </div>
+                  ) : null}
+                  {report ? (
+                    <div className="mt-3">
+                      <Diagnostics diagnostics={report.diagnostics} />
+                    </div>
+                  ) : null}
+                </CollapsiblePanel>
+              </Collapsible>
             ) : null}
           </div>
         </div>

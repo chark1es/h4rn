@@ -1,8 +1,8 @@
 import { CircleCheckIcon, KeyRoundIcon, PlusIcon, TriangleAlertIcon } from "lucide-react";
-import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import { type ReactNode, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-
 import { ChipSelect } from "@/components/common/ChipSelect";
+import { SegmentedControl, SegmentedControlItem } from "@/components/ui/segmented-control";
 import { useHarnesses, useHarnessVersions } from "@/features/harnesses/harnessStore";
 import type {
   HarnessKind,
@@ -418,52 +418,21 @@ export function ModePicker({
   onChange: (next: TitleModelMode) => void;
 }) {
   const { t } = useTranslation(["settings", "common"]);
-  const buttons = useRef<Array<HTMLButtonElement | null>>([]);
-  const select = (index: number) => {
-    const next = (index + MODES.length) % MODES.length;
-    const mode = MODES[next];
-    if (!mode) return;
-    onChange(mode);
-    buttons.current[next]?.focus();
-  };
   return (
-    <div
-      className="q-seg inline q-seg-choice"
-      role="radiogroup"
+    <SegmentedControl
+      className="phone:w-full"
       aria-label={t("textGeneration.titleModelLabel")}
+      value={value}
+      onValueChange={(next) => {
+        if (next) onChange(next as TitleModelMode);
+      }}
     >
-      {MODES.map((mode, index) => (
-        // biome-ignore lint/a11y/useSemanticElements: a segmented radio group, not a form radio
-        <button
-          key={mode}
-          ref={(element) => {
-            buttons.current[index] = element;
-          }}
-          type="button"
-          role="radio"
-          aria-checked={value === mode}
-          tabIndex={value === mode ? 0 : -1}
-          onClick={() => onChange(mode)}
-          onKeyDown={(event) => {
-            if (event.key === "ArrowRight" || event.key === "ArrowDown") {
-              event.preventDefault();
-              select(index + 1);
-            } else if (event.key === "ArrowLeft" || event.key === "ArrowUp") {
-              event.preventDefault();
-              select(index - 1);
-            } else if (event.key === "Home") {
-              event.preventDefault();
-              select(0);
-            } else if (event.key === "End") {
-              event.preventDefault();
-              select(MODES.length - 1);
-            }
-          }}
-        >
+      {MODES.map((mode) => (
+        <SegmentedControlItem key={mode} value={mode} className="phone:min-w-0 phone:flex-1">
           {t(`sourceControl.modes.${mode}`)}
-        </button>
+        </SegmentedControlItem>
       ))}
-    </div>
+    </SegmentedControl>
   );
 }
 

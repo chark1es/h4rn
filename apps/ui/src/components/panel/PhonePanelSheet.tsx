@@ -5,6 +5,7 @@ import { useTranslation } from "react-i18next";
 import { AgentGlyph } from "@/components/agent/AgentGlyph";
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
 import { Sheet, SheetClose, SheetContent, SheetTitle } from "@/components/ui/sheet";
+import { Tabs, TabsCount, TabsList, TabsTab } from "@/components/ui/tabs";
 import { PreviewPanel } from "@/features/preview/PreviewPanel";
 import { DelegateDialog } from "@/features/subagents/DelegateDialog";
 import {
@@ -207,51 +208,36 @@ export function PhonePanelSheet({
               {t("common:done")}
             </SheetClose>
           </div>
-          <div className="q-ph-seg" style={{ padding: "0 16px 10px" }}>
-            <div className="q-seg" role="tablist" aria-label={t("changes.phone.tabs")}>
-              <button
-                type="button"
-                role="tab"
-                aria-selected={tabState === "changes"}
-                onClick={() => setTab("changes")}
-              >
-                {t("panel.changes")}{" "}
-                {files.length > 0 ? (
-                  <span className="c q-num">{formatNumber(files.length)}</span>
-                ) : null}
-              </button>
-              {previewPath ? (
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={tabState === "preview"}
-                  onClick={() => {
-                    setPanelTab("preview");
-                    setTab("preview");
-                  }}
-                >
-                  {t("panel.preview")}
-                </button>
-              ) : null}
-              <button
-                type="button"
-                role="tab"
-                aria-selected={tabState === "subagents"}
-                onClick={() => {
-                  setPanelTab("subagents");
-                  setTab("subagents");
-                }}
-              >
-                {t("panel.subagents")}{" "}
+          <Tabs
+            className="shrink-0 px-4 pb-2.5"
+            value={tabState}
+            onValueChange={(value) => {
+              if (value !== "changes" && value !== "preview" && value !== "subagents") return;
+              if (value !== "changes") setPanelTab(value);
+              setTab(value);
+            }}
+          >
+            <TabsList
+              variant="segmented"
+              aria-label={t("changes.phone.tabs")}
+              className="flex w-full [&>[data-slot=tabs-tab]]:min-w-0 [&>[data-slot=tabs-tab]]:flex-1"
+            >
+              <TabsTab value="changes">
+                {t("panel.changes")}
+                {files.length > 0 ? <TabsCount>{formatNumber(files.length)}</TabsCount> : null}
+              </TabsTab>
+              {previewPath ? <TabsTab value="preview">{t("panel.preview")}</TabsTab> : null}
+              <TabsTab value="subagents">
+                {t("panel.subagents")}
                 {subagents.total > 0 ? (
-                  <span className="c q-num">{formatNumber(subagents.total)}</span>
+                  <TabsCount>{formatNumber(subagents.total)}</TabsCount>
                 ) : null}
                 {subagents.waiting > 0 ? (
                   <span className="q-pip" role="img" aria-label={t("panel.needsYou")} />
                 ) : null}
-              </button>
-            </div>
-          </div>
+              </TabsTab>
+            </TabsList>
+          </Tabs>
 
           {tabState === "preview" ? (
             <PreviewPanel

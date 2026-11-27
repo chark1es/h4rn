@@ -1,11 +1,10 @@
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { ChipSelect } from "@/components/common/ChipSelect";
+import { Switch } from "@/components/ui/switch";
 import type { AutoResumePolicy } from "@/gen";
-
 import { formatDuration, formatNumber } from "@/lib/i18n";
 import { useApp } from "@/lib/store/appStore";
-
 import { loadLimits, setAutoResumePolicy, useUsage } from "./usageStore";
 
 const WAIT_CHOICES: Array<{ amount: number; unit: "minute" | "hour"; ms: number }> = [
@@ -24,16 +23,7 @@ function Toggle({
   label: string;
   onChange: (next: boolean) => void;
 }) {
-  return (
-    <button
-      type="button"
-      className="q-switch"
-      role="switch"
-      aria-checked={checked}
-      aria-label={label}
-      onClick={() => onChange(!checked)}
-    />
-  );
+  return <Switch checked={checked} aria-label={label} onCheckedChange={() => onChange(!checked)} />;
 }
 
 /**
