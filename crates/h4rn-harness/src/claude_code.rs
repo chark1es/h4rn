@@ -189,6 +189,45 @@ impl Harness for ClaudeCodeHarness {
         RewindMethod::Native
     }
 
+    async fn list_models(
+        &self,
+        install: &HarnessInstall,
+        cwd: &std::path::Path,
+    ) -> Result<Vec<String>, std::io::Error> {
+        let mut command = cli_command(&install.path);
+        command.current_dir(cwd).args([
+            "-p",
+            "--input-format",
+            "stream-json",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--strict-mcp-config",
+        ]);
+        for key in SCRUBBED_ENV {
+            command.env_remove(key);
+        }
+        let mut probe = crate::model_probe::ModelProbe::spawn(command)?;
+        probe
+            .send(serde_json::json!({
+                "type": "control_request", "request_id": "models",
+                "request": { "subtype": "initialize" }
+            }))
+            .await?;
+        let frame = probe
+            .receive(|frame| {
+                frame["type"] == "control_response" && frame["response"]["request_id"] == "models"
+            })
+            .await?;
+        let models = &frame["response"]["response"]["models"];
+        if !models.is_array() {
+            return Err(std::io::Error::other(
+                "Claude Code did not return a model catalog",
+            ));
+        }
+        Ok(crate::model_probe::model_ids(models, "value"))
+    }
+
     async fn start_session(
         &self,
         spec: SessionSpec,
@@ -1238,7 +1277,7 @@ fn candidate_names() -> Vec<&'static str> {
 }
 
 fn probe_version(path: &Path) -> Option<String> {
-    let output = version_command(path).output().ok()?;
+    let output = cli_command(path).arg("--version").output().ok()?;
     if !output.status.success() {
         return None;
     }
@@ -1249,7 +1288,7 @@ fn probe_version(path: &Path) -> Option<String> {
     parse_version(&String::from_utf8_lossy(&output.stderr))
 }
 
-fn version_command(path: &Path) -> std::process::Command {
+fn cli_command(path: &Path) -> std::process::Command {
     #[cfg(windows)]
     {
         let extension = path
@@ -1258,13 +1297,11 @@ fn version_command(path: &Path) -> std::process::Command {
             .map(str::to_ascii_lowercase);
         if matches!(extension.as_deref(), Some("cmd" | "bat")) {
             let mut command = std::process::Command::new("cmd");
-            command.arg("/C").arg(path).arg("--version");
+            command.arg("/C").arg(path);
             return command;
         }
     }
-    let mut command = std::process::Command::new(path);
-    command.arg("--version");
-    command
+    std::process::Command::new(path)
 }
 
 fn parse_version(text: &str) -> Option<String> {

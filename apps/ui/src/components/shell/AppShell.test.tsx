@@ -32,6 +32,7 @@ const mock = vi.hoisted(() => {
 });
 
 vi.mock("@/lib/store/appStore", () => ({
+  getClient: () => ({ request: async () => null }),
   useApp: (selector: (state: unknown) => unknown) => selector(mock.state),
   createThread: mock.createThread,
   navigate: mock.navigate,
@@ -47,6 +48,7 @@ vi.mock("@/features/projects/store", () => ({
 vi.mock("@/features/proxy/proxyStore", () => ({
   proxyDefaultModel: () => null,
   proxyModelsFor: () => [],
+  proxyOverrideFor: () => null,
   useProxy: () => undefined,
   useProxyCatalog: () => undefined,
 }));

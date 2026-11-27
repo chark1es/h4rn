@@ -32,8 +32,8 @@ import type {
 } from "./types";
 import { WebSocketTransport } from "./ws";
 
-type ResponseOfRest<T extends ClientRequest["type"]> = T extends "hello"
-  ? Extract<ResponseBody, { type: "hello" }>
+type ResponseOfRest<T extends ClientRequest["type"]> = T extends "hello" | "list_harness_models"
+  ? Extract<ResponseBody, { type: T extends "hello" ? "hello" : "harness_models" }>
   : T extends "subscribe"
     ? Extract<ResponseBody, { type: "subscribed" }>
     : T extends "list_harness_versions"

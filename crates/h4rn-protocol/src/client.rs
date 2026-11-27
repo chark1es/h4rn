@@ -1494,6 +1494,13 @@ pub enum ClientRequest {
     /// The latest version comes from the npm registry and is cached for a few
     /// hours. An offline registry is reported as unknown, never as an error.
     ListHarnessVersions,
+    /// Discover the models offered by an installed harness on this host.
+    ListHarnessModels {
+        /// Host on which the harness will run.
+        host: HostId,
+        /// Harness whose model catalog to read.
+        harness: HarnessKind,
+    },
     /// Update one harness CLI and stream its output as events.
     ///
     /// Refused while that harness has an active turn. The command runs with no
@@ -1778,6 +1785,7 @@ impl ClientRequest {
             | Self::ListResets
             | Self::ListFailoverOptions { .. }
             | Self::ListHarnessVersions
+            | Self::ListHarnessModels { .. }
             | Self::ListAcpAgents
             | Self::GetThreadQueue { .. }
             | Self::ListWorktrees

@@ -1485,7 +1485,15 @@ number: number, } | { "type": "subagent",
 /**
  * Operation to perform.
  */
-request: SubagentRequest, } | { "type": "list_harness_versions" } | { "type": "update_harness", 
+request: SubagentRequest, } | { "type": "list_harness_versions" } | { "type": "list_harness_models", 
+/**
+ * Host on which the harness will run.
+ */
+host: HostId, 
+/**
+ * Harness whose model catalog to read.
+ */
+harness: HarnessKind, } | { "type": "update_harness", 
 /**
  * Harness to update.
  */

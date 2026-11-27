@@ -895,4 +895,8 @@ settings: GuestSettings, } | { "type": "subscribed",
 /**
  * Journal head at the moment the subscription was served.
  */
-replay_through: number, } | { "type": "ack" };
+replay_through: number, } | { "type": "harness_models", 
+/**
+ * Model IDs accepted by the harness at launch.
+ */
+models: Array<string>, } | { "type": "ack" };
