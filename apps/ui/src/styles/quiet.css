@@ -694,6 +694,15 @@ fieldset.q-seg-fs {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* Rows keep their height when the MCP list opens; the list scrolls instead. */
+.setnav .q-nav,
+.setnav .q-set-subrow {
+  flex: none;
+}
+.setnav .q-side-h {
+  height: 44px;
+  padding: 16px 4px 4px 8px;
+}
 .q-side-banner {
   margin: 0 8px 8px;
   flex: none;
@@ -992,18 +1001,6 @@ fieldset.q-seg-fs {
 }
 
 /* Thread rows */
-.q-row .q-row-more {
-  position: absolute;
-  top: 5px;
-  right: 4px;
-  width: 22px;
-  height: 22px;
-  opacity: 0;
-}
-.q-row:hover .q-row-more,
-.q-row-more:focus-visible {
-  opacity: 1;
-}
 .q-rows .q-inbox-vrow {
   position: absolute;
   top: 0;
@@ -1041,9 +1038,13 @@ fieldset.q-seg-fs {
 .q-row-l1,
 .q-row-l2 {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 8px;
   min-width: 0;
+}
+.q-row-l2 {
+  font-size: 12px;
+  line-height: 16px;
 }
 .q-row-title {
   flex: 1;
@@ -1071,12 +1072,15 @@ fieldset.q-seg-fs {
   line-height: 20px;
 }
 .q-row:hover .q-row-time,
-.q-row:has(.q-row-more:focus-visible) .q-row-time {
+.q-row:has(.q-row-tools :focus-visible) .q-row-time,
+.q-row:has(.q-row-tools [data-open]) .q-row-time {
   visibility: hidden;
 }
+/* Line 2 gives way branch first: the harness keeps its name and the status
+   its word, while the branch ellipsizes (its title has the full value). */
 .q-row-meta {
-  flex: 1;
-  min-width: 0;
+  flex: none;
+  max-width: 60%;
   font-size: 12px;
   color: var(--fg-2);
   white-space: nowrap;
@@ -1089,7 +1093,6 @@ fieldset.q-seg-fs {
   gap: 3px;
   flex: 0 1 auto;
   min-width: 0;
-  max-width: 46%;
   font-size: 12px;
   line-height: 16px;
   color: var(--fg-3);
@@ -1130,16 +1133,6 @@ fieldset.q-seg-fs {
 .q-ph-pg .q-row-status {
   font-size: 14px;
   line-height: 20px;
-}
-.q-row-act {
-  margin-top: 0;
-  display: flex;
-  gap: 6px;
-}
-.q-row-act .q-btn {
-  height: 24px;
-  padding: 0 8px;
-  font-size: 12px;
 }
 .q-snoozed span:nth-child(2) {
   flex: 1;
@@ -3835,25 +3828,6 @@ fieldset.q-seg-fs {
   gap: 8px;
   min-width: 0;
 }
-/* One label column and one control column: every control starts at the same
-   x and fills the column; read-only values sit in it too. */
-.q-field:has(> .lab + .ctl) {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 20rem;
-  column-gap: 24px;
-}
-.q-field:has(> .lab + .ctl) > .lab {
-  min-width: 0;
-}
-.q-field > .ctl > .q-input,
-.q-field > .ctl > input,
-.q-field > .ctl > textarea,
-.q-field > .ctl > [data-slot="select-trigger"],
-.q-field > .ctl > [data-slot="input"] {
-  flex: 1 1 auto;
-  width: 100%;
-  min-width: 0;
-}
 .q-secret {
   display: inline-flex;
   align-items: center;
@@ -5677,9 +5651,7 @@ fieldset.q-seg-fs {
   .q-group > h2 {
     flex-wrap: wrap;
   }
-  .q-field,
-  .q-field:has(> .lab + .ctl) {
-    display: flex;
+  .q-field {
     flex-direction: column;
     align-items: stretch;
     gap: 8px;
@@ -6754,4 +6726,57 @@ fieldset.q-seg-fs {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* Row actions sit over the time at the trailing edge, on hover or focus. */
+.q-row-tools {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  display: flex;
+  gap: 2px;
+  opacity: 0;
+  transition: opacity var(--duration-micro) var(--ease-enter);
+}
+.q-row-tools .q-ibtn {
+  position: relative;
+  width: 24px;
+  height: 24px;
+}
+.q-row:hover .q-row-tools,
+.q-row-tools:focus-within,
+.q-row-tools:has([data-open]) {
+  opacity: 1;
+}
+.q-row:hover .q-row-title,
+.q-row:has(.q-row-tools :focus-visible) .q-row-title {
+  padding-right: var(--row-tools-w, 0px);
+}
+.q-row:has(.q-row-tools > :nth-child(2)) {
+  --row-tools-w: 24px;
+}
+
+/* One label column and one control column: every control starts at the same
+   x and fills the column; read-only values sit in it too. */
+.q-field:has(> .lab + .ctl) {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 20rem;
+  column-gap: 24px;
+}
+.q-field:has(> .lab + .ctl) > .lab {
+  min-width: 0;
+}
+.q-field > .ctl > .q-input,
+.q-field > .ctl > input,
+.q-field > .ctl > textarea.q-input,
+.q-field > .ctl > [data-slot="select-trigger"],
+.q-field > .ctl > [data-slot="input"] {
+  flex: 1 1 auto;
+  width: 100%;
+  min-width: 0;
+}
+@media (max-width: 639px) {
+  .q-field:has(> .lab + .ctl) {
+    display: flex;
+  }
 }

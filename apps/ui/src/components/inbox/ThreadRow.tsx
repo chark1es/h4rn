@@ -13,7 +13,6 @@ import {
 import { useTranslation } from "react-i18next";
 
 import { AgentGlyph } from "@/components/agent/AgentGlyph";
-import { ShortcutCaps } from "@/components/ui/kbd";
 import {
   Menu,
   MenuContent,
@@ -24,6 +23,7 @@ import {
   MenuSeparator,
   MenuTrigger,
 } from "@/components/ui/menu";
+import { Tip } from "@/components/ui/tooltip";
 import { openGuestShare } from "@/features/guest/guestStore";
 import type { HostSummary, ThreadSummary } from "@/gen";
 import { glyphForThread } from "@/lib/agent";
@@ -144,7 +144,7 @@ export function ThreadRow({
 
   return (
     <Menu>
-      <div className={cn("q-row flex-wrap", selected && "sel", isSettled && "dim")}>
+      <div className={cn("q-row", selected && "sel", isSettled && "dim")}>
         <MenuContextTrigger
           role="option"
           aria-selected={selected}
@@ -165,7 +165,9 @@ export function ThreadRow({
           </span>
           <span className="q-row-main">
             <span className="q-row-l1">
-              <span className="q-row-title">{thread.title}</span>
+              <span className="q-row-title" title={thread.title}>
+                {thread.title}
+              </span>
               <span className="q-row-time q-num">{formatAge(thread.last_activity, now)}</span>
             </span>
             <span className="q-row-l2">
@@ -184,33 +186,28 @@ export function ThreadRow({
             </span>
           </span>
         </MenuContextTrigger>
-        {isDone ? (
-          <span className="q-row-act ps-6 in-[.q-side]:ps-6.5">
-            {needsResume ? (
-              <>
-                <button type="button" className="q-btn secondary" onClick={onReopen}>
-                  <PlayIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
-                  {t("row.resumeNow")}
-                </button>
-                <button type="button" className="q-btn ghost" onClick={onAcknowledge}>
-                  {t("row.acknowledge")}
-                </button>
-              </>
-            ) : (
-              <button type="button" className="q-btn secondary" onClick={onAcknowledge}>
-                {t("row.acknowledge")}
-                {selected ? <ShortcutCaps command="thread.acknowledge" /> : null}
+        <span className="q-row-tools">
+          {isDone ? (
+            <Tip label={t("row.acknowledge")} command={shortcut("thread.acknowledge")}>
+              <button
+                type="button"
+                className="q-ibtn hit-area"
+                aria-label={t("row.acknowledgeTitle", { title: thread.title })}
+                tabIndex={tabStop ? 0 : -1}
+                onClick={onAcknowledge}
+              >
+                <CheckIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
               </button>
-            )}
-          </span>
-        ) : null}
-        <MenuTrigger
-          aria-label={t("row.actionsFor", { title: thread.title })}
-          className="q-ibtn q-row-more"
-          tabIndex={tabStop ? 0 : -1}
-        >
-          <MoreHorizontalIcon className="q-icon" strokeWidth={1.5} aria-hidden />
-        </MenuTrigger>
+            </Tip>
+          ) : null}
+          <MenuTrigger
+            aria-label={t("row.actionsFor", { title: thread.title })}
+            className="q-ibtn hit-area"
+            tabIndex={tabStop ? 0 : -1}
+          >
+            <MoreHorizontalIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
+          </MenuTrigger>
+        </span>
       </div>
       <MenuContent align="end" className="min-w-56">
         <MenuGroup>
@@ -223,6 +220,11 @@ export function ThreadRow({
           <MenuItem icon={<PinIcon />} command={shortcut("thread.pin")} onSelect={onPin}>
             {thread.pinned ? t("row.unpin") : t("row.keep")}
           </MenuItem>
+          {needsResume ? (
+            <MenuItem icon={<PlayIcon />} onSelect={onReopen}>
+              {t("row.resumeNow")}
+            </MenuItem>
+          ) : null}
           {isDone ? (
             <MenuItem
               icon={<CheckIcon />}

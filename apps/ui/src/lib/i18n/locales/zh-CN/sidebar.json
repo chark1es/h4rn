@@ -141,6 +141,7 @@
   },
   "row": {
     "actionsFor": "{{title}} 的操作",
+    "acknowledgeTitle": "确认 {{title}}",
     "harnessOn": "{{host}} 上的 {{harness}}",
     "resumeNow": "立即继续",
     "acknowledge": "确认",

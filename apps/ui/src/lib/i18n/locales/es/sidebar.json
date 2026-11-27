@@ -151,6 +151,7 @@
   },
   "row": {
     "actionsFor": "Acciones de {{title}}",
+    "acknowledgeTitle": "Confirmar {{title}}",
     "harnessOn": "{{harness}} en {{host}}",
     "resumeNow": "Reanudar ya",
     "acknowledge": "Confirmar",
