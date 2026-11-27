@@ -143,6 +143,55 @@ describe("Toaster", () => {
     expect(failed?.duration).toBe(8000);
   });
 
+  it("lets Tab leave the stack in document order", async () => {
+    render(
+      <>
+        <button type="button">First</button>
+        <input aria-label="Last" />
+        <Toaster />
+      </>,
+    );
+    act(() => {
+      pushToast({ title: "Couldn't save.", variant: "error" });
+    });
+    await screen.findByText("Couldn't save.");
+    const last = screen.getByRole("textbox", { name: "Last" });
+    const toastItem = toaster()?.querySelector<HTMLElement>("[data-sonner-toast]");
+    const dismiss = screen.getByRole("button", { name: "Dismiss" });
+
+    act(() => last.focus());
+    act(() => toastItem?.focus());
+    act(() => dismiss.focus());
+    expect(fireEvent.keyDown(dismiss, { key: "Tab" })).toBe(false);
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "First" }));
+
+    act(() => toastItem?.focus());
+    expect(fireEvent.keyDown(toastItem as HTMLElement, { key: "Tab", shiftKey: true })).toBe(false);
+    expect(document.activeElement).toBe(last);
+  });
+
+  it("keeps the hotkey's return to where focus came from", async () => {
+    render(
+      <>
+        <input aria-label="Field" />
+        <Toaster />
+      </>,
+    );
+    act(() => {
+      pushToast({ title: "Saved." });
+    });
+    await screen.findByText("Saved.");
+    const field = screen.getByRole("textbox", { name: "Field" });
+    act(() => field.focus());
+    fireEvent.keyDown(document, { key: "t", code: "KeyT", altKey: true });
+    expect(document.activeElement).toBe(toaster());
+    const dismiss = screen.getByRole("button", { name: "Dismiss" });
+    act(() => dismiss.focus());
+    expect(fireEvent.keyDown(dismiss, { key: "Tab" })).toBe(true);
+    act(() => dismiss.blur());
+    expect(document.activeElement).toBe(field);
+  });
+
   it("lifts desktop toasts above the dock it is told about", async () => {
     const dock = document.createElement("div");
     Object.defineProperty(dock, "offsetHeight", { value: 180 });

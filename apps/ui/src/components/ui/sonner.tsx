@@ -6,7 +6,7 @@ import {
   TriangleAlertIcon,
   XIcon,
 } from "lucide-react";
-import { useSyncExternalStore } from "react";
+import { useEffect, useSyncExternalStore } from "react";
 import { useTranslation } from "react-i18next";
 import { Toaster as Sonner, type ToastClassnames, type ToasterProps } from "sonner";
 
@@ -81,6 +81,90 @@ function toastClearance(node: HTMLElement | null): (() => void) | undefined {
   };
 }
 
+const TABBABLE =
+  'a[href], button, input, select, textarea, summary, [contenteditable=""], [contenteditable="true"], [tabindex]';
+
+function tabbables(root: ParentNode): HTMLElement[] {
+  return Array.from(root.querySelectorAll<HTMLElement>(TABBABLE)).filter(
+    (el) =>
+      el.tabIndex >= 0 &&
+      !el.matches(":disabled") &&
+      !el.closest("[inert], [hidden]") &&
+      (typeof el.checkVisibility !== "function" || el.checkVisibility()),
+  );
+}
+
+function toasterOf(node: EventTarget | null): HTMLElement | null {
+  return node instanceof Element ? node.closest<HTMLElement>("[data-sonner-toaster]") : null;
+}
+
+/**
+ * Sonner sends focus back to wherever it came from as soon as it leaves the
+ * stack, so Tab past the last toast loops back into it. When the stack was
+ * reached by Tab, leaving it by Tab continues in document order instead. Entry
+ * by the hotkey (which focuses the list itself) keeps Sonner's return.
+ */
+function useTabThroughToasts(): void {
+  useEffect(() => {
+    let entry: { from: HTMLElement | null; byHotkey: boolean } | null = null;
+
+    const onFocusIn = (event: FocusEvent) => {
+      const list = toasterOf(event.target);
+      if (!list) {
+        entry = null;
+        return;
+      }
+      if (toasterOf(event.relatedTarget) === list) return;
+      entry = {
+        from: event.relatedTarget instanceof HTMLElement ? event.relatedTarget : null,
+        byHotkey: event.target === list,
+      };
+    };
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Tab" || event.defaultPrevented || event.altKey || event.ctrlKey) return;
+      if (event.metaKey || !entry || entry.byHotkey) return;
+      const active = document.activeElement;
+      const list = toasterOf(active);
+      if (!list || !(active instanceof HTMLElement)) return;
+      const inside = tabbables(list);
+      const edge = event.shiftKey ? inside[0] : inside[inside.length - 1];
+      if (inside.length > 0 && active !== edge) return;
+
+      const outside = tabbables(document.body).filter((el) => !list.contains(el));
+      if (outside.length === 0) return;
+      const after = outside.findIndex(
+        (el) => list.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING,
+      );
+      const next = after === -1 ? 0 : after;
+      const target = event.shiftKey
+        ? outside[(next - 1 + outside.length) % outside.length]
+        : outside[next];
+      if (!target) return;
+
+      event.preventDefault();
+      const { from } = entry;
+      entry = null;
+      // Sonner's blur handler calls from.focus(); skip that one call.
+      if (from && from !== target) {
+        Object.defineProperty(from, "focus", { configurable: true, value: () => undefined });
+      }
+      try {
+        HTMLElement.prototype.focus.call(target);
+      } finally {
+        if (from && from !== target) delete (from as { focus?: unknown }).focus;
+      }
+    };
+
+    document.addEventListener("focusin", onFocusIn);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("focusin", onFocusIn);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, []);
+}
+
 /**
  * The app's one toast stack, on Sonner. Bottom right on desktop, above the
  * composer when there is one; top centre on the phone, below the safe area.
@@ -89,6 +173,7 @@ function Toaster(props: ToasterProps) {
   const { t } = useTranslation("shell");
   const theme = useDocumentTheme();
   const phone = useIsPhone();
+  useTabThroughToasts();
   return (
     <Sonner
       theme={theme}
