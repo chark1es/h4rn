@@ -604,6 +604,7 @@
   flex: none;
 }
 .setnav .q-side-h {
+  flex: none;
   height: 44px;
   padding: 16px 4px 4px 8px;
 }
