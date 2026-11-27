@@ -1,3 +1,4 @@
+import { Radio, RadioGroup } from "@ui-sdk/react/radio";
 import {
   ArrowDownToLineIcon,
   ArrowUpIcon,
@@ -322,19 +323,22 @@ export function AddProjectDialog() {
           </DialogDescription>
         </DialogHeader>
         <DialogBody>
-          <div className="q-addp-modes" role="radiogroup" aria-label={t("addProject.howTo")}>
+          <RadioGroup
+            className="q-addp-modes"
+            aria-label={t("addProject.howTo")}
+            value={mode}
+            onValueChange={(value) => {
+              const next = MODES.find((option) => option.value === value);
+              if (!next) return;
+              setMode(next.value);
+              setProblem(null);
+            }}
+          >
             {MODES.map((option) => (
-              // biome-ignore lint/a11y/useSemanticElements: a card-style radio needs a button
-              <button
+              <Radio
                 key={option.value}
-                type="button"
-                role="radio"
-                aria-checked={mode === option.value}
-                className="q-addp-mode"
-                onClick={() => {
-                  setMode(option.value);
-                  setProblem(null);
-                }}
+                value={option.value}
+                className="q-addp-mode outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
               >
                 <option.icon className="q-icon" strokeWidth={1.5} aria-hidden />
                 <span className="q-addp-mode-t">{t(`addProject.modes.${option.value}.label`)}</span>
@@ -342,9 +346,9 @@ export function AddProjectDialog() {
                 {mode === option.value ? (
                   <CheckIcon className="q-icon s12 tick" strokeWidth={2} aria-hidden />
                 ) : null}
-              </button>
+              </Radio>
             ))}
-          </div>
+          </RadioGroup>
 
           {mode === "import" ? (
             <ImportPanel />
