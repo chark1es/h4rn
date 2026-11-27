@@ -6254,6 +6254,25 @@ fieldset.q-seg-fs {
   line-height: 1.5;
   white-space: pre-wrap;
 }
+.q-harness-log summary {
+  min-height: 28px;
+  align-content: center;
+  cursor: pointer;
+}
+.q-harness-log summary:hover {
+  color: var(--fg);
+}
+.q-harness-log section {
+  max-height: 140px;
+  overflow: auto;
+  margin-bottom: 6px;
+  border-radius: 6px;
+}
+.q-harness-log pre {
+  max-height: none;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
 .q-harness-out .res {
   margin: 0;
 }

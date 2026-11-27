@@ -44,7 +44,7 @@ function HarnessRow({ row }: { row: HarnessVersionInfo }) {
   const result = useHarnesses((state) => state.results[kind]);
   const runnable =
     row.method.kind === "self_update" || row.method.kind === "npm" || row.method.kind === "bun";
-  const showOutput = (output?.length ?? 0) > 0 || result !== undefined;
+  const showOutput = updating || Boolean(output?.length) || result !== undefined;
 
   return (
     <div className="q-harness-row">
@@ -83,14 +83,24 @@ function HarnessRow({ row }: { row: HarnessVersionInfo }) {
         </p>
       ) : null}
       {showOutput ? (
-        <div className="q-harness-out" role="status" aria-live="polite">
-          {(output?.length ?? 0) > 0 ? <pre className="q-mono">{output?.join("\n")}</pre> : null}
-          {result ? (
-            <p className={result.ok ? "res" : "res bad"}>
-              {result.ok ? "" : `${t("harnesses.failed")} · `}
-              {result.message}
-            </p>
+        <div className="q-harness-out">
+          {output?.length ? (
+            <details className="q-harness-log">
+              <summary>{t("harnesses.updateLog")}</summary>
+              {/* biome-ignore lint/a11y/noNoninteractiveTabindex: A scrollable log needs keyboard focus. */}
+              <section tabIndex={0} aria-label={t("harnesses.updateLog")}>
+                <pre className="q-mono">{output.join("\n")}</pre>
+              </section>
+            </details>
           ) : null}
+          <div role="status">
+            {result ? (
+              <p className={result.ok ? "res" : "res bad"}>
+                {result.ok ? "" : `${t("harnesses.failed")} · `}
+                {result.message}
+              </p>
+            ) : null}
+          </div>
         </div>
       ) : null}
     </div>

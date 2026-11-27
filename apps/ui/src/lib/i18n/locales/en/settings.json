@@ -647,6 +647,7 @@
     "update": "Update",
     "updating": "Updating…",
     "updateLabel": "Update {{harness}}",
+    "updateLog": "Update log",
     "manual": "h4rn won't change this install. Run <code>{{command}}</code> in a terminal.",
     "failed": "Failed",
     "acp": {

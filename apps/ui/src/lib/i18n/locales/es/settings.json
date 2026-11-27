@@ -652,6 +652,7 @@
     "update": "Actualizar",
     "updating": "Actualizando…",
     "updateLabel": "Actualizar {{harness}}",
+    "updateLog": "Registro de actualización",
     "manual": "h4rn no cambiará esta instalación. Ejecuta <code>{{command}}</code> en una terminal.",
     "failed": "Fallido",
     "acp": {
