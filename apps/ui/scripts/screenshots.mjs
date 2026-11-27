@@ -312,7 +312,7 @@ const SHOTS = [
     settle: 2200,
     action: async (page) => {
       await page.getByRole("button", { name: "Restart to update" }).click();
-      await page.getByText(/Downloading h4rn 0\.2\.0 · \d+%/).waitFor({ timeout: 5_000 });
+      await page.getByText(/(Downloading|Installing) h4rn/).waitFor({ timeout: 5_000 });
     },
   },
   {
@@ -321,7 +321,7 @@ const SHOTS = [
     path: "/t/thr_a",
     wait: '[aria-label="Thread stream"]',
     action: async (page) => {
-      await page.getByTitle("Hosts and connection").click();
+      await page.locator(".q-hostbtn").click();
       await page.getByRole("menu", { name: "Hosts" }).waitFor();
       await page.waitForTimeout(350);
     },
@@ -355,7 +355,7 @@ const SHOTS = [
     name: "state-empty",
     device: "desktop",
     path: "/?scenario=empty",
-    wait: "text=No projects yet",
+    wait: "text=Start a thread",
     settle: 500,
   },
   {
@@ -383,7 +383,7 @@ const SHOTS = [
     // popover open from the footer trigger.
     settle: 2200,
     action: async (page) => {
-      await page.getByTitle("Hosts and connection").click();
+      await page.locator(".q-hostbtn").click();
       await page.getByRole("menu", { name: "Hosts" }).waitFor();
       await page.waitForTimeout(350);
     },
