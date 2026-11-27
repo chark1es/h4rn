@@ -1,3 +1,4 @@
+import { createCommandController } from "@ui-sdk/react/command";
 import {
   ArchiveIcon,
   ArrowLeftRightIcon,
@@ -29,7 +30,7 @@ import {
   WorkflowIcon,
   XIcon,
 } from "lucide-react";
-import { type ReactNode, useEffect, useMemo, useState } from "react";
+import { type KeyboardEvent, type ReactNode, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { AgentGlyph } from "@/components/agent/AgentGlyph";
@@ -152,20 +153,24 @@ function paletteRow({
 }
 
 /**
- * Hides rows that score 0 and puts each group's best matches first. Groups
- * keep their order, so the current thread's actions stay on top.
+ * Orders a search the way cmdk 1.1.1 did: rows that score 0 hide, and each
+ * group's enabled rows sort by score, with disabled matches left at the
+ * group's top. Groups keep their order: cmdk's group sort looked groups up by
+ * id in a `data-value` that holds the heading, so it never moved one.
  */
-function rankGroups(groups: PaletteGroup[], query: string): PaletteGroup[] {
+export function rankGroups(groups: PaletteGroup[], query: string): PaletteGroup[] {
   if (!query.trim()) return groups;
   return groups
-    .map((group) => ({
-      ...group,
-      rows: group.rows
+    .map((group) => {
+      const shown = group.rows
         .map((row) => ({ row, score: paletteScore(row.value, query, row.keywords) }))
-        .filter((entry) => entry.score > 0)
-        .sort((a, b) => b.score - a.score)
-        .map((entry) => entry.row),
-    }))
+        .filter((entry) => entry.score > 0);
+      const rows = [
+        ...shown.filter((entry) => entry.row.disabled),
+        ...shown.filter((entry) => !entry.row.disabled).sort((a, b) => b.score - a.score),
+      ].map((entry) => entry.row);
+      return { ...group, rows };
+    })
     .filter((group) => group.rows.length > 0);
 }
 
@@ -185,6 +190,7 @@ export function CommandPalette() {
   );
   const { t } = useTranslation("commands");
   const [query, setQuery] = useState("");
+  const [controller] = useState(createCommandController);
 
   const currentId = route.kind === "thread" ? route.threadId : null;
   const current = currentId ? threads[currentId] : undefined;
@@ -595,6 +601,46 @@ export function CommandPalette() {
     ],
   });
 
+  const ranked = rankGroups(groups, query);
+
+  // cmdk's keys, which UI SDK's Command leaves to the field: Escape closes even
+  // with text typed, Home and End jump to the first and last result, Ctrl+N/J
+  // and Ctrl+P/K move, ⌘ with an arrow jumps to an end, Alt with an arrow to
+  // the next group.
+  const onKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+    if (event.nativeEvent.isComposing || event.keyCode === 229) return;
+    const rows = ranked.flatMap((group) => group.rows).filter((row) => !row.disabled);
+    const at = rows.findIndex((row) => row.key === controller.getValue());
+    const jump = (index: number) => {
+      event.preventDefault();
+      const row = rows[index];
+      if (row) controller.setValue(row.key);
+    };
+    const toGroup = (step: 1 | -1) => {
+      const groupAt = ranked.findIndex((group) =>
+        group.rows.some((row) => row.key === rows[at]?.key),
+      );
+      for (let i = groupAt + step; groupAt >= 0 && i >= 0 && i < ranked.length; i += step) {
+        const first = ranked[i]?.rows.find((row) => !row.disabled);
+        if (first) return jump(rows.indexOf(first));
+      }
+      jump(at + step);
+    };
+    const move = (step: 1 | -1) => {
+      if (event.metaKey) return jump(step > 0 ? rows.length - 1 : 0);
+      if (event.altKey) return toGroup(step);
+      jump(at + step);
+    };
+    const key = event.key;
+    if (key === "Escape") {
+      event.preventDefault();
+      closePalette();
+    } else if (key === "Home") jump(0);
+    else if (key === "End") jump(rows.length - 1);
+    else if (key === "ArrowDown" || (event.ctrlKey && (key === "n" || key === "j"))) move(1);
+    else if (key === "ArrowUp" || (event.ctrlKey && (key === "p" || key === "k"))) move(-1);
+  };
+
   return (
     <CommandDialog
       open={open}
@@ -602,9 +648,17 @@ export function CommandPalette() {
       title={t("palette.title")}
       description={t("palette.description")}
     >
-      <Command filter={false} autoHighlight loop query={query} onQueryChange={setQuery}>
+      <Command
+        filter={false}
+        autoHighlight
+        loop={false}
+        controller={controller}
+        query={query}
+        onQueryChange={setQuery}
+      >
         <CommandInput
           aria-label={t("palette.title")}
+          onKeyDown={onKeyDown}
           placeholder={t("palette.placeholder")}
           trailing={
             current ? (
@@ -617,7 +671,7 @@ export function CommandPalette() {
         />
         <CommandEmpty>{t("palette.empty")}</CommandEmpty>
         <CommandList>
-          {rankGroups(groups, query).map((group) => (
+          {ranked.map((group) => (
             <CommandGroup key={group.key} heading={group.heading}>
               {group.rows.map((row) => (
                 <CommandItem

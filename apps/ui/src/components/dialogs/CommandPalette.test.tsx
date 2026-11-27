@@ -95,7 +95,7 @@ vi.mock("@/lib/store/appStore", () => ({
 
 vi.mock("@/hooks/use-media-query", () => ({ useIsPhone: () => false }));
 
-import { CommandPalette } from "./CommandPalette";
+import { CommandPalette, rankGroups } from "./CommandPalette";
 
 beforeEach(() => {
   cleanup();
@@ -121,5 +121,85 @@ describe("command palette: link pull request", () => {
     fireEvent.click(action);
 
     expect(mock.openLinkPullRequest).toHaveBeenCalled();
+  });
+});
+
+function highlighted(): string | null | undefined {
+  return document.querySelector("[data-highlighted]")?.textContent;
+}
+
+function options(): string[] {
+  return screen.getAllByRole("option").map((option) => option.textContent ?? "");
+}
+
+describe("command palette keys, as cmdk had them", () => {
+  it("closes on one Escape even with text typed", () => {
+    render(<CommandPalette />);
+    const input = screen.getByRole("combobox");
+    fireEvent.change(input, { target: { value: "set" } });
+    fireEvent.keyDown(input, { key: "Escape" });
+    expect(mock.closePalette).toHaveBeenCalledTimes(1);
+  });
+
+  it("moves the highlight to the first and last result with Home and End", () => {
+    render(<CommandPalette />);
+    const input = screen.getByRole("combobox");
+    const all = options();
+    fireEvent.keyDown(input, { key: "End" });
+    expect(highlighted()).toBe(all.at(-1));
+    fireEvent.keyDown(input, { key: "Home" });
+    expect(highlighted()).toBe(all[0]);
+  });
+
+  it("stops at the last result instead of wrapping", () => {
+    render(<CommandPalette />);
+    const input = screen.getByRole("combobox");
+    const all = options();
+    fireEvent.keyDown(input, { key: "End" });
+    fireEvent.keyDown(input, { key: "ArrowDown" });
+    expect(highlighted()).toBe(all.at(-1));
+    fireEvent.keyDown(input, { key: "ArrowUp" });
+    expect(highlighted()).toBe(all.at(-2));
+  });
+});
+
+describe("rankGroups", () => {
+  const row = (key: string, value: string, disabled = false) => ({
+    key,
+    value,
+    label: value,
+    disabled,
+    onSelect: () => {},
+  });
+
+  it("keeps groups in order even when a later one matches better, as cmdk did", () => {
+    const ranked = rankGroups(
+      [
+        { key: "a", heading: "A", rows: [row("a1", "Open the settings archive")] },
+        { key: "b", heading: "B", rows: [row("b1", "Settings")] },
+        { key: "c", heading: "C", rows: [row("c1", "Terminal")] },
+      ],
+      "settings",
+    );
+    expect(ranked.map((group) => group.key)).toEqual(["a", "b"]);
+  });
+
+  it("sorts enabled rows by score and leaves disabled matches at the top", () => {
+    const [group] = rankGroups(
+      [
+        {
+          key: "a",
+          heading: "A",
+          rows: [
+            row("weak", "Open the settings archive"),
+            row("off", "Settings help", true),
+            row("strong", "Settings"),
+            row("none", "Terminal"),
+          ],
+        },
+      ],
+      "settings",
+    );
+    expect(group?.rows.map((r) => r.key)).toEqual(["off", "strong", "weak"]);
   });
 });

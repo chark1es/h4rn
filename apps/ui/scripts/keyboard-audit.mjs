@@ -595,7 +595,7 @@ await check(
 
 await check(
   "Command palette",
-  "Tab to Search or run, Enter, type, ArrowDown, Esc",
+  "Tab to Search or run, Enter, type, ArrowDown, End, Home, Esc",
   THREAD,
   async (page, notes) => {
     await tabTo(page, byName(/^Search or run/));
@@ -608,20 +608,25 @@ await check(
     await page.keyboard.press("ArrowDown");
     const second = await highlighted(page);
     if (!first || first === second) notes.push(`arrows did not move (${first} → ${second})`);
+    await page.keyboard.press("End");
+    const last = await highlighted(page);
+    await page.keyboard.press("Home");
+    const home = await highlighted(page);
+    const ends = home === first && !!last;
+    notes.push(`End → ${last}, Home → ${home}`);
+    if (!ends) notes.push("Home did not return to the first result");
+    // As with cmdk: one Escape closes, even with text typed.
     await page.keyboard.press("Escape");
-    await page.waitForTimeout(250);
-    // UI SDK Command: Escape clears the query first, then closes.
-    const cleared =
-      (await page.getByRole("dialog").isVisible()) &&
-      (await page.getByRole("combobox").first().inputValue()) === "";
-    if (cleared)
-      notes.push("first Esc cleared the query, second closed (UI SDK Command behaviour)");
-    await page.keyboard.press("Escape");
-    await page.getByRole("dialog").waitFor({ state: "hidden", timeout: 3_000 });
+    const closed = await page
+      .getByRole("dialog")
+      .waitFor({ state: "hidden", timeout: 3_000 })
+      .then(() => true)
+      .catch(() => false);
+    if (!closed) notes.push("one Esc did not close the palette");
     await page.waitForTimeout(200);
     const back = await focusReturned(page);
     if (!back) notes.push("focus did not return to Search or run");
-    return !!first && first !== second && back && cleared;
+    return !!first && first !== second && ends && closed && back;
   },
 );
 

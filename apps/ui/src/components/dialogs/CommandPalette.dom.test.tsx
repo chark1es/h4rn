@@ -175,7 +175,7 @@ describe("CommandPalette keyboard", () => {
     await waitFor(() => expect(forkThread).toHaveBeenCalledWith("thread_1", "turn_1"));
   });
 
-  it("moves between rows with the arrow keys and wraps at the ends", async () => {
+  it("moves between rows with the arrow keys and stops at the ends, as cmdk did", async () => {
     renderPalette([turn()]);
     const input = screen.getByRole("combobox");
     const items = () => [...document.querySelectorAll('[data-slot="command-item"]')];
@@ -193,7 +193,7 @@ describe("CommandPalette keyboard", () => {
       fireEvent.keyDown(input, { key: "ArrowUp" });
       fireEvent.keyDown(input, { key: "ArrowUp" });
     });
-    expect(highlightedIndex()).toBe(items().length - 1);
+    expect(highlightedIndex()).toBe(0);
   });
 
   it("closes on Escape", async () => {
