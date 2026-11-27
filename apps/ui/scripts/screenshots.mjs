@@ -196,6 +196,7 @@ const SHOTS = [
         .getByRole("tab", { name: /session\.test\.ts/ })
         .first()
         .click();
+      await page.getByRole("tab", { name: /Changes/ }).click();
       await page.getByRole("radio", { name: "vs agent" }).click();
       await sidebar.locator('[data-thread-id="thr_a"]').click();
       await page.getByRole("heading", { name: "api" }).waitFor({ timeout: 10_000 });
@@ -285,6 +286,7 @@ const SHOTS = [
     settle: 1200,
     action: async (page) => {
       await page.getByRole("button", { name: "Update Codex" }).click();
+      await page.getByRole("button", { name: "Update log" }).click({ timeout: 10_000 });
       await page.getByText("added 1 package in 4s").waitFor({ timeout: 5_000 });
     },
   },
