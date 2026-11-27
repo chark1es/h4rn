@@ -28,9 +28,10 @@ import {
 } from "@/lib/keybindings";
 import { cn } from "@/lib/utils";
 
-type WithClassName<P> = Omit<P, "className" | "children"> & {
+type WithClassName<P> = Omit<P, "className" | "children" | "disabled"> & {
   className?: string | undefined;
   children?: React.ReactNode;
+  disabled?: boolean | undefined;
 };
 
 /**
@@ -64,6 +65,7 @@ const itemRow = [
   "data-disabled:pointer-events-none data-disabled:opacity-45 data-pending:cursor-progress",
   "data-destructive:text-destructive data-destructive:data-highlighted:bg-danger-soft",
   "in-data-has-icons:not-data-has-icon:ps-7.5",
+  "data-has-description:h-auto data-has-description:min-h-7 data-has-description:py-1",
   "phone:h-11 phone:text-base in-data-[presentation=sheet]:h-11 in-data-[presentation=sheet]:text-base",
   "[&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-3.5",
 ];
@@ -103,24 +105,65 @@ function MenuSubContent({
 }
 
 type MenuItemProps = WithClassName<React.ComponentProps<typeof MenuItemPrimitive>> & {
-  /** A lucide icon for the leading column. */
   icon?: React.ReactNode;
+  /** A muted second line under the label. */
+  description?: React.ReactNode;
+  /** Muted metadata at the end of the row, like a state or a count. */
+  trailing?: React.ReactNode;
   /** Shows this command's current binding and announces it. */
   command?: CommandId | undefined;
 };
 
-function MenuItem({ className, icon, command, children, ...props }: MenuItemProps) {
+function MenuItem({
+  className,
+  icon,
+  description,
+  trailing,
+  command,
+  disabled,
+  children,
+  ...props
+}: MenuItemProps) {
   useKeybindingsVersion();
   return (
     <MenuItemPrimitive
+      disabled={disabled ?? false}
       aria-keyshortcuts={command ? ariaKeyShortcut(bindingFor(command)) : undefined}
+      data-has-description={description ? "" : undefined}
       className={cn(itemRow, className)}
       {...props}
     >
       {icon ? <MenuItemIcon>{icon}</MenuItemIcon> : null}
-      <span className="min-w-0 flex-1 truncate">{children}</span>
+      <MenuItemLabel description={description}>{children}</MenuItemLabel>
+      {trailing ? <MenuItemTrailing>{trailing}</MenuItemTrailing> : null}
       {command ? <MenuShortcut command={command} /> : null}
     </MenuItemPrimitive>
+  );
+}
+
+function MenuItemLabel({
+  children,
+  description,
+}: {
+  children: React.ReactNode;
+  description?: React.ReactNode;
+}) {
+  if (!description) return <span className="min-w-0 flex-1 truncate">{children}</span>;
+  return (
+    <span className="flex min-w-0 flex-1 flex-col">
+      <span className="truncate">{children}</span>
+      <span className="truncate text-xs text-muted-foreground in-data-highlighted:text-current/70">
+        {description}
+      </span>
+    </span>
+  );
+}
+
+function MenuItemTrailing({ children }: { children: React.ReactNode }) {
+  return (
+    <span className="ms-auto inline-flex shrink-0 items-center gap-1.5 ps-4 text-xs text-muted-foreground tabular-nums">
+      {children}
+    </span>
   );
 }
 
@@ -153,10 +196,15 @@ function MenuCheck() {
 function MenuCheckboxItem({
   className,
   children,
+  disabled,
   ...props
 }: WithClassName<React.ComponentProps<typeof MenuCheckboxItemPrimitive>>) {
   return (
-    <MenuCheckboxItemPrimitive className={cn(itemRow, className)} {...props}>
+    <MenuCheckboxItemPrimitive
+      disabled={disabled ?? false}
+      className={cn(itemRow, className)}
+      {...props}
+    >
       <MenuCheck />
       <span className="min-w-0 flex-1 truncate">{children}</span>
     </MenuCheckboxItemPrimitive>
@@ -166,10 +214,15 @@ function MenuCheckboxItem({
 function MenuRadioItem({
   className,
   children,
+  disabled,
   ...props
 }: WithClassName<React.ComponentProps<typeof MenuRadioItemPrimitive>>) {
   return (
-    <MenuRadioItemPrimitive className={cn(itemRow, className)} {...props}>
+    <MenuRadioItemPrimitive
+      disabled={disabled ?? false}
+      className={cn(itemRow, className)}
+      {...props}
+    >
       <MenuCheck />
       <span className="min-w-0 flex-1 truncate">{children}</span>
     </MenuRadioItemPrimitive>
@@ -179,13 +232,18 @@ function MenuRadioItem({
 function MenuSubTrigger({
   className,
   icon,
+  disabled,
   children,
   ...props
 }: WithClassName<React.ComponentProps<typeof MenuSubTriggerPrimitive>> & {
   icon?: React.ReactNode;
 }) {
   return (
-    <MenuSubTriggerPrimitive className={cn(itemRow, "data-open:bg-accent", className)} {...props}>
+    <MenuSubTriggerPrimitive
+      disabled={disabled ?? false}
+      className={cn(itemRow, "data-open:bg-accent", className)}
+      {...props}
+    >
       {icon ? <MenuItemIcon>{icon}</MenuItemIcon> : null}
       <span className="min-w-0 flex-1 truncate">{children}</span>
       <ChevronRightIcon className="text-muted-foreground rtl:rotate-180" aria-hidden="true" />
@@ -244,11 +302,37 @@ function MenuFooter({ className, ...props }: React.ComponentProps<"div">) {
   );
 }
 
+/** Non-interactive text inside a group, lined up with the item labels. */
+function MenuNote({
+  className,
+  tone,
+  ...props
+}: React.ComponentProps<"p"> & { tone?: "danger" | undefined }) {
+  return (
+    <p
+      data-slot="menu-note"
+      className={cn(
+        "m-0 px-2 pt-0.5 pb-1.5 text-xs text-muted-foreground in-data-has-icons:ps-7.5",
+        tone === "danger" && "text-destructive",
+        className,
+      )}
+      {...props}
+    />
+  );
+}
+
 function MenuContextTrigger({
   className,
+  disabled,
   ...props
 }: WithClassName<React.ComponentProps<typeof MenuContextTriggerPrimitive>>) {
-  return <MenuContextTriggerPrimitive className={cn(className)} {...props} />;
+  return (
+    <MenuContextTriggerPrimitive
+      disabled={disabled ?? false}
+      className={cn(className)}
+      {...props}
+    />
+  );
 }
 
 export {
@@ -262,6 +346,7 @@ export {
   MenuGroupLabel,
   MenuItem,
   MenuItemIcon,
+  MenuNote,
   MenuRadioGroup,
   MenuRadioItem,
   MenuSeparator,

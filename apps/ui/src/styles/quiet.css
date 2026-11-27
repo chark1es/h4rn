@@ -440,43 +440,6 @@ fieldset.q-seg-fs {
 .q-pr-more {
   color: var(--fg-3);
 }
-.q-pr-links {
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-}
-.q-pr-row {
-  gap: 6px;
-  min-width: 0;
-}
-.q-pr-row-state {
-  margin-left: auto;
-  flex: none;
-  font-size: 12px;
-  color: var(--fg-3);
-}
-.q-pr-note {
-  margin: 0;
-  padding: 2px 8px 6px;
-  font-size: 12px;
-  line-height: 1.4;
-  color: var(--fg-3);
-}
-/* The tone classes must win over the muted base colour above. */
-.q-pr-row-state.q-danger,
-.q-pr-note.q-danger {
-  color: var(--danger);
-}
-.q-pr-row-state.q-ok {
-  color: var(--ok);
-}
-.q-pr-link-name {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 .q-pr-link-form {
   display: flex;
   align-items: center;

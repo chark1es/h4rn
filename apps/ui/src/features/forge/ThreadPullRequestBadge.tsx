@@ -1,15 +1,17 @@
 import { CircleDotIcon, ExternalLinkIcon, EyeIcon, GitPullRequestIcon, XIcon } from "lucide-react";
-import { useState } from "react";
+import { Fragment, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
+  Menu,
+  MenuContent,
+  MenuGroup,
+  MenuGroupLabel,
+  MenuItem,
+  MenuNote,
+  MenuSeparator,
+  MenuTrigger,
+} from "@/components/ui/menu";
 import { IssueApi, issueStateLabel } from "@/features/issues/store";
 import { notifyThreadIssueLinks, useThreadIssues } from "@/features/issues/threadLinks";
 import type { ThreadIssue, ThreadPullRequest } from "@/gen";
@@ -179,107 +181,104 @@ export function LinkedPullRequestsMenu({
   const extra = pulls.length + issues.length - 1;
 
   return (
-    <DropdownMenu onOpenChange={(open) => open && onOpen?.()}>
-      <DropdownMenuTrigger asChild>
-        <button
-          type="button"
-          className={cn("q-badge q-pr-badge", primary ? linkedPullTone(primary) : "")}
-          aria-label={t("linked.items")}
-          title={t("linked.items")}
-        >
-          {primary ? (
-            <GitPullRequestIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
-          ) : (
-            <CircleDotIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
-          )}
-          <span>
-            {primary ? linkedPullLabel(primary) : primaryIssue ? issueLabel(primaryIssue) : ""}
-          </span>
-          {extra > 0 ? <span className="q-pr-more">+{extra}</span> : null}
-        </button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="w-80 max-h-80 overflow-y-auto">
-        <DropdownMenuLabel>{t("linked.items")}</DropdownMenuLabel>
-        <DropdownMenuSeparator />
+    <Menu onOpenChange={(open) => open && onOpen?.()}>
+      <MenuTrigger
+        className={cn("q-badge q-pr-badge", primary ? linkedPullTone(primary) : "")}
+        aria-label={t("linked.items")}
+        title={t("linked.items")}
+      >
+        {primary ? (
+          <GitPullRequestIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+        ) : (
+          <CircleDotIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+        )}
+        <span>
+          {primary ? linkedPullLabel(primary) : primaryIssue ? issueLabel(primaryIssue) : ""}
+        </span>
+        {extra > 0 ? <span className="q-pr-more">+{extra}</span> : null}
+      </MenuTrigger>
+      <MenuContent align="end" className="w-80">
         {pulls.map((pull, index) => {
           const url = pull.summary?.web_url || prWebUrl(pull.repo, pull.number);
           const state = pull.summary ? stateLabel(pull.summary.state) : null;
           const finished = pull.summary?.state === "merged" || pull.summary?.state === "closed";
           return (
-            <div className="q-pr-links" key={`${pull.repo.base_url}:${pull.number}`}>
-              {index > 0 ? <DropdownMenuSeparator /> : null}
-              <DropdownMenuItem
-                className="q-pr-row"
-                disabled={busy !== null}
-                onSelect={() => openPull(url)}
-              >
-                <GitPullRequestIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
-                <span className="q-num">#{pull.number}</span>
-                <span className="q-pr-link-name">
-                  {pull.summary?.title ?? t("linked.pullUnavailable")}
-                </span>
-                <span
-                  className={cn(
-                    "q-pr-row-state",
-                    state?.tone === "danger" && "q-danger",
-                    state?.tone === "ok" && "q-ok",
-                  )}
-                >
-                  {state?.label ?? t("linked.stateUnavailable")}
-                </span>
-                <ExternalLinkIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
-              </DropdownMenuItem>
-              {pull.error ? <p className="q-pr-note q-danger">{pull.error}</p> : null}
-              {/* A merged or closed PR has nothing left to watch. */}
-              {pull.watching || !finished ? (
-                <DropdownMenuItem
+            <Fragment key={`${pull.repo.base_url}:${pull.number}`}>
+              {index > 0 ? <MenuSeparator /> : null}
+              <MenuGroup aria-label={`#${pull.number}`}>
+                {index === 0 ? <MenuGroupLabel>{t("linked.items")}</MenuGroupLabel> : null}
+                <MenuItem
+                  icon={<GitPullRequestIcon />}
                   disabled={busy !== null}
-                  onSelect={() => (pull.watching ? onUnwatch(pull) : onWatch(pull))}
+                  onSelect={() => openPull(url)}
+                  trailing={
+                    <>
+                      <span
+                        className={cn(
+                          state?.tone === "danger" && "text-destructive",
+                          state?.tone === "ok" && "text-ok",
+                        )}
+                      >
+                        {state?.label ?? t("linked.stateUnavailable")}
+                      </span>
+                      <ExternalLinkIcon aria-hidden />
+                    </>
+                  }
                 >
-                  {/* The eye marks the current state; the action row that ends a
-                    watch is the only place it appears. */}
-                  {pull.watching ? (
-                    <EyeIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
-                  ) : null}
-                  {pull.watching ? t("linked.stopWatching") : t("linked.watch")}
-                </DropdownMenuItem>
-              ) : null}
-              {pull.watch_notice ? <p className="q-pr-note">{pull.watch_notice}</p> : null}
-              <DropdownMenuItem disabled={busy !== null} onSelect={() => onUnlink(pull)}>
-                <XIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
-                {t("linked.unlink")}
-              </DropdownMenuItem>
-            </div>
+                  <span className="tabular-nums">#{pull.number}</span>{" "}
+                  {pull.summary?.title ?? t("linked.pullUnavailable")}
+                </MenuItem>
+                {pull.error ? <MenuNote tone="danger">{pull.error}</MenuNote> : null}
+                {/* A merged or closed PR has nothing left to watch. */}
+                {pull.watching || !finished ? (
+                  // The eye marks the current state, so only the row that ends a watch has it.
+                  <MenuItem
+                    icon={pull.watching ? <EyeIcon /> : null}
+                    disabled={busy !== null}
+                    onSelect={() => (pull.watching ? onUnwatch(pull) : onWatch(pull))}
+                  >
+                    {pull.watching ? t("linked.stopWatching") : t("linked.watch")}
+                  </MenuItem>
+                ) : null}
+                {pull.watch_notice ? <MenuNote>{pull.watch_notice}</MenuNote> : null}
+                <MenuItem icon={<XIcon />} disabled={busy !== null} onSelect={() => onUnlink(pull)}>
+                  {t("linked.unlink")}
+                </MenuItem>
+              </MenuGroup>
+            </Fragment>
           );
         })}
         {issues.map((issue, index) => {
           const url = issueUrl(issue);
+          const first = pulls.length === 0 && index === 0;
           return (
-            <div className="q-pr-links" key={`issue:${issueScopeKey(issue)}`}>
-              {pulls.length > 0 || index > 0 ? <DropdownMenuSeparator /> : null}
-              <DropdownMenuItem
-                className="q-pr-row"
-                disabled={busy !== null || !url}
-                onSelect={() => url && openPull(url)}
-              >
-                <CircleDotIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
-                <span className="q-num">{issueLabel(issue)}</span>
-                <span className="q-pr-link-name">{issueTitle(issue)}</span>
-                <ExternalLinkIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
-              </DropdownMenuItem>
-              {issue.error ? (
-                <p className="q-pr-note q-danger">{issueErrorMessage(issue)}</p>
-              ) : null}
-              {onUnlinkIssue ? (
-                <DropdownMenuItem disabled={busy !== null} onSelect={() => onUnlinkIssue(issue)}>
-                  <XIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
-                  {t("linked.unlinkIssue")}
-                </DropdownMenuItem>
-              ) : null}
-            </div>
+            <Fragment key={`issue:${issueScopeKey(issue)}`}>
+              {first ? null : <MenuSeparator />}
+              <MenuGroup aria-label={issueLabel(issue)}>
+                {first ? <MenuGroupLabel>{t("linked.items")}</MenuGroupLabel> : null}
+                <MenuItem
+                  icon={<CircleDotIcon />}
+                  disabled={busy !== null || !url}
+                  onSelect={() => url && openPull(url)}
+                  trailing={<ExternalLinkIcon aria-hidden />}
+                >
+                  <span className="tabular-nums">{issueLabel(issue)}</span> {issueTitle(issue)}
+                </MenuItem>
+                {issue.error ? <MenuNote tone="danger">{issueErrorMessage(issue)}</MenuNote> : null}
+                {onUnlinkIssue ? (
+                  <MenuItem
+                    icon={<XIcon />}
+                    disabled={busy !== null}
+                    onSelect={() => onUnlinkIssue(issue)}
+                  >
+                    {t("linked.unlinkIssue")}
+                  </MenuItem>
+                ) : null}
+              </MenuGroup>
+            </Fragment>
           );
         })}
-      </DropdownMenuContent>
-    </DropdownMenu>
+      </MenuContent>
+    </Menu>
   );
 }

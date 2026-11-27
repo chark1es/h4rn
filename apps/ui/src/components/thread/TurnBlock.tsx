@@ -15,12 +15,7 @@ import { useTranslation } from "react-i18next";
 
 import { AgentGlyph } from "@/components/agent/AgentGlyph";
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
+import { Menu, MenuContent, MenuItem, MenuTrigger } from "@/components/ui/menu";
 import { MessageAttachments } from "@/features/attachments/MessageAttachments";
 import { ChangeSetCard } from "@/features/changes/ChangeSetCard";
 import type { PlanStep, ThreadSummary } from "@/gen";
@@ -60,19 +55,16 @@ function TurnMenu({
 }) {
   const { t } = useTranslation("thread");
   return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <button type="button" className="q-turn-menu" aria-label={label} title={label}>
-          <MoreHorizontalIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-        </button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="w-44">
-        <DropdownMenuItem onSelect={() => void forkThread(threadId, turnId)}>
-          <GitForkIcon aria-hidden />
+    <Menu>
+      <MenuTrigger className="q-turn-menu" aria-label={label} title={label}>
+        <MoreHorizontalIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
+      </MenuTrigger>
+      <MenuContent align="end" className="w-44">
+        <MenuItem icon={<GitForkIcon />} onSelect={() => void forkThread(threadId, turnId)}>
           {t("turn.forkFromHere")}
-        </DropdownMenuItem>
-      </DropdownMenuContent>
-    </DropdownMenu>
+        </MenuItem>
+      </MenuContent>
+    </Menu>
   );
 }
 
