@@ -293,8 +293,8 @@
   --text-2xl--letter-spacing: -0.02em;
 }
 
-/* The phone layout (AppShell's .q-ph root), for sizes a coarse pointer alone doesn't imply. */
-@custom-variant phone (&:where(.q-ph *));
+/* The phone layout: the same breakpoint as useIsPhone() and quiet.css, so it reaches portaled popups too. */
+@custom-variant phone (@media (max-width: 639px));
 
 /*
  * A hit area of at least 32 px (44 px on touch or the phone layout) around
@@ -313,16 +313,11 @@
     translate: -50% -50%;
   }
 
-  @media (pointer: coarse) {
+  @media (pointer: coarse), (max-width: 639px) {
     &::after {
       width: max(100%, 2.75rem);
       height: max(100%, 2.75rem);
     }
-  }
-
-  &:where(.q-ph *)::after {
-    width: max(100%, 2.75rem);
-    height: max(100%, 2.75rem);
   }
 }
 
