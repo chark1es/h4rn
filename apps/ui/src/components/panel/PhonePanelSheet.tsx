@@ -1,9 +1,10 @@
 import { CheckIcon, ChevronDownIcon, CircleXIcon, FileIcon, PlusIcon } from "lucide-react";
-import { type ReactNode, useEffect, useRef, useState } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { AgentGlyph } from "@/components/agent/AgentGlyph";
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
+import { Sheet, SheetClose, SheetContent, SheetTitle } from "@/components/ui/sheet";
 import { PreviewPanel } from "@/features/preview/PreviewPanel";
 import { DelegateDialog } from "@/features/subagents/DelegateDialog";
 import {
@@ -169,7 +170,6 @@ export function PhonePanelSheet({
 }) {
   const { t } = useTranslation(["thread", "common"]);
   const [tab, setTab] = useState(initialTab);
-  const sheetRef = useRef<HTMLDivElement | null>(null);
   const changes = usePanelChanges(thread);
   const files = changes.changes?.files ?? [];
   const subagents = useSubagentCount(thread.thread_id);
@@ -179,12 +179,6 @@ export function PhonePanelSheet({
   const tabState = tab === "preview" && !previewPath ? "changes" : tab;
 
   useEffect(() => setTab(initialTab), [initialTab]);
-  // The sheet is modal: take focus on open so a `/` command that opens it
-  // leaves the composer, and typing no longer edits the draft behind it.
-  // Focus the container rather than Done, so no action looks pre-chosen.
-  useEffect(() => {
-    sheetRef.current?.focus({ preventScroll: true });
-  }, []);
   useEffect(() => {
     if (!previewPath && tab === "preview") setTab("changes");
   }, [previewPath, tab]);
@@ -201,243 +195,236 @@ export function PhonePanelSheet({
 
   return (
     <>
-      <button
-        type="button"
-        className="q-ph-scrim"
-        aria-label={t("changes.phone.close")}
-        onClick={onClose}
-      />
-      <div
-        ref={sheetRef}
-        className="q-ph-sheet large"
-        role="dialog"
-        aria-modal="true"
-        aria-label={t("panel.label")}
-        tabIndex={-1}
-      >
-        <div className="q-grab" />
-        <div className="q-ph-sh-nav">
-          <span style={{ width: 64 }} />
-          <span className="ttl">{thread.title}</span>
-          <button type="button" className="navbtn" onClick={onClose}>
-            {t("common:done")}
-          </button>
-        </div>
-        <div className="q-ph-seg" style={{ padding: "0 16px 10px" }}>
-          <div className="q-seg" role="tablist" aria-label={t("changes.phone.tabs")}>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={tabState === "changes"}
-              onClick={() => setTab("changes")}
-            >
-              {t("panel.changes")}{" "}
-              {files.length > 0 ? (
-                <span className="c q-num">{formatNumber(files.length)}</span>
-              ) : null}
-            </button>
-            {previewPath ? (
+      <Sheet defaultOpen onOpenChangeComplete={(open) => (open ? undefined : onClose())}>
+        <SheetContent size="large" initialFocus="content">
+          <SheetTitle className="sr-only">{t("panel.label")}</SheetTitle>
+          <div className="flex h-11 shrink-0 items-center px-2">
+            <span className="w-16 shrink-0" />
+            <span className="min-w-0 flex-1 truncate text-center text-lg font-semibold">
+              {thread.title}
+            </span>
+            <SheetClose className="hit-area relative inline-flex h-11 min-w-16 shrink-0 items-center justify-end rounded-md px-3 text-lg text-accent-tx outline-none focus-visible:outline-2 focus-visible:outline-ring">
+              {t("common:done")}
+            </SheetClose>
+          </div>
+          <div className="q-ph-seg" style={{ padding: "0 16px 10px" }}>
+            <div className="q-seg" role="tablist" aria-label={t("changes.phone.tabs")}>
               <button
                 type="button"
                 role="tab"
-                aria-selected={tabState === "preview"}
+                aria-selected={tabState === "changes"}
+                onClick={() => setTab("changes")}
+              >
+                {t("panel.changes")}{" "}
+                {files.length > 0 ? (
+                  <span className="c q-num">{formatNumber(files.length)}</span>
+                ) : null}
+              </button>
+              {previewPath ? (
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={tabState === "preview"}
+                  onClick={() => {
+                    setPanelTab("preview");
+                    setTab("preview");
+                  }}
+                >
+                  {t("panel.preview")}
+                </button>
+              ) : null}
+              <button
+                type="button"
+                role="tab"
+                aria-selected={tabState === "subagents"}
                 onClick={() => {
-                  setPanelTab("preview");
-                  setTab("preview");
+                  setPanelTab("subagents");
+                  setTab("subagents");
                 }}
               >
-                {t("panel.preview")}
-              </button>
-            ) : null}
-            <button
-              type="button"
-              role="tab"
-              aria-selected={tabState === "subagents"}
-              onClick={() => {
-                setPanelTab("subagents");
-                setTab("subagents");
-              }}
-            >
-              {t("panel.subagents")}{" "}
-              {subagents.total > 0 ? (
-                <span className="c q-num">{formatNumber(subagents.total)}</span>
-              ) : null}
-              {subagents.waiting > 0 ? (
-                <span className="q-pip" role="img" aria-label={t("panel.needsYou")} />
-              ) : null}
-            </button>
-          </div>
-        </div>
-
-        {tabState === "preview" ? (
-          <PreviewPanel
-            key={`${thread.thread_id}:${previewPath ?? "empty"}`}
-            thread={thread}
-            path={previewPath}
-            variant="phone"
-          />
-        ) : tabState === "subagents" ? (
-          <div className="q-ph-body">
-            <div className="q-ph-gh" style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <span>
-                {subagents.total === 0
-                  ? t("subagents.none")
-                  : subagents.waiting > 0
-                    ? `${t("subagents.count", { count: subagents.total })} · ${t("subagents.waiting", { count: subagents.waiting })}`
-                    : t("subagents.count", { count: subagents.total })}
-              </span>
-              <span className="grow" />
-              <button type="button" className="q-btn ghost sm" onClick={openDelegate}>
-                <PlusIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-                {t("subagents.delegate")}
+                {t("panel.subagents")}{" "}
+                {subagents.total > 0 ? (
+                  <span className="c q-num">{formatNumber(subagents.total)}</span>
+                ) : null}
+                {subagents.waiting > 0 ? (
+                  <span className="q-pip" role="img" aria-label={t("panel.needsYou")} />
+                ) : null}
               </button>
             </div>
-            {views.length === 0 ? (
-              <div className="q-empty q-sub-empty">
-                <h3>{t("subagents.emptyTitle")}</h3>
-                <p>{t("subagents.emptyBody", { harness: harnessLabel(thread.harness) })}</p>
-                <button type="button" className="q-btn secondary" onClick={openDelegate}>
+          </div>
+
+          {tabState === "preview" ? (
+            <PreviewPanel
+              key={`${thread.thread_id}:${previewPath ?? "empty"}`}
+              thread={thread}
+              path={previewPath}
+              variant="phone"
+            />
+          ) : tabState === "subagents" ? (
+            <div className="q-ph-body">
+              <div className="q-ph-gh" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <span>
+                  {subagents.total === 0
+                    ? t("subagents.none")
+                    : subagents.waiting > 0
+                      ? `${t("subagents.count", { count: subagents.total })} · ${t("subagents.waiting", { count: subagents.waiting })}`
+                      : t("subagents.count", { count: subagents.total })}
+                </span>
+                <span className="grow" />
+                <button type="button" className="q-btn ghost sm" onClick={openDelegate}>
                   <PlusIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
                   {t("subagents.delegate")}
                 </button>
               </div>
-            ) : (
-              <>
-                <div className="q-ph-group">
-                  <SubagentRow
-                    glyph={<AgentGlyph glyph={glyphForAgentState(thread.agent_state)} size={14} />}
-                    title={thread.title}
-                    byline={
-                      <>
-                        <EntityAvatar
-                          seed={machineSeed(thread.host)}
-                          kind="machine"
-                          label={thread.host}
-                          size={14}
-                        />
-                        {thread.host} · {harnessLabel(thread.harness)}
-                      </>
-                    }
-                    status={t("subagents.phone.parent", {
-                      state: glyphForAgentState(thread.agent_state).label,
-                    })}
-                  />
-                  {views.map((view) => (
-                    <PhoneSubagent
-                      key={view.subagent_id}
-                      view={view}
-                      parentThreadId={thread.thread_id}
-                      onReview={() => {
-                        onClose();
-                        onReview?.();
-                      }}
+              {views.length === 0 ? (
+                <div className="q-empty q-sub-empty">
+                  <h3>{t("subagents.emptyTitle")}</h3>
+                  <p>{t("subagents.emptyBody", { harness: harnessLabel(thread.harness) })}</p>
+                  <button type="button" className="q-btn secondary" onClick={openDelegate}>
+                    <PlusIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
+                    {t("subagents.delegate")}
+                  </button>
+                </div>
+              ) : (
+                <>
+                  <div className="q-ph-group">
+                    <SubagentRow
+                      glyph={
+                        <AgentGlyph glyph={glyphForAgentState(thread.agent_state)} size={14} />
+                      }
+                      title={thread.title}
+                      byline={
+                        <>
+                          <EntityAvatar
+                            seed={machineSeed(thread.host)}
+                            kind="machine"
+                            label={thread.host}
+                            size={14}
+                          />
+                          {thread.host} · {harnessLabel(thread.harness)}
+                        </>
+                      }
+                      status={t("subagents.phone.parent", {
+                        state: glyphForAgentState(thread.agent_state).label,
+                      })}
                     />
-                  ))}
-                </div>
-                <p className="q-ph-note" style={{ marginTop: -8 }}>
-                  {t("subagents.phone.note")}
-                </p>
-              </>
-            )}
-          </div>
-        ) : (
-          <div className="q-ph-body">
-            <div className="q-ph-sum">
-              <span className="q-btn secondary sm">
-                {t("changes.phone.allTurns", { count: Math.max(1, changes.turns.length) })}{" "}
-                <ChevronDownIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
-              </span>
-              <span className="grow" />
-              <span className="q-num q-pm">
-                <span className="q-add">+{changes.added}</span>{" "}
-                <span className="q-del">−{changes.removed}</span>
-              </span>
-            </div>
-            <div className="q-ph-gh" style={{ display: "flex", alignItems: "center", gap: 6 }}>
-              <EntityAvatar
-                seed={harnessSeed(thread.host, thread.harness)}
-                kind="harness"
-                label={harnessLabel(thread.harness)}
-                size={14}
-              />
-              {t("changes.phone.since", {
-                harness: harnessLabel(thread.harness),
-                host: thread.host,
-                time: absoluteTime(thread.last_activity),
-              })}
-            </div>
-            {changes.error ? (
-              <p className="q-ph-note">{changes.error}</p>
-            ) : files.length === 0 ? (
-              <p className="q-ph-note">
-                {changes.loading ? t("changes.phone.loading") : t("changes.phone.empty")}
-              </p>
-            ) : (
-              <>
-                <div className="q-ph-group">
-                  {files.map((file) => {
-                    const { directory, name } = splitPath(file.path);
-                    return (
-                      <button
-                        key={file.path}
-                        type="button"
-                        className="q-ph-li"
-                        onClick={() => openFile(file.path)}
-                      >
-                        <span className="q-faint">
-                          <FileIcon className="q-icon s18" strokeWidth={1.5} aria-hidden />
-                        </span>
-                        <span
-                          className="grow q-mono"
-                          style={{
-                            fontSize: 14,
-                            overflow: "hidden",
-                            textOverflow: "ellipsis",
-                            whiteSpace: "nowrap",
-                          }}
-                        >
-                          <span className="q-faint">{directory}</span>
-                          {name}
-                        </span>
-                        <span className="q-num q-pm">
-                          <span className="q-add">+{file.added}</span>{" "}
-                          <span className="q-del">−{file.removed}</span>
-                        </span>
-                        <ChevronDownIcon
-                          className="q-icon s16 q-faint"
-                          strokeWidth={1.5}
-                          style={{ transform: "rotate(-90deg)" }}
-                          aria-hidden
-                        />
-                      </button>
-                    );
-                  })}
-                </div>
-                {files[0] ? (
-                  <>
-                    <div className="q-ph-gh q-mono" style={{ fontSize: 13 }}>
-                      {files[0].path}
-                    </div>
-                    <div className="q-ph-diff">
-                      <FileDiff
-                        bare
-                        compact
-                        path={files[0].path}
-                        diff={changes.diffs[files[0].path] ?? null}
-                        added={files[0].added}
-                        removed={files[0].removed}
-                        loading={changes.diffsLoading}
-                        onOpen={() => openFile(files[0]?.path ?? "")}
+                    {views.map((view) => (
+                      <PhoneSubagent
+                        key={view.subagent_id}
+                        view={view}
+                        parentThreadId={thread.thread_id}
+                        onReview={() => {
+                          onClose();
+                          onReview?.();
+                        }}
                       />
-                    </div>
-                  </>
-                ) : null}
-              </>
-            )}
-            <p className="q-ph-desktop-only">{t("changes.phone.desktopOnly")}</p>
-          </div>
-        )}
-      </div>
+                    ))}
+                  </div>
+                  <p className="q-ph-note" style={{ marginTop: -8 }}>
+                    {t("subagents.phone.note")}
+                  </p>
+                </>
+              )}
+            </div>
+          ) : (
+            <div className="q-ph-body">
+              <div className="q-ph-sum">
+                <span className="q-btn secondary sm">
+                  {t("changes.phone.allTurns", { count: Math.max(1, changes.turns.length) })}{" "}
+                  <ChevronDownIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+                </span>
+                <span className="grow" />
+                <span className="q-num q-pm">
+                  <span className="q-add">+{changes.added}</span>{" "}
+                  <span className="q-del">−{changes.removed}</span>
+                </span>
+              </div>
+              <div className="q-ph-gh" style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <EntityAvatar
+                  seed={harnessSeed(thread.host, thread.harness)}
+                  kind="harness"
+                  label={harnessLabel(thread.harness)}
+                  size={14}
+                />
+                {t("changes.phone.since", {
+                  harness: harnessLabel(thread.harness),
+                  host: thread.host,
+                  time: absoluteTime(thread.last_activity),
+                })}
+              </div>
+              {changes.error ? (
+                <p className="q-ph-note">{changes.error}</p>
+              ) : files.length === 0 ? (
+                <p className="q-ph-note">
+                  {changes.loading ? t("changes.phone.loading") : t("changes.phone.empty")}
+                </p>
+              ) : (
+                <>
+                  <div className="q-ph-group">
+                    {files.map((file) => {
+                      const { directory, name } = splitPath(file.path);
+                      return (
+                        <button
+                          key={file.path}
+                          type="button"
+                          className="q-ph-li"
+                          onClick={() => openFile(file.path)}
+                        >
+                          <span className="q-faint">
+                            <FileIcon className="q-icon s18" strokeWidth={1.5} aria-hidden />
+                          </span>
+                          <span
+                            className="grow q-mono"
+                            style={{
+                              fontSize: 14,
+                              overflow: "hidden",
+                              textOverflow: "ellipsis",
+                              whiteSpace: "nowrap",
+                            }}
+                          >
+                            <span className="q-faint">{directory}</span>
+                            {name}
+                          </span>
+                          <span className="q-num q-pm">
+                            <span className="q-add">+{file.added}</span>{" "}
+                            <span className="q-del">−{file.removed}</span>
+                          </span>
+                          <ChevronDownIcon
+                            className="q-icon s16 q-faint"
+                            strokeWidth={1.5}
+                            style={{ transform: "rotate(-90deg)" }}
+                            aria-hidden
+                          />
+                        </button>
+                      );
+                    })}
+                  </div>
+                  {files[0] ? (
+                    <>
+                      <div className="q-ph-gh q-mono" style={{ fontSize: 13 }}>
+                        {files[0].path}
+                      </div>
+                      <div className="q-ph-diff">
+                        <FileDiff
+                          bare
+                          compact
+                          path={files[0].path}
+                          diff={changes.diffs[files[0].path] ?? null}
+                          added={files[0].added}
+                          removed={files[0].removed}
+                          loading={changes.diffsLoading}
+                          onOpen={() => openFile(files[0]?.path ?? "")}
+                        />
+                      </div>
+                    </>
+                  ) : null}
+                </>
+              )}
+              <p className="q-ph-desktop-only">{t("changes.phone.desktopOnly")}</p>
+            </div>
+          )}
+        </SheetContent>
+      </Sheet>
       <DelegateDialog thread={thread} />
     </>
   );

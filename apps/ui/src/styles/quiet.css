@@ -1301,7 +1301,8 @@ fieldset.q-seg-fs {
   font-size: 11.5px;
   overflow-wrap: anywhere;
 }
-.q-ph-sheet .q-mono {
+.q-ph-sheet .q-mono,
+[data-slot="drawer-content"] .q-mono {
   font-size: 13px;
 }
 .q-prov .br .q-mono,
@@ -4102,11 +4103,6 @@ fieldset.q-seg-fs {
   flex: 0 1 320px;
   min-width: 200px;
 }
-.q-ph-sheet-head .t {
-  font-size: 17px;
-  font-weight: 600;
-  line-height: 22px;
-}
 .q-tchip .t {
   white-space: nowrap;
   overflow: hidden;
@@ -4124,10 +4120,6 @@ fieldset.q-seg-fs {
   color: var(--fg-2);
   line-height: 18px;
   margin-top: 1px;
-}
-.q-ph-sheet-head .s {
-  font-size: 14px;
-  color: var(--fg-2);
 }
 .q-tchip .s {
   color: var(--accent-tx);
@@ -4775,9 +4767,6 @@ fieldset.q-seg-fs {
 .q-ph-ask-f .q-btn {
   flex: 1;
 }
-.q-ph-sheet-actions .q-btn {
-  flex: 1;
-}
 .q-ph .q-btn {
   height: 44px;
   border-radius: 12px;
@@ -4980,12 +4969,6 @@ fieldset.q-seg-fs {
   background: var(--scrim);
   animation: q-fade var(--duration-popup) var(--ease-enter);
 }
-.q-ph-sheet-head {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 4px 20px 0;
-}
 .q-ph-sheet-cmd {
   margin: 14px 20px 4px;
   font-size: 13.5px;
@@ -4995,13 +4978,9 @@ fieldset.q-seg-fs {
   white-space: normal;
   overflow-wrap: anywhere;
 }
-.q-ph-sheet .q-ph-group {
+.q-ph-sheet .q-ph-group,
+[data-slot="drawer-content"] .q-ph-group {
   margin-top: 14px;
-}
-.q-ph-sheet-actions {
-  display: flex;
-  gap: 12px;
-  padding: 0 16px;
 }
 .q-ph-sheet {
   position: absolute;
@@ -5672,7 +5651,8 @@ fieldset.q-seg-fs {
   padding: 0 16px;
   border-bottom: 1px solid var(--line);
 }
-.q-ph-sheet .q-pv-body {
+.q-ph-sheet .q-pv-body,
+[data-slot="drawer-content"] .q-pv-body {
   overflow: hidden;
 }
 
@@ -5735,45 +5715,10 @@ fieldset.q-seg-fs {
   width: 20px;
   height: 22px;
 }
-.q-ph-sheet.large {
-  top: 10px;
-  display: flex;
-  flex-direction: column;
-  padding: 8px 0 0;
-}
-/* The panel sheet takes focus when it opens so typing stays out of the
+/* Phone sheets take focus when they open so typing stays out of the
    composer behind it; the dialog itself is not a control, so no ring. */
 .q-ph-sheet:focus {
   outline: none;
-}
-.q-ph-sheet.large .q-ph-body {
-  padding-bottom: 34px;
-}
-.q-ph-sh-nav {
-  display: flex;
-  align-items: center;
-  height: 44px;
-  padding: 0 8px;
-  flex: none;
-}
-.q-ph-sh-nav .ttl {
-  flex: 1;
-  text-align: center;
-  font-size: 17px;
-  font-weight: 600;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.q-ph-sh-nav .navbtn {
-  min-width: 64px;
-  height: 44px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: flex-end;
-  padding: 0 12px;
-  color: var(--accent-tx);
-  font-size: 17px;
 }
 .q-ph-sum {
   display: flex;

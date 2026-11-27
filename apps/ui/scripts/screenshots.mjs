@@ -464,7 +464,7 @@ const SHOTS = [
     wait: '[aria-label="Thread stream"]',
     action: async (page) => {
       await page.getByRole("button", { name: "Review" }).click();
-      await page.getByRole("dialog", { name: "Approve command" }).waitFor();
+      await page.getByRole("dialog").getByRole("button", { name: "Approve" }).waitFor();
       await page.waitForTimeout(450);
     },
   },

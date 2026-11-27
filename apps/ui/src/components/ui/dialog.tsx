@@ -230,5 +230,6 @@ export {
   DialogTitle,
   DialogTrigger,
   modalSurfaceClassName,
+  SheetGrabber,
   useDialogSheet,
 };
