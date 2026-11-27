@@ -136,7 +136,9 @@ export function InboxDetailEmpty() {
     // The dialog's session: no folder option, so a folder the person used on
     // this host before is restored here with its draft.
     const draft = draftSession().adoptHost(first);
+    const available = onlineHosts.find((entry) => entry.host_id === first)?.harnesses ?? [];
     setHost(first);
+    setHarness(HARNESSES.find((kind) => available.includes(kind)) ?? "claude_code");
     setWorkspace(draft.workspace);
     setPrompt(draft.text);
   }, [host, onlineHosts, localHostId, draftSession]);
