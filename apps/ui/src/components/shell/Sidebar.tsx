@@ -26,11 +26,11 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { Trans, useTranslation } from "react-i18next";
-
 import { AgentGlyph } from "@/components/agent/AgentGlyph";
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
 import { StateTabs } from "@/components/inbox/StateTabs";
 import { ShortcutCaps } from "@/components/ui/kbd";
+import { Tip } from "@/components/ui/tooltip";
 import {
   harnessUpdateCount,
   useHarnesses,
@@ -60,7 +60,7 @@ import { harnessLabel, machineSeed } from "@/lib/entities";
 import { absoluteTime } from "@/lib/format";
 import { formatAge, formatDateTime, formatList, formatNumber } from "@/lib/i18n";
 import { isSnoozed, needsAttention, snoozedThreads, tabCounts, threadsForTab } from "@/lib/inbox";
-import { type CommandId, titleWithShortcut } from "@/lib/keybindings";
+import type { CommandId } from "@/lib/keybindings";
 import { SETTINGS_SECTIONS, type SettingsGroup, settingsPath } from "@/lib/settings";
 import {
   loadThreads,
@@ -544,30 +544,30 @@ function SidebarFooter({
           <ChevronDownIcon className="q-icon s12 q-faint" strokeWidth={1.5} aria-hidden />
         </button>
         {DESTINATIONS.map((item) => (
-          <button
-            key={item.key}
-            type="button"
-            className={cn("q-ibtn q-side-dest", destination === item.key && "on")}
-            aria-current={destination === item.key ? "page" : undefined}
-            aria-label={t(`footer.${item.key}`)}
-            title={titleWithShortcut(t(`footer.${item.key}`), item.command)}
-            onClick={() =>
-              navigate({
-                kind: "placeholder",
-                surface:
-                  item.key === "pr"
-                    ? "pulls"
-                    : item.key === "issues"
-                      ? "issues"
-                      : item.key === "usage"
-                        ? "usage"
-                        : "settings",
-                path: item.path,
-              })
-            }
-          >
-            <item.icon className="q-icon" strokeWidth={1.5} aria-hidden />
-          </button>
+          <Tip key={item.key} label={t(`footer.${item.key}`)} command={item.command}>
+            <button
+              type="button"
+              className={cn("q-ibtn q-side-dest", destination === item.key && "on")}
+              aria-current={destination === item.key ? "page" : undefined}
+              aria-label={t(`footer.${item.key}`)}
+              onClick={() =>
+                navigate({
+                  kind: "placeholder",
+                  surface:
+                    item.key === "pr"
+                      ? "pulls"
+                      : item.key === "issues"
+                        ? "issues"
+                        : item.key === "usage"
+                          ? "usage"
+                          : "settings",
+                  path: item.path,
+                })
+              }
+            >
+              <item.icon className="q-icon" strokeWidth={1.5} aria-hidden />
+            </button>
+          </Tip>
         ))}
       </div>
       {popoverOpen ? (
@@ -683,24 +683,21 @@ function ThreadsSidebar() {
         <div className="q-side-top">
           <span className="q-word">h4rn</span>
           <span className="grow" />
-          <button
-            type="button"
-            className="q-ibtn"
-            aria-label={t("hide")}
-            title={titleWithShortcut(t("hide"), "sidebar.toggle")}
-            onClick={toggleSidebar}
-          >
-            <PanelLeftIcon className="q-icon" strokeWidth={1.5} aria-hidden />
-          </button>
-          <button
-            type="button"
-            className="q-ibtn"
-            aria-label={t("newThread")}
-            title={titleWithShortcut(t("newThread"), "thread.new")}
-            onClick={() => openNewThread()}
-          >
-            <SquarePenIcon className="q-icon" strokeWidth={1.5} aria-hidden />
-          </button>
+          <Tip label={t("hide")} command="sidebar.toggle">
+            <button type="button" className="q-ibtn" aria-label={t("hide")} onClick={toggleSidebar}>
+              <PanelLeftIcon className="q-icon" strokeWidth={1.5} aria-hidden />
+            </button>
+          </Tip>
+          <Tip label={t("newThread")} command="thread.new">
+            <button
+              type="button"
+              className="q-ibtn"
+              aria-label={t("newThread")}
+              onClick={() => openNewThread()}
+            >
+              <SquarePenIcon className="q-icon" strokeWidth={1.5} aria-hidden />
+            </button>
+          </Tip>
         </div>
         <button
           type="button"
@@ -945,20 +942,21 @@ function SettingsSidebar() {
     >
       <div className="q-side-hd">
         <div className="q-side-top">
-          <button
-            type="button"
-            className="q-ibtn"
-            aria-label={t("nav.back")}
-            title={t("nav.backTitle")}
-            onClick={() => navigate({ kind: "inbox" })}
-          >
-            <ChevronRightIcon
-              className="q-icon"
-              style={{ transform: "rotate(180deg)" }}
-              strokeWidth={1.5}
-              aria-hidden
-            />
-          </button>
+          <Tip label={t("nav.backTitle")}>
+            <button
+              type="button"
+              className="q-ibtn"
+              aria-label={t("nav.back")}
+              onClick={() => navigate({ kind: "inbox" })}
+            >
+              <ChevronRightIcon
+                className="q-icon"
+                style={{ transform: "rotate(180deg)" }}
+                strokeWidth={1.5}
+                aria-hidden
+              />
+            </button>
+          </Tip>
           <span className="q-word">{t("page.label")}</span>
         </div>
         <label className="q-side-search">
@@ -1011,18 +1009,19 @@ function SettingsSidebar() {
                 <>
                   <div className="q-side-h">
                     <span>{t("nav.tools")}</span>
-                    <button
-                      type="button"
-                      className="q-ibtn s22"
-                      aria-label={t("nav.addMcp")}
-                      title={t("nav.addMcp")}
-                      onClick={() => {
-                        setLibrarySelected("__new");
-                        goLibrary("/library");
-                      }}
-                    >
-                      +
-                    </button>
+                    <Tip label={t("nav.addMcp")}>
+                      <button
+                        type="button"
+                        className="q-ibtn s22"
+                        aria-label={t("nav.addMcp")}
+                        onClick={() => {
+                          setLibrarySelected("__new");
+                          goLibrary("/library");
+                        }}
+                      >
+                        +
+                      </button>
+                    </Tip>
                   </div>
                   <button
                     type="button"
@@ -1142,25 +1141,27 @@ export function SidebarReveal() {
   if (layout.sidebarOpen) return null;
   return (
     <div className="q-hd-l">
-      <button
-        type="button"
-        className="q-ibtn"
-        aria-label={needsYou > 0 ? t("showNeedsYou", { count: needsYou }) : t("show")}
-        title={titleWithShortcut(t("show"), "sidebar.toggle")}
-        onClick={toggleSidebar}
-      >
-        <PanelLeftIcon className="q-icon" strokeWidth={1.5} aria-hidden />
-        {needsYou > 0 ? <span className="q-pip" aria-hidden="true" /> : null}
-      </button>
-      <button
-        type="button"
-        className="q-ibtn"
-        aria-label={t("newThread")}
-        title={titleWithShortcut(t("newThread"), "thread.new")}
-        onClick={() => openNewThread()}
-      >
-        <SquarePenIcon className="q-icon" strokeWidth={1.5} aria-hidden />
-      </button>
+      <Tip label={t("show")} command="sidebar.toggle">
+        <button
+          type="button"
+          className="q-ibtn"
+          aria-label={needsYou > 0 ? t("showNeedsYou", { count: needsYou }) : t("show")}
+          onClick={toggleSidebar}
+        >
+          <PanelLeftIcon className="q-icon" strokeWidth={1.5} aria-hidden />
+          {needsYou > 0 ? <span className="q-pip" aria-hidden="true" /> : null}
+        </button>
+      </Tip>
+      <Tip label={t("newThread")} command="thread.new">
+        <button
+          type="button"
+          className="q-ibtn"
+          aria-label={t("newThread")}
+          onClick={() => openNewThread()}
+        >
+          <SquarePenIcon className="q-icon" strokeWidth={1.5} aria-hidden />
+        </button>
+      </Tip>
       <span className="q-vsep" />
     </div>
   );

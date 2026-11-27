@@ -16,7 +16,6 @@ import {
 
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
-
 import { AgentGlyph } from "@/components/agent/AgentGlyph";
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
 import { SidebarReveal } from "@/components/shell/Sidebar";
@@ -32,6 +31,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Kbd } from "@/components/ui/kbd";
+import { Tip } from "@/components/ui/tooltip";
 import { ThreadPullRequestBadge } from "@/features/forge/ThreadPullRequestBadge";
 import { openGuestShare } from "@/features/guest/guestStore";
 import { useThreadSettings } from "@/features/threads/settings";
@@ -105,27 +105,29 @@ export function ViewCluster({
         </button>
       </div>
       {onToggleTerminal ? (
+        <Tip label={t("header.terminal")} command="terminal.toggle">
+          <button
+            type="button"
+            className={cn("q-ibtn", terminalOpen && "on")}
+            aria-label={t("header.toggleTerminal")}
+            aria-pressed={terminalOpen}
+            onClick={onToggleTerminal}
+          >
+            <TerminalIcon className="q-icon" strokeWidth={1.5} aria-hidden />
+          </button>
+        </Tip>
+      ) : null}
+      <Tip label={t("header.rightPanel")} command="panel.toggle">
         <button
           type="button"
-          className={cn("q-ibtn", terminalOpen && "on")}
-          aria-label={t("header.toggleTerminal")}
-          aria-pressed={terminalOpen}
-          title={titleWithShortcut(t("header.terminal"), "terminal.toggle")}
-          onClick={onToggleTerminal}
+          className={cn("q-ibtn", panelOpen && "on")}
+          aria-label={t("header.rightPanel")}
+          aria-pressed={panelOpen}
+          onClick={togglePanel}
         >
-          <TerminalIcon className="q-icon" strokeWidth={1.5} aria-hidden />
+          <PanelRightIcon className="q-icon" strokeWidth={1.5} aria-hidden />
         </button>
-      ) : null}
-      <button
-        type="button"
-        className={cn("q-ibtn", panelOpen && "on")}
-        aria-label={t("header.rightPanel")}
-        aria-pressed={panelOpen}
-        title={titleWithShortcut(t("header.rightPanel"), "panel.toggle")}
-        onClick={togglePanel}
-      >
-        <PanelRightIcon className="q-icon" strokeWidth={1.5} aria-hidden />
-      </button>
+      </Tip>
     </>
   );
 }

@@ -11,6 +11,7 @@ import {
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
+import { Tip } from "@/components/ui/tooltip";
 import { AttachmentTray } from "@/features/attachments/AttachmentTray";
 import { FILE_ACCEPT } from "@/features/attachments/picker";
 import { useAttachmentDrafts, useAttachShortcut } from "@/features/attachments/use-attachments";
@@ -1097,16 +1098,17 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
           >
             <PaperclipIcon className="q-icon" strokeWidth={1.5} aria-hidden />
           </button>
-          <button
-            type="button"
-            disabled={!writable}
-            onClick={insertMention}
-            aria-label={t("mention")}
-            title={t("mention")}
-            className="q-ibtn"
-          >
-            <AtSignIcon className="q-icon" strokeWidth={1.5} aria-hidden />
-          </button>
+          <Tip label={t("mention")}>
+            <button
+              type="button"
+              disabled={!writable}
+              onClick={insertMention}
+              aria-label={t("mention")}
+              className="q-ibtn"
+            >
+              <AtSignIcon className="q-icon" strokeWidth={1.5} aria-hidden />
+            </button>
+          </Tip>
           <span className="grow" />
 
           <ThreadControls summary={summary} />

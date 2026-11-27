@@ -2,13 +2,13 @@ import { XIcon } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { Resizer } from "@/components/shell/Resizer";
+import { Tip } from "@/components/ui/tooltip";
 import { PreviewPanel } from "@/features/preview/PreviewPanel";
 import { SubagentsPanel } from "@/features/subagents/SubagentsPanel";
 import { useSubagentCount } from "@/features/subagents/subagentStore";
 import type { ThreadSummary } from "@/gen";
 import { harnessLabel } from "@/lib/entities";
 import { formatNumber } from "@/lib/i18n";
-import { titleWithShortcut } from "@/lib/keybindings";
 import { openPreview, setPanelTab, setPanelWidth, togglePanel, useApp } from "@/lib/store/appStore";
 import { ChangesSection } from "./ChangesSection";
 import { usePanelChanges } from "./usePanelChanges";
@@ -86,15 +86,16 @@ export function RightPanel({ thread, ide = false }: { thread: ThreadSummary; ide
           ) : null}
         </button>
         <span className="grow" />
-        <button
-          type="button"
-          className="q-ibtn"
-          aria-label={t("panel.close")}
-          title={titleWithShortcut(t("panel.close"), "panel.toggle")}
-          onClick={togglePanel}
-        >
-          <XIcon className="q-icon" strokeWidth={1.5} aria-hidden />
-        </button>
+        <Tip label={t("panel.close")} command="panel.toggle">
+          <button
+            type="button"
+            className="q-ibtn"
+            aria-label={t("panel.close")}
+            onClick={togglePanel}
+          >
+            <XIcon className="q-icon" strokeWidth={1.5} aria-hidden />
+          </button>
+        </Tip>
       </div>
 
       {tab === "changes" ? (
