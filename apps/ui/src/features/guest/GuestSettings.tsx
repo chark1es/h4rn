@@ -1,6 +1,7 @@
 import { FlaskConicalIcon } from "lucide-react";
 import { useEffect } from "react";
 import { useTranslation } from "react-i18next";
+import { Switch } from "@/components/ui/switch";
 import { errorWords } from "@/lib/client/errors";
 import { loadOutsideAgentSettings, setOutsideAgentEnabled, useAccess } from "../access/store";
 import { loadRewindSettings, setRewindFilesEnabled, useRewindSettings } from "../rewind/settings";
@@ -44,25 +45,20 @@ export function GuestSettingsForm() {
             <div className="s">{t("labs.rewindFilesHint")}</div>
           </div>
           <div className="ctl">
-            <button
-              type="button"
-              className="q-switch"
-              role="switch"
-              aria-checked={rewindFilesEnabled === true}
+            <Switch
+              checked={rewindFilesEnabled === true}
               aria-label={t("labs.rewindFiles")}
               disabled={rewindLoading || rewindSaving || rewindFilesEnabled === null}
-              onClick={() => void setRewindFilesEnabled(rewindFilesEnabled !== true)}
+              onCheckedChange={() => void setRewindFilesEnabled(rewindFilesEnabled !== true)}
             />
           </div>
         </div>
         {rewindError ? (
-          <p className="q-danger" role="alert" style={{ margin: "8px 0 0", fontSize: 12 }}>
+          <p className="q-danger mt-2 mx-0 mb-0 text-xs" role="alert">
             {errorWords(rewindError).message}
           </p>
         ) : null}
-        <p className="q-muted" style={{ fontSize: 12.5 }}>
-          {t("labs.rewindOffNote")}
-        </p>
+        <p className="q-muted text-sm">{t("labs.rewindOffNote")}</p>
       </div>
       <div className="q-group">
         <h2>{t("labs.sharing")}</h2>
@@ -72,14 +68,11 @@ export function GuestSettingsForm() {
             <div className="s">{t("labs.guestLinksHint")}</div>
           </div>
           <div className="ctl">
-            <button
-              type="button"
-              className="q-switch"
-              role="switch"
-              aria-checked={settingsEnabled === true}
+            <Switch
+              checked={settingsEnabled === true}
               aria-label={t("labs.guestLinks")}
               disabled={settingsLoading || settingsSaving || settingsEnabled === null}
-              onClick={() => void setGuestLinksEnabled(settingsEnabled !== true)}
+              onCheckedChange={() => void setGuestLinksEnabled(settingsEnabled !== true)}
             />
           </div>
         </div>
@@ -89,17 +82,15 @@ export function GuestSettingsForm() {
             <div className="s">{t("labs.guestSeesHint")}</div>
           </div>
           <div className="ctl">
-            <FlaskConicalIcon className="q-icon s16 q-faint" strokeWidth={1.5} aria-hidden />
+            <FlaskConicalIcon className="q-icon q-faint" strokeWidth={1.5} aria-hidden />
           </div>
         </div>
         {error ? (
-          <p className="q-danger" role="alert" style={{ margin: "8px 0 0", fontSize: 12 }}>
+          <p className="q-danger mt-2 mx-0 mb-0 text-xs" role="alert">
             {guestErrorText(error)}
           </p>
         ) : null}
-        <p className="q-muted" style={{ fontSize: 12.5 }}>
-          {t("labs.guestOffNote")}
-        </p>
+        <p className="q-muted text-sm">{t("labs.guestOffNote")}</p>
       </div>
       <div className="q-group">
         <h2>{t("labs.outsideAgents")}</h2>
@@ -109,24 +100,21 @@ export function GuestSettingsForm() {
             <div className="s">{t("labs.outsideAgentsHint")}</div>
           </div>
           <div className="ctl">
-            <button
-              type="button"
-              className="q-switch"
-              role="switch"
-              aria-checked={outsideEnabled === true}
+            <Switch
+              checked={outsideEnabled === true}
               aria-label={t("labs.outsideAgentsOAuth")}
               disabled={outsideSaving || outsideEnabled === null}
-              onClick={() => void setOutsideAgentEnabled(outsideEnabled !== true)}
+              onCheckedChange={() => void setOutsideAgentEnabled(outsideEnabled !== true)}
             />
           </div>
         </div>
         {outsideError ? (
-          <p className="q-danger" role="alert" style={{ margin: "8px 0 0", fontSize: 12 }}>
+          <p className="q-danger mt-2 mx-0 mb-0 text-xs" role="alert">
             {outsideError.message}
             {outsideError.hint ? ` ${outsideError.hint}` : ""}
           </p>
         ) : null}
-        <p className="q-faint" style={{ margin: "8px 0 0", fontSize: 12.5 }}>
+        <p className="q-faint" style={{ margin: "8px 0 0", fontSize: 13 }}>
           {t("labs.outsideOffNote")}
         </p>
       </div>

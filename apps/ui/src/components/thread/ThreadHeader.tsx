@@ -1,14 +1,19 @@
 import {
-  CircleSlash2Icon,
-  ExternalLinkIcon,
+  AlarmClockIcon,
+  ArchiveIcon,
+  CheckCheckIcon,
+  ChevronLeftIcon,
   FileDiffIcon,
   GitBranchIcon,
   GitForkIcon,
+  LinkIcon,
   MoreHorizontalIcon,
   PanelRightIcon,
   PencilIcon,
   PinIcon,
+  ServerIcon,
   Share2Icon,
+  SquareCodeIcon,
   SquareIcon,
   SunMoonIcon,
   TerminalIcon,
@@ -16,21 +21,25 @@ import {
 
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
-
 import { AgentGlyph } from "@/components/agent/AgentGlyph";
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
 import { SidebarReveal } from "@/components/shell/Sidebar";
 import { GitActionsDialog } from "@/components/thread/GitActionsDialog";
 import { RenameThreadDialog } from "@/components/thread/RenameThreadDialog";
 import { ThreadForkLine } from "@/components/thread/ThreadForkLine";
+import { ShortcutCaps } from "@/components/ui/kbd";
 import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
+  Menu,
+  MenuContent,
+  MenuFooter,
+  MenuGroup,
+  MenuGroupLabel,
+  MenuItem,
+  MenuSeparator,
+  MenuTrigger,
+} from "@/components/ui/menu";
+import { Tabs, TabsList, TabsTab } from "@/components/ui/tabs";
+import { Tip, TruncatedText } from "@/components/ui/tooltip";
 import { ThreadPullRequestBadge } from "@/features/forge/ThreadPullRequestBadge";
 import { openGuestShare } from "@/features/guest/guestStore";
 import { useThreadSettings } from "@/features/threads/settings";
@@ -42,7 +51,7 @@ import { harnessSeed, machineSeed, threadHarnessLabel } from "@/lib/entities";
 import { latestForkableTurn } from "@/lib/fork";
 import { absoluteDateTime } from "@/lib/format";
 import { formatRelativeTime } from "@/lib/i18n";
-import { shortcutText, titleWithShortcut } from "@/lib/keybindings";
+import { titleWithShortcut } from "@/lib/keybindings";
 import {
   acknowledgeThread,
   forkThread,
@@ -65,6 +74,18 @@ import { HarnessSwitch } from "./HarnessSwitch";
 
 const NO_TURNS: StreamTurn[] = [];
 
+/**
+ * The thread and IDE views each mount their own view switch, so choosing a
+ * view from the keyboard unmounts the focused tab. The switch that mounts
+ * next takes focus back onto its selected tab.
+ */
+let refocusViewTab = false;
+const takeViewFocus = (node: HTMLElement | null) => {
+  if (!node || !refocusViewTab) return;
+  refocusViewTab = false;
+  node.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]')?.focus();
+};
+
 export function ViewCluster({
   terminalOpen = false,
   onToggleTerminal,
@@ -80,51 +101,50 @@ export function ViewCluster({
   const panelOpen = layout.panelOpen && panelFits(layout, viewportWidth);
   return (
     <>
-      <div
-        className="q-seg inline q-viewseg"
-        role="tablist"
-        aria-label={t("header.view")}
-        title={titleWithShortcut(t("header.switchView"), "view.toggle")}
-      >
-        <button
-          type="button"
-          role="tab"
-          aria-selected={view === "thread"}
-          onClick={() => setView("thread")}
+      <span ref={takeViewFocus} className="contents">
+        <Tabs
+          className="flex-row"
+          value={view}
+          onValueChange={(value) => {
+            if (value !== "thread" && value !== "ide") return;
+            refocusViewTab = document.activeElement?.getAttribute("role") === "tab";
+            setView(value);
+          }}
         >
-          {t("header.thread")}
-        </button>
-        <button
-          type="button"
-          role="tab"
-          aria-selected={view === "ide"}
-          onClick={() => setView("ide")}
-        >
-          IDE
-        </button>
-      </div>
+          <TabsList
+            variant="segmented"
+            aria-label={t("header.view")}
+            title={titleWithShortcut(t("header.switchView"), "view.toggle")}
+          >
+            <TabsTab value="thread">{t("header.thread")}</TabsTab>
+            <TabsTab value="ide">IDE</TabsTab>
+          </TabsList>
+        </Tabs>
+      </span>
       {onToggleTerminal ? (
+        <Tip label={t("header.terminal")} command="terminal.toggle">
+          <button
+            type="button"
+            className={cn("q-ibtn", terminalOpen && "on")}
+            aria-label={t("header.toggleTerminal")}
+            aria-pressed={terminalOpen}
+            onClick={onToggleTerminal}
+          >
+            <TerminalIcon className="q-icon" strokeWidth={1.5} aria-hidden />
+          </button>
+        </Tip>
+      ) : null}
+      <Tip label={t("header.rightPanel")} command="panel.toggle">
         <button
           type="button"
-          className={cn("q-ibtn", terminalOpen && "on")}
-          aria-label={t("header.toggleTerminal")}
-          aria-pressed={terminalOpen}
-          title={titleWithShortcut(t("header.terminal"), "terminal.toggle")}
-          onClick={onToggleTerminal}
+          className={cn("q-ibtn", panelOpen && "on")}
+          aria-label={t("header.rightPanel")}
+          aria-pressed={panelOpen}
+          onClick={togglePanel}
         >
-          <TerminalIcon className="q-icon" strokeWidth={1.5} aria-hidden />
+          <PanelRightIcon className="q-icon" strokeWidth={1.5} aria-hidden />
         </button>
-      ) : null}
-      <button
-        type="button"
-        className={cn("q-ibtn", panelOpen && "on")}
-        aria-label={t("header.rightPanel")}
-        aria-pressed={panelOpen}
-        title={titleWithShortcut(t("header.rightPanel"), "panel.toggle")}
-        onClick={togglePanel}
-      >
-        <PanelRightIcon className="q-icon" strokeWidth={1.5} aria-hidden />
-      </button>
+      </Tip>
     </>
   );
 }
@@ -178,91 +198,100 @@ export function ThreadHeader({
       : glyph.label;
 
   const threadMenu = (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <button
-          type="button"
-          className={isPhone ? "navbtn" : "q-ibtn"}
-          aria-label={t("header.actions")}
-        >
-          <MoreHorizontalIcon className={isPhone ? "q-icon s22" : "q-icon"} strokeWidth={1.5} />
-        </button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="w-56">
-        <DropdownMenuLabel>{t("header.thread")}</DropdownMenuLabel>
-        <DropdownMenuItem onSelect={() => void togglePin(summary.thread_id)}>
-          <PinIcon aria-hidden />
-          {summary.pinned ? t("header.menu.unpin") : t("header.menu.keep")}
-        </DropdownMenuItem>
-        <DropdownMenuItem onSelect={() => setRenaming(true)}>
-          <PencilIcon aria-hidden />
-          {t("header.menu.rename")}
-        </DropdownMenuItem>
-        <DropdownMenuItem
-          disabled={!forkTurn}
-          onSelect={() => {
-            if (forkTurn) void forkThread(summary.thread_id, forkTurn);
-          }}
-        >
-          <GitForkIcon aria-hidden />
-          {t("header.menu.fork")}
-        </DropdownMenuItem>
-        <DropdownMenuItem onSelect={() => setGitOpen(true)}>
-          <GitBranchIcon aria-hidden />
-          {t("header.menu.git")}
-        </DropdownMenuItem>
-        <DropdownMenuItem onSelect={() => void setThreadTab(summary.thread_id, "done")}>
-          {t("header.menu.moveToDone")}
-        </DropdownMenuItem>
-        <DropdownMenuItem onSelect={() => void setThreadTab(summary.thread_id, "settled")}>
-          {t("header.menu.settleNow")}
-        </DropdownMenuItem>
-        <DropdownMenuItem
-          onSelect={() =>
-            void snoozeThread(summary.thread_id, new Date(Date.now() + 3_600_000).toISOString())
-          }
-        >
-          {t("header.menu.snoozeHour")}
-        </DropdownMenuItem>
-        <DropdownMenuSeparator />
+    <Menu>
+      <MenuTrigger className={isPhone ? "navbtn" : "q-ibtn"} aria-label={t("header.actions")}>
+        <MoreHorizontalIcon
+          className={isPhone ? "q-icon s22" : "q-icon"}
+          strokeWidth={1.5}
+          aria-hidden
+        />
+      </MenuTrigger>
+      <MenuContent align="end" className="min-w-56">
+        <MenuGroup>
+          <MenuGroupLabel>{t("header.thread")}</MenuGroupLabel>
+          <MenuItem
+            icon={<PinIcon />}
+            command="thread.pin"
+            onSelect={() => void togglePin(summary.thread_id)}
+          >
+            {summary.pinned ? t("header.menu.unpin") : t("header.menu.keep")}
+          </MenuItem>
+          <MenuItem icon={<PencilIcon />} onSelect={() => setRenaming(true)}>
+            {t("header.menu.rename")}
+          </MenuItem>
+          <MenuItem
+            icon={<GitForkIcon />}
+            disabled={!forkTurn}
+            onSelect={() => {
+              if (forkTurn) void forkThread(summary.thread_id, forkTurn);
+            }}
+          >
+            {t("header.menu.fork")}
+          </MenuItem>
+          <MenuItem icon={<GitBranchIcon />} onSelect={() => setGitOpen(true)}>
+            {t("header.menu.git")}
+          </MenuItem>
+          <MenuItem
+            icon={<CheckCheckIcon />}
+            onSelect={() => void setThreadTab(summary.thread_id, "done")}
+          >
+            {t("header.menu.moveToDone")}
+          </MenuItem>
+          <MenuItem
+            icon={<ArchiveIcon />}
+            command="thread.settle"
+            onSelect={() => void setThreadTab(summary.thread_id, "settled")}
+          >
+            {t("header.menu.settleNow")}
+          </MenuItem>
+          <MenuItem
+            icon={<AlarmClockIcon />}
+            command="thread.snooze"
+            onSelect={() =>
+              void snoozeThread(summary.thread_id, new Date(Date.now() + 3_600_000).toISOString())
+            }
+          >
+            {t("header.menu.snoozeHour")}
+          </MenuItem>
+        </MenuGroup>
+        <MenuSeparator />
         {summary.tab !== "settled" ? (
-          <DropdownMenuItem onSelect={() => openGuestShare(summary.thread_id)}>
-            <Share2Icon aria-hidden />
+          <MenuItem
+            icon={<Share2Icon />}
+            command="guest.share"
+            onSelect={() => openGuestShare(summary.thread_id)}
+          >
             {t("header.menu.share")}
-          </DropdownMenuItem>
+          </MenuItem>
         ) : null}
-        <DropdownMenuItem
+        <MenuItem
+          icon={<LinkIcon />}
           onSelect={() => {
             void navigator.clipboard
               ?.writeText(`${window.location.origin}/t/${summary.thread_id}`)
               .then(() => pushToast({ title: t("header.menu.linkCopied"), variant: "success" }));
           }}
         >
-          <Share2Icon aria-hidden />
           {t("header.menu.copyLink")}
-        </DropdownMenuItem>
-        <DropdownMenuItem onSelect={() => navigate({ kind: "hosts" })}>
-          <ExternalLinkIcon aria-hidden />
+        </MenuItem>
+        <MenuItem icon={<ServerIcon />} onSelect={() => navigate({ kind: "hosts" })}>
           {t("header.menu.openHosts")}
-        </DropdownMenuItem>
-        <DropdownMenuItem onSelect={() => navigate({ kind: "ide" })}>
-          <CircleSlash2Icon aria-hidden />
-          {t("header.menu.openInIde")}
-        </DropdownMenuItem>
-        <DropdownMenuSeparator />
-        <DropdownMenuItem onSelect={toggleTheme}>
-          <SunMoonIcon aria-hidden />
+        </MenuItem>
+        {isPhone ? null : (
+          <MenuItem icon={<SquareCodeIcon />} onSelect={() => navigate({ kind: "ide" })}>
+            {t("header.menu.openInIde")}
+          </MenuItem>
+        )}
+        <MenuSeparator />
+        <MenuItem icon={<SunMoonIcon />} command="theme.toggle" onSelect={toggleTheme}>
           {t("header.menu.toggleTheme")}
-          <span className="ml-auto text-small text-fg-3">{shortcutText("theme.toggle")}</span>
-        </DropdownMenuItem>
-        <DropdownMenuSeparator />
-        <DropdownMenuItem disabled>
-          <span className="text-small">
-            {t("header.menu.started", { time: absoluteDateTime(summary.last_activity) })}
-          </span>
-        </DropdownMenuItem>
-      </DropdownMenuContent>
-    </DropdownMenu>
+        </MenuItem>
+        <MenuSeparator />
+        <MenuFooter>
+          {t("header.menu.started", { time: absoluteDateTime(summary.last_activity) })}
+        </MenuFooter>
+      </MenuContent>
+    </Menu>
   );
 
   const renameDialog = (
@@ -283,9 +312,7 @@ export function ThreadHeader({
         {gitDialog}
         <div className="q-ph-nav">
           <button type="button" className="navbtn" aria-label={t("header.back")} onClick={onBack}>
-            <span aria-hidden className="q-ph-back-glyph">
-              ‹
-            </span>
+            <ChevronLeftIcon className="q-icon s22 -ms-1" strokeWidth={1.5} aria-hidden />
             {t("header.inbox")}
           </button>
           <span className="ttl" />
@@ -315,7 +342,9 @@ export function ThreadHeader({
           </div>
         </div>
         <div className="q-ph-th-title">
-          <div className="q-ph-th-name">{summary.title}</div>
+          <div className="q-ph-th-name" title={summary.title}>
+            {summary.title}
+          </div>
           <ThreadForkLine summary={summary} />
           <div className="q-ph-th-meta">
             <EntityAvatar
@@ -351,7 +380,9 @@ export function ThreadHeader({
       {gitDialog}
       <SidebarReveal />
       <div className="q-th-titles">
-        <h1>{summary.title}</h1>
+        <h1>
+          <TruncatedText>{summary.title}</TruncatedText>
+        </h1>
         <div className="q-prov">
           <EntityAvatar
             seed={machineSeed(summary.host)}
@@ -369,20 +400,19 @@ export function ThreadHeader({
           />
           <HarnessSwitch summary={summary} />
           <span className="opt">
-            <span className="q-sep">/</span> {summary.model}
+            <span className="q-sep">/</span>
+            <span className="truncate">{summary.model}</span>
           </span>
           {changedSettings.length > 0 ? (
-            <span className="q-faint" style={{ fontSize: 11.5 }}>
+            <span className="q-faint" style={{ fontSize: 12 }}>
               {changedSettings.join(" · ")}
             </span>
           ) : null}
           {summary.branch ? (
             <span className="br">
               <span className="q-sep">/</span>
-              <GitBranchIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
-              <span className="q-mono" style={{ fontSize: 11.5 }}>
-                {summary.branch}
-              </span>
+              <GitBranchIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
+              <TruncatedText className="q-mono">{summary.branch}</TruncatedText>
             </span>
           ) : null}
         </div>
@@ -423,7 +453,7 @@ export function ThreadHeader({
               className="q-btn primary"
               onClick={() => void acknowledgeThread(summary.thread_id)}
             >
-              {t("header.acknowledge")} <span className="q-kbd">A</span>
+              {t("header.acknowledge")} <ShortcutCaps command="thread.acknowledge" />
             </button>
           </>
         ) : null}

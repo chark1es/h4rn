@@ -51,12 +51,12 @@ function CodeBlock({ code, language }: { code: string; language: string | null }
   };
 
   return (
-    <div className="group/code relative my-2 overflow-hidden rounded-md border border-line bg-bg-sunk">
+    <div className="group/code relative my-2 overflow-hidden rounded-lg border border-line bg-bg-sunk">
       <div className="flex h-7 items-center gap-2 border-b border-line px-2.5">
         <span className="text-caption text-fg-3">{language ?? "text"}</span>
         <button
           type="button"
-          className="ml-auto flex items-center gap-1 text-caption text-fg-3 opacity-0 transition-opacity duration-[var(--dur-instant)] hover:text-fg focus-visible:opacity-100 group-hover/code:opacity-100"
+          className="ml-auto flex items-center gap-1 text-caption text-fg-3 opacity-0 transition-opacity duration-micro hover:text-fg focus-visible:opacity-100 group-hover/code:opacity-100"
           onClick={copy}
           aria-label={t("code.copy")}
         >

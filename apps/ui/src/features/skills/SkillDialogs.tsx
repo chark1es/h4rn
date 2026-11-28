@@ -1,11 +1,18 @@
-import { CheckIcon, FolderIcon, GitBranchIcon, Trash2Icon, TriangleAlertIcon } from "lucide-react";
+import {
+  ArrowRightIcon,
+  CheckIcon,
+  FolderIcon,
+  GitBranchIcon,
+  Trash2Icon,
+  TriangleAlertIcon,
+} from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { ChipSelect } from "@/components/common/ChipSelect";
-
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
+  DialogBody,
   DialogContent,
   DialogDescription,
   DialogFooter,
@@ -13,6 +20,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { SegmentedControl, SegmentedControlItem } from "@/components/ui/segmented-control";
 import type {
   HarnessKind,
   ProtoError,
@@ -52,8 +60,8 @@ function FieldLabel({
 }) {
   return (
     <label htmlFor={htmlFor} className="flex items-baseline justify-between">
-      <span className="text-[12px] text-[var(--fg-3)]">{children}</span>
-      {hint ? <span className="text-[11.5px] text-[var(--fg-3)]">{hint}</span> : null}
+      <span className="text-xs text-[var(--fg-3)]">{children}</span>
+      {hint ? <span className="text-xs text-[var(--fg-3)]">{hint}</span> : null}
     </label>
   );
 }
@@ -166,146 +174,143 @@ export function SkillAddDialog({ open, onClose }: { open: boolean; onClose: () =
 
   return (
     <Dialog open={open} onOpenChange={(value) => (value ? undefined : onClose())}>
-      <DialogContent className="gap-3 sm:max-w-[600px]">
+      <DialogContent>
         <DialogHeader>
           <DialogTitle>{t("skills.add.title")}</DialogTitle>
           <DialogDescription>{t("skills.add.description")}</DialogDescription>
         </DialogHeader>
-
-        <div className="grid gap-3">
-          <div className="flex flex-col gap-1">
-            <FieldLabel>{t("skills.add.source")}</FieldLabel>
-            <div className="q-seg inline" role="tablist" aria-label={t("skills.add.sourceLabel")}>
-              <button
-                type="button"
-                role="tab"
-                aria-selected={mode === "local_folder"}
-                onClick={() => setMode("local_folder")}
-              >
-                <FolderIcon className="q-icon s14" aria-hidden /> {t("skills.add.folder")}
-              </button>
-              <button
-                type="button"
-                role="tab"
-                aria-selected={mode === "git"}
-                onClick={() => setMode("git")}
-              >
-                <GitBranchIcon className="q-icon s14" aria-hidden /> {t("skills.add.git")}
-              </button>
-            </div>
-          </div>
-
-          {mode === "local_folder" ? (
+        <DialogBody>
+          <div className="grid gap-3">
             <div className="flex flex-col gap-1">
-              <FieldLabel htmlFor="skill-path">{t("skills.add.folderField")}</FieldLabel>
-              <Input
-                id="skill-path"
-                value={path}
-                onChange={(event) => setPath(event.target.value)}
-                placeholder="~/code/skills/release-notes"
-                spellCheck={false}
-                autoComplete="off"
-              />
-              <span className="text-[11.5px] text-[var(--fg-3)]">{t("skills.add.folderHint")}</span>
+              <FieldLabel>{t("skills.add.source")}</FieldLabel>
+              <SegmentedControl
+                className="self-start"
+                aria-label={t("skills.add.sourceLabel")}
+                value={mode}
+                onValueChange={(value) => {
+                  if (value === "local_folder" || value === "git") setMode(value);
+                }}
+              >
+                <SegmentedControlItem value="local_folder">
+                  <FolderIcon aria-hidden /> {t("skills.add.folder")}
+                </SegmentedControlItem>
+                <SegmentedControlItem value="git">
+                  <GitBranchIcon aria-hidden /> {t("skills.add.git")}
+                </SegmentedControlItem>
+              </SegmentedControl>
             </div>
-          ) : (
-            <>
+
+            {mode === "local_folder" ? (
               <div className="flex flex-col gap-1">
-                <FieldLabel htmlFor="skill-url">{t("fields.repository")}</FieldLabel>
+                <FieldLabel htmlFor="skill-path">{t("skills.add.folderField")}</FieldLabel>
                 <Input
-                  id="skill-url"
-                  value={url}
-                  onChange={(event) => setUrl(event.target.value)}
-                  placeholder={EXAMPLE_REPO}
+                  id="skill-path"
+                  value={path}
+                  onChange={(event) => setPath(event.target.value)}
+                  placeholder="~/code/skills/release-notes"
                   spellCheck={false}
                   autoComplete="off"
                 />
+                <span className="text-xs text-[var(--fg-3)]">{t("skills.add.folderHint")}</span>
               </div>
-              <div className="grid gap-3 sm:grid-cols-2">
+            ) : (
+              <>
                 <div className="flex flex-col gap-1">
-                  <FieldLabel htmlFor="skill-commit" hint={t("skills.add.commitHint")}>
-                    {t("skills.add.commit")}
-                  </FieldLabel>
+                  <FieldLabel htmlFor="skill-url">{t("fields.repository")}</FieldLabel>
                   <Input
-                    id="skill-commit"
-                    value={commit}
-                    onChange={(event) => setCommit(event.target.value)}
-                    placeholder="main"
+                    id="skill-url"
+                    value={url}
+                    onChange={(event) => setUrl(event.target.value)}
+                    placeholder={EXAMPLE_REPO}
                     spellCheck={false}
                     autoComplete="off"
                   />
                 </div>
-                <div className="flex flex-col gap-1">
-                  <FieldLabel htmlFor="skill-subdir" hint={t("fields.optional")}>
-                    {t("skills.add.subdir")}
-                  </FieldLabel>
-                  <Input
-                    id="skill-subdir"
-                    value={subdir}
-                    onChange={(event) => setSubdir(event.target.value)}
-                    placeholder="skills/release-notes"
-                    spellCheck={false}
-                    autoComplete="off"
-                  />
-                </div>
-              </div>
-            </>
-          )}
-
-          <div className="flex flex-col gap-1">
-            <FieldLabel htmlFor="skill-name" hint={t("fields.optional")}>
-              {t("skills.add.nameOverride")}
-            </FieldLabel>
-            <Input
-              id="skill-name"
-              value={name}
-              onChange={(event) => setName(event.target.value)}
-              placeholder="release-notes"
-              spellCheck={false}
-              autoComplete="off"
-            />
-          </div>
-
-          <div className="flex flex-col gap-1.5">
-            <span className="text-[12px] text-[var(--fg-3)]">{t("skills.add.installFor")}</span>
-            <div className="grid grid-cols-2 gap-1.5">
-              {ALL_HARNESSES.map((harness) => {
-                const state = availability.find((entry) => entry.harness === harness);
-                const checked = harnesses.includes(harness);
-                return (
-                  <label
-                    key={harness}
-                    className="flex flex-wrap items-center gap-x-2 rounded-[6px] bg-bg-raised px-2 py-1.5 text-[12.5px] text-fg shadow-[inset_0_0_0_1px_var(--line-2)]"
-                  >
-                    <input
-                      type="checkbox"
-                      checked={checked}
-                      onChange={() => toggle(harness)}
-                      aria-label={t("skills.add.installForOne", {
-                        harness: HARNESS_LABELS[harness],
-                      })}
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <div className="flex flex-col gap-1">
+                    <FieldLabel htmlFor="skill-commit" hint={t("skills.add.commitHint")}>
+                      {t("skills.add.commit")}
+                    </FieldLabel>
+                    <Input
+                      id="skill-commit"
+                      value={commit}
+                      onChange={(event) => setCommit(event.target.value)}
+                      placeholder="main"
+                      spellCheck={false}
+                      autoComplete="off"
                     />
-                    <span className="grow">{HARNESS_LABELS[harness]}</span>
-                    {state && !state.detected ? (
-                      <span className="text-[11px] text-[var(--fg-3)]">
-                        {t("skills.add.notDetected")}
-                      </span>
-                    ) : null}
-                  </label>
-                );
-              })}
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    <FieldLabel htmlFor="skill-subdir" hint={t("fields.optional")}>
+                      {t("skills.add.subdir")}
+                    </FieldLabel>
+                    <Input
+                      id="skill-subdir"
+                      value={subdir}
+                      onChange={(event) => setSubdir(event.target.value)}
+                      placeholder="skills/release-notes"
+                      spellCheck={false}
+                      autoComplete="off"
+                    />
+                  </div>
+                </div>
+              </>
+            )}
+
+            <div className="flex flex-col gap-1">
+              <FieldLabel htmlFor="skill-name" hint={t("fields.optional")}>
+                {t("skills.add.nameOverride")}
+              </FieldLabel>
+              <Input
+                id="skill-name"
+                value={name}
+                onChange={(event) => setName(event.target.value)}
+                placeholder="release-notes"
+                spellCheck={false}
+                autoComplete="off"
+              />
             </div>
+
+            <div className="flex flex-col gap-1.5">
+              <span className="text-xs text-[var(--fg-3)]">{t("skills.add.installFor")}</span>
+              <div className="grid grid-cols-2 gap-1.5">
+                {ALL_HARNESSES.map((harness) => {
+                  const state = availability.find((entry) => entry.harness === harness);
+                  const checked = harnesses.includes(harness);
+                  return (
+                    <label
+                      key={harness}
+                      className="flex flex-wrap items-center gap-x-2 rounded-md bg-bg-raised px-2 py-1.5 text-sm text-fg shadow-[inset_0_0_0_1px_var(--line-2)]"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={() => toggle(harness)}
+                        aria-label={t("skills.add.installForOne", {
+                          harness: HARNESS_LABELS[harness],
+                        })}
+                      />
+                      <span className="grow">{HARNESS_LABELS[harness]}</span>
+                      {state && !state.detected ? (
+                        <span className="text-xs text-[var(--fg-3)]">
+                          {t("skills.add.notDetected")}
+                        </span>
+                      ) : null}
+                    </label>
+                  );
+                })}
+              </div>
+            </div>
+
+            {problem ? (
+              <div className="q-banner err">
+                {problem === "secret"
+                  ? t("skills.secretRefusal")
+                  : t(`skills.add.problems.${problem}`)}
+              </div>
+            ) : null}
           </div>
-
-          {problem ? (
-            <div className="q-banner err">
-              {problem === "secret"
-                ? t("skills.secretRefusal")
-                : t(`skills.add.problems.${problem}`)}
-            </div>
-          ) : null}
-        </div>
-
+        </DialogBody>
         <DialogFooter>
           <Button variant="ghost" onClick={onClose}>
             {t("common:cancel")}
@@ -428,118 +433,120 @@ export function SkillImportDialog({ open, onClose }: { open: boolean; onClose: (
 
   return (
     <Dialog open={open} onOpenChange={(value) => (value ? undefined : onClose())}>
-      <DialogContent className="gap-3 sm:max-w-[680px]">
+      <DialogContent size="lg">
         <DialogHeader>
           <DialogTitle>{t("skills.import.title")}</DialogTitle>
           <DialogDescription>{t("skills.import.description")}</DialogDescription>
         </DialogHeader>
+        <DialogBody>
+          <label className="q-skill-manage">
+            <input
+              type="checkbox"
+              className="sr-only"
+              checked={manage}
+              onChange={(event) => setManage(event.target.checked)}
+            />
+            <span className={cn("q-check", manage && "on")} aria-hidden>
+              {manage ? <CheckIcon className="q-icon s14" strokeWidth={2} /> : null}
+            </span>
+            <span>
+              <span className="q-skill-manage-t">{t("skills.import.manageTitle")}</span>
+              <span className="q-skill-manage-s">{t("skills.import.manageBody")}</span>
+            </span>
+          </label>
 
-        <label className="q-skill-manage">
-          <input
-            type="checkbox"
-            className="sr-only"
-            checked={manage}
-            onChange={(event) => setManage(event.target.checked)}
-          />
-          <span className={cn("q-check", manage && "on")} aria-hidden>
-            {manage ? <CheckIcon className="q-icon s12" strokeWidth={2} /> : null}
-          </span>
-          <span>
-            <span className="q-skill-manage-t">{t("skills.import.manageTitle")}</span>
-            <span className="q-skill-manage-s">{t("skills.import.manageBody")}</span>
-          </span>
-        </label>
-
-        <div className="q-sec-h">
-          <h2>{t("skills.import.found")}</h2>
-          <span className="aside">
-            {busy && !preview
-              ? t("skills.import.scanning")
-              : preview
-                ? t("skills.import.summary", {
-                    pending,
-                    handled: candidates.length - pending,
-                  })
-                : null}
-          </span>
-        </div>
-
-        <div className="q-list" style={{ maxHeight: 320, overflow: "auto" }}>
-          {busy && !preview ? (
-            <div className="q-li">
-              <span className="q-faint">{t("skills.import.scanningFolders")}</span>
-            </div>
-          ) : !preview ? (
-            <div className="q-li">
-              <span className="q-faint">{t("skills.import.noResults")}</span>
-            </div>
-          ) : candidates.length === 0 ? (
-            <div className="q-li">
-              <span className="q-faint">{t("skills.import.none")}</span>
-            </div>
-          ) : (
-            candidates.map((candidate) => {
-              const kind = candidateKind(candidate);
-              const enabled = selectable(candidate);
-              const tone = KIND_TONE[kind];
-              const on = enabled && Boolean(selected[candidate.id]);
-              return (
-                <label
-                  key={candidate.id}
-                  className={cn("q-li", !enabled && "q-li-off")}
-                  style={{ cursor: enabled ? "pointer" : "default" }}
-                >
-                  <input
-                    type="checkbox"
-                    className="sr-only"
-                    checked={on}
-                    disabled={!enabled}
-                    onChange={(event) =>
-                      setSelected((current) => ({
-                        ...current,
-                        [candidate.id]: event.target.checked,
-                      }))
-                    }
-                    aria-label={t("skills.import.bringIn", { name: candidate.name })}
-                  />
-                  <span className={cn("q-check", on && "on")} aria-hidden>
-                    {on ? <CheckIcon className="q-icon s12" strokeWidth={2} /> : null}
-                  </span>
-                  <div className="grow" style={{ minWidth: 0 }}>
-                    <div className="t">{candidate.name}</div>
-                    <div className="s truncate">
-                      {HARNESS_LABELS[candidate.harness]} ·{" "}
-                      <span className="q-mono">{candidate.source_path}</span>
-                    </div>
-                    {candidate.conflict ? (
-                      <div
-                        className="q-warn"
-                        style={{ display: "flex", gap: 4, fontSize: 12, marginTop: 3 }}
-                      >
-                        <TriangleAlertIcon
-                          className="q-icon s12"
-                          style={{ flex: "none", marginTop: 2 }}
-                          aria-hidden
-                        />
-                        <span>{t("skills.import.conflict", { conflict: candidate.conflict })}</span>
-                      </div>
-                    ) : null}
-                  </div>
-                  <span className={cn("q-badge", tone)}>{t(`skills.import.kinds.${kind}`)}</span>
-                </label>
-              );
-            })
-          )}
-        </div>
-
-        {problem ? (
-          <div className="q-banner err">
-            {problem.kind === "scanFailed"
-              ? t("skills.import.problems.scanFailed", { message: problem.message })
-              : t(`skills.import.problems.${problem.kind}`)}
+          <div className="q-sec-h">
+            <h2>{t("skills.import.found")}</h2>
+            <span className="aside">
+              {busy && !preview
+                ? t("skills.import.scanning")
+                : preview
+                  ? t("skills.import.summary", {
+                      pending,
+                      handled: candidates.length - pending,
+                    })
+                  : null}
+            </span>
           </div>
-        ) : null}
 
+          <div className="q-list" style={{ maxHeight: 320, overflow: "auto" }}>
+            {busy && !preview ? (
+              <div className="q-li">
+                <span className="q-faint">{t("skills.import.scanningFolders")}</span>
+              </div>
+            ) : !preview ? (
+              <div className="q-li">
+                <span className="q-faint">{t("skills.import.noResults")}</span>
+              </div>
+            ) : candidates.length === 0 ? (
+              <div className="q-li">
+                <span className="q-faint">{t("skills.import.none")}</span>
+              </div>
+            ) : (
+              candidates.map((candidate) => {
+                const kind = candidateKind(candidate);
+                const enabled = selectable(candidate);
+                const tone = KIND_TONE[kind];
+                const on = enabled && Boolean(selected[candidate.id]);
+                return (
+                  <label
+                    key={candidate.id}
+                    className={cn("q-li", !enabled && "q-li-off")}
+                    style={{ cursor: enabled ? "pointer" : "default" }}
+                  >
+                    <input
+                      type="checkbox"
+                      className="sr-only"
+                      checked={on}
+                      disabled={!enabled}
+                      onChange={(event) =>
+                        setSelected((current) => ({
+                          ...current,
+                          [candidate.id]: event.target.checked,
+                        }))
+                      }
+                      aria-label={t("skills.import.bringIn", { name: candidate.name })}
+                    />
+                    <span className={cn("q-check", on && "on")} aria-hidden>
+                      {on ? <CheckIcon className="q-icon s14" strokeWidth={2} /> : null}
+                    </span>
+                    <div className="grow" style={{ minWidth: 0 }}>
+                      <div className="t">{candidate.name}</div>
+                      <div className="s truncate">
+                        {HARNESS_LABELS[candidate.harness]} ·{" "}
+                        <span className="q-mono">{candidate.source_path}</span>
+                      </div>
+                      {candidate.conflict ? (
+                        <div
+                          className="q-warn"
+                          style={{ display: "flex", gap: 4, fontSize: 12, marginTop: 3 }}
+                        >
+                          <TriangleAlertIcon
+                            className="q-icon s14"
+                            style={{ flex: "none", marginTop: 2 }}
+                            aria-hidden
+                          />
+                          <span>
+                            {t("skills.import.conflict", { conflict: candidate.conflict })}
+                          </span>
+                        </div>
+                      ) : null}
+                    </div>
+                    <span className={cn("q-badge", tone)}>{t(`skills.import.kinds.${kind}`)}</span>
+                  </label>
+                );
+              })
+            )}
+          </div>
+
+          {problem ? (
+            <div className="q-banner err">
+              {problem.kind === "scanFailed"
+                ? t("skills.import.problems.scanFailed", { message: problem.message })
+                : t(`skills.import.problems.${problem.kind}`)}
+            </div>
+          ) : null}
+        </DialogBody>
         <DialogFooter>
           <Button variant="ghost" onClick={onClose}>
             {t("common:cancel")}
@@ -615,149 +622,153 @@ export function SkillDetailsDialog({
 
   return (
     <Dialog open={open} onOpenChange={(value) => (value ? undefined : onClose())}>
-      <DialogContent className="gap-3 sm:max-w-[700px]">
+      <DialogContent size="lg">
         <DialogHeader>
           <DialogTitle>{skill.name}</DialogTitle>
           <DialogDescription>{skill.description}</DialogDescription>
         </DialogHeader>
-
-        <div className="grid gap-1 text-[12.5px]">
-          <div className="flex items-baseline gap-2">
-            <span className="w-24 text-[var(--fg-3)]">{t("skills.details.version")}</span>
-            <span className="q-mono">{skill.version.slice(0, 12)}</span>
-            <span className="q-faint">· {bytes(skill.total_bytes)}</span>
-          </div>
-          <div className="flex items-baseline gap-2">
-            <span className="w-24 text-[var(--fg-3)]">{t("skills.details.source")}</span>
-            <span className="q-mono break-all">{sourceLabel(skill.source)}</span>
-          </div>
-          <div className="flex items-baseline gap-2">
-            <span className="w-24 text-[var(--fg-3)]">{t("skills.details.updated")}</span>
-            <span>
-              {formatDateTime(skill.updated_at)}{" "}
-              <span className="q-faint">({formatRelativeTime(skill.updated_at)})</span>
-            </span>
-          </div>
-        </div>
-
-        <div className="q-sec-h" style={{ marginTop: 4 }}>
-          <h2>{t("skills.details.installs")}</h2>
-          <span className="aside">{t("skills.details.thisMachine")}</span>
-        </div>
-        <table className="q-tbl">
-          <thead>
-            <tr>
-              <th style={{ width: "22%" }}>{t("fields.harness")}</th>
-              <th style={{ width: "18%" }}>{t("skills.details.version")}</th>
-              <th style={{ width: "16%" }}>{t("skills.details.state")}</th>
-              <th>{t("skills.details.path")}</th>
-            </tr>
-          </thead>
-          <tbody>
-            {skill.installs.map((install) => (
-              <tr key={install.harness}>
-                <td>{HARNESS_LABELS[install.harness]}</td>
-                <td className="q-mono">{install.version?.slice(0, 8) ?? "—"}</td>
-                <td>
-                  {install.installed ? (
-                    <span className={install.enabled ? "q-ok" : "q-faint"}>
-                      {install.enabled ? t("skills.details.enabled") : t("skills.details.disabled")}
-                      {" · "}
-                      {install.managed ? t("skills.details.managed") : t("skills.details.userCopy")}
-                    </span>
-                  ) : (
-                    <span className="q-faint">{t("skills.details.notInstalled")}</span>
-                  )}
-                </td>
-                <td className="q-mono q-faint" style={{ maxWidth: 280, overflow: "hidden" }}>
-                  {install.path ?? "—"}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-
-        <div className="q-sec-h" style={{ marginTop: 4 }}>
-          <h2>{t("skills.details.compareTitle")}</h2>
-          <span className="aside">{t("skills.details.compareAside")}</span>
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <ChipSelect
-            label={t("skills.details.fromVersion")}
-            width={200}
-            value={from}
-            options={[
-              { value: "", label: t("skills.details.newSkill") },
-              ...versions.map((version) => ({ value: version, label: version.slice(0, 12) })),
-            ]}
-            onChange={setFrom}
-          />
-          <span className="q-faint">→</span>
-          <ChipSelect
-            label={t("skills.details.toVersion")}
-            width={200}
-            value={to}
-            options={versions.map((version) => ({ value: version, label: version.slice(0, 12) }))}
-            onChange={setTo}
-          />
-          <Button variant="secondary" onClick={() => void compare()} disabled={busy}>
-            {busy ? t("skills.details.comparing") : t("skills.details.compare")}
-          </Button>
-        </div>
-
-        {diff ? (
-          <div className="q-list" style={{ maxHeight: 190, overflow: "auto" }}>
-            {diff.files.length === 0 ? (
-              <div className="q-li">
-                <span className="q-faint">{t("skills.details.same")}</span>
-              </div>
-            ) : (
-              diff.files.map((file) => (
-                <div className="q-li" key={file.path}>
-                  <span
-                    className={cn(
-                      "q-badge",
-                      file.change === "added" && "ok",
-                      file.change === "removed" && "danger",
-                    )}
-                  >
-                    {t(`skills.details.change.${file.change}`)}
-                  </span>
-                  <span className="grow q-mono" style={{ fontSize: 12 }}>
-                    {file.path}
-                  </span>
-                  <span className="q-faint q-num" style={{ fontSize: 11.5 }}>
-                    {file.old_size !== null ? bytes(file.old_size) : "—"} →{" "}
-                    {file.new_size !== null ? bytes(file.new_size) : "—"}
-                  </span>
-                </div>
-              ))
-            )}
-          </div>
-        ) : null}
-
-        {problem ? (
-          <div className="q-banner err">{t(`skills.details.problems.${problem}`)}</div>
-        ) : null}
-
-        {confirmRemove ? (
-          <div className="q-conflict">
-            <TriangleAlertIcon className="q-icon q-warn" aria-hidden />
-            <div className="grow">
-              <div className="t">{t("skills.details.removeTitle", { name: skill.name })}</div>
-              <div className="q-muted" style={{ fontSize: 12, marginTop: 2 }}>
-                {t("skills.details.removeBody")}
-              </div>
+        <DialogBody>
+          <div className="grid gap-1 text-sm">
+            <div className="flex items-baseline gap-2">
+              <span className="w-24 text-[var(--fg-3)]">{t("skills.details.version")}</span>
+              <span className="q-mono">{skill.version.slice(0, 12)}</span>
+              <span className="q-faint">· {bytes(skill.total_bytes)}</span>
             </div>
-            <Button variant="ghost" size="sm" onClick={() => setConfirmRemove(false)}>
-              {t("common:cancel")}
-            </Button>
-            <Button variant="destructive" size="sm" onClick={() => void remove()} disabled={busy}>
-              {busy ? t("removing") : t("common:remove")}
+            <div className="flex items-baseline gap-2">
+              <span className="w-24 text-[var(--fg-3)]">{t("skills.details.source")}</span>
+              <span className="q-mono break-all">{sourceLabel(skill.source)}</span>
+            </div>
+            <div className="flex items-baseline gap-2">
+              <span className="w-24 text-[var(--fg-3)]">{t("skills.details.updated")}</span>
+              <span>
+                {formatDateTime(skill.updated_at)}{" "}
+                <span className="q-faint">({formatRelativeTime(skill.updated_at)})</span>
+              </span>
+            </div>
+          </div>
+
+          <div className="q-sec-h" style={{ marginTop: 4 }}>
+            <h2>{t("skills.details.installs")}</h2>
+            <span className="aside">{t("skills.details.thisMachine")}</span>
+          </div>
+          <table className="q-tbl">
+            <thead>
+              <tr>
+                <th style={{ width: "22%" }}>{t("fields.harness")}</th>
+                <th style={{ width: "18%" }}>{t("skills.details.version")}</th>
+                <th style={{ width: "16%" }}>{t("skills.details.state")}</th>
+                <th>{t("skills.details.path")}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {skill.installs.map((install) => (
+                <tr key={install.harness}>
+                  <td>{HARNESS_LABELS[install.harness]}</td>
+                  <td className="q-mono">{install.version?.slice(0, 8) ?? "—"}</td>
+                  <td>
+                    {install.installed ? (
+                      <span className={install.enabled ? "q-ok" : "q-faint"}>
+                        {install.enabled
+                          ? t("skills.details.enabled")
+                          : t("skills.details.disabled")}
+                        {" · "}
+                        {install.managed
+                          ? t("skills.details.managed")
+                          : t("skills.details.userCopy")}
+                      </span>
+                    ) : (
+                      <span className="q-faint">{t("skills.details.notInstalled")}</span>
+                    )}
+                  </td>
+                  <td className="q-mono q-faint" style={{ maxWidth: 280, overflow: "hidden" }}>
+                    {install.path ?? "—"}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+
+          <div className="q-sec-h" style={{ marginTop: 4 }}>
+            <h2>{t("skills.details.compareTitle")}</h2>
+            <span className="aside">{t("skills.details.compareAside")}</span>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <ChipSelect
+              label={t("skills.details.fromVersion")}
+              className="w-50"
+              value={from}
+              options={[
+                { value: "", label: t("skills.details.newSkill") },
+                ...versions.map((version) => ({ value: version, label: version.slice(0, 12) })),
+              ]}
+              onChange={setFrom}
+            />
+            <ArrowRightIcon className="q-icon s14 q-faint" strokeWidth={1.5} aria-hidden />
+            <ChipSelect
+              label={t("skills.details.toVersion")}
+              className="w-50"
+              value={to}
+              options={versions.map((version) => ({ value: version, label: version.slice(0, 12) }))}
+              onChange={setTo}
+            />
+            <Button variant="secondary" onClick={() => void compare()} disabled={busy}>
+              {busy ? t("skills.details.comparing") : t("skills.details.compare")}
             </Button>
           </div>
-        ) : null}
 
+          {diff ? (
+            <div className="q-list" style={{ maxHeight: 190, overflow: "auto" }}>
+              {diff.files.length === 0 ? (
+                <div className="q-li">
+                  <span className="q-faint">{t("skills.details.same")}</span>
+                </div>
+              ) : (
+                diff.files.map((file) => (
+                  <div className="q-li" key={file.path}>
+                    <span
+                      className={cn(
+                        "q-badge",
+                        file.change === "added" && "ok",
+                        file.change === "removed" && "danger",
+                      )}
+                    >
+                      {t(`skills.details.change.${file.change}`)}
+                    </span>
+                    <span className="grow q-mono" style={{ fontSize: 12 }}>
+                      {file.path}
+                    </span>
+                    <span className="q-faint q-num" style={{ fontSize: 12 }}>
+                      {file.old_size !== null ? bytes(file.old_size) : "—"} →{" "}
+                      {file.new_size !== null ? bytes(file.new_size) : "—"}
+                    </span>
+                  </div>
+                ))
+              )}
+            </div>
+          ) : null}
+
+          {problem ? (
+            <div className="q-banner err">{t(`skills.details.problems.${problem}`)}</div>
+          ) : null}
+
+          {confirmRemove ? (
+            <div className="q-conflict">
+              <TriangleAlertIcon className="q-icon q-warn" aria-hidden />
+              <div className="grow">
+                <div className="t">{t("skills.details.removeTitle", { name: skill.name })}</div>
+                <div className="q-muted" style={{ fontSize: 12, marginTop: 2 }}>
+                  {t("skills.details.removeBody")}
+                </div>
+              </div>
+              <Button variant="ghost" size="sm" onClick={() => setConfirmRemove(false)}>
+                {t("common:cancel")}
+              </Button>
+              <Button variant="destructive" size="sm" onClick={() => void remove()} disabled={busy}>
+                {busy ? t("removing") : t("common:remove")}
+              </Button>
+            </div>
+          ) : null}
+        </DialogBody>
         <DialogFooter>
           {confirmRemove ? null : (
             <Button variant="ghost" onClick={() => setConfirmRemove(true)}>

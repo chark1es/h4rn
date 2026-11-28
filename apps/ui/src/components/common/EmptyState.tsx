@@ -1,9 +1,8 @@
 import type { LucideIcon } from "lucide-react";
 import type { ReactNode } from "react";
 import { Trans, useTranslation } from "react-i18next";
-
+import { Kbd } from "@/components/ui/kbd";
 import { cn } from "@/lib/utils";
-import { Kbd } from "./Kbd";
 
 /** An empty state teaches what would appear here and offers one next action. */
 export function EmptyState({
@@ -32,7 +31,7 @@ export function EmptyState({
         className,
       )}
     >
-      <span className="flex size-10 items-center justify-center rounded-md border border-line bg-bg-side text-fg-2">
+      <span className="flex size-10 items-center justify-center rounded-lg border border-line bg-bg-side text-fg-2">
         <Icon className="size-5" strokeWidth={1.5} aria-hidden />
       </span>
       <div className="max-w-[44ch] space-y-1">

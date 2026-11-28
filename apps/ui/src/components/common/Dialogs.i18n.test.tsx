@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { act, cleanup, render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { formatDuration, setLocalePreference } from "@/lib/i18n";
 
@@ -30,6 +30,12 @@ import { expiryText } from "@/features/guest/GuestShareDialog";
 import { McpRemoveDialog } from "@/features/mcp/McpDialogs";
 import { sourceLabel } from "@/features/skills/SkillDialogs";
 import type { McpServerView } from "@/gen";
+import { stubPhoneLayout, stubPopupApis } from "@/test/popups";
+
+beforeEach(() => {
+  stubPopupApis();
+  stubPhoneLayout(false);
+});
 
 afterEach(async () => {
   cleanup();
@@ -53,15 +59,14 @@ describe("dialogs in other languages", () => {
   it("keeps English as it was", () => {
     renderConfirm();
     expect(screen.getByRole("button", { name: "Cancel" })).toBeTruthy();
-    // The dialog's own close button, read by a screen reader.
-    expect(screen.getByRole("button", { name: "Close" })).toBeTruthy();
+    // An alert dialog is answered, not dismissed: no close button.
+    expect(screen.queryByRole("button", { name: "Close" })).toBeNull();
   });
 
-  it("translates the confirm's Cancel and close button, and keeps the caller's own text", async () => {
+  it("translates the confirm's Cancel, and keeps the caller's own text", async () => {
     await act(() => setLocalePreference("es"));
     renderConfirm();
     expect(screen.getByRole("button", { name: "Cancelar" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Cerrar" })).toBeTruthy();
     // The title is the caller's own text, shown as passed.
     expect(screen.getByText("Remove the worktree?")).toBeTruthy();
   });

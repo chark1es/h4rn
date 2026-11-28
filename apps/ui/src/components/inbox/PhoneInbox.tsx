@@ -124,7 +124,7 @@ export function PhoneInbox() {
                     </>
                   ) : null}
                   <ChevronDownIcon
-                    className={cn("chev q-icon s16", closed && "closed")}
+                    className={cn("chev q-icon", closed && "closed")}
                     strokeWidth={1.5}
                     aria-hidden
                   />
@@ -163,12 +163,12 @@ export function PhoneInbox() {
             aria-expanded={snoozedOpen}
             onClick={() => setSnoozedOpen((value) => !value)}
           >
-            <ClockIcon className="q-icon s16" strokeWidth={1.5} aria-hidden />
+            <ClockIcon className="q-icon" strokeWidth={1.5} aria-hidden />
             <span>{t("snoozed.title")}</span>
             <span className="q-num q-faint">{formatNumber(snoozed.length)}</span>
           </button>
         ) : null}
-        <div style={{ height: 16 }} />
+        <div className="h-4" />
       </div>
     </>
   );

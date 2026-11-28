@@ -1,9 +1,10 @@
 import { CheckIcon, CopyIcon, LinkIcon, LoaderCircleIcon, ShieldIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
-
+import { Button } from "@/components/ui/button";
 import {
   Dialog,
+  DialogBody,
   DialogContent,
   DialogDescription,
   DialogFooter,
@@ -13,7 +14,6 @@ import {
 import { useNow } from "@/hooks/use-now";
 import { formatDateTime, formatDuration, i18n } from "@/lib/i18n";
 import { pushToast, useApp } from "@/lib/store/appStore";
-import { cn } from "@/lib/utils";
 import {
   closeGuestShare,
   copyGuestLink,
@@ -88,31 +88,46 @@ export function GuestShareDialog() {
     }
   };
 
+  const create = async () => {
+    if (!threadId) return;
+    setBusy("create");
+    const created = await shareThreadWithGuest(threadId);
+    setBusy(null);
+    if (created) setCopied(false);
+  };
+
+  const errorNote = error ? (
+    <p className="q-danger m-0 text-xs" role="alert">
+      {guestErrorText(error)}
+    </p>
+  ) : null;
+
   return (
     <Dialog open={open} onOpenChange={(value) => (value ? undefined : closeGuestShare())}>
-      <DialogContent className="max-w-[520px]" aria-describedby="guest-share-description">
+      <DialogContent>
         <DialogHeader>
           <DialogTitle>{t("guest.title")}</DialogTitle>
-          <DialogDescription id="guest-share-description">
-            {t("guest.description")}
-          </DialogDescription>
+          <DialogDescription>{t("guest.description")}</DialogDescription>
         </DialogHeader>
 
         {!thread || !threadId ? null : settingsEnabled === false ? (
-          <div style={{ display: "grid", gap: 12 }}>
-            <div className="q-guest-off">
-              <ShieldIcon className="q-icon s16" strokeWidth={1.5} aria-hidden />
-              <div>
-                <div style={{ fontWeight: 500 }}>{t("guest.off.title")}</div>
-                <p className="q-muted" style={{ margin: "2px 0 0" }}>
-                  {t("guest.off.body")}
-                </p>
+          <>
+            <DialogBody>
+              <div className="q-guest-off">
+                <ShieldIcon className="q-icon" strokeWidth={1.5} aria-hidden />
+                <div>
+                  <div className="font-medium">{t("guest.off.title")}</div>
+                  <p className="q-muted mt-0.5 mb-0">{t("guest.off.body")}</p>
+                </div>
               </div>
-            </div>
+              {errorNote}
+            </DialogBody>
             <DialogFooter>
-              <button
-                type="button"
-                className="q-btn secondary"
+              <Button variant="ghost" onClick={closeGuestShare}>
+                {t("common:close")}
+              </Button>
+              <Button
+                variant="secondary"
                 disabled={busy === "settings" || settingsSaving}
                 onClick={async () => {
                   setBusy("settings");
@@ -122,156 +137,122 @@ export function GuestShareDialog() {
                 }}
               >
                 {busy === "settings" || settingsSaving ? (
-                  <LoaderCircleIcon className="q-icon s14 q-spin" aria-hidden />
+                  <LoaderCircleIcon className="animate-spin" aria-hidden />
                 ) : null}
                 {t("guest.off.turnOn")}
-              </button>
-              <button type="button" className="q-btn ghost" onClick={closeGuestShare}>
-                {t("common:close")}
-              </button>
+              </Button>
             </DialogFooter>
-          </div>
+          </>
         ) : (
-          <div style={{ display: "grid", gap: 14 }}>
-            <div className="q-field" style={{ padding: 0, border: 0 }}>
-              <div className="lab">
-                <div className="t">{t("guest.thread")}</div>
-                <div className="s">{thread.title}</div>
-              </div>
-            </div>
-
-            {loading && !sharing ? (
-              <div className="q-faint" aria-live="polite" style={{ fontSize: 12 }}>
-                {t("guest.reading")}
-              </div>
-            ) : link ? (
-              <>
-                <div style={{ display: "grid", gap: 6 }}>
-                  <span className="q-faint" style={{ fontSize: 12 }}>
-                    {t("guest.link")}
-                  </span>
-                  {link.url ? (
-                    <div style={{ display: "flex", gap: 8 }}>
-                      <input
-                        id="guest-link-url"
-                        aria-label={t("guest.linkLabel")}
-                        className="q-input q-mono"
-                        style={{ fontSize: 11.5 }}
-                        value={link.url}
-                        readOnly
-                        onFocus={(event) => event.currentTarget.select()}
-                      />
-                      <button
-                        type="button"
-                        className={cn("q-btn", copied ? "secondary" : "primary")}
-                        onClick={() => void copy()}
-                        aria-live="polite"
-                      >
-                        {copied ? (
-                          <CheckIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-                        ) : (
-                          <CopyIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-                        )}
-                        {copied ? t("common:copied") : t("common:copy")}
-                      </button>
-                    </div>
-                  ) : link.no_serving_listener ? (
-                    <p className="q-danger" role="note" style={{ margin: 0, fontSize: 12.5 }}>
-                      {t("guest.noListener")}
-                    </p>
-                  ) : (
-                    <p className="q-muted" style={{ margin: 0, fontSize: 12.5 }}>
-                      {t("guest.noUrl")}
-                    </p>
-                  )}
-                  <div className="q-faint" style={{ fontSize: 11.5 }}>
-                    {expiryText(link.expires_at, now)}
-                    {link.no_serving_listener ? null : (
-                      <> · {link.bound ? t("guest.bound") : t("guest.unbound")}</>
-                    )}
-                  </div>
-                  {link.url && isLoopbackLink(link.url) ? (
-                    <p className="q-danger" role="note" style={{ margin: 0, fontSize: 12 }}>
-                      {t("guest.loopback")}
-                    </p>
-                  ) : null}
+          <>
+            <DialogBody className="gap-3.5">
+              <div className="q-field" style={{ padding: 0, border: 0 }}>
+                <div className="lab">
+                  <div className="t">{t("guest.thread")}</div>
+                  <div className="s">{thread.title}</div>
                 </div>
-                <p className="q-muted" style={{ margin: 0, fontSize: 12.5 }}>
-                  {t("guest.sees")}
-                </p>
-                <DialogFooter>
-                  <button
-                    type="button"
-                    className="q-btn ghost q-danger"
-                    disabled={stopping || creating || busy !== null}
-                    onClick={async () => {
-                      setBusy("stop");
-                      await stopGuestSharing(threadId);
-                      setBusy(null);
-                    }}
-                  >
-                    {stopping ? (
-                      <LoaderCircleIcon className="q-icon s14 q-spin" aria-hidden />
-                    ) : null}
-                    {t("guest.stop")}
-                  </button>
-                  <button
-                    type="button"
-                    className="q-btn secondary"
-                    disabled={creating || stopping || busy !== null}
-                    onClick={async () => {
-                      setBusy("create");
-                      const created = await shareThreadWithGuest(threadId);
-                      setBusy(null);
-                      if (created) setCopied(false);
-                    }}
-                  >
-                    {creating ? (
-                      <LoaderCircleIcon className="q-icon s14 q-spin" aria-hidden />
-                    ) : (
-                      <LinkIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-                    )}
-                    {t("guest.newLink")}
-                  </button>
-                </DialogFooter>
-              </>
-            ) : (
-              <>
-                <p className="q-muted" style={{ margin: 0, fontSize: 12.5 }}>
-                  {t("guest.anyone")}
-                </p>
-                <DialogFooter>
-                  <button
-                    type="button"
-                    className="q-btn primary"
-                    disabled={creating || busy !== null}
-                    onClick={async () => {
-                      setBusy("create");
-                      const created = await shareThreadWithGuest(threadId);
-                      setBusy(null);
-                      if (created) setCopied(false);
-                    }}
-                  >
-                    {creating ? (
-                      <LoaderCircleIcon className="q-icon s14 q-spin" aria-hidden />
-                    ) : (
-                      <LinkIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-                    )}
-                    {t("guest.create")}
-                  </button>
-                  <button type="button" className="q-btn ghost" onClick={closeGuestShare}>
-                    {t("common:cancel")}
-                  </button>
-                </DialogFooter>
-              </>
-            )}
+              </div>
 
-            {error ? (
-              <p className="q-danger" role="alert" style={{ margin: 0, fontSize: 12 }}>
-                {guestErrorText(error)}
-              </p>
-            ) : null}
-          </div>
+              {loading && !sharing ? (
+                <div className="q-faint text-xs" aria-live="polite">
+                  {t("guest.reading")}
+                </div>
+              ) : link ? (
+                <>
+                  <div className="grid gap-1.5">
+                    <span className="q-faint text-xs">{t("guest.link")}</span>
+                    {link.url ? (
+                      <div className="flex gap-2">
+                        <input
+                          id="guest-link-url"
+                          aria-label={t("guest.linkLabel")}
+                          className="q-input q-mono text-xs"
+                          value={link.url}
+                          readOnly
+                          onFocus={(event) => event.currentTarget.select()}
+                        />
+                        <Button
+                          variant={copied ? "secondary" : "default"}
+                          onClick={() => void copy()}
+                          aria-live="polite"
+                        >
+                          {copied ? (
+                            <CheckIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
+                          ) : (
+                            <CopyIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
+                          )}
+                          {copied ? t("common:copied") : t("common:copy")}
+                        </Button>
+                      </div>
+                    ) : link.no_serving_listener ? (
+                      <p className="q-danger m-0 text-sm" role="note">
+                        {t("guest.noListener")}
+                      </p>
+                    ) : (
+                      <p className="q-muted m-0 text-sm">{t("guest.noUrl")}</p>
+                    )}
+                    <div className="q-faint text-xs tabular-nums">
+                      {expiryText(link.expires_at, now)}
+                      {link.no_serving_listener ? null : (
+                        <> · {link.bound ? t("guest.bound") : t("guest.unbound")}</>
+                      )}
+                    </div>
+                    {link.url && isLoopbackLink(link.url) ? (
+                      <p className="q-danger m-0 text-xs" role="note">
+                        {t("guest.loopback")}
+                      </p>
+                    ) : null}
+                  </div>
+                  <p className="q-muted m-0 text-sm">{t("guest.sees")}</p>
+                </>
+              ) : (
+                <p className="q-muted m-0 text-sm">{t("guest.anyone")}</p>
+              )}
+              {errorNote}
+            </DialogBody>
+            {loading && !sharing ? null : link ? (
+              <DialogFooter>
+                <Button
+                  variant="destructive"
+                  disabled={stopping || creating || busy !== null}
+                  onClick={async () => {
+                    setBusy("stop");
+                    await stopGuestSharing(threadId);
+                    setBusy(null);
+                  }}
+                >
+                  {stopping ? <LoaderCircleIcon className="animate-spin" aria-hidden /> : null}
+                  {t("guest.stop")}
+                </Button>
+                <Button
+                  variant="secondary"
+                  disabled={creating || stopping || busy !== null}
+                  onClick={() => void create()}
+                >
+                  {creating ? (
+                    <LoaderCircleIcon className="animate-spin" aria-hidden />
+                  ) : (
+                    <LinkIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
+                  )}
+                  {t("guest.newLink")}
+                </Button>
+              </DialogFooter>
+            ) : (
+              <DialogFooter>
+                <Button variant="ghost" onClick={closeGuestShare}>
+                  {t("common:cancel")}
+                </Button>
+                <Button disabled={creating || busy !== null} onClick={() => void create()}>
+                  {creating ? (
+                    <LoaderCircleIcon className="animate-spin" aria-hidden />
+                  ) : (
+                    <LinkIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
+                  )}
+                  {t("guest.create")}
+                </Button>
+              </DialogFooter>
+            )}
+          </>
         )}
       </DialogContent>
     </Dialog>

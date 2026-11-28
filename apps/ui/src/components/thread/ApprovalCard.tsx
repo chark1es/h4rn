@@ -1,7 +1,7 @@
 import { ChevronDownIcon, ShieldCheckIcon } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
-import { ShortcutCaps } from "@/components/common/Kbd";
+import { ShortcutCaps } from "@/components/ui/kbd";
 import { harnessLabel } from "@/lib/entities";
 import { tildePath } from "@/lib/format";
 import { respondApproval, useApp } from "@/lib/store/appStore";
@@ -50,7 +50,7 @@ export function ApprovalCard({ threadId }: { threadId: string }) {
       </div>
       {summary?.workspace_path ? (
         <div className="q-ask-sub">
-          <span className="q-mono" style={{ fontSize: 11.5 }}>
+          <span className="q-mono" style={{ fontSize: 12 }}>
             {tildePath(summary.workspace_path)}
           </span>
         </div>
@@ -80,13 +80,13 @@ export function ApprovalCard({ threadId }: { threadId: string }) {
         ) : (
           <button
             type="button"
-            className="q-btn ghost"
+            className="q-btn ghost q-inline-start"
             aria-disabled="true"
             title={t("approval.notAvailable")}
             onClick={(event) => event.preventDefault()}
           >
             {t("approval.alwaysAllow")}{" "}
-            <ChevronDownIcon className="q-icon s12" strokeWidth={1.75} aria-hidden />
+            <ChevronDownIcon className="q-icon s14" strokeWidth={1.75} aria-hidden />
           </button>
         )}
         <span className="grow" />

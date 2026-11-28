@@ -74,7 +74,7 @@
     "proxyModels_many": "{{count, number}} modelos de {{profile}}; el harness pasa por él.",
     "proxyModels_other": "{{count, number}} modelos de {{profile}}; el harness pasa por él.",
     "effort": "Esfuerzo de razonamiento",
-    "effortHint": "el valor por defecto del harness si no se elige",
+    "effortHint": "Usa el valor por defecto del harness si no se elige.",
     "speed": "Velocidad",
     "fastMode": "Modo rápido",
     "fastHint": "Nivel de servicio prioritario. Más uso.",
@@ -84,8 +84,6 @@
     "agentDecides": "El agente decide sus propias aprobaciones.",
     "modeLater": "Puedes cambiarlo después desde el compositor.",
     "where": "Dónde",
-    "whereFixed": "fijado por el agente",
-    "whereHost": "en el host",
     "whereNote": {
       "fixed": "Este agente siempre se ejecuta en su directorio configurado.",
       "git": "El agente trabaja aquí, o en su propia copia cuando se la pidas.",

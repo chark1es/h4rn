@@ -3,6 +3,9 @@ import { useEffect } from "react";
 import { useTranslation } from "react-i18next";
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
 import { ChipSelect } from "@/components/common/ChipSelect";
+import { PhoneLargeTitle } from "@/components/shell/PhoneNav";
+import { SegmentedControl, SegmentedControlItem } from "@/components/ui/segmented-control";
+import { Tip } from "@/components/ui/tooltip";
 import type {
   LimitStatus,
   UsageBucketPoint,
@@ -135,8 +138,7 @@ function ScopePicker({ compact = false }: { compact?: boolean }) {
       value={scope}
       options={options}
       onChange={setScope}
-      width={120}
-      {...(compact ? { className: "q-scope-compact" } : {})}
+      className={cn("w-30", compact && "ms-auto me-2 mt-2")}
     />
   );
 }
@@ -145,23 +147,20 @@ function RangePicker({ compact = false }: { compact?: boolean }) {
   const { t } = useTranslation("usage");
   const range = useUsage((state) => state.query.range);
   return (
-    <div
-      className={cn("q-seg", compact ? undefined : "inline")}
-      role="tablist"
+    <SegmentedControl
+      width={compact ? "full" : "auto"}
       aria-label={t("range.label")}
+      value={range}
+      onValueChange={(value) => {
+        if (value) setRange(value as typeof range);
+      }}
     >
       {RANGES.map((key) => (
-        <button
-          key={key}
-          type="button"
-          role="tab"
-          aria-selected={range === key}
-          onClick={() => setRange(key)}
-        >
+        <SegmentedControlItem key={key} value={key}>
           {t(`range.${key}`)}
-        </button>
+        </SegmentedControlItem>
       ))}
-    </div>
+    </SegmentedControl>
   );
 }
 
@@ -169,19 +168,19 @@ function GroupPicker() {
   const { t } = useTranslation("usage");
   const groupBy = useUsage((state) => state.query.groupBy);
   return (
-    <div className="q-seg inline" role="tablist" aria-label={t("groupBy.label")}>
+    <SegmentedControl
+      aria-label={t("groupBy.label")}
+      value={groupBy}
+      onValueChange={(value) => {
+        if (value) setGroupBy(value as typeof groupBy);
+      }}
+    >
       {GROUPS.map((key) => (
-        <button
-          key={key}
-          type="button"
-          role="tab"
-          aria-selected={groupBy === key}
-          onClick={() => setGroupBy(key)}
-        >
+        <SegmentedControlItem key={key} value={key}>
           {t(`groupBy.${key}`)}
-        </button>
+        </SegmentedControlItem>
       ))}
-    </div>
+    </SegmentedControl>
   );
 }
 
@@ -189,19 +188,19 @@ function MetricPicker() {
   const { t } = useTranslation("usage");
   const metric = useUsage((state) => state.query.metric);
   return (
-    <div className="q-seg inline" role="tablist" aria-label={t("metric.label")}>
+    <SegmentedControl
+      aria-label={t("metric.label")}
+      value={metric}
+      onValueChange={(value) => {
+        if (value) setMetric(value as typeof metric);
+      }}
+    >
       {METRICS.map((key) => (
-        <button
-          key={key}
-          type="button"
-          role="tab"
-          aria-selected={metric === key}
-          onClick={() => setMetric(key)}
-        >
+        <SegmentedControlItem key={key} value={key}>
           {t(`metric.${key}`)}
-        </button>
+        </SegmentedControlItem>
       ))}
-    </div>
+    </SegmentedControl>
   );
 }
 
@@ -232,13 +231,13 @@ function UsageChart({ report, metric }: { report: UsageReport; metric: ChartMetr
   if (report.buckets.length === 0) {
     return (
       <div className="q-empty" style={{ padding: "28px 0" }}>
-        <p style={{ margin: 0 }}>{t("chart.empty")}</p>
+        <p className="m-0">{t("chart.empty")}</p>
       </div>
     );
   }
 
   return (
-    <div className="q-chart-wrap" style={{ height: 220 }}>
+    <div className="q-chart-wrap h-55">
       <div
         style={{
           display: "flex",
@@ -259,7 +258,7 @@ function UsageChart({ report, metric }: { report: UsageReport; metric: ChartMetr
               bottom: `calc(24px + ${(tick / max) * 190}px)`,
               width: 42,
               textAlign: "right",
-              fontSize: 11,
+              fontSize: 12,
               color: "var(--fg-3)",
               transform: "translateY(50%)",
             }}
@@ -307,7 +306,7 @@ function UsageChart({ report, metric }: { report: UsageReport; metric: ChartMetr
                       style={{
                         height: Math.max(1, (value / max) * 186),
                         background: seriesColor(series.key, seriesIndex),
-                        borderRadius: reverseIndex === 0 ? "3px 3px 0 0" : 0,
+                        borderRadius: reverseIndex === 0 ? "4px 4px 0 0" : 0,
                       }}
                     />
                   );
@@ -316,7 +315,7 @@ function UsageChart({ report, metric }: { report: UsageReport; metric: ChartMetr
               {index % 2 === 0 || index === report.buckets.length - 1 ? (
                 <span
                   className="num"
-                  style={{ fontSize: 11, color: "var(--fg-3)", position: "absolute", bottom: -18 }}
+                  style={{ fontSize: 12, color: "var(--fg-3)", position: "absolute", bottom: -18 }}
                 >
                   {labels[index]}
                 </span>
@@ -492,8 +491,8 @@ function LimitRow({ limit }: { limit: LimitStatus }) {
   const host = thread?.host ?? limit.account ?? "h4rn";
   return (
     <div className="q-li" style={{ display: "block", padding: "10px 0" }}>
-      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
-        <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
+      <div className="flex justify-between mb-1.5">
+        <span className="inline-flex items-center gap-1">
           <EntityAvatar
             seed={harnessSeed(host, harness)}
             kind="harness"
@@ -534,9 +533,9 @@ function LimitsPanel() {
   const error = useUsage((state) => state.limitsError);
   if (loading && !limits) {
     return (
-      <div style={{ display: "grid", gap: 10 }}>
+      <div className="grid gap-2.5">
         <div className="q-skel" style={{ height: 10, width: "72%" }} />
-        <div className="q-skel" style={{ height: 6 }} />
+        <div className="q-skel h-1.5" />
         <div className="q-skel" style={{ height: 10, width: "54%" }} />
       </div>
     );
@@ -573,7 +572,7 @@ function ResetHistory() {
   }
   if (!resets || resets.history.length === 0) return null;
   return (
-    <div className="q-sec" style={{ marginTop: 24 }}>
+    <div className="q-sec mt-6">
       <div className="q-sec-h">
         <h2>{t("resets.title")}</h2>
         <span className="aside">{t("resets.aside")}</span>
@@ -615,8 +614,8 @@ function Stats({ report, phone = false }: { report: UsageReport | null; phone?: 
         {(phone ? SKELETON_STATS.slice(0, 4) : SKELETON_STATS).map((key) => (
           <div className="q-stat" key={key}>
             <div className="q-skel" style={{ height: 9, width: 64 }} />
-            <div className="q-skel" style={{ height: 18, width: 86, marginTop: 10 }} />
-            <div className="q-skel" style={{ height: 8, width: 48, marginTop: 8 }} />
+            <div className="q-skel h-4.5 w-21.5 mt-2.5" />
+            <div className="q-skel h-2 w-12 mt-2" />
           </div>
         ))}
       </div>
@@ -684,16 +683,13 @@ function ActiveIdle({ report }: { report: UsageReport }) {
       <div className="q-sec-h">
         <h2>{t("activeIdle.title")}</h2>
       </div>
-      <div className="q-split" style={{ margin: "6px 0 10px" }}>
+      <div className="q-split mt-1.5 mx-0 mb-2.5">
         <i style={{ flex: Math.max(activeWidth, 1), background: "var(--fg-2)" }} />
         <i style={{ flex: Math.max(100 - activeWidth, 1), background: "var(--fill-2)" }} />
       </div>
-      <div
-        style={{ display: "flex", justifyContent: "space-between", fontSize: 12 }}
-        className="num"
-      >
+      <div className="num flex justify-between text-xs">
         <span>
-          <b style={{ fontWeight: 500 }}>{formatSpan(active)}</b>{" "}
+          <b className="font-medium">{formatSpan(active)}</b>{" "}
           <span className="q-muted">
             {t("activeIdle.active", { percent: formatPercent(activeWidth) })}
           </span>
@@ -707,8 +703,7 @@ function ActiveIdle({ report }: { report: UsageReport }) {
         <h2>{t("limits.title")}</h2>
         <button
           type="button"
-          className="q-link"
-          style={{ fontSize: 12 }}
+          className="q-link text-xs"
           onClick={() =>
             navigate({ kind: "placeholder", surface: "settings", path: "/settings/resume" })
           }
@@ -726,15 +721,13 @@ function OfflineNote() {
   const status = useApp((state) => state.connection.status);
   if (status === "online") return null;
   return (
-    <div className="q-resume" style={{ marginBottom: 20 }}>
+    <div className="q-resume mb-5">
       <span className="q-warn">
         <TriangleAlertIcon className="q-icon s20" strokeWidth={1.5} aria-hidden />
       </span>
-      <div style={{ flex: 1 }}>
-        <div style={{ fontWeight: 600 }}>{t("offline.title")}</div>
-        <div className="q-muted" style={{ marginTop: 2, fontSize: 13 }}>
-          {t(`offline.${status}`)}
-        </div>
+      <div className="flex-1">
+        <div className="font-semibold">{t("offline.title")}</div>
+        <div className="q-muted mt-0.5 text-sm">{t(`offline.${status}`)}</div>
       </div>
       <button type="button" className="q-btn secondary" onClick={refreshUsage}>
         <RefreshCwIcon className="q-icon s14" strokeWidth={1.5} aria-hidden /> {t("common:retry")}
@@ -750,7 +743,7 @@ function EmptyOrError({ report }: { report: UsageReport | null }) {
   if (error && !report) {
     return (
       <div className="q-empty" style={{ padding: "28px 0" }}>
-        <p style={{ margin: 0 }}>{error.message}</p>
+        <p className="m-0">{error.message}</p>
         <p className="q-faint" style={{ margin: "4px 0 12px" }}>
           {error.hint ?? t("error.hint")}
         </p>
@@ -763,7 +756,7 @@ function EmptyOrError({ report }: { report: UsageReport | null }) {
   if (!report && loading) {
     return (
       <div className="q-sec">
-        <div className="q-skel" style={{ height: 220 }} />
+        <div className="q-skel h-55" />
       </div>
     );
   }
@@ -815,14 +808,9 @@ export function UsagePage() {
   if (isPhone) {
     return (
       <main className="q-main" aria-label={t("title")}>
-        <div className="q-ph-nav">
-          <span style={{ width: 44 }} />
-          <span className="ttl" />
-          <ScopePicker compact />
-        </div>
-        <h1 className="q-ph-lt">{t("title")}</h1>
+        <PhoneLargeTitle title={t("title")} actions={<ScopePicker compact />} />
         <div className="q-ph-body">
-          <div style={{ padding: "0 16px 10px" }}>
+          <div className="px-4 pb-2.5">
             <RangePicker compact />
           </div>
           <OfflineNote />
@@ -830,16 +818,8 @@ export function UsagePage() {
           <div className="q-ph-group">
             <Stats report={report} phone />
           </div>
-          <div className="q-ph-group" style={{ padding: "14px 16px" }}>
-            <div
-              style={{
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "space-between",
-                gap: 8,
-                marginBottom: 10,
-              }}
-            >
+          <div className="q-ph-group py-3 px-4">
+            <div className="mb-2.5 flex items-center justify-between gap-2">
               <GroupPicker />
               <MetricPicker />
             </div>
@@ -848,11 +828,11 @@ export function UsagePage() {
             {!report ? <EmptyOrError report={report} /> : null}
           </div>
           <div className="q-ph-gh">{t("limits.title")}</div>
-          <div className="q-ph-group" style={{ padding: "4px 16px 10px" }}>
+          <div className="q-ph-group pt-1 px-4 pb-2.5">
             <LimitsPanel />
           </div>
           <div className="q-ph-gh">{t(`breakdown.title.${groupBy}`)}</div>
-          <div className="q-ph-group" style={{ padding: "4px 16px 12px" }}>
+          <div className="q-ph-group pt-1 px-4 pb-3">
             <Breakdown report={report ?? emptyReport()} />
           </div>
         </div>
@@ -867,15 +847,16 @@ export function UsagePage() {
         <span className="grow" />
         <ScopePicker />
         <RangePicker />
-        <button
-          type="button"
-          className="q-btn secondary"
-          title={t("refresh")}
-          aria-label={t("refresh")}
-          onClick={refreshUsage}
-        >
-          <RefreshCwIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-        </button>
+        <Tip label={t("refresh")}>
+          <button
+            type="button"
+            className="q-btn secondary"
+            aria-label={t("refresh")}
+            onClick={refreshUsage}
+          >
+            <RefreshCwIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
+          </button>
+        </Tip>
       </header>
 
       <div className="q-page">
@@ -906,15 +887,7 @@ export function UsagePage() {
                   {tableView ? t("chart.viewChart") : t("chart.viewTable")}
                 </button>
               </div>
-              <div
-                style={{
-                  display: "flex",
-                  gap: 8,
-                  alignItems: "center",
-                  flexWrap: "wrap",
-                  marginBottom: 10,
-                }}
-              >
+              <div className="flex gap-2 items-center flex-wrap mb-2.5">
                 <GroupPicker />
                 <MetricPicker />
               </div>
@@ -935,7 +908,7 @@ export function UsagePage() {
               <ActiveIdle report={report} />
             ) : (
               <div className="q-sec" style={{ margin: 0 }}>
-                <div className="q-skel" style={{ height: 180 }} />
+                <div className="q-skel h-45" />
               </div>
             )}
           </div>
@@ -943,7 +916,7 @@ export function UsagePage() {
           {report ? <Breakdown report={report} /> : null}
           <ResetHistory />
           <p className="q-faint" style={{ fontSize: 12, marginTop: 16 }}>
-            <ClockIcon className="q-icon s12" aria-hidden /> {t("footnote")}
+            <ClockIcon className="q-icon s14" aria-hidden /> {t("footnote")}
           </p>
         </div>
       </div>

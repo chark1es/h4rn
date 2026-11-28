@@ -1,10 +1,11 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
 import type { ThreadSummary } from "@/gen";
 import type { StreamTurn } from "@/lib/store/projection";
 import { createThreadLog } from "@/lib/store/projection";
+import { installPopupStubs, stubPhoneLayout } from "@/test/popups";
 
 vi.mock("@/lib/store/appStore", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/store/appStore")>();
@@ -12,7 +13,7 @@ vi.mock("@/lib/store/appStore", async (importOriginal) => {
 });
 
 import { forkThread, getState, store } from "@/lib/store/appStore";
-import { ThreadHeader } from "./ThreadHeader";
+import { ThreadHeader, ViewCluster } from "./ThreadHeader";
 
 const summary: ThreadSummary = {
   thread_id: "thread_1",
@@ -91,34 +92,13 @@ function renderHeader(turns: StreamTurn[]) {
   render(<ThreadHeader summary={summary} host={undefined} onBack={() => {}} />);
 }
 
-function openMenu() {
-  const trigger = screen.getByRole("button", { name: "Thread actions" });
-  fireEvent.pointerDown(trigger, {
-    button: 0,
-    ctrlKey: false,
-    pointerType: "mouse",
+async function openMenu() {
+  await act(async () => {
+    fireEvent.click(screen.getByRole("button", { name: "Thread actions" }));
   });
-  fireEvent.click(trigger);
 }
 
-beforeAll(() => {
-  Element.prototype.hasPointerCapture ??= () => false;
-  Element.prototype.setPointerCapture ??= () => undefined;
-  Element.prototype.releasePointerCapture ??= () => undefined;
-  Object.defineProperty(window, "matchMedia", {
-    writable: true,
-    value: (query: string) => ({
-      matches: false,
-      media: query,
-      onchange: null,
-      addListener: () => undefined,
-      removeListener: () => undefined,
-      addEventListener: () => undefined,
-      removeEventListener: () => undefined,
-      dispatchEvent: () => false,
-    }),
-  });
-});
+beforeAll(installPopupStubs);
 
 describe("ThreadHeader fork from latest turn", () => {
   afterEach(() => {
@@ -128,7 +108,7 @@ describe("ThreadHeader fork from latest turn", () => {
 
   it("is disabled while the newest turn is running", async () => {
     renderHeader([turn({ status: "running" })]);
-    openMenu();
+    await openMenu();
     const item = await screen.findByRole("menuitem", { name: "Fork from latest turn" });
     expect(item.getAttribute("data-disabled")).not.toBeNull();
     fireEvent.click(item);
@@ -137,10 +117,47 @@ describe("ThreadHeader fork from latest turn", () => {
 
   it("forks the latest settled turn", async () => {
     renderHeader([turn()]);
-    openMenu();
+    await openMenu();
     const item = await screen.findByRole("menuitem", { name: "Fork from latest turn" });
     expect(item.getAttribute("data-disabled")).toBeNull();
     fireEvent.click(item);
     await waitFor(() => expect(forkThread).toHaveBeenCalledWith("thread_1", "turn_1"));
+  });
+});
+
+describe("ThreadHeader menu on phone", () => {
+  afterEach(() => {
+    cleanup();
+    stubPhoneLayout(false);
+  });
+
+  it("keeps Toggle theme and hides only Open in IDE", async () => {
+    stubPhoneLayout(true);
+    renderHeader([turn()]);
+    await openMenu();
+    expect(await screen.findByRole("menuitem", { name: /Toggle theme/ })).toBeTruthy();
+    expect(screen.queryByRole("menuitem", { name: /Open in IDE/ })).toBeNull();
+  });
+});
+
+describe("ViewCluster", () => {
+  afterEach(cleanup);
+
+  it("keeps focus on the view tabs when a key switches the view and remounts them", async () => {
+    store.setState({
+      ...getState(),
+      ui: { ...getState().ui, layout: { ...getState().ui.layout, view: "thread" } },
+    });
+    const { unmount } = render(<ViewCluster />);
+    const thread = screen.getByRole("tab", { name: "Thread" });
+    thread.focus();
+    await act(async () => {
+      fireEvent.keyDown(thread, { key: "ArrowRight" });
+    });
+    expect(getState().ui.layout.view).toBe("ide");
+    // The IDE pane mounts its own cluster in place of the thread header's.
+    unmount();
+    render(<ViewCluster />);
+    expect(document.activeElement).toBe(screen.getByRole("tab", { name: "IDE" }));
   });
 });

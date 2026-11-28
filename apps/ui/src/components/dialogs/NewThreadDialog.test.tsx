@@ -109,6 +109,7 @@ import {
   readNewThreadDraft,
   writeNewThreadDraft,
 } from "@/lib/drafts";
+import { suggestionsOf } from "@/test/popups";
 import { NewThreadDialog } from "./NewThreadDialog";
 
 function host(hostId: string, name: string): HostSummary {
@@ -267,18 +268,18 @@ describe("NewThreadDialog drafts", () => {
     mock.state.localHostId = null;
 
     render(<NewThreadDialog />);
-    await waitFor(() => expect(screen.getByRole("button", { name: "Host: alpha" })).toBeTruthy());
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "Host: alpha" })).toBeTruthy());
 
-    fireEvent.pointerDown(screen.getByRole("button", { name: "Host: alpha" }), {
+    fireEvent.pointerDown(screen.getByRole("combobox", { name: "Host: alpha" }), {
       button: 0,
       ctrlKey: false,
       pointerType: "mouse",
     });
-    const option = await screen.findByRole("menuitem", { name: /beta/ });
+    const option = await screen.findByRole("option", { name: /beta/ });
     fireEvent.click(option);
 
     await waitFor(() => expect(textarea().value).toBe("for beta"));
-    expect(screen.getByRole("button", { name: "Host: beta" })).toBeTruthy();
+    expect(screen.getByRole("combobox", { name: "Host: beta" })).toBeTruthy();
   });
 
   it("rebinds a chosen host that stops being eligible", async () => {
@@ -289,14 +290,14 @@ describe("NewThreadDialog drafts", () => {
     mock.state.localHostId = null;
 
     const view = render(<NewThreadDialog />);
-    await waitFor(() => expect(screen.getByRole("button", { name: "Host: alpha" })).toBeTruthy());
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "Host: alpha" })).toBeTruthy());
 
-    fireEvent.pointerDown(screen.getByRole("button", { name: "Host: alpha" }), {
+    fireEvent.pointerDown(screen.getByRole("combobox", { name: "Host: alpha" }), {
       button: 0,
       ctrlKey: false,
       pointerType: "mouse",
     });
-    fireEvent.click(await screen.findByRole("menuitem", { name: /beta/ }));
+    fireEvent.click(await screen.findByRole("option", { name: /beta/ }));
     await waitFor(() => expect(textarea().value).toBe("for beta"));
 
     // The user's chosen host is gone; the dialog falls back to the default.
@@ -304,7 +305,7 @@ describe("NewThreadDialog drafts", () => {
     view.rerender(<NewThreadDialog />);
 
     await waitFor(() => expect(textarea().value).toBe("for alpha"));
-    expect(screen.getByRole("button", { name: "Host: alpha" })).toBeTruthy();
+    expect(screen.getByRole("combobox", { name: "Host: alpha" })).toBeTruthy();
   });
 
   it("rebinds to the daemon's own host when it arrives before the user picks one", async () => {
@@ -315,7 +316,7 @@ describe("NewThreadDialog drafts", () => {
 
     const view = render(<NewThreadDialog />);
     await waitFor(() => expect(textarea().value).toBe(""));
-    expect(screen.getByRole("button", { name: "Host: alpha" })).toBeTruthy();
+    expect(screen.getByRole("combobox", { name: "Host: alpha" })).toBeTruthy();
 
     mock.state.hosts = {
       host_remote: host("host_remote", "alpha"),
@@ -325,7 +326,7 @@ describe("NewThreadDialog drafts", () => {
     view.rerender(<NewThreadDialog />);
 
     await waitFor(() => expect(textarea().value).toBe("local draft"));
-    expect(screen.getByRole("button", { name: "Host: zulu" })).toBeTruthy();
+    expect(screen.getByRole("combobox", { name: "Host: zulu" })).toBeTruthy();
   });
 
   it("does nothing on Cmd+Enter before a host resolves", () => {
@@ -374,21 +375,19 @@ describe("NewThreadDialog drafts", () => {
 
     render(<NewThreadDialog />);
     await waitFor(() =>
-      expect(screen.getByRole("button", { name: "Harness: Claude Code" })).toBeTruthy(),
+      expect(screen.getByRole("combobox", { name: "Harness: Claude Code" })).toBeTruthy(),
     );
-    fireEvent.pointerDown(screen.getByRole("button", { name: "Harness: Claude Code" }), {
+    fireEvent.pointerDown(screen.getByRole("combobox", { name: "Harness: Claude Code" }), {
       button: 0,
       ctrlKey: false,
       pointerType: "mouse",
     });
-    fireEvent.click(await screen.findByRole("menuitem", { name: /Demo agent/ }));
+    fireEvent.click(await screen.findByRole("option", { name: /Demo agent/ }));
 
     await waitFor(() =>
-      expect(screen.getByRole("button", { name: "Harness: Demo agent" })).toBeTruthy(),
+      expect(screen.getByRole("combobox", { name: "Harness: Demo agent" })).toBeTruthy(),
     );
-    const options = Array.from(
-      document.querySelectorAll<HTMLOptionElement>("#h4rn-models-acp option"),
-    ).map((option) => option.value);
+    const options = await suggestionsOf(screen.getByLabelText("Model"));
     expect(options).toEqual(["cached-model"]);
     expect(screen.getByText("the agent exited before the handshake")).toBeTruthy();
   });
@@ -426,16 +425,16 @@ describe("NewThreadDialog drafts", () => {
 
     render(<NewThreadDialog />);
     await waitFor(() =>
-      expect(screen.getByRole("button", { name: "Harness: Claude Code" })).toBeTruthy(),
+      expect(screen.getByRole("combobox", { name: "Harness: Claude Code" })).toBeTruthy(),
     );
-    fireEvent.pointerDown(screen.getByRole("button", { name: "Harness: Claude Code" }), {
+    fireEvent.pointerDown(screen.getByRole("combobox", { name: "Harness: Claude Code" }), {
       button: 0,
       ctrlKey: false,
       pointerType: "mouse",
     });
-    fireEvent.click(await screen.findByRole("menuitem", { name: /Demo agent/ }));
+    fireEvent.click(await screen.findByRole("option", { name: /Demo agent/ }));
     await waitFor(() =>
-      expect(screen.getByRole("button", { name: "Harness: Demo agent" })).toBeTruthy(),
+      expect(screen.getByRole("combobox", { name: "Harness: Demo agent" })).toBeTruthy(),
     );
 
     const field = document.getElementById("new-thread-model") as HTMLInputElement;
@@ -476,17 +475,17 @@ describe("NewThreadDialog drafts", () => {
 
     render(<NewThreadDialog />);
     await waitFor(() =>
-      expect(screen.getByRole("button", { name: "Harness: Claude Code" })).toBeTruthy(),
+      expect(screen.getByRole("combobox", { name: "Harness: Claude Code" })).toBeTruthy(),
     );
-    fireEvent.pointerDown(screen.getByRole("button", { name: "Harness: Claude Code" }), {
+    fireEvent.pointerDown(screen.getByRole("combobox", { name: "Harness: Claude Code" }), {
       button: 0,
       ctrlKey: false,
       pointerType: "mouse",
     });
-    fireEvent.click(await screen.findByRole("menuitem", { name: /Demo agent/ }));
+    fireEvent.click(await screen.findByRole("option", { name: /Demo agent/ }));
 
     await waitFor(() => expect(screen.getByText("Mode is managed by the agent.")).toBeTruthy());
-    expect(screen.queryByRole("button", { name: "Mode: Approval required" })).toBeNull();
+    expect(screen.queryByRole("combobox", { name: "Mode: Approval required" })).toBeNull();
     expect(screen.queryByText("Can be changed later from the composer.")).toBeNull();
   });
 
@@ -522,14 +521,14 @@ describe("NewThreadDialog drafts", () => {
 
     render(<NewThreadDialog />);
     await waitFor(() =>
-      expect(screen.getByRole("button", { name: "Harness: Claude Code" })).toBeTruthy(),
+      expect(screen.getByRole("combobox", { name: "Harness: Claude Code" })).toBeTruthy(),
     );
-    fireEvent.pointerDown(screen.getByRole("button", { name: "Harness: Claude Code" }), {
+    fireEvent.pointerDown(screen.getByRole("combobox", { name: "Harness: Claude Code" }), {
       button: 0,
       ctrlKey: false,
       pointerType: "mouse",
     });
-    fireEvent.click(await screen.findByRole("menuitem", { name: /Demo agent/ }));
+    fireEvent.click(await screen.findByRole("option", { name: /Demo agent/ }));
 
     await waitFor(() => expect(screen.getByText("Mode is managed by the agent.")).toBeTruthy());
     for (const label of [
@@ -549,11 +548,11 @@ describe("NewThreadDialog drafts", () => {
 
     render(<NewThreadDialog />);
     await waitFor(() =>
-      expect(screen.getByRole("button", { name: "Harness: Claude Code" })).toBeTruthy(),
+      expect(screen.getByRole("combobox", { name: "Harness: Claude Code" })).toBeTruthy(),
     );
     // Claude Code has a real plan mode, so the dialog offers it and does not
     // coerce the device's Plan default to the first row.
-    await waitFor(() => expect(screen.getByRole("button", { name: "Mode: Plan" })).toBeTruthy());
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "Mode: Plan" })).toBeTruthy());
     expect(screen.getByText("Can be changed later from the composer.")).toBeTruthy();
   });
 
@@ -590,19 +589,19 @@ describe("NewThreadDialog drafts", () => {
 
     render(<NewThreadDialog />);
     await waitFor(() =>
-      expect(screen.getByRole("button", { name: "Harness: Claude Code" })).toBeTruthy(),
+      expect(screen.getByRole("combobox", { name: "Harness: Claude Code" })).toBeTruthy(),
     );
-    fireEvent.pointerDown(screen.getByRole("button", { name: "Harness: Claude Code" }), {
+    fireEvent.pointerDown(screen.getByRole("combobox", { name: "Harness: Claude Code" }), {
       button: 0,
       ctrlKey: false,
       pointerType: "mouse",
     });
-    fireEvent.click(await screen.findByRole("menuitem", { name: /Demo agent/ }));
+    fireEvent.click(await screen.findByRole("option", { name: /Demo agent/ }));
 
     // The daemon maps these ids to auto-accept-edits and full-access, so the
     // dialog offers them instead of deciding the agent manages its own mode.
     await waitFor(() =>
-      expect(screen.getByRole("button", { name: "Mode: Auto-accept edits" })).toBeTruthy(),
+      expect(screen.getByRole("combobox", { name: "Mode: Auto-accept edits" })).toBeTruthy(),
     );
   });
 
@@ -637,14 +636,14 @@ describe("NewThreadDialog drafts", () => {
 
     render(<NewThreadDialog />);
     await waitFor(() =>
-      expect(screen.getByRole("button", { name: "Harness: Claude Code" })).toBeTruthy(),
+      expect(screen.getByRole("combobox", { name: "Harness: Claude Code" })).toBeTruthy(),
     );
-    fireEvent.pointerDown(screen.getByRole("button", { name: "Harness: Claude Code" }), {
+    fireEvent.pointerDown(screen.getByRole("combobox", { name: "Harness: Claude Code" }), {
       button: 0,
       ctrlKey: false,
       pointerType: "mouse",
     });
-    fireEvent.click(await screen.findByRole("menuitem", { name: /Demo agent/ }));
+    fireEvent.click(await screen.findByRole("option", { name: /Demo agent/ }));
     await waitFor(() => expect(folderField().value).toBe("/srv/agent-home"));
     expect(folderField().disabled).toBe(true);
 
@@ -916,10 +915,7 @@ describe("NewThreadDialog drafts", () => {
       { type: "list_harness_models", host: "host_a", harness: "codex" },
       expect.anything(),
     );
-    const options = Array.from(
-      document.querySelectorAll<HTMLOptionElement>("#h4rn-models-codex option"),
-      (option) => option.value,
-    );
+    const options = await suggestionsOf(screen.getByLabelText("Model"));
     expect(options).toEqual(["default", "live-codex"]);
   });
 
@@ -973,12 +969,12 @@ describe("NewThreadDialog drafts", () => {
     await waitFor(() => expect(modelField().value).toBe("gpt-6.2-sol"));
 
     // ChipSelect fires onChange even for the row that is already selected.
-    fireEvent.pointerDown(screen.getByRole("button", { name: "Host: atlas" }), {
+    fireEvent.pointerDown(screen.getByRole("combobox", { name: "Host: atlas" }), {
       button: 0,
       ctrlKey: false,
       pointerType: "mouse",
     });
-    fireEvent.click(await screen.findByRole("menuitem", { name: /atlas/ }));
+    fireEvent.click(await screen.findByRole("option", { name: /atlas/ }));
 
     // The live catalogue still wins: reselecting must not fall back to the
     // static `gpt-5.1-codex` the installed CLI no longer lists.
@@ -998,30 +994,30 @@ describe("NewThreadDialog drafts", () => {
 
     render(<NewThreadDialog />);
     await waitFor(() =>
-      expect(screen.getByRole("button", { name: "Harness: Claude Code" })).toBeTruthy(),
+      expect(screen.getByRole("combobox", { name: "Harness: Claude Code" })).toBeTruthy(),
     );
-    fireEvent.pointerDown(screen.getByRole("button", { name: "Harness: Claude Code" }), {
+    fireEvent.pointerDown(screen.getByRole("combobox", { name: "Harness: Claude Code" }), {
       button: 0,
       ctrlKey: false,
       pointerType: "mouse",
     });
-    fireEvent.click(await screen.findByRole("menuitem", { name: /Codex/ }));
+    fireEvent.click(await screen.findByRole("option", { name: /Codex/ }));
     await waitFor(() =>
-      expect(screen.getByRole("button", { name: "Harness: Codex" })).toBeTruthy(),
+      expect(screen.getByRole("combobox", { name: "Harness: Codex" })).toBeTruthy(),
     );
     fireEvent.change(modelField(), { target: { value: "gpt-6.2-astra" } });
 
     // Picking the host that is already bound changes nothing, even though its
     // first detected harness is Claude Code.
-    fireEvent.pointerDown(screen.getByRole("button", { name: "Host: atlas" }), {
+    fireEvent.pointerDown(screen.getByRole("combobox", { name: "Host: atlas" }), {
       button: 0,
       ctrlKey: false,
       pointerType: "mouse",
     });
-    fireEvent.click(await screen.findByRole("menuitem", { name: /atlas/ }));
+    fireEvent.click(await screen.findByRole("option", { name: /atlas/ }));
 
     await waitFor(() =>
-      expect(screen.getByRole("button", { name: "Harness: Codex" })).toBeTruthy(),
+      expect(screen.getByRole("combobox", { name: "Harness: Codex" })).toBeTruthy(),
     );
     expect(modelField().value).toBe("gpt-6.2-astra");
   });

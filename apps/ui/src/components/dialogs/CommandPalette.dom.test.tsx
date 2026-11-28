@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
 import type { ThreadSummary } from "@/gen";
@@ -11,6 +11,7 @@ vi.mock("@/lib/store/appStore", async (importOriginal) => {
   return { ...actual, forkThread: vi.fn(async () => true) };
 });
 
+import { useKeyboardShortcuts } from "@/hooks/use-keyboard-shortcuts";
 import { forkThread, getState, store } from "@/lib/store/appStore";
 import { CommandPalette } from "./CommandPalette";
 
@@ -93,7 +94,7 @@ function renderPalette(turns: StreamTurn[]) {
 
 function forkItem(): HTMLElement {
   const label = screen.getByText("Fork from latest turn");
-  const item = label.closest("[cmdk-item]");
+  const item = label.closest('[data-slot="command-item"]');
   if (!(item instanceof HTMLElement)) throw new Error("the fork row is not a command item");
   return item;
 }
@@ -140,7 +141,7 @@ describe("CommandPalette fork from latest turn", () => {
   it("is disabled while the newest turn is running", async () => {
     renderPalette([turn({ status: "running" })]);
     const item = await waitFor(() => forkItem());
-    expect(item.getAttribute("data-disabled")).toBe("true");
+    expect(item.hasAttribute("data-disabled")).toBe(true);
     fireEvent.click(item);
     expect(forkThread).not.toHaveBeenCalled();
   });
@@ -148,8 +149,75 @@ describe("CommandPalette fork from latest turn", () => {
   it("forks the latest settled turn", async () => {
     renderPalette([turn()]);
     const item = await waitFor(() => forkItem());
-    expect(item.getAttribute("data-disabled")).toBe("false");
+    expect(item.hasAttribute("data-disabled")).toBe(false);
     fireEvent.click(item);
     await waitFor(() => expect(forkThread).toHaveBeenCalledWith("thread_1", "turn_1"));
+  });
+});
+
+function Shortcuts() {
+  useKeyboardShortcuts();
+  return null;
+}
+
+describe("CommandPalette keyboard", () => {
+  afterEach(() => {
+    cleanup();
+    vi.mocked(forkThread).mockClear();
+  });
+
+  it("highlights the best match as you type, runs it with Enter and moves with the arrows", async () => {
+    renderPalette([turn()]);
+    const input = screen.getByRole("combobox");
+    await act(async () => {
+      fireEvent.change(input, { target: { value: "fork" } });
+    });
+    const highlighted = () =>
+      document.querySelector('[data-slot="command-item"][data-highlighted]')?.textContent;
+    expect(highlighted()).toContain("Fork from latest turn");
+    await act(async () => {
+      fireEvent.keyDown(input, { key: "Enter" });
+    });
+    await waitFor(() => expect(forkThread).toHaveBeenCalledWith("thread_1", "turn_1"));
+  });
+
+  it("moves between rows with the arrow keys and stops at the ends, as cmdk did", async () => {
+    renderPalette([turn()]);
+    const input = screen.getByRole("combobox");
+    const items = () => [...document.querySelectorAll('[data-slot="command-item"]')];
+    const highlightedIndex = () =>
+      items().findIndex((item) => item.hasAttribute("data-highlighted"));
+    await act(async () => {
+      input.focus();
+    });
+    expect(highlightedIndex()).toBe(0);
+    await act(async () => {
+      fireEvent.keyDown(input, { key: "ArrowDown" });
+    });
+    expect(highlightedIndex()).toBe(1);
+    await act(async () => {
+      fireEvent.keyDown(input, { key: "ArrowUp" });
+      fireEvent.keyDown(input, { key: "ArrowUp" });
+    });
+    expect(highlightedIndex()).toBe(0);
+  });
+
+  it("closes on Ctrl+K through the global shortcut, which the field must not swallow", async () => {
+    render(<Shortcuts />);
+    renderPalette([turn()]);
+    const input = screen.getByRole("combobox");
+    await act(async () => {
+      input.focus();
+      fireEvent.keyDown(input, { key: "k", ctrlKey: true });
+    });
+    await waitFor(() => expect(getState().ui.paletteOpen).toBe(false));
+  });
+
+  it("closes on Escape", async () => {
+    renderPalette([turn()]);
+    await act(async () => {
+      fireEvent.keyDown(screen.getByRole("combobox"), { key: "Escape" });
+    });
+    await waitFor(() => expect(getState().ui.paletteOpen).toBe(false));
   });
 });

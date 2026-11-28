@@ -1,3 +1,4 @@
+import { Tree } from "@ui-sdk/react/tree";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it } from "vitest";
 import { PreviewFailure, PreviewPanel } from "@/features/preview/PreviewPanel";
@@ -62,15 +63,9 @@ function file(path: string, kind: FileEntry["kind"] = "file"): FileEntry {
 
 function renderRow(entry: FileEntry): string {
   return renderToStaticMarkup(
-    <WorkspaceFileRow
-      entry={entry}
-      depth={1}
-      open={false}
-      active={false}
-      onToggle={() => undefined}
-      onOpenFile={() => undefined}
-      onOpenPreview={() => undefined}
-    />,
+    <Tree aria-label="Files">
+      <WorkspaceFileRow entry={entry} depth={1} onOpenPreview={() => undefined} />
+    </Tree>,
   );
 }
 
@@ -82,9 +77,8 @@ describe("WorkspaceFileRow", () => {
   it("offers Open preview on HTML files", () => {
     const markup = renderRow(file("reports/report.html"));
     expect(markup).toContain("Open preview of report.html");
-    // The action sits beside the treeitem in a presentational wrapper, so the
-    // tree still owns the row.
-    expect(markup).toContain('role="presentation"');
+    // The action sits inside the file's own treeitem row.
+    expect(markup).toContain('role="treeitem"');
     expect(renderRow(file("reports/report.htm"))).toContain("Open preview of report.htm");
   });
 

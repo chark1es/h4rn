@@ -1,9 +1,10 @@
 import { GitPullRequestIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
-
+import { Button } from "@/components/ui/button";
 import {
   Dialog,
+  DialogBody,
   DialogContent,
   DialogDescription,
   DialogFooter,
@@ -111,7 +112,7 @@ export function LinkPullRequestDialog({
 
   return (
     <Dialog open={open} onOpenChange={(value) => (value ? undefined : onClose())}>
-      <DialogContent className="gap-3 sm:max-w-[560px]">
+      <DialogContent>
         <DialogHeader>
           <DialogTitle>{t("linkDialog.title")}</DialogTitle>
           <DialogDescription>
@@ -120,67 +121,67 @@ export function LinkPullRequestDialog({
               : t("linkDialog.noRemote")}
           </DialogDescription>
         </DialogHeader>
+        <DialogBody>
+          <div className="q-pr-link-form">
+            <Input
+              value={url}
+              onChange={(event) => setUrl(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") submitUrl();
+              }}
+              placeholder="https://github.com/owner/repo/pull/12"
+              aria-label={t("linkDialog.urlLabel")}
+              data-autofocus
+            />
+            <button
+              type="button"
+              className="q-btn primary"
+              disabled={busy || url.trim().length === 0}
+              onClick={submitUrl}
+            >
+              {t("linkDialog.link")}
+            </button>
+          </div>
 
-        <div className="q-pr-link-form">
-          <Input
-            value={url}
-            onChange={(event) => setUrl(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter") submitUrl();
-            }}
-            placeholder="https://github.com/owner/repo/pull/12"
-            aria-label={t("linkDialog.urlLabel")}
-            autoFocus
-          />
-          <button
-            type="button"
-            className="q-btn primary"
-            disabled={busy || url.trim().length === 0}
-            onClick={submitUrl}
-          >
-            {t("linkDialog.link")}
-          </button>
-        </div>
+          {error ? (
+            <p className="q-field-error" role="alert">
+              {error}
+            </p>
+          ) : null}
 
-        {error ? (
-          <p className="q-field-error" role="alert">
-            {error}
-          </p>
-        ) : null}
-
-        {loading ? (
-          <p className="q-faint" style={{ fontSize: 12 }}>
-            {t("linkDialog.reading")}
-          </p>
-        ) : candidates.length > 0 ? (
-          <ul className="q-pr-picks" aria-label={t("linkDialog.openList")}>
-            {candidates.map((pr) => (
-              <li key={pr.number}>
-                <button
-                  type="button"
-                  className="q-pr-pick"
-                  disabled={busy}
-                  onClick={() => void link(pr.repo, pr.number)}
-                  title={prWebUrl(pr.repo, pr.number)}
-                >
-                  <GitPullRequestIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-                  <span className="q-num">#{pr.number}</span>
-                  <span className="q-pr-pick-title">{pr.title}</span>
-                  <span className="q-faint">{stateLabel(pr.state).label}</span>
-                </button>
-              </li>
-            ))}
-          </ul>
-        ) : knownRepo && !loading && !error ? (
-          <p className="q-faint" style={{ fontSize: 12 }}>
-            {t("linkDialog.noneOpen", { repo: `${knownRepo.owner}/${knownRepo.repo}` })}
-          </p>
-        ) : null}
-
+          {loading ? (
+            <p className="q-faint" style={{ fontSize: 12 }}>
+              {t("linkDialog.reading")}
+            </p>
+          ) : candidates.length > 0 ? (
+            <ul className="q-pr-picks" aria-label={t("linkDialog.openList")}>
+              {candidates.map((pr) => (
+                <li key={pr.number}>
+                  <button
+                    type="button"
+                    className="q-pr-pick"
+                    disabled={busy}
+                    onClick={() => void link(pr.repo, pr.number)}
+                    title={prWebUrl(pr.repo, pr.number)}
+                  >
+                    <GitPullRequestIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
+                    <span className="q-num">#{pr.number}</span>
+                    <span className="q-pr-pick-title">{pr.title}</span>
+                    <span className="q-faint">{stateLabel(pr.state).label}</span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          ) : knownRepo && !loading && !error ? (
+            <p className="q-faint" style={{ fontSize: 12 }}>
+              {t("linkDialog.noneOpen", { repo: `${knownRepo.owner}/${knownRepo.repo}` })}
+            </p>
+          ) : null}
+        </DialogBody>
         <DialogFooter>
-          <button type="button" className="q-btn ghost" onClick={onClose}>
+          <Button variant="ghost" onClick={onClose}>
             {t("common:cancel")}
-          </button>
+          </Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

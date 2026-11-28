@@ -508,7 +508,13 @@
     "neverConnected": "从未连接",
     "confirmSignOut": "要从此设备退出登录吗？",
     "confirmDisconnect": "要断开此主机吗？",
-    "confirmRevoke": "要撤销吗？",
+    "confirmRevoke": "要撤销 {{name}} 吗？",
+    "confirmDescription": {
+      "direct": "{{name}} 将无法再连接到这台电脑。需重新配对才能使用。",
+      "revoke": "{{name}} 将失去对你账户的访问权限，直到再次登录。",
+      "disconnect": "{{name}} 将离开你的账户。在它再次登录之前，其对话不会显示在这里。",
+      "signOut": "在你再次登录之前，此设备将无法连接你的主机。"
+    },
     "signOut": "退出登录",
     "scopes": {
       "all": "全部",

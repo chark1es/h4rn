@@ -1,3 +1,4 @@
+import { Tree, TreeGroup, TreeItem, TreeItemIndicator, TreeItemLabel } from "@ui-sdk/react/tree";
 import {
   ChevronRightIcon,
   EyeIcon,
@@ -8,9 +9,10 @@ import {
   RefreshCwIcon,
   SearchIcon,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { ShortcutCaps } from "@/components/common/Kbd";
+import { ShortcutCaps } from "@/components/ui/kbd";
+import { Tip } from "@/components/ui/tooltip";
 
 import { gitBadge } from "@/features/ide/useIdeSession";
 import { isHtmlPath } from "@/features/preview/htmlPreview";
@@ -36,94 +38,115 @@ function flatten(listings: Record<string, FsListing>, expanded: Record<string, t
   return rows;
 }
 
-function entryIcon(entry: FileEntry, open: boolean) {
-  if (entry.kind === "directory") {
-    return open ? (
-      <FolderOpenIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
-    ) : (
-      <FolderIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
-    );
-  }
+const CODE_EXTENSIONS = ["ts", "tsx", "js", "jsx", "rs", "py", "go", "css", "html", "json", "toml"];
+const ROOT = ".";
+
+function FileGlyph({ entry }: { entry: FileEntry }) {
+  if (entry.kind === "directory") return <FolderGlyph />;
   const extension = entry.name.split(".").at(-1)?.toLowerCase();
-  if (
-    extension &&
-    ["ts", "tsx", "js", "jsx", "rs", "py", "go", "css", "html", "json", "toml"].includes(extension)
-  ) {
-    return <FileCodeIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />;
-  }
-  return <FileIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />;
+  const Icon = extension && CODE_EXTENSIONS.includes(extension) ? FileCodeIcon : FileIcon;
+  return <Icon className="size-3.5 shrink-0 text-fg-3" strokeWidth={1.5} aria-hidden />;
+}
+
+function FolderGlyph() {
+  return (
+    <>
+      <FolderIcon
+        className="size-3.5 shrink-0 text-fg-3 group-data-expanded/row:hidden"
+        strokeWidth={1.5}
+        aria-hidden
+      />
+      <FolderOpenIcon
+        className="hidden size-3.5 shrink-0 text-fg-3 group-data-expanded/row:block"
+        strokeWidth={1.5}
+        aria-hidden
+      />
+    </>
+  );
+}
+
+const rowClass = cn(
+  "group/row relative mx-1.5 flex h-6.5 cursor-default items-center gap-1.5 rounded-md pr-2.5 text-sm text-muted-foreground select-none",
+  "ps-[calc(var(--spacing)*2.5+var(--d,0)*var(--spacing)*3.5)]",
+  "transition-colors duration-micro ease-enter hover:bg-hover",
+  "data-selected:bg-sel data-selected:text-foreground",
+  "group-focus-visible/item:outline-2 group-focus-visible/item:-outline-offset-2 group-focus-visible/item:outline-ring",
+);
+
+function RowChevron() {
+  return (
+    <TreeItemIndicator className="grid size-3.5 shrink-0 place-items-center">
+      <ChevronRightIcon
+        className="size-3.5 text-fg-3 transition-transform duration-micro ease-enter group-data-expanded/row:rotate-90 motion-reduce:transition-none rtl:-scale-x-100"
+        strokeWidth={1.5}
+        aria-hidden
+      />
+    </TreeItemIndicator>
+  );
 }
 
 /**
- * One row of the workspace tree.
+ * One row of the workspace tree, with its children when it is an open folder.
  *
- * A file row opens the IDE when clicked. An HTML file also carries an
- * "Open preview" action beside it, so the panel's Preview tab is one click
- * away without changing what a click on the name does.
+ * A file row opens the IDE when pressed. An HTML file also carries an
+ * "Open preview" action, so the panel's Preview tab is one click away without
+ * changing what a press on the name does.
  */
 export function WorkspaceFileRow({
   entry,
   depth,
-  open,
-  active,
-  onToggle,
-  onOpenFile,
   onOpenPreview,
+  children,
 }: {
   entry: FileEntry;
   depth: number;
-  open: boolean;
-  active: boolean;
-  onToggle: (path: string) => void;
-  onOpenFile: (path: string) => void;
   onOpenPreview: (path: string) => void;
+  children?: ReactNode;
 }) {
   const { t } = useTranslation("ide");
   const badge = gitBadge(entry.git_status);
   const directory = entry.kind === "directory";
-  const row = (
-    <button
-      type="button"
-      role="treeitem"
-      aria-expanded={directory ? open : undefined}
-      aria-selected={active || undefined}
-      aria-label={entry.name}
-      title={entry.path}
-      className={cn("q-fnode", active && "sel")}
-      style={{ ["--d" as string]: depth }}
-      onClick={() => (directory ? onToggle(entry.path) : onOpenFile(entry.path))}
-    >
-      {directory ? (
-        <ChevronRightIcon
-          className={cn("q-icon s12 q-fchev", open && "open")}
-          strokeWidth={1.5}
-          aria-hidden
-        />
-      ) : (
-        <span style={{ width: 12 }} />
-      )}
-      {entryIcon(entry, open)}
-      <span className="grow q-mono" style={{ fontSize: 12 }}>
-        {entry.name}
-      </span>
-      {badge ? <span className={cn("gs", badge.tone)}>{badge.letter}</span> : null}
-    </button>
-  );
-
-  if (directory || !isHtmlPath(entry.path)) return row;
+  const preview = !directory && isHtmlPath(entry.path);
   return (
-    <div className="q-frow" role="presentation">
-      {row}
-      <button
-        type="button"
-        className="q-fopen"
-        aria-label={t("workspace.openPreviewOf", { name: entry.name })}
-        title={t("workspace.openPreview")}
-        onClick={() => onOpenPreview(entry.path)}
+    <TreeItem
+      value={entry.path}
+      branch={directory}
+      label={entry.name}
+      aria-label={entry.name}
+      className="group/item outline-none"
+    >
+      <TreeItemLabel
+        title={entry.path}
+        className={cn(rowClass, preview && "pr-8")}
+        style={{ ["--d" as string]: depth }}
       >
-        <EyeIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-      </button>
-    </div>
+        {directory ? <RowChevron /> : <span className="size-3.5 shrink-0" />}
+        <FileGlyph entry={entry} />
+        <span className="min-w-0 flex-1 truncate font-mono text-xs">{entry.name}</span>
+        {badge ? (
+          <span className={cn("shrink-0 font-mono text-xs font-medium", badge.tone)}>
+            {badge.letter}
+          </span>
+        ) : null}
+        {preview ? (
+          <Tip label={t("workspace.openPreview")}>
+            <button
+              type="button"
+              className="hit-area absolute end-1 top-0.5 grid size-5.5 place-items-center rounded-sm text-fg-3 opacity-55 transition-opacity duration-micro ease-enter outline-none group-hover/row:opacity-100 hover:bg-fill hover:text-foreground focus-visible:opacity-100 focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-ring"
+              aria-label={t("workspace.openPreviewOf", { name: entry.name })}
+              onClick={(event) => {
+                event.stopPropagation();
+                onOpenPreview(entry.path);
+              }}
+              onKeyDown={(event) => event.stopPropagation()}
+            >
+              <EyeIcon className="size-3.5" strokeWidth={1.5} aria-hidden />
+            </button>
+          </Tip>
+        ) : null}
+      </TreeItemLabel>
+      {children}
+    </TreeItem>
   );
 }
 
@@ -196,23 +219,37 @@ export function WorkspaceFiles({
     void load("");
   }, [load]);
 
-  const toggle = (path: string) => {
-    const open = expanded[path] === true;
-    setExpanded((current) => {
-      const next = { ...current };
-      if (open) delete next[path];
-      else next[path] = true;
-      return next;
-    });
-    if (!open && !listings[path]) void load(path);
-  };
+  const listingsRef = useRef(listings);
+  listingsRef.current = listings;
+  const kinds = useMemo(() => {
+    const map = new Map<string, FileEntry["kind"]>();
+    for (const listing of Object.values(listings)) {
+      for (const entry of listing.entries) map.set(entry.path, entry.kind);
+    }
+    return map;
+  }, [listings]);
+  const expandedValues = useMemo(
+    () => [...(rootOpen ? [ROOT] : []), ...Object.keys(expanded)],
+    [rootOpen, expanded],
+  );
 
-  const rows = useMemo(() => {
-    const all = flatten(listings, expanded);
-    const needle = query.trim().toLowerCase();
-    if (!needle) return all;
-    return all.filter((row) => row.entry.path.toLowerCase().includes(needle));
-  }, [listings, expanded, query]);
+  const needle = query.trim().toLowerCase();
+  const matches = useMemo(() => {
+    if (!needle) return null;
+    return flatten(listings, expanded).filter((row) =>
+      row.entry.path.toLowerCase().includes(needle),
+    );
+  }, [listings, expanded, needle]);
+  const empty = matches ? matches.length === 0 : (listings[""]?.entries.length ?? 0) === 0;
+
+  const level = (directory: string, depth: number): ReactNode =>
+    listings[directory]?.entries.map((entry) => (
+      <WorkspaceFileRow key={entry.path} entry={entry} depth={depth} onOpenPreview={onOpenPreview}>
+        {entry.kind === "directory" && expanded[entry.path] && listings[entry.path] ? (
+          <TreeGroup>{level(entry.path, depth + 1)}</TreeGroup>
+        ) : null}
+      </WorkspaceFileRow>
+    ));
 
   return (
     <>
@@ -260,51 +297,61 @@ export function WorkspaceFiles({
               {t("common:retry")}
             </button>
           </div>
-        ) : rows.length === 0 ? (
+        ) : empty ? (
           <div className="q-sub-empty">
             {query ? t("workspace.noMatch", { query }) : t("workspace.empty")}
           </div>
         ) : (
-          <div role="tree" aria-label={t("workspace.tree")}>
-            <button
-              type="button"
-              role="treeitem"
-              aria-expanded={rootOpen}
+          <Tree
+            aria-label={t("workspace.tree")}
+            value={activePath}
+            onValueChange={() => undefined}
+            expanded={expandedValues}
+            onExpandedChange={(next) => {
+              setRootOpen(next.includes(ROOT));
+              setExpanded(
+                Object.fromEntries(
+                  next.filter((value) => value !== ROOT).map((value) => [value, true as const]),
+                ),
+              );
+            }}
+            loadChildren={async (value) => {
+              if (value !== ROOT && !listingsRef.current[value]) await load(value);
+            }}
+            onAction={(value) => {
+              if (kinds.get(value) === "file") openInIde(value);
+            }}
+          >
+            <TreeItem
+              value={ROOT}
+              branch
               aria-label={workspaceName}
-              title={workspaceName}
-              className="q-fnode"
-              style={{ ["--d" as string]: 0 }}
-              onClick={() => setRootOpen((value) => !value)}
+              label={workspaceName}
+              className="group/item outline-none"
             >
-              <ChevronRightIcon
-                className={cn("q-icon s12 q-fchev", rootOpen && "open")}
-                strokeWidth={1.5}
-                aria-hidden
-              />
-              {rootOpen ? (
-                <FolderOpenIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
-              ) : (
-                <FolderIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
-              )}
-              <span className="grow q-mono" style={{ fontSize: 12 }}>
-                {workspaceName}
-              </span>
-            </button>
-            {rootOpen
-              ? rows.map((row) => (
-                  <WorkspaceFileRow
-                    key={row.entry.path}
-                    entry={row.entry}
-                    depth={row.depth + 1}
-                    open={row.entry.kind === "directory" && expanded[row.entry.path] === true}
-                    active={activePath === row.entry.path}
-                    onToggle={toggle}
-                    onOpenFile={openInIde}
-                    onOpenPreview={onOpenPreview}
-                  />
-                ))
-              : null}
-          </div>
+              <TreeItemLabel
+                title={workspaceName}
+                className={rowClass}
+                style={{ ["--d" as string]: 0 }}
+              >
+                <RowChevron />
+                <FolderGlyph />
+                <span className="min-w-0 flex-1 truncate font-mono text-xs">{workspaceName}</span>
+              </TreeItemLabel>
+              <TreeGroup>
+                {matches
+                  ? matches.map((row) => (
+                      <WorkspaceFileRow
+                        key={row.entry.path}
+                        entry={row.entry}
+                        depth={row.depth + 1}
+                        onOpenPreview={onOpenPreview}
+                      />
+                    ))
+                  : level("", 1)}
+              </TreeGroup>
+            </TreeItem>
+          </Tree>
         )}
       </div>
       {agentChanges && agentChanges.files.length > 0 ? (

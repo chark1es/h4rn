@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type {
@@ -131,7 +131,7 @@ describe("linked pull request badge and panel", () => {
 
     openBadge();
 
-    expect(screen.getByText("Linked items")).toBeTruthy();
+    expect(within(screen.getByRole("menu")).getByText("Linked items")).toBeTruthy();
     expect(screen.getByText("Add PR watch")).toBeTruthy();
     expect(screen.getByText("Old experiment")).toBeTruthy();
     expect(screen.getByText("Draft")).toBeTruthy();
@@ -169,14 +169,18 @@ describe("linked pull request badge and panel", () => {
 
     const trigger = screen.getByRole("button", { name: "Linked items" });
     trigger.focus();
-    fireEvent.keyDown(trigger, { key: "Enter" });
+    await act(async () => {
+      fireEvent.keyDown(trigger, { key: "ArrowDown" });
+    });
 
     const openRow = await screen.findByRole("menuitem", { name: /Add PR watch/ });
     fireEvent.keyDown(openRow, { key: "ArrowDown" });
     const stop = screen.getByRole("menuitem", { name: /Stop watching/ });
     await waitFor(() => expect(document.activeElement).toBe(stop));
 
-    fireEvent.keyDown(stop, { key: "Enter" });
+    await act(async () => {
+      fireEvent.keyDown(stop, { key: "Enter" });
+    });
     expect(onUnwatch).toHaveBeenCalledWith(pulls[0]);
   });
 
@@ -214,7 +218,7 @@ describe("linked pull request badge and panel", () => {
     openBadge();
 
     expect(screen.getByText("Merged")).toBeTruthy();
-    expect(screen.getByText("Closed").className).toContain("q-danger");
+    expect(screen.getByText("Closed").className).toContain("text-destructive");
     expect(screen.queryByRole("menuitem", { name: /Watch for changes/ })).toBeNull();
     expect(screen.getAllByRole("menuitem", { name: /Unlink/ })).toHaveLength(2);
   });
@@ -326,7 +330,7 @@ describe("linked pull request badge and panel", () => {
     expect(screen.queryByText(/team_uuid_1/)).toBeNull();
 
     openBadge();
-    const row = document.querySelector(".q-pr-links");
+    const row = document.querySelector('[role="menu"] [role="group"]');
     expect(row).not.toBeNull();
 
     // A failed refresh empties the live state. The row's key comes from the
@@ -345,7 +349,7 @@ describe("linked pull request badge and panel", () => {
     expect(screen.getAllByText("ENG-1").length).toBeGreaterThan(0);
     expect(screen.getByText("Rate limit the import")).toBeTruthy();
     expect(screen.getByText("the tracker did not answer")).toBeTruthy();
-    expect(document.querySelector(".q-pr-links")).toBe(row);
+    expect(document.querySelector('[role="menu"] [role="group"]')).toBe(row);
     expect(screen.queryByText(/team_uuid_1/)).toBeNull();
     expect(screen.queryByText(/issue_uuid_1/)).toBeNull();
   });

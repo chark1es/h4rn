@@ -1,11 +1,10 @@
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { ChipSelect } from "@/components/common/ChipSelect";
+import { Switch } from "@/components/ui/switch";
 import type { AutoResumePolicy } from "@/gen";
-
 import { formatDuration, formatNumber } from "@/lib/i18n";
 import { useApp } from "@/lib/store/appStore";
-
 import { loadLimits, setAutoResumePolicy, useUsage } from "./usageStore";
 
 const WAIT_CHOICES: Array<{ amount: number; unit: "minute" | "hour"; ms: number }> = [
@@ -24,16 +23,7 @@ function Toggle({
   label: string;
   onChange: (next: boolean) => void;
 }) {
-  return (
-    <button
-      type="button"
-      className="q-switch"
-      role="switch"
-      aria-checked={checked}
-      aria-label={label}
-      onClick={() => onChange(!checked)}
-    />
-  );
+  return <Switch checked={checked} aria-label={label} onCheckedChange={() => onChange(!checked)} />;
 }
 
 /**
@@ -60,8 +50,8 @@ export function AutoResumeSettings() {
     return (
       <div className="q-form">
         <h1>{t("resume.title")}</h1>
-        <div className="q-skel" style={{ height: 12, width: 240 }} />
-        <div className="q-skel" style={{ height: 120, marginTop: 18 }} />
+        <div className="q-skel h-3 w-60" />
+        <div className="q-skel h-30 mt-4" />
       </div>
     );
   }
@@ -102,7 +92,6 @@ export function AutoResumeSettings() {
             <ChipSelect<string>
               label={t("resume.longestWait")}
               value={String(draft.max_wait_ms)}
-              width={180}
               options={WAIT_CHOICES.map((choice) => ({
                 value: String(choice.ms),
                 label: formatNumber(choice.amount, {
@@ -136,7 +125,6 @@ export function AutoResumeSettings() {
               onChange={(event) =>
                 patch({ jitter_ms: Math.max(0, Number(event.target.value) || 0) * 1000 })
               }
-              style={{ maxWidth: 100, fontSize: 12 }}
             />
             <span className="q-faint" style={{ fontSize: 12 }}>
               {t("resume.seconds")}
@@ -148,9 +136,8 @@ export function AutoResumeSettings() {
             <div className="t">{t("resume.prompt")}</div>
             <div className="s">{t("resume.promptHint")}</div>
           </div>
-          <div className="ctl" style={{ display: "block" }}>
+          <div className="ctl">
             <textarea
-              className="q-input"
               value={draft.prompt}
               aria-label={t("resume.prompt")}
               rows={1}
@@ -162,18 +149,12 @@ export function AutoResumeSettings() {
                 }
               }}
               onChange={(event) => patch({ prompt: event.target.value })}
-              style={{
-                width: "100%",
-                maxWidth: 520,
-                fontSize: 12.5,
-                padding: 8,
-                resize: "none",
-                overflow: "hidden",
-              }}
+              className="q-input"
+              style={{ fontSize: 13, padding: "8px 10px", resize: "none", overflow: "hidden" }}
             />
           </div>
         </div>
-        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+        <div className="flex gap-2 justify-end pt-2.5">
           <span
             className="q-faint"
             style={{ fontSize: 12, marginRight: "auto", alignSelf: "center" }}
@@ -202,7 +183,7 @@ export function AutoResumeSettings() {
           </button>
         </div>
         {error ? (
-          <p className="q-danger" style={{ fontSize: 12, marginTop: 8 }}>
+          <p className="q-danger text-xs mt-2">
             {error.message}
             {error.hint ? ` ${error.hint}` : ""}
           </p>

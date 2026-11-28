@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { HostSummary, ThreadSummary } from "@/gen";
@@ -139,6 +139,8 @@ const thread: ThreadSummary = {
 };
 
 describe("ThreadRow", () => {
+  afterEach(cleanup);
+
   it("shows Request in the sidebar while a guest message waits", () => {
     render(
       <ThreadRow
@@ -176,5 +178,52 @@ describe("ThreadRow", () => {
       />,
     );
     expect(screen.getByText("Needs approval")).toBeTruthy();
+  });
+});
+
+describe("ThreadRow actions", () => {
+  afterEach(cleanup);
+
+  function renderRow(onAcknowledge = vi.fn()) {
+    render(
+      <ThreadRow
+        thread={{ ...thread, tab: "done", agent_state: "done" }}
+        host={host}
+        index={0}
+        selected
+        tabStop
+        now={Date.now()}
+        onOpen={vi.fn()}
+        onAcknowledge={onAcknowledge}
+        onSettle={vi.fn()}
+        onReopen={vi.fn()}
+        onPin={vi.fn()}
+        onSnooze={vi.fn()}
+      />,
+    );
+    return onAcknowledge;
+  }
+
+  it("keeps buttons out of the option", () => {
+    renderRow();
+    const option = screen.getByRole("option");
+    expect(option.querySelector("button")).toBeNull();
+    expect(screen.getByRole("button", { name: /Actions for/ }).tabIndex).toBe(0);
+  });
+
+  it("opens the row menu from the keyboard's context menu key and runs an item", async () => {
+    const onAcknowledge = renderRow();
+    const option = screen.getByRole("option");
+    option.focus();
+    await act(async () => {
+      // Browsers turn Shift+F10 and the menu key into a contextmenu event on the focused element.
+      fireEvent.contextMenu(option);
+    });
+    const item = screen.getByRole("menuitem", { name: "Acknowledge" });
+    expect(item.getAttribute("aria-keyshortcuts")).toMatch(/Alt\+A$/);
+    await act(async () => {
+      fireEvent.click(item);
+    });
+    expect(onAcknowledge).toHaveBeenCalledTimes(1);
   });
 });

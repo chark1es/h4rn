@@ -14,19 +14,24 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-
 import { AgentGlyph } from "@/components/agent/AgentGlyph";
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
 import { ChipSelect } from "@/components/common/ChipSelect";
+import { PhoneLargeTitle, PhoneNavButton } from "@/components/shell/PhoneNav";
 import { Markdown } from "@/components/thread/Markdown";
+import { Button } from "@/components/ui/button";
 import {
   Dialog,
+  DialogBody,
   DialogContent,
   DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { SegmentedControl, SegmentedControlItem } from "@/components/ui/segmented-control";
+import { Tabs, TabsCount, TabsList, TabsTab } from "@/components/ui/tabs";
+import { Tip } from "@/components/ui/tooltip";
 import {
   accountForRepo,
   appendComment,
@@ -63,6 +68,7 @@ import type {
   PrLinkedThread,
   ThreadSummary,
 } from "@/gen";
+import { useIsPhone } from "@/hooks/use-media-query";
 import { glyphForThread } from "@/lib/agent";
 import { userSeed } from "@/lib/entities";
 import { formatAge, formatList, formatNumber, formatRelativeTime } from "@/lib/i18n";
@@ -165,7 +171,7 @@ function TabError({
 /** One tab's request still in flight, shown inside the tab. */
 function TabLoading({ label }: { label: string }) {
   return (
-    <p className="q-faint" role="status" style={{ margin: "12px 0", fontSize: 12.5 }}>
+    <p className="q-faint" role="status" style={{ margin: "12px 0", fontSize: 13 }}>
       {label}
     </p>
   );
@@ -193,7 +199,7 @@ function ChecksActions({
   const rerun = rerunAction(checks);
   const blocked = rerun.kind !== "ready";
   return (
-    <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
+    <div className="flex gap-1.5 mt-2">
       {log?.details_url ? (
         <a
           className="q-btn secondary"
@@ -234,9 +240,9 @@ function PrSkeleton() {
   return (
     <div className="q-page" role="status" aria-busy="true" aria-label={t("loading")}>
       <div style={{ maxWidth: 860, margin: "0 auto", padding: "24px 32px" }}>
-        <div className="q-skel" style={{ width: 220, height: 20, marginBottom: 18 }} />
+        <div className="q-skel w-55 h-5 mb-4" />
         {[0, 1, 2, 3].map((row) => (
-          <div key={row} className="q-skel" style={{ height: 52, marginBottom: 8 }} />
+          <div key={row} className="q-skel h-13 mb-2" />
         ))}
       </div>
     </div>
@@ -248,7 +254,7 @@ function EmptyForge({ onSettings }: { onSettings: () => void }) {
   return (
     <div className="q-page">
       <div className="q-center-empty">
-        <div className="q-empty" style={{ width: 400 }}>
+        <div className="q-empty w-100">
           <GitPullRequestIcon className="q-icon s22 q-faint" strokeWidth={1.5} aria-hidden />
           <h3>{t("noForge.title")}</h3>
           <p>{t("noForge.body")}</p>
@@ -266,7 +272,7 @@ function NoRepo({ onSettings }: { onSettings: () => void }) {
   return (
     <div className="q-page">
       <div className="q-center-empty">
-        <div className="q-empty" style={{ width: 420 }}>
+        <div className="q-empty w-105">
           <GitPullRequestIcon className="q-icon s22 q-faint" strokeWidth={1.5} aria-hidden />
           <h3>{t("noRepo.title")}</h3>
           <p>{t("noRepo.body")}</p>
@@ -281,6 +287,7 @@ function NoRepo({ onSettings }: { onSettings: () => void }) {
 
 export function PullRequestsPage() {
   const { t } = useTranslation(["pullRequests", "common"]);
+  const isPhone = useIsPhone();
   const threads = useApp((state) => state.threads);
   // A cold deep link mounts this page before the socket handshake finishes.
   const connection = useApp((state) => state.connection.status);
@@ -419,7 +426,7 @@ export function PullRequestsPage() {
       <main className="q-main" aria-label={t("title")}>
         <div className="q-page">
           <div className="q-center-empty">
-            <div className="q-empty" style={{ width: 420 }}>
+            <div className="q-empty w-105">
               <CircleAlertIcon className="q-icon s22 q-danger" strokeWidth={1.5} aria-hidden />
               <h3>{t("accountsFailed")}</h3>
               <p>{accountsError}</p>
@@ -471,9 +478,22 @@ export function PullRequestsPage() {
 
   return (
     <main className="q-main" aria-label={t("title")}>
+      {isPhone ? (
+        <PhoneLargeTitle
+          title={t("title")}
+          actions={
+            <PhoneNavButton
+              label={t("refresh")}
+              onClick={() => setReloadNonce((value) => value + 1)}
+            >
+              <RotateCwIcon className="q-icon s22" strokeWidth={1.5} aria-hidden />
+            </PhoneNavButton>
+          }
+        />
+      ) : null}
       <header className="q-page-head q-pr-list-head">
-        <h1>{t("title")}</h1>
-        <span className="q-faint" style={{ fontSize: 12 }}>
+        {isPhone ? null : <h1>{t("title")}</h1>}
+        <span className="q-faint text-xs">
           {repo.owner}/{repo.repo}
         </span>
         {repos.length > 1 ? (
@@ -499,22 +519,22 @@ export function PullRequestsPage() {
           />
         ) : null}
         <span className="grow" />
-        <div className="q-seg" role="tablist" aria-label={t("filters.label")}>
+        <SegmentedControl
+          className="max-[760px]:order-last max-[760px]:basis-full max-[760px]:overflow-x-auto max-[760px]:[scrollbar-width:none]"
+          aria-label={t("filters.label")}
+          value={filter}
+          onValueChange={(value) => {
+            if (!value) return;
+            setFilter(value as typeof filter);
+            setPage(1);
+          }}
+        >
           {filters.map((key) => (
-            <button
-              key={key}
-              type="button"
-              role="tab"
-              aria-selected={filter === key}
-              onClick={() => {
-                setFilter(key);
-                setPage(1);
-              }}
-            >
+            <SegmentedControlItem key={key} value={key}>
               {t(`filters.${key}`)}
-            </button>
+            </SegmentedControlItem>
           ))}
-        </div>
+        </SegmentedControl>
         <OpenPrButton
           repo={repo}
           thread={activeThread}
@@ -524,19 +544,23 @@ export function PullRequestsPage() {
             setSelected(pr.summary.number);
           }}
         />
-        <button
-          type="button"
-          className="q-ibtn"
-          aria-label={t("refresh")}
-          onClick={() => setReloadNonce((value) => value + 1)}
-        >
-          <RotateCwIcon className="q-icon" strokeWidth={1.5} aria-hidden />
-        </button>
+        {isPhone ? null : (
+          <Tip label={t("refresh")}>
+            <button
+              type="button"
+              className="q-ibtn"
+              aria-label={t("refresh")}
+              onClick={() => setReloadNonce((value) => value + 1)}
+            >
+              <RotateCwIcon className="q-icon" strokeWidth={1.5} aria-hidden />
+            </button>
+          </Tip>
+        )}
       </header>
       <div className="q-scroll">
         {listError ? (
           <div className="q-center-empty">
-            <div className="q-empty" style={{ width: 420 }}>
+            <div className="q-empty w-105">
               <CircleAlertIcon className="q-icon s22 q-danger" strokeWidth={1.5} aria-hidden />
               <h3>{t("listFailed")}</h3>
               <p>{listError}</p>
@@ -552,12 +576,12 @@ export function PullRequestsPage() {
         ) : listLoading && prs.length === 0 ? (
           <div className="q-rows" aria-busy="true">
             {[0, 1, 2, 3].map((row) => (
-              <div key={row} className="q-skel" style={{ height: 52, margin: "4px 8px" }} />
+              <div key={row} className="q-skel h-13 my-1 mx-2" />
             ))}
           </div>
         ) : prs.length === 0 ? (
           <div className="q-center-empty">
-            <div className="q-empty" style={{ width: 380 }}>
+            <div className="q-empty w-95">
               <GitPullRequestIcon className="q-icon s22 q-faint" strokeWidth={1.5} aria-hidden />
               <h3>
                 {filter === "review"
@@ -604,14 +628,18 @@ export function PullRequestsPage() {
                       <span className="q-row-meta">
                         {pr.head_branch} → {pr.base_branch}
                       </span>
-                      <span className={`q-row-status ${state.tone}`}>{state.label}</span>
+                      <span className={`q-row-status q-pr-state ${state.tone}`}>{state.label}</span>
                       {checks ? (
-                        <span className={`q-row-status ${pr.checks === "failing" ? "danger" : ""}`}>
+                        <span
+                          className={`q-row-status q-pr-checks ${pr.checks === "failing" ? "danger" : ""}`}
+                        >
                           {checks}
                         </span>
                       ) : null}
                       {review ? (
-                        <span className={`q-row-status ${review.tone}`}>{review.label}</span>
+                        <span className={`q-row-status q-pr-review ${review.tone}`}>
+                          {review.label}
+                        </span>
                       ) : null}
                     </span>
                   </span>
@@ -619,7 +647,7 @@ export function PullRequestsPage() {
               );
             })}
             {hasMore ? (
-              <div style={{ padding: "12px 8px" }}>
+              <div className="py-3 px-2">
                 <button
                   type="button"
                   className="q-btn secondary"
@@ -708,46 +736,46 @@ function OpenPrButton({
             {t("open.description", { forge: forgeLabel(repo.forge) })}
           </DialogDescription>
         </DialogHeader>
-        <label className="q-field" style={{ display: "block" }}>
-          <span className="t">{t("open.titleField")}</span>
-          <input
-            className="q-input"
-            value={title}
-            onChange={(event) => setTitle(event.target.value)}
-            aria-label={t("open.titleLabel")}
-          />
-        </label>
-        <label className="q-field" style={{ display: "block" }}>
-          <span className="t">{t("open.base")}</span>
-          <input
-            className="q-input"
-            value={base}
-            onChange={(event) => setBase(event.target.value)}
-            aria-label={t("open.base")}
-          />
-        </label>
-        <label className="q-field" style={{ display: "block" }}>
-          <span className="t">{t("open.descriptionField")}</span>
-          <textarea
-            className="q-input"
-            rows={4}
-            value={body}
-            onChange={(event) => setBody(event.target.value)}
-            aria-label={t("open.descriptionLabel")}
-          />
-        </label>
+        <DialogBody>
+          <label className="q-field" style={{ display: "block" }}>
+            <span className="t">{t("open.titleField")}</span>
+            <input
+              className="q-input"
+              value={title}
+              onChange={(event) => setTitle(event.target.value)}
+              aria-label={t("open.titleLabel")}
+            />
+          </label>
+          <label className="q-field" style={{ display: "block" }}>
+            <span className="t">{t("open.base")}</span>
+            <input
+              className="q-input"
+              value={base}
+              onChange={(event) => setBase(event.target.value)}
+              aria-label={t("open.base")}
+            />
+          </label>
+          <label className="q-field" style={{ display: "block" }}>
+            <span className="t">{t("open.descriptionField")}</span>
+            <textarea
+              className="q-input"
+              rows={4}
+              value={body}
+              onChange={(event) => setBody(event.target.value)}
+              aria-label={t("open.descriptionLabel")}
+            />
+          </label>
+        </DialogBody>
         <DialogFooter>
-          <button type="button" className="q-btn ghost" onClick={() => setOpen(false)}>
+          <Button variant="ghost" onClick={() => setOpen(false)}>
             {t("common:cancel")}
-          </button>
-          <button
-            type="button"
-            className="q-btn primary"
+          </Button>
+          <Button
             disabled={busy || title.trim() === "" || base.trim() === ""}
             onClick={() => void submit()}
           >
             {busy ? t("open.submitting") : t("open.submit")}
-          </button>
+          </Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
@@ -1229,13 +1257,13 @@ function PrDetail({
   if (loading) {
     return (
       <main className="q-main" aria-label={t("detail.label")} aria-busy="true">
-        <header className="q-page-head" style={{ height: "auto", padding: "14px 16px 14px 32px" }}>
-          <div style={{ flex: 1 }}>
-            <div className="q-skel" style={{ width: 320, height: 22 }} />
+        <header className="q-page-head q-pr-head">
+          <div className="flex-1">
+            <div className="q-skel w-80 h-5.5" />
           </div>
         </header>
         <div className="q-page">
-          <div className="q-skel" style={{ height: 260, margin: "24px 32px" }} />
+          <div className="q-skel h-65 my-6 mx-8" />
         </div>
       </main>
     );
@@ -1246,11 +1274,11 @@ function PrDetail({
       <main className="q-main" aria-label={t("detail.label")}>
         <div className="q-page">
           <div className="q-center-empty">
-            <div className="q-empty" style={{ width: 420 }}>
+            <div className="q-empty w-105">
               <CircleAlertIcon className="q-icon s22 q-danger" strokeWidth={1.5} aria-hidden />
               <h3>{t("detail.failed")}</h3>
               <p>{error ?? t("detail.noDetail")}</p>
-              <div style={{ display: "flex", gap: 6, justifyContent: "center" }}>
+              <div className="flex gap-1.5 justify-center">
                 <button type="button" className="q-btn secondary" onClick={onBack}>
                   {t("detail.back")}
                 </button>
@@ -1274,7 +1302,7 @@ function PrDetail({
   return (
     <main className="q-main" aria-label={t("detail.label")}>
       <header className="q-page-head q-pr-head">
-        <div style={{ flex: 1, minWidth: 0 }}>
+        <div className="flex-1 min-w-0">
           <nav className="q-crumb" aria-label={t("detail.breadcrumb")}>
             <button type="button" className="q-crumb-link" onClick={onBack}>
               {t("title")}
@@ -1290,24 +1318,16 @@ function PrDetail({
             </span>
             <span aria-current="page">#{number}</span>
           </nav>
-          <h1 style={{ fontSize: 17, lineHeight: "22px" }}>
-            {pr.summary.title}{" "}
-            <span className="q-faint" style={{ fontWeight: 400 }}>
-              #{number}
-            </span>
+          <h1 style={{ fontSize: 16, lineHeight: "22px" }}>
+            {pr.summary.title} <span className="q-faint font-normal">#{number}</span>
           </h1>
           <div className="q-muted q-pr-meta">
             <span className={`q-badge ${state.tone}`} style={{ height: 18 }}>
               {state.label}
             </span>
-            <span className="mono" style={{ fontSize: 11.5 }}>
-              {pr.summary.head_branch}
-            </span>{" "}
-            →{" "}
-            <span className="mono" style={{ fontSize: 11.5 }}>
-              {pr.summary.base_branch}
-            </span>{" "}
-            · {t("detail.commits", { count: pr.commits })} ·{" "}
+            <span className="mono text-xs">{pr.summary.head_branch}</span> →{" "}
+            <span className="mono text-xs">{pr.summary.base_branch}</span> ·{" "}
+            {t("detail.commits", { count: pr.commits })} ·{" "}
             {isNow(pr.created_at)
               ? t("detail.openedByNow", { author: pr.summary.author })
               : t("detail.openedBy", {
@@ -1334,50 +1354,36 @@ function PrDetail({
       <div className="q-page">
         <div className="q-pr-cols">
           <div className="q-pr-main">
-            <div className="q-tabs" role="tablist">
-              <button
-                type="button"
-                role="tab"
-                aria-selected={tab === "conversation"}
-                onClick={() => setTab("conversation")}
-              >
-                {t("tabs.conversation")}{" "}
-                <span className="c">
-                  {formatNumber((comments?.comments.length ?? 0) + unresolved)}
-                </span>
-              </button>
-              <button
-                type="button"
-                role="tab"
-                aria-selected={tab === "commits"}
-                onClick={() => setTab("commits")}
-              >
-                {t("tabs.commits")}{" "}
-                <span className="c">{formatNumber(commits?.commits.length ?? pr.commits)}</span>
-              </button>
-              <button
-                type="button"
-                role="tab"
-                aria-selected={tab === "checks"}
-                onClick={() => setTab("checks")}
-              >
-                {t("tabs.checks")} <span className="c">{formatNumber(total)}</span>
-              </button>
-              <button
-                type="button"
-                role="tab"
-                aria-selected={tab === "files"}
-                onClick={() => setTab("files")}
-              >
-                {t("tabs.files")}{" "}
-                <span
-                  className="c"
-                  title={pr.changed_files_known ? undefined : t("tabs.filesUnknown")}
-                >
-                  {pr.changed_files_known ? formatNumber(pr.changed_files) : "—"}
-                </span>
-              </button>
-            </div>
+            <Tabs
+              className="mb-5 border-b border-border"
+              value={tab}
+              onValueChange={(value) => {
+                if (value) setTab(value as typeof tab);
+              }}
+            >
+              <TabsList aria-label={t("tabs.label")} className="-mb-px gap-5 overflow-x-auto">
+                <TabsTab value="conversation">
+                  {t("tabs.conversation")}
+                  <TabsCount>
+                    {formatNumber((comments?.comments.length ?? 0) + unresolved)}
+                  </TabsCount>
+                </TabsTab>
+                <TabsTab value="commits">
+                  {t("tabs.commits")}
+                  <TabsCount>{formatNumber(commits?.commits.length ?? pr.commits)}</TabsCount>
+                </TabsTab>
+                <TabsTab value="checks">
+                  {t("tabs.checks")}
+                  <TabsCount>{formatNumber(total)}</TabsCount>
+                </TabsTab>
+                <TabsTab value="files">
+                  {t("tabs.files")}
+                  <TabsCount title={pr.changed_files_known ? undefined : t("tabs.filesUnknown")}>
+                    {pr.changed_files_known ? formatNumber(pr.changed_files) : "—"}
+                  </TabsCount>
+                </TabsTab>
+              </TabsList>
+            </Tabs>
 
             {tab === "conversation" ? (
               <>
@@ -1449,8 +1455,16 @@ function PrDetail({
                         </div>
                         <ThreadQuote thread={thread} files={diffFiles} />
                         {thread.comments.map((comment) => (
-                          <div key={comment.comment_id} style={{ marginBottom: 10 }}>
+                          <div className="mb-2.5" key={comment.comment_id}>
                             <div className="q-cmt-h" style={{ marginBottom: 2 }}>
+                              {/* The same avatar as the conversation's comments, so
+                                  every author name starts on one column. */}
+                              <EntityAvatar
+                                seed={userSeed(comment.author)}
+                                kind="user"
+                                label={comment.author}
+                                size={18}
+                              />
                               <b>{comment.author}</b> · {formatAge(comment.created_at)}
                               {comment.comment_id.startsWith("tmp_") ? (
                                 <span className="q-faint"> · {t("conversation.sending")}</span>
@@ -1546,7 +1560,7 @@ function PrDetail({
                       </div>
                     ))}
 
-                    <div style={{ marginTop: 18 }}>
+                    <div className="mt-4">
                       <div className="q-composer">
                         <textarea
                           aria-label={t("conversation.commentOn", { number })}
@@ -1556,7 +1570,7 @@ function PrDetail({
                         />
                         <div className="q-comp-f">
                           <span className="grow" />
-                          <span className="q-faint" style={{ fontSize: 11.5 }}>
+                          <span className="q-faint" style={{ fontSize: 12 }}>
                             {forgeLabel(repo.forge)}
                           </span>
                           <button
@@ -1642,7 +1656,7 @@ function PrDetail({
                   />
                 ) : checks ? (
                   <>
-                    <div className="q-muted" style={{ marginBottom: 10 }}>
+                    <div className="q-muted mb-2.5">
                       {checksLabel(checks.state, checks.passed, checks.total)} ·{" "}
                       <span className="q-mono">{checks.head_sha.slice(0, 8)}</span>
                     </div>
@@ -1773,7 +1787,7 @@ function PrDetail({
                         })
                       : null}
                     {diffPage?.has_more && !diffError ? (
-                      <div style={{ padding: "12px 0" }}>
+                      <div className="py-3 px-0">
                         <button
                           type="button"
                           className="q-btn secondary"
@@ -1914,7 +1928,7 @@ function PrDetail({
                       <span className="grow">{link.title}</span>
                       {link.watching ? (
                         <EyeIcon
-                          className="q-icon s12 q-faint"
+                          className="q-icon s14 q-faint"
                           strokeWidth={1.5}
                           aria-label={t("side.watching")}
                         />
@@ -1954,7 +1968,7 @@ function PrDetail({
                   {t("side.noAgentThread")}
                 </p>
               )}
-              <div style={{ marginTop: 8 }}>
+              <div className="mt-2">
                 <button
                   type="button"
                   className="q-btn ghost"

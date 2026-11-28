@@ -8,9 +8,9 @@ import {
 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
-
 import { AgentGlyph } from "@/components/agent/AgentGlyph";
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
+import { Tip } from "@/components/ui/tooltip";
 import type { SubagentState, SubagentView, ThreadSummary } from "@/gen";
 import { glyphForAgentState } from "@/lib/agent";
 import { harnessLabel, harnessSeed, machineSeed, subagentSeed } from "@/lib/entities";
@@ -229,7 +229,7 @@ function Details({ view }: { view: SubagentView }) {
         <dd>{t("subagents.details.inherited")}</dd>
         <dt>{t("subagents.details.credential")}</dt>
         <dd style={{ display: "flex", alignItems: "center", gap: 4 }}>
-          <KeyRoundIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />{" "}
+          <KeyRoundIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />{" "}
           {view.credential.shared_with_parent
             ? t("subagents.details.sharedWithParent", { label: view.credential.label })
             : view.credential.label}
@@ -332,16 +332,17 @@ export function SubagentsPanel({ thread }: { thread: ThreadSummary }) {
               : t("subagents.count", { count: views.length })}
         </span>
         <span className="grow" />
-        <button
-          type="button"
-          className="q-ibtn"
-          aria-label={t("subagents.refresh")}
-          title={t("subagents.refresh")}
-          onClick={() => void loadSubagents(thread.thread_id, true)}
-        >
-          <RefreshCwIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-        </button>
-        <button type="button" className="q-btn ghost" onClick={openDelegate}>
+        <Tip label={t("subagents.refresh")}>
+          <button
+            type="button"
+            className="q-ibtn"
+            aria-label={t("subagents.refresh")}
+            onClick={() => void loadSubagents(thread.thread_id, true)}
+          >
+            <RefreshCwIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
+          </button>
+        </Tip>
+        <button type="button" className="q-btn ghost q-inline-end" onClick={openDelegate}>
           <PlusIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
           {t("subagents.delegate")}
         </button>

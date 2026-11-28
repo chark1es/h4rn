@@ -15,12 +15,7 @@ import { useTranslation } from "react-i18next";
 
 import { AgentGlyph } from "@/components/agent/AgentGlyph";
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
+import { Menu, MenuContent, MenuItem, MenuTrigger } from "@/components/ui/menu";
 import { MessageAttachments } from "@/features/attachments/MessageAttachments";
 import { ChangeSetCard } from "@/features/changes/ChangeSetCard";
 import type { PlanStep, ThreadSummary } from "@/gen";
@@ -60,19 +55,16 @@ function TurnMenu({
 }) {
   const { t } = useTranslation("thread");
   return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <button type="button" className="q-turn-menu" aria-label={label} title={label}>
-          <MoreHorizontalIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-        </button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="w-44">
-        <DropdownMenuItem onSelect={() => void forkThread(threadId, turnId)}>
-          <GitForkIcon aria-hidden />
+    <Menu>
+      <MenuTrigger className="q-turn-menu" aria-label={label} title={label}>
+        <MoreHorizontalIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
+      </MenuTrigger>
+      <MenuContent align="end" className="w-44">
+        <MenuItem icon={<GitForkIcon />} onSelect={() => void forkThread(threadId, turnId)}>
           {t("turn.forkFromHere")}
-        </DropdownMenuItem>
-      </DropdownMenuContent>
-    </DropdownMenu>
+        </MenuItem>
+      </MenuContent>
+    </Menu>
   );
 }
 
@@ -95,20 +87,22 @@ function UserMessage({
       {item.text ? <div className="q-bubble">{item.text}</div> : null}
       <MessageAttachments attachments={item.attachments} align="end" />
       <div className="q-you-meta">
+        {/* First, so the hover-only menu takes its room on the free side and
+            the row's right edge stays on the bubble's whether or not it shows. */}
+        {fork ? <TurnMenu {...fork} /> : null}
         <span>{absoluteTime(at)}</span>
         {onEdit ? (
           <button
             type="button"
-            className="q-btn ghost q-edit-here"
+            className="q-btn ghost q-edit-here q-inline-end"
             disabled={Boolean(editDisabledReason)}
             title={editDisabledReason ?? t("turn.editHint")}
             onClick={() => onEdit(item)}
           >
-            <PencilLineIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+            <PencilLineIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
             {t("turn.editFromHere")}
           </button>
         ) : null}
-        {fork ? <TurnMenu {...fork} /> : null}
       </div>
     </div>
   );
@@ -208,11 +202,11 @@ function PlanItemView({ item }: { item: PlanItem }) {
             <li key={`${index}:${step.content}`} data-status={status} className="q-plan-step">
               <span className="q-plan-mark" aria-hidden>
                 {status === "completed" ? (
-                  <CheckIcon className="q-icon s12" strokeWidth={2} />
+                  <CheckIcon className="q-icon s14" strokeWidth={2} />
                 ) : status === "in_progress" ? (
-                  <CircleDotIcon className="q-icon s12" strokeWidth={1.75} />
+                  <CircleDotIcon className="q-icon s14" strokeWidth={1.75} />
                 ) : (
-                  <CircleIcon className="q-icon s12" strokeWidth={1.5} />
+                  <CircleIcon className="q-icon s14" strokeWidth={1.5} />
                 )}
               </span>
               <span className="q-plan-text">{step.content}</span>
@@ -345,7 +339,7 @@ export function TurnBlock({
             <CircleAlertIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
             <span>{stopped}</span>
             <button type="button" className="q-btn ghost" style={{ height: 24 }} onClick={onReply}>
-              <CornerDownLeftIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+              <CornerDownLeftIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
               {t("turn.reply")}
             </button>
           </div>
@@ -431,7 +425,7 @@ export function TurnBlock({
           <CircleAlertIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
           <span>{stopped}</span>
           <button type="button" className="q-btn ghost" style={{ height: 24 }} onClick={onReply}>
-            <CornerDownLeftIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+            <CornerDownLeftIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
             {t("turn.reply")}
           </button>
         </div>
@@ -440,7 +434,7 @@ export function TurnBlock({
           <CircleAlertIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
           <span>{turn.status === "failed" ? t("turn.failed") : t("turn.interrupted")}</span>
           <button type="button" className="q-btn ghost" style={{ height: 24 }} onClick={onReply}>
-            <CornerDownLeftIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+            <CornerDownLeftIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
             {t("turn.reply")}
           </button>
         </div>

@@ -168,8 +168,6 @@
     "phone": {
       "details": "Detalles",
       "review": "Revisar",
-      "close": "Cerrar la revisión de la aprobación",
-      "sheet": "Aprobar comando",
       "runCommandOn": "Ejecutar un comando en {{host}}",
       "reviewRequestOn": "Revisar una solicitud en {{host}}",
       "folder": "Carpeta",
@@ -383,6 +381,7 @@
     "back": "Volver al hilo",
     "thread": "Hilo",
     "title": "Terminal",
+    "tabs": "Terminales",
     "new": "Nueva terminal",
     "close": "Cerrar {{name}}",
     "find": "Buscar en la terminal",

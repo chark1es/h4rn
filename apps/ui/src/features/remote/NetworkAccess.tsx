@@ -21,8 +21,11 @@ import {
 import { useEffect, useRef, useState } from "react";
 import { Trans, useTranslation } from "react-i18next";
 
+import { ConfirmDialog } from "@/components/common/ConfirmDialog";
+import { Switch } from "@/components/ui/switch";
 import type { DirectDevice, PairScope } from "@/gen";
 import { useNow } from "@/hooks/use-now";
+import { rememberNeighbours } from "@/lib/focus";
 import { formatRelativeTime, i18n } from "@/lib/i18n";
 import { useApp } from "@/lib/store/appStore";
 import {
@@ -62,30 +65,6 @@ export function networkAccessVisible(
   if (shell === "mobile") return false;
   if (remoteActive) return false;
   return transport !== "relay" && transport !== "tailscale";
-}
-
-function Switch({
-  checked,
-  disabled,
-  label,
-  onChange,
-}: {
-  checked: boolean;
-  disabled: boolean;
-  label: string;
-  onChange: (next: boolean) => void;
-}) {
-  return (
-    <button
-      type="button"
-      className="q-switch"
-      role="switch"
-      aria-checked={checked}
-      aria-label={label}
-      disabled={disabled}
-      onClick={() => onChange(!checked)}
-    />
-  );
 }
 
 function remainingText(ms: number): string {
@@ -138,10 +117,8 @@ export function DirectPairingBlock({
           size={148}
         />
       </div>
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div className="q-muted" style={{ fontSize: 12 }}>
-          {expired ? t("network.expired") : t("network.scan")}
-        </div>
+      <div className="flex-1 min-w-0">
+        <div className="q-muted text-xs">{expired ? t("network.expired") : t("network.scan")}</div>
         <div className="q-faint q-num" style={{ fontSize: 12, marginTop: 4 }}>
           {expired ? (
             t("network.generateNew")
@@ -154,7 +131,7 @@ export function DirectPairingBlock({
             />
           )}
         </div>
-        <div className="q-pair-scopes" style={{ marginTop: 12 }}>
+        <div className="q-pair-scopes mt-3">
           {SCOPE_OPTIONS.map((scope) => {
             const on = scope.locked || scopes.includes(scope.id);
             return (
@@ -167,10 +144,10 @@ export function DirectPairingBlock({
                   onChange={() => onToggleScope(scope.id)}
                 />
                 <span className={`q-check${on ? " on" : ""}`} aria-hidden>
-                  {on ? <CheckIcon className="q-icon s12" strokeWidth={2} /> : null}
+                  {on ? <CheckIcon className="q-icon s14" strokeWidth={2} /> : null}
                 </span>
                 <span>
-                  <span style={{ fontWeight: 500 }}>{scopeLabel(scope.id)}</span>
+                  <span className="font-medium">{scopeLabel(scope.id)}</span>
                   {scopeSub(scope.id) ? (
                     <span className="q-faint sub">{scopeSub(scope.id)}</span>
                   ) : null}
@@ -184,7 +161,7 @@ export function DirectPairingBlock({
             {t("network.adminNote", { host: hostName ?? t("network.thisComputerLower") })}
           </div>
         ) : null}
-        <div style={{ display: "flex", gap: 6, marginTop: 12, flexWrap: "wrap" }}>
+        <div className="flex gap-1.5 mt-3 flex-wrap">
           <button
             type="button"
             className="q-btn secondary"
@@ -202,7 +179,7 @@ export function DirectPairingBlock({
             )}
             {copied ? t("common:copied") : t("devices.pairing.copyLink")}
           </button>
-          <button type="button" className="q-btn ghost" onClick={onNewCode}>
+          <button type="button" className="q-btn secondary" onClick={onNewCode}>
             <RefreshCwIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
             {t("devices.pairing.newCode")}
           </button>
@@ -233,13 +210,14 @@ function DirectDeviceRow({
 }) {
   const { t } = useTranslation(["settings", "common"]);
   const [confirming, setConfirming] = useState(false);
+  const restoreFocus = useRef<(() => Promise<void>) | null>(null);
   const name = directDeviceName(device.key);
   return (
     <tr className="hov">
       <td>
         <span className="q-cell-id">
           <SmartphoneIcon className="q-icon" strokeWidth={1.5} aria-hidden />
-          <span style={{ fontWeight: 500 }} className="q-num" title={device.key}>
+          <span className="q-num font-medium" title={device.key}>
             {name}
           </span>
         </span>
@@ -262,46 +240,30 @@ function DirectDeviceRow({
           <span className="q-muted">{t("network.notConnected")}</span>
         )}
       </td>
-      <td className="r" style={{ paddingRight: 0 }}>
-        {confirming ? (
-          <span style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
-            <span className="q-faint" style={{ fontSize: 12 }}>
-              {t("devices.confirmRevoke")}
-            </span>
-            <button
-              type="button"
-              className="q-btn ghost"
-              style={{ height: 24 }}
-              onClick={() => setConfirming(false)}
-            >
-              {t("common:cancel")}
-            </button>
-            <button
-              type="button"
-              className="q-btn danger"
-              style={{ height: 24 }}
-              disabled={busy}
-              aria-label={t("access.revokeLabel", { name })}
-              onClick={() => {
-                void onRevoke().then((ok) => {
-                  if (!ok) setConfirming(false);
-                });
-              }}
-            >
-              {t("common:revoke")}
-            </button>
-          </span>
-        ) : (
-          <button
-            type="button"
-            className="q-btn danger"
-            style={{ height: 24 }}
-            aria-label={t("access.revokeLabel", { name })}
-            onClick={() => setConfirming(true)}
-          >
-            {t("common:revoke")}
-          </button>
-        )}
+      <td className="r pr-0">
+        <button
+          type="button"
+          className="q-btn danger"
+          disabled={busy}
+          aria-label={t("access.revokeLabel", { name })}
+          onClick={(event) => {
+            restoreFocus.current = rememberNeighbours(event.currentTarget);
+            setConfirming(true);
+          }}
+        >
+          {t("common:revoke")}
+        </button>
+        <ConfirmDialog
+          open={confirming}
+          title={t("devices.confirmRevoke", { name })}
+          description={t("devices.confirmDescription.direct", { name })}
+          confirmLabel={t("common:revoke")}
+          onOpenChange={setConfirming}
+          onConfirm={() => {
+            if (busy) return;
+            void onRevoke().finally(() => void restoreFocus.current?.());
+          }}
+        />
       </td>
     </tr>
   );
@@ -337,7 +299,7 @@ export function DirectDevicesTable({
       <tbody>
         {devices.length === 0 ? (
           <tr>
-            <td colSpan={5} className="q-muted" style={{ padding: "16px 0" }}>
+            <td colSpan={5} className="q-muted py-4 px-0">
               {t("network.empty")}
             </td>
           </tr>
@@ -445,8 +407,8 @@ export function NetworkAccessSettings() {
           <Switch
             checked={enabled}
             disabled={state.saving || !access}
-            label={t("network.allow")}
-            onChange={(next) => void setNetworkAccess(next)}
+            aria-label={t("network.allow")}
+            onCheckedChange={(next) => void setNetworkAccess(next)}
           />
         </div>
       </div>
@@ -558,7 +520,7 @@ export function NetworkAccessSettings() {
             onRevoke={revokeDirectDevice}
           />
           {state.devicesError ? (
-            <div className="q-danger" role="status" style={{ fontSize: 12, marginTop: 8 }}>
+            <div className="q-danger text-xs mt-2" role="status">
               {state.devicesError}
             </div>
           ) : null}

@@ -5,10 +5,10 @@ import {
   FolderIcon,
   FolderPlusIcon,
   PaperclipIcon,
+  TextCursorInputIcon,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Trans, useTranslation } from "react-i18next";
-
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
 import { CommandPalette } from "@/components/dialogs/CommandPalette";
 import { NewThreadDialog } from "@/components/dialogs/NewThreadDialog";
@@ -22,18 +22,24 @@ import { SettingsPage } from "@/components/pages/SettingsPage";
 import { RightPanel } from "@/components/panel/RightPanel";
 import { OfflineBanner } from "@/components/shell/OfflineBanner";
 import { PhoneNav } from "@/components/shell/PhoneNav";
+import { ShellSplit } from "@/components/shell/ShellSplit";
 import { Sidebar } from "@/components/shell/Sidebar";
-import { Toasts } from "@/components/shell/Toasts";
 import { HarnessSwitchCommand } from "@/components/thread/HarnessSwitch";
 import { ThreadPane } from "@/components/thread/ThreadPane";
 import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
+  Menu,
+  MenuContent,
+  MenuGroup,
+  MenuGroupLabel,
+  MenuItem,
+  MenuNote,
+  MenuRadioGroup,
+  MenuRadioItem,
+  MenuSeparator,
+  MenuTrigger,
+} from "@/components/ui/menu";
+import { selectTriggerVariants } from "@/components/ui/select";
+import { Toaster } from "@/components/ui/sonner";
 import { AttachmentTray } from "@/features/attachments/AttachmentTray";
 import { FILE_ACCEPT } from "@/features/attachments/picker";
 import { useAttachmentDrafts, useAttachShortcut } from "@/features/attachments/use-attachments";
@@ -57,6 +63,7 @@ import { AppUpdateNotice } from "@/features/updates/AppUpdateNotice";
 import { UsagePage } from "@/features/usage/UsagePage";
 import type { HarnessKind } from "@/gen";
 import { useIsPhone } from "@/hooks/use-media-query";
+import { useViewFade, viewKey } from "@/hooks/use-view-fade";
 import { useViewportWidth } from "@/hooks/use-viewport-width";
 import {
   DEFAULT_NEW_THREAD_WORKSPACE,
@@ -75,6 +82,8 @@ import {
   navigate,
   openAddProject,
   panelFits,
+  setPanelWidth,
+  setSidebarWidth,
   useApp,
 } from "@/lib/store/appStore";
 import { defaultThreadHostId, localOnlyHostOptions } from "@/lib/thread-hosts";
@@ -82,6 +91,8 @@ import { activeThread } from "@/lib/thread-selection";
 
 const HARNESSES: HarnessKind[] = ["claude_code", "codex", "opencode", "antigravity"];
 
+/** The start screen's pickers share the compact Select trigger. */
+const START_CHIP = selectTriggerVariants({ size: "chip" });
 export function InboxDetailEmpty() {
   const hosts = useApp((state) => state.hosts);
   const localHostId = useApp((state) => state.localHostId);
@@ -336,7 +347,7 @@ export function InboxDetailEmpty() {
           <h2
             style={{
               margin: "0 0 6px",
-              fontSize: 17,
+              fontSize: 16,
               lineHeight: "24px",
               fontWeight: 600,
               color: "var(--fg)",
@@ -349,91 +360,103 @@ export function InboxDetailEmpty() {
           </p>
 
           <div className="q-chips" style={{ marginBottom: 10 }}>
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <button
-                  type="button"
-                  className="q-chip"
-                  aria-label={
-                    selectedHost
-                      ? t("start.hostChip", { name: selectedHost.name })
-                      : t("start.hostChipNone")
-                  }
-                >
-                  <EntityAvatar
-                    seed={machineSeed(host)}
-                    kind="machine"
-                    label={selectedHost?.name ?? t("start.host")}
-                    size={16}
-                  />
-                  <span className="q-chip-label">
-                    {selectedHost?.name ?? t("start.noOnlineHost")}
-                  </span>
-                  <ChevronDownIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
-                </button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="start" className="w-52">
-                <DropdownMenuLabel>{t("start.host")}</DropdownMenuLabel>
-                {hostOptions.length === 0 ? (
-                  <DropdownMenuItem disabled>{t("start.noOnlineHosts")}</DropdownMenuItem>
-                ) : (
-                  hostOptions.map((option) => (
-                    <DropdownMenuItem
-                      key={option.value}
-                      disabled={option.disabled}
-                      title={option.hint}
-                      onSelect={() => pickHost(option.value)}
-                    >
-                      <EntityAvatar
-                        seed={machineSeed(option.value)}
-                        kind="machine"
+            <Menu>
+              <MenuTrigger
+                className={START_CHIP}
+                aria-label={
+                  selectedHost
+                    ? t("start.hostChip", { name: selectedHost.name })
+                    : t("start.hostChipNone")
+                }
+              >
+                <EntityAvatar
+                  seed={machineSeed(host)}
+                  kind="machine"
+                  label={selectedHost?.name ?? t("start.host")}
+                  size={16}
+                />
+                <span className="min-w-0 flex-1 truncate">
+                  {selectedHost?.name ?? t("start.noOnlineHost")}
+                </span>
+                <ChevronDownIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
+              </MenuTrigger>
+              <MenuContent align="start" className="w-60">
+                <MenuRadioGroup value={host} onValueChange={(next: string) => pickHost(next)}>
+                  <MenuGroupLabel>{t("start.host")}</MenuGroupLabel>
+                  {hostOptions.length === 0 ? (
+                    <MenuNote>{t("start.noOnlineHosts")}</MenuNote>
+                  ) : (
+                    hostOptions.map((option) => (
+                      <MenuRadioItem
+                        key={option.value}
+                        value={option.value}
                         label={option.label}
-                        size={16}
-                      />
-                      <span className="min-w-0 flex-1 truncate">{option.label}</span>
-                      {option.hint ? (
-                        <span className="ml-2 shrink-0 text-[11px] text-[var(--fg-3)]">
-                          {t("start.notYet")}
+                        disabled={option.disabled}
+                        title={option.hint}
+                        closeOnSelect
+                      >
+                        <span className="inline-flex min-w-0 items-center gap-2">
+                          <EntityAvatar
+                            seed={machineSeed(option.value)}
+                            kind="machine"
+                            label={option.label}
+                            size={14}
+                          />
+                          <span className="truncate">{option.label}</span>
+                          {option.hint ? (
+                            <span className="ms-auto shrink-0 text-xs text-muted-foreground">
+                              {t("start.notYet")}
+                            </span>
+                          ) : null}
                         </span>
-                      ) : null}
-                    </DropdownMenuItem>
-                  ))
-                )}
-              </DropdownMenuContent>
-            </DropdownMenu>
+                      </MenuRadioItem>
+                    ))
+                  )}
+                </MenuRadioGroup>
+              </MenuContent>
+            </Menu>
 
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <button
-                  type="button"
-                  className="q-chip"
-                  aria-label={t("start.harnessChip", { name: harnessLabel(harness) })}
+            <Menu>
+              <MenuTrigger
+                className={START_CHIP}
+                aria-label={t("start.harnessChip", { name: harnessLabel(harness) })}
+              >
+                <EntityAvatar
+                  seed={harnessSeed(host, harness)}
+                  kind="harness"
+                  label={harnessLabel(harness)}
+                  size={16}
+                />
+                <span className="min-w-0 flex-1 truncate">{harnessLabel(harness)}</span>
+                <ChevronDownIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
+              </MenuTrigger>
+              <MenuContent align="start" className="w-60">
+                <MenuRadioGroup
+                  value={harness}
+                  onValueChange={(next: HarnessKind) => pickHarness(next)}
                 >
-                  <EntityAvatar
-                    seed={harnessSeed(host, harness)}
-                    kind="harness"
-                    label={harnessLabel(harness)}
-                    size={16}
-                  />
-                  <span className="q-chip-label">{harnessLabel(harness)}</span>
-                  <ChevronDownIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
-                </button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="start" className="w-52">
-                <DropdownMenuLabel>{t("start.harness")}</DropdownMenuLabel>
-                {harnessChoices.map((option) => (
-                  <DropdownMenuItem key={option} onSelect={() => pickHarness(option)}>
-                    <EntityAvatar
-                      seed={harnessSeed(host, option)}
-                      kind="harness"
-                      label={harnessLabel(option)}
-                      size={16}
-                    />
-                    {HARNESS_LABELS[option]}
-                  </DropdownMenuItem>
-                ))}
-              </DropdownMenuContent>
-            </DropdownMenu>
+                  <MenuGroupLabel>{t("start.harness")}</MenuGroupLabel>
+                  {harnessChoices.map((option) => (
+                    <MenuRadioItem
+                      key={option}
+                      value={option}
+                      label={HARNESS_LABELS[option]}
+                      closeOnSelect
+                    >
+                      <span className="inline-flex min-w-0 items-center gap-2">
+                        <EntityAvatar
+                          seed={harnessSeed(host, option)}
+                          kind="harness"
+                          label={harnessLabel(option)}
+                          size={14}
+                        />
+                        <span className="truncate">{HARNESS_LABELS[option]}</span>
+                      </span>
+                    </MenuRadioItem>
+                  ))}
+                </MenuRadioGroup>
+              </MenuContent>
+            </Menu>
 
             {customFolder || folderChoices.length === 0 ? (
               <label className="q-chip q-chip-field">
@@ -462,57 +485,59 @@ export function InboxDetailEmpty() {
                 />
               </label>
             ) : null}
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <button
-                  type="button"
-                  className="q-chip"
-                  aria-label={t("start.projectChip", { name: selectedFolder?.name ?? workspace })}
-                  title={workspace}
-                >
-                  <FolderIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-                  <span className="q-chip-label">
-                    {customFolder || folderChoices.length === 0
-                      ? t("start.projects")
-                      : (selectedFolder?.name ?? shortPath(workspace))}
-                  </span>
-                  <ChevronDownIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
-                </button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="start" className="w-64">
-                <DropdownMenuLabel>
-                  {hostName
-                    ? t("start.projectOn", { host: hostName })
-                    : t("start.projectOnAnyHost")}
-                </DropdownMenuLabel>
-                {folderChoices.length === 0 ? (
-                  <DropdownMenuItem disabled>{t("start.noProjects")}</DropdownMenuItem>
-                ) : (
-                  folderChoices.map((choice) => (
-                    <DropdownMenuItem
-                      key={choice.path}
-                      onSelect={() => {
-                        setCustomFolder(false);
-                        commitWorkspace(choice.path);
-                      }}
-                    >
-                      <span className="min-w-0 flex-1 truncate">{choice.name}</span>
-                      <span className="ml-2 max-w-[120px] shrink-0 truncate text-[11px] text-[var(--fg-3)]">
-                        {shortPath(choice.path)}
-                      </span>
-                    </DropdownMenuItem>
-                  ))
-                )}
-                <DropdownMenuSeparator />
-                <DropdownMenuItem onSelect={() => setCustomFolder(true)}>
+            <Menu>
+              <MenuTrigger
+                className={START_CHIP}
+                aria-label={t("start.projectChip", { name: selectedFolder?.name ?? workspace })}
+                title={workspace}
+              >
+                <FolderIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
+                <span className="min-w-0 flex-1 truncate">
+                  {customFolder || folderChoices.length === 0
+                    ? t("start.projects")
+                    : (selectedFolder?.name ?? shortPath(workspace))}
+                </span>
+                <ChevronDownIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
+              </MenuTrigger>
+              <MenuContent align="start" className="w-72">
+                <MenuGroup>
+                  <MenuGroupLabel>
+                    {hostName
+                      ? t("start.projectOn", { host: hostName })
+                      : t("start.projectOnAnyHost")}
+                  </MenuGroupLabel>
+                  {folderChoices.length === 0 ? (
+                    <MenuNote>{t("start.noProjects")}</MenuNote>
+                  ) : (
+                    folderChoices.map((choice) => (
+                      <MenuItem
+                        key={choice.path}
+                        icon={<FolderIcon />}
+                        label={choice.name}
+                        trailing={
+                          <span className="max-w-30 truncate font-mono">
+                            {shortPath(choice.path)}
+                          </span>
+                        }
+                        onSelect={() => {
+                          setCustomFolder(false);
+                          commitWorkspace(choice.path);
+                        }}
+                      >
+                        {choice.name}
+                      </MenuItem>
+                    ))
+                  )}
+                </MenuGroup>
+                <MenuSeparator />
+                <MenuItem icon={<TextCursorInputIcon />} onSelect={() => setCustomFolder(true)}>
                   {t("start.typePath")}
-                </DropdownMenuItem>
-                <DropdownMenuItem onSelect={openAddProject}>
-                  <FolderPlusIcon aria-hidden />
+                </MenuItem>
+                <MenuItem icon={<FolderPlusIcon />} onSelect={openAddProject}>
                   {t("start.addProject")}
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
+                </MenuItem>
+              </MenuContent>
+            </Menu>
           </div>
 
           <fieldset
@@ -597,32 +622,28 @@ export function InboxDetailEmpty() {
               </button>
               <span className="grow" />
 
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <button
-                    type="button"
-                    className="q-model"
-                    aria-label={t("composer:controls.model")}
-                    title={`${harnessLabel(harness)} · ${model}`}
-                  >
-                    <span className="truncate" style={{ maxWidth: 210 }}>
-                      {model}
-                    </span>
-                    <ChevronDownIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
-                  </button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent
-                  align="end"
-                  className="max-h-[var(--radix-dropdown-menu-content-available-height)] w-60 overflow-y-auto"
+              <Menu>
+                <MenuTrigger
+                  className="q-model"
+                  aria-label={t("composer:controls.model")}
+                  title={`${harnessLabel(harness)} · ${model}`}
                 >
-                  <DropdownMenuLabel>{t("composer:controls.model")}</DropdownMenuLabel>
-                  {modelChoices.map((option) => (
-                    <DropdownMenuItem key={option} onSelect={() => setModel(option)}>
-                      <span className="font-mono">{option}</span>
-                    </DropdownMenuItem>
-                  ))}
-                </DropdownMenuContent>
-              </DropdownMenu>
+                  <span className="truncate" style={{ maxWidth: 210 }}>
+                    {model}
+                  </span>
+                  <ChevronDownIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
+                </MenuTrigger>
+                <MenuContent align="end" className="w-64">
+                  <MenuRadioGroup value={model} onValueChange={(next: string) => setModel(next)}>
+                    <MenuGroupLabel>{t("composer:controls.model")}</MenuGroupLabel>
+                    {modelChoices.map((option) => (
+                      <MenuRadioItem key={option} value={option} closeOnSelect>
+                        <span className="font-mono">{option}</span>
+                      </MenuRadioItem>
+                    ))}
+                  </MenuRadioGroup>
+                </MenuContent>
+              </Menu>
 
               <button
                 ref={startButtonRef}
@@ -741,8 +762,8 @@ function PhoneIdeNotice() {
     <main className="q-main" aria-label="IDE">
       <div className="q-center-empty">
         <div className="q-empty" style={{ width: 340, padding: 0 }}>
-          <h3 style={{ fontSize: 17, lineHeight: "24px" }}>{t("phoneIde.title")}</h3>
-          <p style={{ margin: 0 }}>{t("phoneIde.body")}</p>
+          <h3 style={{ fontSize: 16, lineHeight: "24px" }}>{t("phoneIde.title")}</h3>
+          <p className="m-0">{t("phoneIde.body")}</p>
           <button
             type="button"
             className="q-btn secondary"
@@ -756,7 +777,21 @@ function PhoneIdeNotice() {
   );
 }
 
+/**
+ * One toaster outside the layout switch, so toasts on screen stay put when
+ * the window crosses the phone breakpoint; it moves itself between corners.
+ */
 export function AppShell() {
+  return (
+    <>
+      <ShellLayout />
+      <Toaster />
+    </>
+  );
+}
+
+function ShellLayout() {
+  const { t } = useTranslation(["sidebar", "thread"]);
   const route = useApp((state) => state.ui.route);
   const layout = useApp((state) => state.ui.layout);
   const threads = useApp((state) => state.threads);
@@ -777,6 +812,8 @@ export function AppShell() {
       <Surface surface={route.surface} path={route.path} />
     ) : null;
   const ide = layout.view === "ide" && !isPhone && (isThread || route.kind === "ide");
+  const viewRef = useRef<HTMLDivElement>(null);
+  useViewFade(viewRef, viewKey(route, ide ? "ide" : "main"));
   const thread = activeThread(threads, selectedThreadId);
   const preview = useApp((state) => state.ui.preview);
   const previewExpanded = useApp((state) => state.ui.previewExpanded);
@@ -794,10 +831,7 @@ export function AppShell() {
         {surface ? <OfflineBanner /> : null}
         <AppUpdateNotice inline />
         <McpApprovalCard />
-        <div
-          className="q-ph-content"
-          style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}
-        >
+        <div ref={viewRef} className="q-ph-content flex min-h-0 flex-1 flex-col">
           {ide ? (
             <PhoneIdeNotice />
           ) : isThread ? (
@@ -819,7 +853,6 @@ export function AppShell() {
           onClose={closeLinkPullRequest}
         />
         <ShortcutsDialog />
-        <Toasts />
       </div>
     );
   }
@@ -851,16 +884,32 @@ export function AppShell() {
 
   return (
     <div className="q-app">
-      {layout.sidebarOpen ? <Sidebar /> : null}
-      <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", minHeight: 0 }}>
+      <ShellSplit
+        side="start"
+        pane={layout.sidebarOpen ? <Sidebar /> : null}
+        width={layout.sidebarWidth}
+        min={240}
+        max={420}
+        label={t("sidebar:resize")}
+        onWidth={setSidebarWidth}
+      >
         {surface ? <OfflineBanner /> : null}
         <AppUpdateNotice />
         <McpApprovalCard />
-        <div style={{ flex: 1, minHeight: 0, display: "flex" }}>
-          {main}
-          {showPanel && thread ? <RightPanel thread={thread} ide={ide} /> : null}
-        </div>
-      </div>
+        <ShellSplit
+          side="end"
+          pane={showPanel && thread ? <RightPanel thread={thread} ide={ide} /> : null}
+          width={layout.panelWidth}
+          min={320}
+          max={640}
+          label={t("thread:panel.resize")}
+          onWidth={setPanelWidth}
+        >
+          <div ref={viewRef} className="flex min-h-0 min-w-0 flex-1">
+            {main}
+          </div>
+        </ShellSplit>
+      </ShellSplit>
 
       <NewThreadDialog />
       <AddProjectDialog />
@@ -873,7 +922,6 @@ export function AppShell() {
         onClose={closeLinkPullRequest}
       />
       <ShortcutsDialog />
-      <Toasts />
     </div>
   );
 }

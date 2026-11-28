@@ -120,7 +120,7 @@ export function ImportPanel() {
                       onChange={() => toggleImportProject(project.key)}
                     />
                     <span className={cn("q-check", checked && "on")} aria-hidden>
-                      {checked ? <CheckIcon className="q-icon s12" strokeWidth={2} /> : null}
+                      {checked ? <CheckIcon className="q-icon s14" strokeWidth={2} /> : null}
                     </span>
                     {project.git ? (
                       <FolderGit2Icon className="q-icon s14" strokeWidth={1.5} aria-hidden />
@@ -178,7 +178,9 @@ export function ImportPanel() {
         <div className="q-imp-progress" aria-hidden>
           <div
             className="q-imp-progress-bar"
-            style={{ width: `${progress.running ? Math.max(percent, 4) : 100}%` }}
+            style={{
+              transform: `scaleX(${(progress.running ? Math.max(percent, 4) : 100) / 100})`,
+            }}
           />
         </div>
       ) : null}

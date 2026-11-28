@@ -1,12 +1,13 @@
 import { Trans, useTranslation } from "react-i18next";
-import { ENTER, ESC, KeyCaps, SHIFT, ShortcutCaps } from "@/components/common/Kbd";
 import {
   Dialog,
+  DialogBody,
   DialogContent,
   DialogDescription,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { ENTER, ESC, KeyCaps, SHIFT, ShortcutCaps } from "@/components/ui/kbd";
 
 import { COMMAND_GROUPS, COMMANDS, commandGroupName, commandName } from "@/lib/keybindings";
 import { closeShortcuts, navigate, useApp } from "@/lib/store/appStore";
@@ -43,10 +44,7 @@ export function ShortcutsDialog() {
 
   return (
     <Dialog open={open} onOpenChange={(value) => (value ? undefined : closeShortcuts())}>
-      <DialogContent
-        className="sm:max-w-[680px]"
-        onOpenAutoFocus={(event) => event.preventDefault()}
-      >
+      <DialogContent size="lg" initialFocus="content">
         <DialogHeader>
           <DialogTitle>{commandName("shortcuts.open")}</DialogTitle>
           <DialogDescription>
@@ -73,17 +71,17 @@ export function ShortcutsDialog() {
           </DialogDescription>
         </DialogHeader>
 
-        <div className="grid gap-x-6 gap-y-4 sm:grid-cols-2">
+        <DialogBody className="grid gap-x-6 gap-y-5 sm:grid-cols-2">
           {COMMAND_GROUPS.map((group) => (
-            <section key={group} className="space-y-1">
-              <h3 className="text-[12px] font-medium text-[var(--fg-3)]">
+            <section key={group} className="flex flex-col gap-1">
+              <h3 className="m-0 text-xs font-medium text-muted-foreground">
                 {commandGroupName(group)}
               </h3>
-              <dl className="divide-y divide-line/70">
+              <dl className="m-0 divide-y divide-border">
                 {COMMANDS.filter((command) => command.group === group).map((command) => (
-                  <div key={command.id} className="flex items-center justify-between gap-2 py-1">
-                    <dt className="text-[12.5px] text-[var(--fg-2)]">{commandName(command.id)}</dt>
-                    <dd className="q-pal-kbd shrink-0">
+                  <div key={command.id} className="flex h-8 items-center justify-between gap-2">
+                    <dt className="truncate text-sm text-fg-2">{commandName(command.id)}</dt>
+                    <dd className="m-0 shrink-0">
                       <ShortcutCaps command={command.id} />
                     </dd>
                   </div>
@@ -91,24 +89,24 @@ export function ShortcutsDialog() {
               </dl>
             </section>
           ))}
-          <section className="space-y-1">
-            <h3 className="text-[12px] font-medium text-[var(--fg-3)]">
+          <section className="flex flex-col gap-1">
+            <h3 className="m-0 text-xs font-medium text-muted-foreground">
               {t("shortcutsDialog.whileTyping")}
             </h3>
-            <dl className="divide-y divide-line/70">
+            <dl className="m-0 divide-y divide-border">
               {TYPING.map(([key, keys]) => (
-                <div key={key} className="flex items-center justify-between gap-2 py-1">
-                  <dt className="text-[12.5px] text-[var(--fg-2)]">
+                <div key={key} className="flex h-8 items-center justify-between gap-2">
+                  <dt className="truncate text-sm text-fg-2">
                     {t(`shortcutsDialog.typing.${key}`)}
                   </dt>
-                  <dd className="q-pal-kbd shrink-0">
+                  <dd className="m-0 shrink-0">
                     <KeyCaps value={keys.join(" ")} />
                   </dd>
                 </div>
               ))}
             </dl>
           </section>
-        </div>
+        </DialogBody>
       </DialogContent>
     </Dialog>
   );

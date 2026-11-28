@@ -1,7 +1,19 @@
 import { ShieldCheckIcon } from "lucide-react";
 import { useTranslation } from "react-i18next";
-
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
+import { buttonVariants } from "@/components/ui/button";
+import {
+  Sheet,
+  SheetBody,
+  SheetClose,
+  SheetContent,
+  SheetDescription,
+  SheetFooter,
+  SheetHeader,
+  SheetTitle,
+} from "@/components/ui/sheet";
+import { Switch } from "@/components/ui/switch";
+import { Tip } from "@/components/ui/tooltip";
 import type { ThreadSummary } from "@/gen";
 import { harnessLabel, harnessSeed } from "@/lib/entities";
 import { respondApproval } from "@/lib/store/appStore";
@@ -65,85 +77,58 @@ export function PhoneApprovalSheet({
 }) {
   const { t } = useTranslation("thread");
   const harness = harnessLabel(thread.harness);
+  const respond = (decision: "approve" | "deny") => () => {
+    void respondApproval(thread.thread_id, approval.approvalId, decision);
+  };
   return (
-    <>
-      <button
-        type="button"
-        className="q-ph-scrim"
-        aria-label={t("approval.phone.close")}
-        onClick={onClose}
-      />
-      <div
-        className="q-ph-sheet"
-        role="dialog"
-        aria-modal="true"
-        aria-label={t("approval.phone.sheet")}
-      >
-        <div className="q-grab" />
-        <div className="q-ph-sheet-head">
+    <Sheet defaultOpen onOpenChangeComplete={(open) => (open ? undefined : onClose())}>
+      <SheetContent>
+        <SheetHeader className="items-center gap-2.5">
           <EntityAvatar
             seed={harnessSeed(thread.host, thread.harness)}
             kind="harness"
             label={harness}
-            size={22}
+            size={24}
           />
-          <div className="grow">
-            <div className="t">
+          <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+            <SheetTitle>
               {approval.approvalKind === "command"
                 ? t("approval.phone.runCommandOn", { host: hostName })
                 : t("approval.phone.reviewRequestOn", { host: hostName })}
-            </div>
-            <div className="s">
+            </SheetTitle>
+            <SheetDescription className="truncate">
               {harness} · {thread.title}
+            </SheetDescription>
+          </div>
+        </SheetHeader>
+        <SheetBody className="px-0">
+          <div className="q-cmd q-ph-sheet-cmd">{approval.prompt}</div>
+          <div className="q-ph-group">
+            <div className="q-ph-li">
+              <span className="grow q-muted">{t("approval.phone.folder")}</span>
+              <span className="q-mono">{shortPath(thread.workspace_path)}</span>
+            </div>
+            <div className="q-ph-li">
+              <span className="grow q-muted">{t("approval.phone.asked")}</span>
+              <span>{t("approval.now")}</span>
+            </div>
+            <div className="q-ph-li">
+              <span className="grow">{t("approval.phone.alwaysAllow")}</span>
+              <Tip label={t("approval.notAvailable")}>
+                <Switch checked={false} disabled aria-label={t("approval.phone.alwaysAllow")} />
+              </Tip>
             </div>
           </div>
-        </div>
-        <div className="q-cmd q-ph-sheet-cmd">{approval.prompt}</div>
-        <div className="q-ph-group">
-          <div className="q-ph-li">
-            <span className="grow q-muted">{t("approval.phone.folder")}</span>
-            <span className="q-mono">{shortPath(thread.workspace_path)}</span>
-          </div>
-          <div className="q-ph-li">
-            <span className="grow q-muted">{t("approval.phone.asked")}</span>
-            <span>{t("approval.now")}</span>
-          </div>
-          <div className="q-ph-li">
-            <span className="grow">{t("approval.phone.alwaysAllow")}</span>
-            <button
-              type="button"
-              className="q-switch"
-              role="switch"
-              aria-checked={false}
-              disabled
-              title={t("approval.notAvailable")}
-              aria-label={t("approval.phone.alwaysAllow")}
-            />
-          </div>
-        </div>
-        <div className="q-ph-sheet-actions">
-          <button
-            type="button"
-            className="q-btn secondary"
-            onClick={() => {
-              void respondApproval(thread.thread_id, approval.approvalId, "deny");
-              onClose();
-            }}
-          >
+        </SheetBody>
+        <SheetFooter>
+          <SheetClose className={buttonVariants({ variant: "secondary" })} action={respond("deny")}>
             {t("approval.deny")}
-          </button>
-          <button
-            type="button"
-            className="q-btn primary"
-            onClick={() => {
-              void respondApproval(thread.thread_id, approval.approvalId, "approve");
-              onClose();
-            }}
-          >
+          </SheetClose>
+          <SheetClose className={buttonVariants()} action={respond("approve")}>
             {t("approval.approve")}
-          </button>
-        </div>
-      </div>
-    </>
+          </SheetClose>
+        </SheetFooter>
+      </SheetContent>
+    </Sheet>
   );
 }

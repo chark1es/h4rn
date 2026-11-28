@@ -1,8 +1,8 @@
 import { CircleCheckIcon, KeyRoundIcon, PlusIcon, TriangleAlertIcon } from "lucide-react";
-import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import { type ReactNode, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-
 import { ChipSelect } from "@/components/common/ChipSelect";
+import { SegmentedControl, SegmentedControlItem } from "@/components/ui/segmented-control";
 import { useHarnesses, useHarnessVersions } from "@/features/harnesses/harnessStore";
 import type {
   HarnessKind,
@@ -72,7 +72,7 @@ function TestResult({ generatorId }: { generatorId: TextGeneratorId }) {
   }
   if (error) {
     return (
-      <span className="q-danger" role="alert" style={{ fontSize: 12 }}>
+      <span className="q-danger text-xs" role="alert">
         {error.message}
         {error.hint ? ` ${error.hint}` : ""}
       </span>
@@ -81,8 +81,8 @@ function TestResult({ generatorId }: { generatorId: TextGeneratorId }) {
   if (!report) return null;
   if (report.ok) {
     return (
-      <span className="q-ok" style={{ fontSize: 12 }}>
-        <CircleCheckIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />{" "}
+      <span className="q-ok text-xs">
+        <CircleCheckIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />{" "}
         {report.reply
           ? t("textGeneration.repliedWith", {
               latency: formatNumber(Number(report.latency_ms), {
@@ -103,8 +103,8 @@ function TestResult({ generatorId }: { generatorId: TextGeneratorId }) {
     );
   }
   return (
-    <span className="q-danger" role="alert" style={{ fontSize: 12 }}>
-      <TriangleAlertIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />{" "}
+    <span className="q-danger text-xs" role="alert">
+      <TriangleAlertIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />{" "}
       {report.error ?? t("textGeneration.noAnswer")}
       {report.hint ? ` ${report.hint}` : ""}
     </span>
@@ -131,9 +131,9 @@ function GeneratorRow({ id }: { id: TextGeneratorId }) {
         </div>
       </div>
       <div className="ctl" style={{ display: "block" }}>
-        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+        <div className="flex gap-2 items-center flex-wrap">
           <span className="q-secret">
-            <KeyRoundIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+            <KeyRoundIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
             {generator.has_api_key
               ? t("textGeneration.keyStored", { host })
               : t("textGeneration.noKey")}
@@ -154,7 +154,7 @@ function GeneratorRow({ id }: { id: TextGeneratorId }) {
             {t("common:remove")}
           </button>
         </div>
-        <div style={{ marginTop: 6 }}>
+        <div className="mt-1.5">
           <TestResult generatorId={generator.id} />
         </div>
       </div>
@@ -222,11 +222,10 @@ export function AddGenerator() {
         </div>
         <div className="ctl">
           <input
-            className="q-input"
+            className="q-input text-xs"
             value={name}
             aria-label={t("textGeneration.nameLabel")}
             onChange={(event) => setName(event.target.value)}
-            style={{ maxWidth: 300, fontSize: 12 }}
           />
         </div>
       </div>
@@ -239,7 +238,6 @@ export function AddGenerator() {
           <ChipSelect<TextGeneratorKind>
             label={t("textGeneration.kindLabel")}
             value={kind}
-            width={190}
             options={KINDS.map((entry) => ({
               value: entry,
               label: kindLabel(entry),
@@ -269,7 +267,6 @@ export function AddGenerator() {
               kind === "anthropic" ? "https://api.anthropic.com" : "https://api.openai.com/v1"
             }
             onChange={(event) => setBaseUrl(event.target.value)}
-            style={{ maxWidth: 340, fontSize: 12 }}
           />
         </div>
       </div>
@@ -291,7 +288,6 @@ export function AddGenerator() {
             aria-label={t("textGeneration.modelLabel")}
             placeholder="gpt-5.4-mini"
             onChange={(event) => setModel(event.target.value)}
-            style={{ maxWidth: 260, fontSize: 12 }}
           />
         </div>
       </div>
@@ -308,11 +304,10 @@ export function AddGenerator() {
             aria-label={t("textGeneration.apiKeyLabel")}
             placeholder={t("textGeneration.writeOnly")}
             onChange={(event) => setApiKey(event.target.value)}
-            style={{ maxWidth: 300, fontSize: 12 }}
           />
         </div>
       </div>
-      <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+      <div className="flex gap-2 justify-end">
         <button
           type="button"
           className="q-btn ghost"
@@ -344,7 +339,7 @@ export function AddGenerator() {
         </button>
       </div>
       {saveError ? (
-        <p className="q-danger" role="alert" style={{ fontSize: 12, marginTop: 8 }}>
+        <p className="q-danger text-xs mt-2" role="alert">
           {saveError.message}
           {saveError.hint ? ` ${saveError.hint}` : ""}
         </p>
@@ -377,10 +372,10 @@ export function TextGeneratorsSettings() {
       <p className="desc">{t("textGeneration.lead", { host })}</p>
 
       {loading && generators.length === 0 ? (
-        <div className="q-skel" style={{ height: 60 }} />
+        <div className="q-skel h-15" />
       ) : error && generators.length === 0 ? (
         <div className="q-empty">
-          <p style={{ margin: 0 }}>{error.message}</p>
+          <p className="m-0">{error.message}</p>
           <p className="q-faint" style={{ margin: "4px 0 12px" }}>
             {error.hint ?? t("textGeneration.retryOnline")}
           </p>
@@ -423,52 +418,21 @@ export function ModePicker({
   onChange: (next: TitleModelMode) => void;
 }) {
   const { t } = useTranslation(["settings", "common"]);
-  const buttons = useRef<Array<HTMLButtonElement | null>>([]);
-  const select = (index: number) => {
-    const next = (index + MODES.length) % MODES.length;
-    const mode = MODES[next];
-    if (!mode) return;
-    onChange(mode);
-    buttons.current[next]?.focus();
-  };
   return (
-    <div
-      className="q-seg inline q-seg-choice"
-      role="radiogroup"
+    <SegmentedControl
+      className="phone:w-full"
       aria-label={t("textGeneration.titleModelLabel")}
+      value={value}
+      onValueChange={(next) => {
+        if (next) onChange(next as TitleModelMode);
+      }}
     >
-      {MODES.map((mode, index) => (
-        // biome-ignore lint/a11y/useSemanticElements: a segmented radio group, not a form radio
-        <button
-          key={mode}
-          ref={(element) => {
-            buttons.current[index] = element;
-          }}
-          type="button"
-          role="radio"
-          aria-checked={value === mode}
-          tabIndex={value === mode ? 0 : -1}
-          onClick={() => onChange(mode)}
-          onKeyDown={(event) => {
-            if (event.key === "ArrowRight" || event.key === "ArrowDown") {
-              event.preventDefault();
-              select(index + 1);
-            } else if (event.key === "ArrowLeft" || event.key === "ArrowUp") {
-              event.preventDefault();
-              select(index - 1);
-            } else if (event.key === "Home") {
-              event.preventDefault();
-              select(0);
-            } else if (event.key === "End") {
-              event.preventDefault();
-              select(MODES.length - 1);
-            }
-          }}
-        >
+      {MODES.map((mode) => (
+        <SegmentedControlItem key={mode} value={mode} className="phone:min-w-0 phone:flex-1">
           {t(`sourceControl.modes.${mode}`)}
-        </button>
+        </SegmentedControlItem>
       ))}
-    </div>
+    </SegmentedControl>
   );
 }
 
@@ -546,7 +510,6 @@ function TitleDraftForm({ saved }: { saved: TextGenerationSettings }) {
             <ChipSelect<AgentChoice>
               label={t("textGeneration.codingAgentLabel")}
               value={draft.harness ?? FOLLOW_THREAD}
-              width={220}
               options={[
                 {
                   value: FOLLOW_THREAD,
@@ -582,7 +545,6 @@ function TitleDraftForm({ saved }: { saved: TextGenerationSettings }) {
               <ChipSelect<TextGeneratorId>
                 label={t("textGeneration.generatorLabel")}
                 value={draft.generator_id ?? ""}
-                width={200}
                 disabled={generators.length === 0}
                 options={generators.map((entry) => ({
                   value: entry.id,
@@ -606,7 +568,6 @@ function TitleDraftForm({ saved }: { saved: TextGenerationSettings }) {
                 value={model}
                 aria-label={t("textGeneration.titleModelLabel")}
                 onChange={(event) => patchSetting({ model: event.target.value })}
-                style={{ maxWidth: 260, fontSize: 12 }}
               />
               <button
                 type="button"
@@ -633,7 +594,7 @@ function TitleDraftForm({ saved }: { saved: TextGenerationSettings }) {
         </>
       ) : null}
 
-      <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+      <div className="flex gap-2 justify-end">
         <button
           type="button"
           className="q-btn ghost"
@@ -665,7 +626,7 @@ function TitleDraftForm({ saved }: { saved: TextGenerationSettings }) {
         </button>
       </div>
       {saveError ? (
-        <p className="q-danger" role="alert" style={{ fontSize: 12, marginTop: 8 }}>
+        <p className="q-danger text-xs mt-2" role="alert">
           {saveError.message}
           {saveError.hint ? ` ${saveError.hint}` : ""}
         </p>
@@ -698,10 +659,10 @@ export function ThreadSettings({ children }: { children?: ReactNode }) {
       {settings ? (
         <TitleDraftForm saved={settings} />
       ) : loading ? (
-        <div className="q-skel" style={{ height: 120 }} />
+        <div className="q-skel h-30" />
       ) : error ? (
         <div className="q-empty">
-          <p style={{ margin: 0 }}>{error.message}</p>
+          <p className="m-0">{error.message}</p>
           <p className="q-faint" style={{ margin: "4px 0 12px" }}>
             {error.hint ?? t("textGeneration.retryOnline")}
           </p>

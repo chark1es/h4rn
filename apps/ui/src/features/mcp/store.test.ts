@@ -4,6 +4,7 @@ import type { McpRequest, McpServerView, ResponseBody } from "@/gen";
 import { H4rnRequestError, protoError } from "@/lib/client/errors";
 import { setLocalePreference } from "@/lib/i18n";
 import { getState, store } from "@/lib/store/appStore";
+import { lastToast } from "@/test/toasts";
 import { CONFLICT_CHOICES, conflictResolution } from "./labels";
 import {
   applyMcpEvent,
@@ -145,7 +146,7 @@ describe("MCP store", () => {
       getMcpState().servers[0]?.enabled.by_harness.find((entry) => entry.harness === "claude_code")
         ?.enabled,
     ).toBe(true);
-    const toast = getState().toasts.at(-1);
+    const toast = lastToast();
     expect(toast?.title).toBe("Couldn't turn off playwright.");
     expect(toast?.description).toContain("The switch is back where it was");
   });
@@ -159,7 +160,7 @@ describe("MCP store", () => {
     await setLocalePreference("ja");
     try {
       await removeMcpServer("playwright");
-      const toast = getState().toasts.at(-1);
+      const toast = lastToast();
       expect(toast?.title).toBe("playwright を削除できませんでした。");
       expect(toast?.description).toBe("In use. サーバーは設定されたままです。Stop it first.");
     } finally {
@@ -178,7 +179,7 @@ describe("MCP store", () => {
 
     expect(removed).toBe(false);
     expect(getMcpState().servers.map((entry) => entry.name)).toEqual(["playwright"]);
-    expect(getState().toasts.at(-1)?.description).toContain("still configured");
+    expect(lastToast()?.description).toContain("still configured");
   });
 
   it("keeps live tool calls newest first and capped", () => {

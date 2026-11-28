@@ -128,6 +128,7 @@
 
 /* Controls */
 .q-btn {
+  position: relative;
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -138,9 +139,9 @@
   font-size: 13px;
   white-space: nowrap;
   transition:
-    background var(--dur-1) var(--ease-out),
-    box-shadow var(--dur-1) var(--ease-out),
-    color var(--dur-1);
+    background var(--duration-micro) var(--ease-enter),
+    box-shadow var(--duration-micro) var(--ease-enter),
+    color var(--duration-micro);
 }
 .q-btn.primary {
   background: var(--accent);
@@ -165,6 +166,20 @@
   background: var(--hover);
   color: var(--fg);
 }
+/* An inline action: a text-only button that starts or ends a column. Its 6px
+   hover pad hangs past that edge so the label lines up with the text and
+   fields around it, and it keeps this compact size on a phone (its hit area
+   still grows to 44px). */
+.q-inline-start,
+.q-inline-end {
+  padding-inline: 6px;
+}
+.q-inline-start {
+  margin-inline-start: -6px;
+}
+.q-inline-end {
+  margin-inline-end: -6px;
+}
 .q-btn.danger {
   color: var(--danger);
   box-shadow: inset 0 0 0 1px var(--line-2);
@@ -177,19 +192,8 @@
   opacity: 0.45;
   cursor: not-allowed;
 }
-.q-kbd {
-  font: 500 11px / 16px var(--font);
-  color: var(--fg-3);
-  padding: 0 4px;
-  border-radius: 4px;
-  box-shadow: inset 0 0 0 1px var(--line);
-  min-width: 18px;
-  text-align: center;
-  display: inline-block;
-  letter-spacing: 0.02em;
-  white-space: nowrap;
-}
-.q-btn .q-kbd {
+.q-btn > [data-slot="kbd"],
+.q-btn > [data-slot="kbd-group"] {
   margin-left: 2px;
 }
 /* Settings → Shortcuts: a binding you can click to re-record. */
@@ -204,8 +208,8 @@
   border-radius: 6px;
   box-shadow: inset 0 0 0 1px transparent;
   transition:
-    background var(--dur-1),
-    box-shadow var(--dur-1);
+    background var(--duration-micro),
+    box-shadow var(--duration-micro);
 }
 .q-keybind:hover {
   background: var(--hover);
@@ -221,13 +225,9 @@
   outline: 2px solid var(--focus);
   outline-offset: 1px;
 }
-.q-kbd + .q-kbd {
-  margin-left: 2px;
-}
-.q-btn.primary .q-kbd {
+.q-btn.primary [data-slot="kbd"] {
   color: var(--accent-fg);
   border-color: oklch(1 0 0 / 0.3);
-  box-shadow: inset 0 0 0 1px oklch(1 0 0 / 0.3);
 }
 
 .q-ibtn {
@@ -239,8 +239,27 @@
   color: var(--fg-2);
   flex: none;
   transition:
-    background var(--dur-1),
-    color var(--dur-1);
+    background var(--duration-micro),
+    color var(--duration-micro);
+}
+/* A 32 px hit area (44 px on touch or a phone) around the 28 px buttons,
+   without changing how they look or lay out; same as the hit-area utility. */
+.q-btn::after,
+.q-ibtn::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: max(100%, 2rem);
+  height: max(100%, 2rem);
+  translate: -50% -50%;
+}
+@media (pointer: coarse), (max-width: 639px) {
+  .q-btn::after,
+  .q-ibtn::after {
+    width: max(100%, 2.75rem);
+    height: max(100%, 2.75rem);
+  }
 }
 .q-ibtn:hover {
   background: var(--hover);
@@ -255,118 +274,19 @@
   cursor: not-allowed;
 }
 
-.q-kbd-glyph {
-  display: inline-block;
-  width: 11px;
-  height: 11px;
-  vertical-align: -1.5px;
-  stroke: currentColor;
-  fill: none;
-  stroke-width: 1.75;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-}
-.q-pal-kbd .q-kbd + .q-kbd {
-  margin-left: 0;
-}
-
-.q-seg {
-  display: flex;
-  padding: 2px;
-  gap: 2px;
-  background: var(--fill);
-  border-radius: 8px;
-}
-.q-seg > button {
-  flex: 1;
-  height: 24px;
-  border-radius: 6px;
-  color: var(--fg-2);
-  font-weight: 500;
-  font-size: 13px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  padding: 0 10px;
-  transition:
-    background var(--dur-1),
-    color var(--dur-1);
-  white-space: nowrap;
-}
-.q-seg > button:hover {
-  color: var(--fg);
-}
-.q-seg > button[aria-selected="true"],
-.q-seg > button[aria-checked="true"],
-.q-seg > button[aria-pressed="true"] {
-  background: var(--bg-raised);
-  color: var(--fg);
-  box-shadow:
-    0 1px 2px oklch(0.2 0.01 260 / 0.12),
-    0 0 0 0.5px oklch(0.2 0.01 260 / 0.08);
-}
-.q-tabs button[aria-selected="true"] {
-  color: var(--fg);
-}
-.dark .q-seg > button[aria-selected="true"],
-.dark .q-seg > button[aria-checked="true"],
-.dark .q-seg > button[aria-pressed="true"] {
-  background: var(--fill-2);
-  box-shadow: none;
-}
-.q-seg .c {
-  flex: none;
-  color: var(--fg-3);
-  font-weight: 400;
-}
-.q-rp-tab .c {
-  color: var(--fg-3);
-  font-weight: 400;
-  flex: none;
-}
-.q-tabs button .c {
-  color: var(--fg-3);
-  font-weight: 400;
-}
-.dark .q-seg > button[aria-selected="true"] .c {
-  color: var(--fg-2);
-}
-.q-seg.inline {
-  display: inline-flex;
-}
-fieldset.q-seg-fs {
-  margin: 0;
-  border: 0;
-  min-width: 0;
-}
-.q-tabs button {
-  height: 36px;
-  color: var(--fg-2);
-  font-weight: 500;
-  position: relative;
-  display: flex;
-  gap: 6px;
-  align-items: center;
-}
-.q-viewseg > button {
-  height: 24px;
-  padding: 0 10px;
-}
-.q-seg.inline > button {
-  flex: none;
-}
-
 .q-input {
   height: 28px;
   border-radius: 6px;
   padding: 0 10px;
   background: var(--bg-raised);
-  box-shadow: inset 0 0 0 1px var(--line-2);
+  box-shadow: inset 0 0 0 1px var(--input);
   border: 0;
   width: 100%;
   font-size: 13px;
   color: var(--fg);
+}
+.q-input.q-mono {
+  font-size: 12px;
 }
 .q-input:focus-visible {
   outline: none;
@@ -375,48 +295,11 @@ fieldset.q-seg-fs {
     0 0 0 3px color-mix(in oklch, var(--focus) 25%, transparent);
 }
 
-.q-switch {
-  display: inline-block;
-  vertical-align: middle;
-  width: 30px;
-  height: 18px;
-  border-radius: 8px;
-  background: var(--fill-2);
-  position: relative;
-  flex: none;
-  box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--fg) 12%, transparent);
-  transition: background var(--dur-2) var(--ease-out);
-}
-.q-switch::after {
-  content: "";
-  position: absolute;
-  top: 2px;
-  left: 2px;
-  width: 14px;
-  height: 14px;
-  border-radius: 50%;
-  background: #fff;
-  box-shadow: 0 1px 2px oklch(0 0 0 / 0.25);
-  transition: transform var(--dur-2) var(--ease-out);
-}
-.q-switch[aria-checked="true"] {
-  background: var(--accent);
-  box-shadow: none;
-}
-.q-switch[aria-checked="true"]::after {
-  transform: translateX(12px);
-}
-.q-switch[aria-disabled="true"],
-.q-switch[disabled] {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
 .q-check {
   width: 16px;
   height: 16px;
   border-radius: 4px;
-  box-shadow: inset 0 0 0 1px var(--line-2);
+  box-shadow: inset 0 0 0 1px var(--input);
   display: inline-grid;
   place-items: center;
   flex: none;
@@ -459,53 +342,26 @@ fieldset.q-seg-fs {
 }
 
 /* Linked pull requests: the header badge and its quiet panel. */
-.q-pr-badge {
+/* Sized and outlined like the small secondary buttons beside it (Stop,
+   Snooze); the state keeps its tone in the text only. */
+.q-badge.q-pr-badge {
+  height: 28px;
+  padding: 0 8px;
+  gap: 6px;
   border: 0;
+  border-radius: 6px;
+  background: var(--bg-raised);
+  box-shadow: inset 0 0 0 1px var(--line-2);
   cursor: pointer;
   font: inherit;
+  font-size: 12px;
+  font-weight: 500;
 }
-.q-pr-badge:hover {
+.q-badge.q-pr-badge:hover {
   background: var(--hover);
 }
 .q-pr-more {
   color: var(--fg-3);
-}
-.q-pr-links {
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-}
-.q-pr-row {
-  gap: 6px;
-  min-width: 0;
-}
-.q-pr-row-state {
-  margin-left: auto;
-  flex: none;
-  font-size: 12px;
-  color: var(--fg-3);
-}
-.q-pr-note {
-  margin: 0;
-  padding: 2px 8px 6px;
-  font-size: 12px;
-  line-height: 1.4;
-  color: var(--fg-3);
-}
-/* The tone classes must win over the muted base colour above. */
-.q-pr-row-state.q-danger,
-.q-pr-note.q-danger {
-  color: var(--danger);
-}
-.q-pr-row-state.q-ok {
-  color: var(--ok);
-}
-.q-pr-link-name {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .q-pr-link-form {
   display: flex;
@@ -590,8 +446,8 @@ fieldset.q-seg-fs {
 
 /* Desktop shell: one sidebar, one main column, one right panel */
 .q-side {
-  width: var(--side-w, 288px);
-  flex: none;
+  width: 100%;
+  flex: 1;
   background: var(--bg-side);
   border-right: 1px solid var(--line);
   display: flex;
@@ -660,9 +516,7 @@ fieldset.q-seg-fs {
     inset 0 0 0 1px var(--focus),
     0 0 0 3px color-mix(in oklch, var(--focus) 25%, transparent);
 }
-.q-side .q-seg > button {
-  padding: 0 6px;
-}
+
 .q-nav {
   display: flex;
   align-items: center;
@@ -672,7 +526,7 @@ fieldset.q-seg-fs {
   border-radius: 6px;
   color: var(--fg-2);
   font-weight: 500;
-  transition: background var(--dur-1);
+  transition: background var(--duration-micro);
   width: 100%;
   text-align: left;
 }
@@ -758,6 +612,16 @@ fieldset.q-seg-fs {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* Rows keep their height when the MCP list opens; the list scrolls instead. */
+.setnav .q-nav,
+.setnav .q-set-subrow {
+  flex: none;
+}
+.setnav .q-side-h {
+  flex: none;
+  height: 44px;
+  padding: 16px 4px 4px 8px;
+}
 .q-side-banner {
   margin: 0 8px 8px;
   flex: none;
@@ -781,7 +645,7 @@ fieldset.q-seg-fs {
   padding: 0 8px 0 10px;
   border-radius: 6px;
   color: var(--fg-2);
-  transition: background var(--dur-1);
+  transition: background var(--duration-micro);
   text-align: left;
 }
 .q-pg-tog:hover {
@@ -815,19 +679,23 @@ fieldset.q-seg-fs {
 .q-pg-tog .chev {
   color: var(--fg-3);
   flex: none;
-  transition: transform var(--dur-2) var(--ease-out);
+  transition: transform var(--duration-popup) var(--ease-enter);
 }
+/* The hover-only chevron hangs into the row's own padding, so the resting
+   meta ends 14px in from the column: the same edge as a changes card's file
+   stats and actions. */
 .q-tool .chev {
   color: var(--fg-3);
   opacity: 0;
   transition:
-    opacity var(--dur-1),
-    transform var(--dur-2) var(--ease-out);
+    opacity var(--duration-micro),
+    transform var(--duration-popup) var(--ease-enter);
   flex: none;
+  margin: 0 -8px 0 -2px;
 }
 .q-ph-pg-h .chev {
   color: var(--fg-3);
-  transition: transform var(--dur-2) var(--ease-out);
+  transition: transform var(--duration-popup) var(--ease-enter);
 }
 .q-pg-tog[aria-expanded="false"] .chev {
   transform: rotate(-90deg);
@@ -839,7 +707,7 @@ fieldset.q-seg-fs {
   height: 24px;
   opacity: 0;
   background: var(--bg-side);
-  transition: opacity var(--dur-1);
+  transition: opacity var(--duration-micro);
 }
 .q-pg-h:hover .q-pg-add,
 .q-pg-h:focus-within .q-pg-add {
@@ -879,7 +747,7 @@ fieldset.q-seg-fs {
   padding: 9px 10px 10px;
   border-radius: 8px;
   position: relative;
-  transition: background var(--dur-1);
+  transition: background var(--duration-micro);
   text-align: left;
   cursor: pointer;
 }
@@ -997,116 +865,6 @@ fieldset.q-seg-fs {
   background: var(--fill);
   color: var(--fg);
 }
-.q-hostpop {
-  position: absolute;
-  left: 8px;
-  right: 8px;
-  bottom: 50px;
-  padding: 6px;
-  z-index: 15;
-  background: var(--bg-raised);
-  border-radius: 12px;
-  box-shadow:
-    var(--sh-pop),
-    inset 0 0 0 1px var(--line);
-}
-.q-hp-h {
-  display: flex;
-  justify-content: space-between;
-  align-items: baseline;
-  padding: 6px 8px;
-  font-weight: 600;
-}
-.q-hp-h .q-faint {
-  font-size: 12px;
-  font-weight: 400;
-}
-.q-hp-empty {
-  padding: 8px;
-  font-size: 12px;
-  color: var(--fg-2);
-  line-height: 17px;
-}
-.q-hp-conn {
-  font-size: 12px;
-  color: var(--fg-3);
-  padding: 6px 8px 4px;
-}
-.q-hp-sep {
-  height: 1px;
-  background: var(--line);
-  margin: 6px 2px;
-}
-.q-host {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  height: 28px;
-  padding: 0 8px;
-  border-radius: 6px;
-  color: var(--fg-2);
-  width: 100%;
-  text-align: left;
-}
-.q-host .q-host-on {
-  color: var(--fg-2);
-  flex: none;
-}
-.q-host:hover {
-  background: var(--hover);
-  color: var(--fg);
-}
-.q-host .lbl {
-  flex: 1;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.q-host.sub {
-  padding-left: 22px;
-}
-.q-host .meta {
-  font-size: 12px;
-  color: var(--fg-3);
-}
-.q-resizer {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  width: 8px;
-  margin: 0;
-  border: 0;
-  background: transparent;
-  z-index: 6;
-  cursor: col-resize;
-  touch-action: none;
-}
-.q-resizer.side {
-  right: -4px;
-}
-.q-resizer.panel {
-  left: -4px;
-}
-.q-resizer::after {
-  content: "";
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  left: 3.5px;
-  width: 1px;
-  background: transparent;
-  transition: background var(--dur-1) var(--ease-out);
-}
-.q-resizer:hover::after,
-.q-resizer.drag::after,
-.q-resizer:focus-visible::after {
-  background: var(--focus);
-  left: 3px;
-  width: 2px;
-}
-.q-resizer:focus-visible {
-  outline: none;
-}
 .q-scroll {
   overflow: auto;
   min-height: 0;
@@ -1128,18 +886,6 @@ fieldset.q-seg-fs {
 }
 
 /* Thread rows */
-.q-row .q-row-more {
-  position: absolute;
-  top: 5px;
-  right: 4px;
-  width: 22px;
-  height: 22px;
-  opacity: 0;
-}
-.q-row:hover .q-row-more,
-.q-row-more:focus-visible {
-  opacity: 1;
-}
 .q-rows .q-inbox-vrow {
   position: absolute;
   top: 0;
@@ -1177,9 +923,13 @@ fieldset.q-seg-fs {
 .q-row-l1,
 .q-row-l2 {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 8px;
   min-width: 0;
+}
+.q-row-l2 {
+  font-size: 12px;
+  line-height: 16px;
 }
 .q-row-title {
   flex: 1;
@@ -1207,12 +957,15 @@ fieldset.q-seg-fs {
   line-height: 20px;
 }
 .q-row:hover .q-row-time,
-.q-row:has(.q-row-more:focus-visible) .q-row-time {
+.q-row:has(.q-row-tools :focus-visible) .q-row-time,
+.q-row:has(.q-row-tools [data-open]) .q-row-time {
   visibility: hidden;
 }
+/* Line 2 gives way branch first: the harness keeps its name and the status
+   its word, while the branch ellipsizes (its title has the full value). */
 .q-row-meta {
-  flex: 1;
-  min-width: 0;
+  flex: none;
+  max-width: 60%;
   font-size: 12px;
   color: var(--fg-2);
   white-space: nowrap;
@@ -1225,8 +978,7 @@ fieldset.q-seg-fs {
   gap: 3px;
   flex: 0 1 auto;
   min-width: 0;
-  max-width: 46%;
-  font-size: 11.5px;
+  font-size: 12px;
   line-height: 16px;
   color: var(--fg-3);
   white-space: nowrap;
@@ -1242,6 +994,7 @@ fieldset.q-seg-fs {
   font-size: 12px;
   color: var(--fg-3);
   flex: none;
+  margin-left: auto;
 }
 .q-row-status.you {
   color: var(--accent-tx);
@@ -1253,29 +1006,51 @@ fieldset.q-seg-fs {
 .q-row-status.danger {
   color: var(--danger);
 }
-/* A pull request's chips wrap to a second line rather than run off a phone
-   when they do not fit (Spanish at 360 px). */
+/* A pull request's line 2 is a row of columns: the branch takes what is
+   left and ellipsizes, and state, checks and review keep the same x on every
+   row (a cell only grows past its column for a longer translation). */
 .q-pr-rows .q-row-l2 {
-  flex-wrap: wrap;
-  row-gap: 2px;
+  display: grid;
+  grid-template-columns:
+    minmax(0, 1fr) minmax(max-content, 5rem) minmax(max-content, 9rem)
+    minmax(max-content, 9rem);
+  column-gap: 16px;
+}
+.q-pr-rows .q-row-meta {
+  grid-column: 1;
+  max-width: none;
 }
 .q-pr-rows .q-row-status {
+  margin-left: 0;
   white-space: nowrap;
+}
+.q-pr-rows .q-pr-state {
+  grid-column: 2;
+}
+.q-pr-rows .q-pr-checks {
+  grid-column: 3;
+}
+.q-pr-rows .q-pr-review {
+  grid-column: 4;
+  justify-self: end;
+}
+/* A narrow pane (a phone) has no room for columns: the chips pack after the
+   branch on one line, the branch gives way first and then the chips
+   ellipsize. */
+@container (max-width: 720px) {
+  .q-pr-rows .q-row-l2 {
+    grid-template-columns: minmax(0, 1fr) repeat(3, minmax(0, max-content));
+    column-gap: 8px;
+  }
+  .q-pr-rows .q-row-status {
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
 }
 .q-ph-pg .q-row-meta,
 .q-ph-pg .q-row-status {
   font-size: 14px;
   line-height: 20px;
-}
-.q-row-act {
-  margin-top: 6px;
-  display: flex;
-  gap: 6px;
-}
-.q-row-act .q-btn {
-  height: 24px;
-  padding: 0 8px;
-  font-size: 12px;
 }
 .q-snoozed span:nth-child(2) {
   flex: 1;
@@ -1286,18 +1061,21 @@ fieldset.q-seg-fs {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 10px 12px 10px 24px;
-  min-height: 60px;
+  padding: 0 12px 0 24px;
+  height: var(--header-height);
   border-bottom: 1px solid var(--line);
   flex: none;
 }
 .q-th-titles {
   flex: 1;
   min-width: 0;
+  /* The breadcrumb drops whole items by the room this column actually has
+     (the right panel and the header actions both take from it). */
+  container: q-titles / inline-size;
 }
 .q-th-titles h1 {
   margin: 0;
-  font-size: 15px;
+  font-size: 16px;
   line-height: 20px;
   font-weight: 600;
   letter-spacing: -0.01em;
@@ -1310,13 +1088,18 @@ fieldset.q-seg-fs {
   align-items: center;
   gap: 6px;
   font-size: 12px;
+  line-height: 16px;
   color: var(--fg-2);
-  margin-top: 3px;
+  margin-top: 2px;
   white-space: nowrap;
   overflow: hidden;
 }
 .q-prov .q-sep {
   margin: 0 2px;
+}
+/* The branch gives up space first; the harness name then ellipsizes. */
+.q-prov .br {
+  flex-shrink: 100;
 }
 .q-prov .br {
   display: inline-flex;
@@ -1325,13 +1108,21 @@ fieldset.q-seg-fs {
   min-width: 0;
   overflow: hidden;
 }
+/* The model and its separator sit on the same 6px rhythm as the rest. */
+.q-prov .opt {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
 .q-signin-details .q-mono {
   display: block;
   margin-top: 4px;
-  font-size: 11.5px;
+  font-size: 12px;
   overflow-wrap: anywhere;
 }
-.q-ph-sheet .q-mono {
+.q-ph-sheet .q-mono,
+[data-slot="drawer-content"] .q-mono {
   font-size: 13px;
 }
 .q-prov .br .q-mono,
@@ -1341,12 +1132,12 @@ fieldset.q-seg-fs {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-@container (max-width: 820px) {
+@container q-titles (max-width: 420px) {
   .q-prov .opt {
     display: none;
   }
 }
-@container (max-width: 640px) {
+@container q-titles (max-width: 300px) {
   .q-prov .opt,
   .q-prov .br {
     display: none;
@@ -1374,7 +1165,7 @@ fieldset.q-seg-fs {
 .q-th-actions {
   display: flex;
   align-items: center;
-  gap: 2px;
+  gap: 8px;
 }
 .q-vsep {
   width: 1px;
@@ -1487,7 +1278,7 @@ fieldset.q-seg-fs {
 .q-bubble {
   background: var(--fill);
   padding: 9px 14px;
-  border-radius: 14px;
+  border-radius: 12px;
   font-size: 14px;
   line-height: 21px;
   max-width: 84%;
@@ -1505,9 +1296,7 @@ fieldset.q-seg-fs {
 /* Edit from here: a quiet action under a sent message. */
 .q-edit-here {
   height: 22px;
-  padding: 0 6px;
-  margin-right: -6px;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 500;
   color: var(--fg-3);
   gap: 4px;
@@ -1614,7 +1403,7 @@ fieldset.q-seg-fs {
   max-width: 260px;
   min-width: 0;
   padding: 0 30px 0 6px;
-  border-radius: 9px;
+  border-radius: 8px;
   background: var(--bg);
   box-shadow: inset 0 0 0 1px var(--line);
   overflow: hidden;
@@ -1657,7 +1446,7 @@ fieldset.q-seg-fs {
   text-overflow: ellipsis;
 }
 .q-att-meta {
-  font-size: 11.5px;
+  font-size: 12px;
   line-height: 15px;
   color: var(--fg-3);
   white-space: nowrap;
@@ -1674,11 +1463,11 @@ fieldset.q-seg-fs {
   width: 20px;
   height: 20px;
   margin-top: -10px;
-  border-radius: 999px;
+  border-radius: 9999px;
   color: var(--fg-3);
   transition:
-    background var(--dur-1),
-    color var(--dur-1);
+    background var(--duration-micro),
+    color var(--duration-micro);
 }
 .q-att-x:hover {
   background: var(--fill-2);
@@ -1688,13 +1477,16 @@ fieldset.q-seg-fs {
   outline: 2px solid var(--focus);
   outline-offset: 1px;
 }
+/* Progress grows from the left by scale, never by animating width. */
 .q-att-bar {
   position: absolute;
   left: 0;
+  right: 0;
   bottom: 0;
   height: 2px;
   background: var(--accent);
-  transition: width var(--dur-2);
+  transform-origin: left;
+  transition: transform var(--duration-popup) var(--ease-enter);
 }
 @media (pointer: coarse) {
   .q-att-x {
@@ -1724,7 +1516,7 @@ fieldset.q-seg-fs {
   gap: 5px;
   min-width: 0;
   margin-top: 2px;
-  font-size: 11.5px;
+  font-size: 12px;
   color: var(--fg-3);
 }
 .q-fork-link {
@@ -1749,13 +1541,13 @@ fieldset.q-seg-fs {
   height: 22px;
   display: inline-grid;
   place-items: center;
-  border-radius: 5px;
+  border-radius: 6px;
   color: var(--fg-3);
   opacity: 0;
   transition:
-    opacity var(--dur-1),
-    background var(--dur-1),
-    color var(--dur-1);
+    opacity var(--duration-micro),
+    background var(--duration-micro),
+    color var(--duration-micro);
 }
 .q-turn:hover .q-turn-menu,
 .q-you-msg:hover .q-turn-menu,
@@ -1833,18 +1625,14 @@ fieldset.q-seg-fs {
 .q-tool .add {
   color: var(--add-tx);
 }
-.q-fnode .add {
-  color: var(--add-tx);
-}
+
 .q-tool .pm .add {
   color: var(--add-tx);
 }
 .q-tool .del {
   color: var(--del-tx);
 }
-.q-fnode .del {
-  color: var(--del-tx);
-}
+
 .q-tool .pm .del {
   color: var(--del-tx);
 }
@@ -1880,19 +1668,29 @@ fieldset.q-seg-fs {
 }
 
 .q-changes {
+  position: relative;
   border-radius: 12px;
-  box-shadow: inset 0 0 0 1px var(--line);
   margin: 4px 0 16px;
   overflow: hidden;
   padding-bottom: 4px;
   background: var(--bg);
+}
+/* The outline is drawn over the card's rows: an inset shadow on the card
+   itself sits under the file header and diff rows, which hide its sides. */
+.q-changes::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  box-shadow: inset 0 0 0 1px var(--line);
+  pointer-events: none;
 }
 .q-ch-head {
   display: flex;
   align-items: center;
   gap: 10px;
   height: 40px;
-  padding: 0 8px 0 14px;
+  padding: 0 14px;
 }
 .q-ch-head .t {
   font-weight: 500;
@@ -2051,7 +1849,7 @@ fieldset.q-seg-fs {
   padding: 7px 12px;
   border-bottom: 1px solid var(--line);
   background: var(--bg);
-  font-size: 11px;
+  font-size: 12px;
   color: var(--fg-3);
 }
 .q-diff-file {
@@ -2105,7 +1903,7 @@ fieldset.q-seg-fs {
 .q-diff-files-note {
   margin: 0;
   padding: 8px 12px;
-  font-size: 11.5px;
+  font-size: 12px;
   line-height: 16px;
   color: var(--fg-3);
 }
@@ -2138,7 +1936,7 @@ fieldset.q-seg-fs {
   align-items: center;
   gap: 6px;
   margin: 0 0 4px;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--fg-3);
 }
 .q-review-note textarea {
@@ -2244,7 +2042,7 @@ fieldset.q-seg-fs {
   align-items: center;
   gap: 4px;
   color: var(--accent-tx);
-  font-size: 11.5px;
+  font-size: 12px;
   font-weight: 500;
 }
 .q-guest-req-text {
@@ -2270,7 +2068,7 @@ fieldset.q-seg-fs {
   border-radius: 6px;
   background: var(--fill);
   color: var(--fg-2);
-  font-size: 11.5px;
+  font-size: 12px;
   max-width: 100%;
 }
 .q-guest-req-name {
@@ -2296,11 +2094,11 @@ fieldset.q-seg-fs {
   display: flex;
   gap: 10px;
   padding: 12px;
-  border-radius: 10px;
+  border-radius: 8px;
   border: 1px solid var(--line);
   background: var(--bg-sunk);
   color: var(--fg-2);
-  font-size: 12.5px;
+  font-size: 13px;
 }
 .q-guest-off svg {
   flex: none;
@@ -2312,11 +2110,11 @@ fieldset.q-seg-fs {
   background: var(--bg-raised);
   box-shadow:
     inset 0 0 0 1px var(--line-2),
-    var(--sh-pop);
+    var(--shadow-popup);
   padding: 14px 14px 12px 16px;
   transition:
-    opacity var(--dur-2) var(--ease-out),
-    transform var(--dur-2) var(--ease-out);
+    opacity var(--duration-popup) var(--ease-enter),
+    transform var(--duration-popup) var(--ease-enter);
 }
 .q-ask-h {
   display: flex;
@@ -2404,9 +2202,9 @@ fieldset.q-seg-fs {
   background: var(--bg-raised);
   box-shadow:
     inset 0 0 0 1px var(--line),
-    var(--sh-pop);
+    var(--shadow-popup);
   padding: 4px;
-  animation: q-fade var(--dur-1) var(--ease-out);
+  animation: q-fade var(--duration-micro) var(--ease-enter);
 }
 .dark .q-comp-menu {
   background: oklch(0.215 0.005 260);
@@ -2425,7 +2223,7 @@ fieldset.q-seg-fs {
   padding: 4px 8px;
   border-radius: 6px;
   text-align: left;
-  font-size: 12.5px;
+  font-size: 13px;
   color: var(--fg);
 }
 .q-comp-menu-item[aria-selected="true"] {
@@ -2436,7 +2234,7 @@ fieldset.q-seg-fs {
   max-width: 52%;
   padding-left: 12px;
   color: var(--fg-3);
-  font-size: 11.5px;
+  font-size: 12px;
 }
 .q-comp-menu-empty {
   padding: 10px;
@@ -2445,7 +2243,7 @@ fieldset.q-seg-fs {
 }
 .q-comp-menu-note {
   padding: 6px 10px 8px;
-  font-size: 11.5px;
+  font-size: 12px;
   color: var(--fg-3);
 }
 .q-comp-menu-foot {
@@ -2454,7 +2252,7 @@ fieldset.q-seg-fs {
   margin-top: 2px;
   padding: 5px 8px 3px;
   border-top: 1px solid var(--line);
-  font-size: 11px;
+  font-size: 12px;
   color: var(--fg-3);
 }
 .q-comp-menu .q-comp-menu-item .q-mono {
@@ -2474,12 +2272,13 @@ fieldset.q-seg-fs {
 .q-comp-f .grow {
   flex: 1;
 }
+/* The composer's model control: the compact Select size, borderless. */
 .q-model {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  height: 26px;
-  padding: 0 8px;
+  gap: 6px;
+  height: 24px;
+  padding: 0 6px;
   border-radius: 6px;
   color: var(--fg-2);
   font-size: 12px;
@@ -2492,11 +2291,13 @@ fieldset.q-seg-fs {
 .q-harness-switch {
   display: inline-flex;
   align-items: center;
+  min-width: 0;
+  white-space: nowrap;
   gap: 4px;
   height: 22px;
   padding: 0 6px;
   margin-left: -6px;
-  border-radius: 5px;
+  border-radius: 6px;
   color: var(--fg-2);
   font-size: 12px;
   font-weight: 500;
@@ -2505,13 +2306,27 @@ fieldset.q-seg-fs {
   background: var(--hover);
   color: var(--fg-1);
 }
+/* The picker's hover pad hangs into the gaps on both sides, so its label
+   keeps the same spacing to the separators as plain text. */
+.q-prov .q-harness-switch {
+  margin-right: -6px;
+}
+/* The chevron's glyph sits inset in its box; pull it in so the gap after it
+   reads like the gap after text. */
+.q-prov .q-harness-switch > svg:last-child {
+  margin-right: -4px;
+}
+/* An ellipsized name keeps a few letters rather than shrinking to a sliver. */
+.q-prov .q-harness-switch > .truncate {
+  min-width: 3ch;
+}
 /* A harness switch is a seam in the transcript, not a turn. */
 .q-switch-line {
   display: flex;
   align-items: center;
   gap: 10px;
   margin: 10px 0;
-  font-size: 11.5px;
+  font-size: 12px;
   color: var(--fg-3);
 }
 .q-switch-rule {
@@ -2555,47 +2370,6 @@ fieldset.q-seg-fs {
   display: flex;
   gap: 6px;
 }
-.q-tctrl-model input {
-  flex: 1;
-  min-width: 0;
-  height: 28px;
-  padding: 0 8px;
-  border-radius: 6px;
-  background: var(--fill-1);
-  border: 1px solid var(--line);
-  color: var(--fg-1);
-  font-size: 12px;
-}
-.q-tctrl-list {
-  display: flex;
-  flex-direction: column;
-}
-.q-tctrl-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  padding: 6px 6px;
-  border-radius: 6px;
-  text-align: left;
-  font-size: 12.5px;
-  color: var(--fg-1);
-}
-.q-tctrl-row:hover {
-  background: var(--hover);
-}
-.q-tctrl-check {
-  width: 14px;
-  flex: none;
-  display: grid;
-  place-items: center;
-  color: var(--accent);
-}
-.q-tctrl-hint {
-  display: block;
-  font-size: 11.5px;
-  color: var(--fg-3);
-}
 .q-send {
   width: 28px;
   height: 28px;
@@ -2616,7 +2390,7 @@ fieldset.q-seg-fs {
   display: flex;
   gap: 14px;
   white-space: nowrap;
-  font-size: 11.5px;
+  font-size: 12px;
   color: var(--fg-3);
   padding: 0 4px;
 }
@@ -2627,7 +2401,7 @@ fieldset.q-seg-fs {
   display: inline-block;
   width: 36px;
   height: 4px;
-  border-radius: 2px;
+  border-radius: 4px;
   background: var(--fill-2);
   vertical-align: 2px;
   margin-right: 6px;
@@ -2659,9 +2433,7 @@ fieldset.q-seg-fs {
   border-bottom: 1px solid var(--line);
   flex: none;
 }
-.q-insp-head .q-seg {
-  flex: 1;
-}
+
 .q-tree {
   padding: 14px 12px 16px 16px;
 }
@@ -2689,11 +2461,23 @@ fieldset.q-seg-fs {
   border-bottom: 1px solid var(--line-2);
   border-bottom-left-radius: 6px;
 }
-.q-kids > .q-node:not(:last-child)::after {
+/* Deeper rows (.kid2) follow every direct child and hang under the last
+   one, so a direct child's spine runs on only to a later direct child, and
+   the last one carries a line from its glyph down to the rows under it. */
+.q-kids > .q-node:not(.kid2):has(~ .q-node:not(.kid2))::after,
+.q-kids > .q-node.kid2:not(:last-child)::after {
   content: "";
   position: absolute;
   left: -14px;
   top: 0;
+  bottom: 0;
+  border-left: 1px solid var(--line-2);
+}
+.q-kids > .q-node:not(.kid2):has(+ .kid2)::after {
+  content: "";
+  position: absolute;
+  left: 16px;
+  top: 30px;
   bottom: 0;
   border-left: 1px solid var(--line-2);
 }
@@ -2724,7 +2508,7 @@ fieldset.q-seg-fs {
 }
 .q-node .prog {
   height: 3px;
-  border-radius: 2px;
+  border-radius: 4px;
   background: var(--fill-2);
   margin-top: 8px;
   overflow: hidden;
@@ -2732,20 +2516,20 @@ fieldset.q-seg-fs {
 .q-legend i {
   width: 8px;
   height: 8px;
-  border-radius: 2px;
+  border-radius: 4px;
   display: inline-block;
 }
 .q-meter i {
   display: block;
   height: 100%;
   background: var(--fg-2);
-  border-radius: 3px;
+  border-radius: 4px;
 }
 .q-node .prog i {
   display: block;
   height: 100%;
   background: var(--fg-2);
-  border-radius: 2px;
+  border-radius: 4px;
 }
 .q-node .t {
   font-weight: 500;
@@ -2776,7 +2560,7 @@ fieldset.q-seg-fs {
 }
 .q-node .prog {
   height: 3px;
-  border-radius: 2px;
+  border-radius: 4px;
   background: var(--fill-2);
   margin-top: 8px;
   overflow: hidden;
@@ -2785,7 +2569,7 @@ fieldset.q-seg-fs {
   display: block;
   height: 100%;
   background: var(--fg-2);
-  border-radius: 2px;
+  border-radius: 4px;
 }
 .q-insp-sec {
   border-top: 1px solid var(--line);
@@ -2916,7 +2700,7 @@ fieldset.q-seg-fs {
 }
 .terminal-surface .xterm-viewport::-webkit-scrollbar-thumb {
   background: var(--fill);
-  border-radius: 3px;
+  border-radius: 4px;
 }
 .terminal-surface .xterm .scrollbar.vertical {
   width: 6px !important;
@@ -2924,7 +2708,7 @@ fieldset.q-seg-fs {
 .terminal-surface .xterm .scrollbar.vertical .slider {
   width: 6px !important;
   left: 0 !important;
-  border-radius: 3px;
+  border-radius: 4px;
   background: var(--fill) !important;
 }
 .terminal-surface .xterm-viewport::-webkit-scrollbar-thumb:hover {
@@ -2960,18 +2744,26 @@ fieldset.q-seg-fs {
   overflow: auto;
   min-height: 0;
 }
+/* A page header lines its title and actions up with the page body below:
+   the same centred width (--page-w) and gutter (--page-gutter). */
 .q-page-head {
+  --page-w: 1080px;
+  --page-gutter: 32px;
   display: flex;
   align-items: center;
-  gap: 10px;
-  height: 52px;
-  padding: 0 16px 0 24px;
+  gap: 8px;
+  height: var(--header-height);
+  padding-inline: max(var(--page-gutter), calc((100% - var(--page-w)) / 2 + var(--page-gutter)));
   border-bottom: 1px solid var(--line);
   flex: none;
 }
+.q-pr-list-head {
+  --page-w: 880px;
+  --page-gutter: 16px;
+}
 .q-page-head h1 {
-  margin: 0;
-  font-size: 15px;
+  margin: 0 4px 0 0;
+  font-size: 16px;
   font-weight: 600;
   letter-spacing: -0.01em;
 }
@@ -2982,9 +2774,6 @@ fieldset.q-seg-fs {
   max-width: 1080px;
   margin: 0 auto;
   padding: 24px 32px 48px;
-}
-.q-wrap.q-wrap-phone {
-  padding: 16px 16px 32px;
 }
 .q-sec {
   margin-bottom: 36px;
@@ -3049,6 +2838,11 @@ fieldset.q-seg-fs {
   padding: 0 12px 0 0;
   white-space: nowrap;
 }
+/* The last column ends on the content edge, like the controls around it. */
+.q-tbl th:last-child,
+.q-tbl td:last-child {
+  padding-right: 0;
+}
 .q-tbl .r {
   text-align: right;
 }
@@ -3093,15 +2887,6 @@ fieldset.q-seg-fs {
   min-height: 32px;
   padding: 8px 10px;
   background: var(--danger-soft);
-}
-.q-pal-i .grow {
-  flex: 1;
-}
-.q-fnode .grow {
-  flex: 1;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 .q-ebar .grow {
   flex: 1;
@@ -3148,7 +2933,6 @@ fieldset.q-seg-fs {
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 2px;
 }
 .q-ph-li .grow,
 .q-ph-chg .grow {
@@ -3180,12 +2964,6 @@ fieldset.q-seg-fs {
 .q-signin-details {
   margin-top: 4px;
   color: var(--fg-3);
-}
-.q-signin-details summary {
-  cursor: pointer;
-}
-.q-pal-i .ic {
-  color: var(--fg-2);
 }
 .q-banner.err .ic {
   color: var(--danger);
@@ -3264,7 +3042,7 @@ fieldset.q-seg-fs {
   padding: 0 6px;
   border-radius: 6px;
   background: var(--bg-raised);
-  box-shadow: inset 0 0 0 1px var(--line-2);
+  box-shadow: inset 0 0 0 1px var(--input);
   color: var(--fg);
   font-size: 12px;
   font-weight: 500;
@@ -3273,19 +3051,6 @@ fieldset.q-seg-fs {
 }
 .q-chip:hover {
   background: var(--hover);
-}
-.q-chip .q-chip-label {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.q-chip .q-icon.s12 {
-  color: var(--fg-3);
-  flex: none;
-}
-.q-chip-select {
-  cursor: default;
-  justify-content: space-between;
 }
 .q-ch-diffhead {
   position: sticky;
@@ -3304,25 +3069,6 @@ fieldset.q-seg-fs {
 }
 .q-tool .q-tool-ok {
   color: var(--fg-3);
-}
-.q-chip.q-scope-compact {
-  display: flex;
-  margin: 8px 16px 0 auto;
-}
-.q-chip-select.block {
-  width: 100%;
-  max-width: none;
-  height: 28px;
-  padding: 0 8px;
-  font-size: 12.5px;
-  font-weight: 400;
-}
-.q-chip-select:disabled {
-  color: var(--fg-3);
-}
-.q-chip-select:focus-visible {
-  outline: 2px solid var(--focus);
-  outline-offset: 1px;
 }
 .q-chip.q-chip-field {
   padding: 0 6px 0 7px;
@@ -3353,136 +3099,12 @@ fieldset.q-seg-fs {
   inset: 0;
   background: var(--scrim);
   z-index: 20;
-  animation: q-fade var(--dur-2) var(--ease-out);
+  animation: q-fade var(--duration-popup) var(--ease-enter);
 }
 @keyframes q-fade {
   from {
     opacity: 0;
   }
-}
-/* Spotlight placement: horizontally centred in the window, high but never
-   taller than the window, so short windows scroll the list, not the page. */
-.q-palette {
-  --pal-top: clamp(16px, 12vh, 96px);
-  position: fixed;
-  transform: none;
-  translate: none;
-  z-index: 51;
-  left: 0;
-  right: 0;
-  top: var(--pal-top);
-  width: min(620px, calc(100vw - 32px));
-  max-width: none;
-  max-height: calc(100dvh - var(--pal-top) - 16px);
-  margin: 0 auto;
-  display: flex;
-  flex-direction: column;
-  border-radius: 14px;
-  background: var(--bg-raised);
-  box-shadow:
-    var(--sh-dlg),
-    inset 0 0 0 1px var(--line);
-  overflow: hidden;
-  animation: q-pop var(--dur-2) var(--ease-out);
-}
-@media (max-width: 720px) {
-  .q-palette {
-    top: 0;
-    left: 0;
-    width: 100%;
-    height: 100%;
-    max-height: none;
-    margin: 0;
-    border-radius: 0;
-  }
-}
-@keyframes q-pop {
-  from {
-    opacity: 0;
-    transform: scale(0.98) translateY(-4px);
-  }
-}
-.q-pal-in {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  height: 52px;
-  padding: 0 16px;
-  border-bottom: 1px solid var(--line);
-  font-size: 15px;
-}
-.q-pal-in input {
-  flex: 1;
-  border: 0;
-  background: transparent;
-  font-size: 15px;
-  outline: none;
-}
-.q-pal-in input::placeholder {
-  color: var(--fg-3);
-}
-.q-pal-ctx {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  height: 22px;
-  padding: 0 8px;
-  border-radius: 6px;
-  background: var(--fill);
-  font-size: 12px;
-  color: var(--fg-2);
-}
-.q-palette > [cmdk-root] {
-  display: flex;
-  flex-direction: column;
-  flex: 1 1 auto;
-  min-height: 0;
-}
-.q-pal-list {
-  /* Whole 34 px rows plus 6 px of padding either side: 13 units fit exactly
-     (10 rows, 3 headings), so the resting list never slices a row in half. */
-  max-height: 454px;
-  flex: 1 1 auto;
-  min-height: 0;
-  overflow: auto;
-  padding: 6px;
-}
-.q-pal-g {
-  display: flex;
-  align-items: center;
-  height: 34px;
-  font-size: 12px;
-  color: var(--fg-3);
-  padding: 0 10px;
-  font-weight: 500;
-}
-.q-pal-i {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  height: 34px;
-  padding: 0 10px;
-  border-radius: 8px;
-  color: var(--fg);
-  width: 100%;
-  text-align: left;
-}
-.q-pal-i .h {
-  color: var(--fg-3);
-  font-size: 12px;
-}
-.q-pal-i[aria-selected="true"],
-.q-pal-i[data-selected="true"] {
-  background: var(--sel);
-}
-.q-pal-list [cmdk-group-heading] {
-  display: flex;
-  align-items: center;
-  height: 34px;
-  font-size: 12px;
-  color: var(--fg-3);
-  padding: 0 10px;
-  font-weight: 500;
 }
 .q-pal-kbd {
   margin-left: auto;
@@ -3491,30 +3113,6 @@ fieldset.q-seg-fs {
   gap: 4px;
   flex: none;
 }
-.q-pal-foot {
-  display: flex;
-  gap: 16px;
-  height: 36px;
-  align-items: center;
-  padding: 0 16px;
-  border-top: 1px solid var(--line);
-  font-size: 12px;
-  color: var(--fg-3);
-  /* On a phone the hints wrap; keep a Chinese or Japanese word (閉じる) whole
-     the way an English one is. Latin text is unaffected. */
-  word-break: keep-all;
-}
-.q-pop {
-  position: absolute;
-  z-index: 15;
-  background: var(--bg-raised);
-  border-radius: 12px;
-  box-shadow:
-    var(--sh-pop),
-    inset 0 0 0 1px var(--line);
-  padding: 14px;
-}
-
 /* IDE */
 .q-ftree {
   width: 244px;
@@ -3525,35 +3123,7 @@ fieldset.q-seg-fs {
   min-height: 0;
   background: var(--bg);
 }
-.q-fnode {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  height: 26px;
-  padding: 0 10px 0 calc(10px + var(--d, 0) * 14px);
-  border-radius: 6px;
-  margin: 0 6px;
-  color: var(--fg-2);
-  font-size: 13px;
-  width: calc(100% - 12px);
-  text-align: left;
-}
-.q-fnode:hover {
-  background: var(--hover);
-}
-.q-fchev {
-  transition: transform var(--dur-1) var(--ease-out);
-}
-.q-fchev.open {
-  transform: rotate(90deg);
-}
-.q-fnode.sel {
-  background: var(--sel);
-  color: var(--fg);
-}
-.q-fnode .gs {
-  font: 500 11px var(--mono);
-}
+
 .q-etabs {
   display: flex;
   align-items: flex-end;
@@ -3561,7 +3131,9 @@ fieldset.q-seg-fs {
   border-bottom: 1px solid var(--line);
   padding: 0 8px;
   gap: 2px;
-  flex: none;
+  /* Fills the row so its rule runs to the panel edge. */
+  flex: 1;
+  min-width: 0;
 }
 .q-etab {
   display: inline-flex;
@@ -3571,7 +3143,7 @@ fieldset.q-seg-fs {
   padding: 0 10px 0 12px;
   border-radius: 6px 6px 0 0;
   color: var(--fg-2);
-  font-size: 12.5px;
+  font-size: 13px;
   position: relative;
 }
 .q-etab[aria-selected="true"] {
@@ -3591,7 +3163,7 @@ fieldset.q-seg-fs {
   align-items: center;
   gap: 10px;
   height: 40px;
-  padding: 0 12px 0 16px;
+  padding: 0 16px;
   border-bottom: 1px solid var(--line);
   background: var(--bg-sunk);
   flex: none;
@@ -3623,14 +3195,16 @@ fieldset.q-seg-fs {
 .q-sc {
   color: var(--syn-cm);
 }
+/* Bottom bars are 44px like the sidebar's footer, so the bars that sit side
+   by side (sidebar, editor, right panel) share one top edge. */
 .q-statusbar {
-  height: 26px;
+  height: 44px;
   display: flex;
   align-items: center;
   gap: 16px;
   padding: 0 16px;
   border-top: 1px solid var(--line);
-  font-size: 11.5px;
+  font-size: 12px;
   color: var(--fg-3);
   background: var(--bg);
   flex: none;
@@ -3694,8 +3268,11 @@ fieldset.q-seg-fs {
   letter-spacing: -0.015em;
   margin-top: 6px;
 }
+/* A unit is smaller type on the value's baseline; its own line height must not
+   make the value line taller than a tile without one. */
 .q-stat .v small {
   font-size: 13px;
+  line-height: 1;
   font-weight: 500;
   color: var(--fg-2);
   margin-left: 2px;
@@ -3744,7 +3321,7 @@ fieldset.q-seg-fs {
   background: var(--bg-raised);
   border-radius: 8px;
   box-shadow:
-    var(--sh-pop),
+    var(--shadow-popup),
     inset 0 0 0 1px var(--line);
   padding: 8px 10px;
   font-size: 12px;
@@ -3759,13 +3336,13 @@ fieldset.q-seg-fs {
 .q-tip .r i {
   width: 8px;
   height: 8px;
-  border-radius: 2px;
+  border-radius: 4px;
   display: inline-block;
   margin-right: 6px;
 }
 .q-meter {
   height: 6px;
-  border-radius: 3px;
+  border-radius: 4px;
   background: var(--fill-2);
   overflow: hidden;
 }
@@ -3795,7 +3372,7 @@ fieldset.q-seg-fs {
   background: var(--bg-raised);
 }
 .q-resume .cd {
-  font-size: 22px;
+  font-size: 24px;
   font-weight: 600;
   letter-spacing: -0.015em;
 }
@@ -3847,11 +3424,7 @@ fieldset.q-seg-fs {
 .q-conflict .t {
   font-weight: 500;
 }
-.q-resolve-seg {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  margin-bottom: 10px;
-}
+
 .q-resolve-opt {
   display: flex;
   gap: 10px;
@@ -3870,7 +3443,7 @@ fieldset.q-seg-fs {
   height: 16px;
   margin-top: 2px;
   border-radius: 50%;
-  box-shadow: inset 0 0 0 1.5px var(--line-2);
+  box-shadow: inset 0 0 0 1.5px var(--input);
   position: relative;
 }
 .q-radio.on {
@@ -3905,9 +3478,14 @@ fieldset.q-seg-fs {
   flex: none;
 }
 .q-pr-head {
+  --page-w: 1040px;
   height: auto;
-  padding: 14px 16px 14px 32px;
+  padding-block: 14px;
   align-items: flex-start;
+}
+/* The header block is centred on its title line, so the action sits there. */
+.q-pr-head > .q-btn {
+  align-self: center;
 }
 .q-pr-meta {
   display: flex;
@@ -3941,7 +3519,7 @@ fieldset.q-seg-fs {
   text-decoration: underline;
 }
 .q-quote {
-  margin: 4px 0 10px;
+  margin: 4px 0 12px;
   border-radius: 6px;
   overflow: hidden;
   font: 12px / 18px var(--mono);
@@ -3963,22 +3541,6 @@ fieldset.q-seg-fs {
   flex-wrap: wrap;
   gap: 4px;
   margin-top: 6px;
-}
-.q-tabs {
-  display: flex;
-  gap: 20px;
-  border-bottom: 1px solid var(--line);
-  margin-bottom: 20px;
-}
-.q-tabs button[aria-selected="true"]::after {
-  content: "";
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: -1px;
-  height: 2px;
-  background: var(--fg);
-  border-radius: 1px;
 }
 .q-cmt {
   padding: 16px 0;
@@ -4069,16 +3631,24 @@ fieldset.q-seg-fs {
   justify-content: space-between;
 }
 
-/* Settings */
+/* Settings: every page shares one centred column, so titles sit at one x.
+   Label/control pages cap their content at the form width inside it; pages
+   built around tables (.wide) use the whole column. */
 .q-form {
-  max-width: 760px;
+  max-width: var(--container-settings);
   margin: 0 auto;
   padding: 24px 32px 64px;
 }
+.q-form:not(.wide) > * {
+  max-width: var(--container-form);
+}
+/* A 28px line from the top of the header, the height of the buttons beside
+   it, so a title and its actions share a centre line; the lead below stays
+   where it was. */
 .q-form h1 {
   font-size: 20px;
-  line-height: 26px;
-  margin: 4px 0;
+  line-height: 28px;
+  margin: 0 0 6px;
   font-weight: 600;
   letter-spacing: -0.015em;
 }
@@ -4100,8 +3670,10 @@ fieldset.q-seg-fs {
 .q-group {
   margin-bottom: 32px;
 }
-.q-group > h2 {
+.q-group > h2,
+.q-group-head > h2 {
   font-size: 14px;
+  line-height: 20px;
   font-weight: 600;
   margin: 0 0 4px;
   display: flex;
@@ -4132,11 +3704,6 @@ fieldset.q-seg-fs {
   flex: 0 1 320px;
   min-width: 200px;
 }
-.q-ph-sheet-head .t {
-  font-size: 17px;
-  font-weight: 600;
-  line-height: 22px;
-}
 .q-tchip .t {
   white-space: nowrap;
   overflow: hidden;
@@ -4145,6 +3712,7 @@ fieldset.q-seg-fs {
 }
 .q-agentchg .t {
   font-weight: 600;
+  line-height: 16px;
 }
 .q-field .lab .t {
   font-weight: 500;
@@ -4155,10 +3723,6 @@ fieldset.q-seg-fs {
   line-height: 18px;
   margin-top: 1px;
 }
-.q-ph-sheet-head .s {
-  font-size: 14px;
-  color: var(--fg-2);
-}
 .q-tchip .s {
   color: var(--accent-tx);
   white-space: nowrap;
@@ -4166,6 +3730,7 @@ fieldset.q-seg-fs {
 }
 .q-agentchg .s {
   font-size: 12px;
+  line-height: 16px;
   color: var(--fg-3);
   white-space: nowrap;
   overflow: hidden;
@@ -4176,14 +3741,19 @@ fieldset.q-seg-fs {
   color: var(--fg-2);
   margin-top: 2px;
 }
-/* Controls sit at the trailing edge of the row; inputs still fill it. */
 .q-field .ctl {
   flex: 1;
   display: flex;
   align-items: center;
-  justify-content: flex-end;
-  gap: 10px;
+  gap: 8px;
   min-width: 0;
+}
+/* A row's "opens" chevron hangs in the page gutter, so the row's last control
+   lines up with the column edge like the table rows above it. */
+@media (min-width: 640px) {
+  .q-li-chev {
+    margin-right: -26px;
+  }
 }
 .q-secret {
   display: inline-flex;
@@ -4220,7 +3790,7 @@ fieldset.q-seg-fs {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 11.5px;
+  font-size: 12px;
 }
 .q-envprev {
   margin: 0 0 8px;
@@ -4257,15 +3827,7 @@ fieldset.q-seg-fs {
   font-style: normal;
   color: var(--fg-2);
 }
-.q-details {
-  margin-top: 8px;
-  font-size: 12px;
-}
-.q-details summary {
-  cursor: pointer;
-  color: var(--fg-3);
-  width: fit-content;
-}
+
 .q-qr {
   width: 168px;
   height: 168px;
@@ -4275,9 +3837,11 @@ fieldset.q-seg-fs {
   box-shadow: inset 0 0 0 1px var(--line);
   flex: none;
 }
+/* The second column starts on the settings control column (20rem from the
+   right edge, like .q-field's). */
 .q-pair-scopes {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: minmax(0, 1fr) 20rem;
   gap: 0 24px;
 }
 .q-pair-scope {
@@ -4381,7 +3945,7 @@ fieldset.q-seg-fs {
   padding: 0;
 }
 .q-sas-host .q-sas-code {
-  font-size: 22px;
+  font-size: 24px;
   line-height: 28px;
   padding: 2px 0 2px;
 }
@@ -4415,19 +3979,19 @@ fieldset.q-seg-fs {
     padding: 0 8px;
   }
   .q-pane-head h2 {
-    font-size: 17px;
+    font-size: 16px;
   }
   .q-rows {
     padding: 0 0 16px;
   }
   .q-snoozed {
     min-height: 66px;
-    padding: 0 20px;
+    padding: 0 16px;
     font-size: 16px;
   }
   .q-row {
     min-height: 66px;
-    padding: 12px 20px 13px;
+    padding: 12px 16px 13px;
     border-radius: 0;
   }
   .q-row-title {
@@ -4444,7 +4008,7 @@ fieldset.q-seg-fs {
     height: 22px;
   }
   .q-row + .q-row::before {
-    left: 46px;
+    left: 42px;
     right: 0;
   }
   .q-rows .q-inbox-vrow {
@@ -4452,11 +4016,11 @@ fieldset.q-seg-fs {
     right: 0;
   }
   .q-rows [data-index]:not(:first-child) > .q-row::before {
-    left: 46px;
+    left: 42px;
     right: 0;
   }
   .q-th-head {
-    min-height: 0;
+    height: auto;
     padding: 0 16px 10px;
     border-bottom: 1px solid var(--line);
   }
@@ -4465,7 +4029,7 @@ fieldset.q-seg-fs {
     align-items: center;
   }
   .q-ph-nav-actions .navbtn {
-    min-width: 40px;
+    min-width: 44px;
     height: 44px;
     padding: 0 6px;
     color: var(--accent-tx);
@@ -4477,7 +4041,7 @@ fieldset.q-seg-fs {
     color: var(--accent-tx);
   }
   .q-ph-th-title {
-    padding: 0 20px 10px;
+    padding: 0 16px 10px;
     border-bottom: 1px solid var(--line);
     flex: none;
   }
@@ -4500,13 +4064,15 @@ fieldset.q-seg-fs {
     margin-top: 4px;
     min-width: 0;
   }
-  .q-ph-th-meta > span:not(.grow) {
+  /* Nothing on the meta line wraps. The harness name and the state word
+     share the squeeze; each ellipsizes and its title has the full text. */
+  .q-ph-th-meta > :not(.grow) {
     flex: none;
     white-space: nowrap;
   }
-  .q-ph-th-meta > span:not(.grow) {
-    flex: none;
-    white-space: nowrap;
+  .q-ph-th-meta > .q-harness-switch {
+    flex: 0 1 auto;
+    min-width: 4.5rem;
   }
   .q-th-state {
     font-size: 14px;
@@ -4571,7 +4137,7 @@ fieldset.q-seg-fs {
     font-size: 14px;
   }
   .q-dock {
-    padding: 8px 12px max(34px, env(safe-area-inset-bottom, 0px));
+    padding: 8px 16px max(34px, env(safe-area-inset-bottom, 0px));
     border-top: 1px solid var(--line);
     display: flex;
     flex-direction: column;
@@ -4617,7 +4183,7 @@ fieldset.q-seg-fs {
     flex-wrap: wrap;
     margin-left: 0;
   }
-  .q-ask-f .q-kbd {
+  .q-ask-f [data-slot="kbd-group"] {
     display: none;
   }
   .q-ask-sub,
@@ -4672,7 +4238,7 @@ fieldset.q-seg-fs {
   flex-direction: column;
   align-items: center;
   gap: 3px;
-  font-size: 11px;
+  font-size: 12px;
   line-height: 13px;
   font-weight: 500;
   color: var(--fg-3);
@@ -4693,19 +4259,27 @@ fieldset.q-seg-fs {
   border-radius: 8px;
   background: var(--accent);
   color: var(--accent-fg);
-  font-size: 11px;
+  font-size: 12px;
   line-height: 18px;
   text-align: center;
   padding: 0 5px;
   font-weight: 600;
 }
+/* Back, title, actions: the side slots share what the title leaves, so the
+   title sits on the screen's centre whatever the two sides hold. */
 .q-ph-nav {
-  display: flex;
+  display: grid;
+  grid-template-columns: 1fr minmax(0, auto) 1fr;
   align-items: center;
-  justify-content: space-between;
   height: 44px;
   padding: 0 8px;
   flex: none;
+}
+.q-ph-nav > :first-child {
+  justify-self: start;
+}
+.q-ph-nav > :last-child {
+  justify-self: end;
 }
 .q-ph-nav .navbtn {
   min-width: 44px;
@@ -4715,39 +4289,38 @@ fieldset.q-seg-fs {
   justify-content: center;
   gap: 2px;
   color: var(--accent-tx);
-  font-size: 17px;
+  font-size: 16px;
   padding: 0 8px;
 }
-.q-ph-back-glyph {
-  font-size: 24px;
-  line-height: 1;
-  margin: -2px 1px 0 -4px;
-  font-weight: 400;
-}
 .q-ph-nav .ttl {
-  font-size: 17px;
+  min-width: 0;
+  font-size: 16px;
   font-weight: 600;
-  flex: 1;
   text-align: center;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 .q-ph-lt {
-  font-size: 30px;
-  line-height: 36px;
+  font-size: 24px;
+  line-height: 30px;
   font-weight: 600;
   letter-spacing: -0.02em;
-  padding: 2px 20px 10px;
+  padding: 2px 16px 10px;
+  flex: none;
+}
+.q-ph-sub {
+  margin: -6px 0 0;
+  padding: 0 16px 12px;
+  color: var(--fg-2);
+  font-size: 13px;
+  line-height: 18px;
   flex: none;
 }
 .q-ph-seg {
   padding: 0 16px 10px;
 }
-.q-ph-seg .q-seg > button {
-  height: 30px;
-  font-size: 14px;
-}
+
 .q-ph-body {
   flex: 1;
   overflow: auto;
@@ -4794,7 +4367,7 @@ fieldset.q-seg-fs {
   line-height: 20px;
 }
 .q-ph-resume .cd {
-  font-size: 30px;
+  font-size: 24px;
   line-height: 36px;
   font-weight: 600;
 }
@@ -4805,10 +4378,7 @@ fieldset.q-seg-fs {
 .q-ph-ask-f .q-btn {
   flex: 1;
 }
-.q-ph-sheet-actions .q-btn {
-  flex: 1;
-}
-.q-ph .q-btn {
+.q-ph .q-btn:where(:not(.q-inline-start, .q-inline-end)) {
   height: 44px;
   border-radius: 12px;
   font-size: 16px;
@@ -4883,7 +4453,7 @@ fieldset.q-seg-fs {
   flex: 1;
   min-width: 0;
   min-height: 40px;
-  border-radius: 20px;
+  border-radius: 12px;
   box-shadow: inset 0 0 0 1px var(--line-2);
   display: flex;
   align-items: center;
@@ -4924,7 +4494,7 @@ fieldset.q-seg-fs {
   max-height: 46vh;
   flex-direction: column;
   padding: 8px 0;
-  border-radius: 14px;
+  border-radius: 12px;
 }
 .q-comp-sheet-head {
   display: flex;
@@ -4971,7 +4541,7 @@ fieldset.q-seg-fs {
   min-width: 0;
 }
 .q-ph-ask {
-  border-radius: 14px;
+  border-radius: 12px;
   background: var(--bg-raised);
   box-shadow: inset 0 0 0 1px var(--line-2);
   padding: 12px 14px;
@@ -4984,7 +4554,7 @@ fieldset.q-seg-fs {
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 15px;
+  font-size: 16px;
   font-weight: 600;
 }
 .q-ph-ask-cmd {
@@ -5008,30 +4578,20 @@ fieldset.q-seg-fs {
   border: 0;
   padding: 0;
   background: var(--scrim);
-  animation: q-fade var(--dur-2) var(--ease-out);
-}
-.q-ph-sheet-head {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 4px 20px 0;
+  animation: q-fade var(--duration-popup) var(--ease-enter);
 }
 .q-ph-sheet-cmd {
-  margin: 14px 20px 4px;
-  font-size: 13.5px;
+  margin: 14px 16px 4px;
+  font-size: 13px;
   line-height: 21px;
   padding: 12px 14px;
   border-radius: 12px;
   white-space: normal;
   overflow-wrap: anywhere;
 }
-.q-ph-sheet .q-ph-group {
+.q-ph-sheet .q-ph-group,
+[data-slot="drawer-content"] .q-ph-group {
   margin-top: 14px;
-}
-.q-ph-sheet-actions {
-  display: flex;
-  gap: 12px;
-  padding: 0 16px;
 }
 .q-ph-sheet {
   position: absolute;
@@ -5040,10 +4600,10 @@ fieldset.q-seg-fs {
   bottom: 0;
   z-index: 22;
   background: var(--bg-raised);
-  border-radius: 14px 14px 0 0;
-  box-shadow: var(--sh-dlg);
+  border-radius: 12px 12px 0 0;
+  box-shadow: var(--shadow-modal);
   padding: 8px 0 max(34px, env(safe-area-inset-bottom, 0px));
-  animation: q-rise var(--dur-3) var(--ease-out);
+  animation: q-rise var(--duration-modal) var(--ease-enter);
 }
 .dark .q-ph-sheet {
   background: oklch(0.215 0.005 260);
@@ -5057,7 +4617,7 @@ fieldset.q-seg-fs {
 .q-grab {
   width: 36px;
   height: 5px;
-  border-radius: 3px;
+  border-radius: 4px;
   background: var(--line-2);
   margin: 0 auto 10px;
 }
@@ -5069,7 +4629,7 @@ fieldset.q-seg-fs {
   top: auto;
   bottom: calc(100% + 8px);
   padding: 8px 0;
-  border-radius: 14px;
+  border-radius: 12px;
   max-height: 46vh;
 }
 .q-ph-sheet.q-comp-sheet .q-grab {
@@ -5124,25 +4684,11 @@ fieldset.q-seg-fs {
   height: 16px;
 }
 
-.q-ph .q-btn.sm {
+.q-ph .q-btn.sm:where(:not(.q-inline-start, .q-inline-end)) {
   height: 34px;
   border-radius: 8px;
   font-size: 14px;
   padding: 0 12px;
-}
-.q-ph .q-switch {
-  width: 51px;
-  height: 31px;
-  border-radius: 16px;
-}
-.q-ph .q-switch::after {
-  width: 27px;
-  height: 27px;
-  top: 2px;
-  left: 2px;
-}
-.q-ph .q-switch[aria-checked="true"]::after {
-  transform: translateX(20px);
 }
 
 /* Pairing flow (static shell) */
@@ -5159,7 +4705,7 @@ fieldset.q-seg-fs {
   padding: 18px 24px 24px;
 }
 .q-pair-hero .ttl {
-  font-size: 22px;
+  font-size: 20px;
   font-weight: 600;
   margin-top: 8px;
   letter-spacing: -0.015em;
@@ -5177,13 +4723,13 @@ fieldset.q-seg-fs {
 .q-pair-empty {
   padding: 8px 24px 0;
   text-align: center;
-  font-size: 15px;
+  font-size: 16px;
   line-height: 22px;
   color: var(--fg-2);
 }
 .q-pair-empty h3 {
   margin: 0 0 6px;
-  font-size: 17px;
+  font-size: 16px;
   line-height: 24px;
   font-weight: 600;
   color: var(--fg);
@@ -5217,8 +4763,10 @@ fieldset.q-seg-fs {
 .q-pair-note + .q-pair-note {
   margin-top: 6px;
 }
+/* As wide as the 22px avatar in the "also included" card below, so both
+   cards' text starts on one column. */
 .q-scope-mark {
-  width: 18px;
+  width: 22px;
   height: 18px;
   display: inline-grid;
   place-items: center;
@@ -5290,7 +4838,7 @@ fieldset.q-seg-fs {
   max-width: 340px;
   min-width: 0;
   flex: 0 1 auto;
-  transition: background var(--dur-1);
+  transition: background var(--duration-micro);
 }
 .q-tchip:hover {
   background: var(--hover);
@@ -5298,8 +4846,8 @@ fieldset.q-seg-fs {
 
 /* One right panel, scoped to the selected thread */
 .q-rp {
-  width: var(--rp-w, 400px);
-  flex: none;
+  width: 100%;
+  flex: 1;
   border-left: 1px solid var(--line);
   display: flex;
   flex-direction: column;
@@ -5311,63 +4859,14 @@ fieldset.q-seg-fs {
 .q-rp-head {
   display: flex;
   align-items: stretch;
-  gap: 18px;
-  height: 60px;
+  gap: 8px;
+  height: var(--header-height);
   padding: 0 10px 0 16px;
   border-bottom: 1px solid var(--line);
   flex: none;
 }
-/* A narrow panel tightens the tabs before any name has to shrink: below the
-   default width in every language, and at it in Spanish, whose names run
-   longest. */
-@container rp (max-width: 380px) {
-  .q-rp-head {
-    gap: 10px;
-  }
-}
-@container rp (max-width: 440px) {
-  :lang(es) .q-rp-head {
-    gap: 10px;
-  }
-}
 .q-rp-head > .q-ibtn {
   align-self: center;
-}
-.q-rp-tab {
-  position: relative;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  color: var(--fg-2);
-  font-weight: 500;
-  /* A tab name stays on one line; when the panel is too narrow for every
-     name (its 320 px minimum, or a longer language), the names shrink with
-     an ellipsis and the count stays. The full name is the tab's title. */
-  white-space: nowrap;
-  min-width: 0;
-  flex-shrink: 1;
-  transition: color var(--dur-1);
-}
-.q-rp-tab-name {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.q-rp-tab:hover {
-  color: var(--fg);
-}
-.q-rp-tab[aria-selected="true"] {
-  color: var(--fg);
-}
-.q-rp-tab[aria-selected="true"]::after {
-  content: "";
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: -1px;
-  height: 2px;
-  border-radius: 1px;
-  background: var(--fg);
 }
 .q-rp-bar {
   display: flex;
@@ -5378,10 +4877,7 @@ fieldset.q-seg-fs {
   border-bottom: 1px solid var(--line);
   flex: none;
 }
-.q-rp-bar .q-seg > button {
-  height: 24px;
-  padding: 0 9px;
-}
+
 .q-rp-body {
   flex: 1;
   overflow: auto;
@@ -5449,10 +4945,15 @@ fieldset.q-seg-fs {
   align-items: center;
   gap: 8px;
   height: 36px;
-  padding: 0 6px 0 16px;
+  padding: 0 8px 0 16px;
   background: var(--bg);
   border-bottom: 1px solid var(--line);
   font-size: 12px;
+}
+/* Stats and the open button sit on the changes list's columns above: its rows
+   end their stats 10px before the row's icon button. */
+.q-dfile-h > .q-pm {
+  margin-inline-end: 2px;
 }
 .q-dfile-h .p {
   color: var(--fg);
@@ -5486,7 +4987,8 @@ fieldset.q-seg-fs {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 10px 12px;
+  height: 44px;
+  padding: 0 12px;
   border-top: 1px solid var(--line);
 }
 .q-rp .q-tree {
@@ -5505,7 +5007,7 @@ fieldset.q-seg-fs {
   border-radius: 6px;
   color: var(--fg-3);
   background: var(--bg-raised);
-  box-shadow: inset 0 0 0 1px var(--line-2);
+  box-shadow: inset 0 0 0 1px var(--input);
 }
 .q-filter input {
   flex: 1;
@@ -5526,23 +5028,23 @@ fieldset.q-seg-fs {
     inset 0 0 0 1px var(--focus),
     0 0 0 3px color-mix(in oklch, var(--focus) 25%, transparent);
 }
+/* A 44px bottom bar like the others; its two lines are set tight to fit. */
 .q-agentchg {
   flex: none;
   display: flex;
   align-items: center;
   gap: 10px;
   width: 100%;
-  padding: 10px 12px 10px 16px;
+  height: 44px;
+  padding: 0 12px 0 16px;
   border-top: 1px solid var(--line);
   text-align: left;
-  transition: background var(--dur-1);
+  transition: background var(--duration-micro);
 }
 .q-agentchg:hover {
   background: var(--hover);
 }
-.q-fnode .gs.t-ok {
-  color: var(--ok);
-}
+
 .q-sub-empty {
   padding: 20px 16px;
   font-size: 12px;
@@ -5551,45 +5053,6 @@ fieldset.q-seg-fs {
 }
 
 /* Preview: an HTML file in a sandboxed frame, never a second app window */
-.q-frow {
-  position: relative;
-  margin: 0 6px;
-}
-.q-frow > .q-fnode {
-  margin: 0;
-  width: 100%;
-  padding-right: 32px;
-}
-.q-fopen {
-  position: absolute;
-  right: 4px;
-  top: 2px;
-  width: 22px;
-  height: 22px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 4px;
-  color: var(--fg-3);
-  opacity: 0.55;
-  transition:
-    opacity var(--dur-1),
-    background var(--dur-1),
-    color var(--dur-1);
-}
-.q-frow:hover .q-fopen,
-.q-fopen:focus-visible {
-  opacity: 1;
-}
-.q-fopen:hover {
-  background: var(--fill);
-  color: var(--fg);
-}
-@media (hover: none) {
-  .q-fopen {
-    opacity: 1;
-  }
-}
 .q-pv {
   flex: 1;
   min-width: 0;
@@ -5625,7 +5088,7 @@ fieldset.q-seg-fs {
   padding: 8px 12px;
   border-bottom: 1px solid var(--line);
   background: var(--bg-sunk);
-  font-size: 11.5px;
+  font-size: 12px;
   line-height: 16px;
   color: var(--fg-3);
 }
@@ -5702,14 +5165,17 @@ fieldset.q-seg-fs {
   padding: 0 16px;
   border-bottom: 1px solid var(--line);
 }
-.q-ph-sheet .q-pv-body {
+.q-ph-sheet .q-pv-body,
+[data-slot="drawer-content"] .q-pv-body {
   overflow: hidden;
 }
 
 /* IDE: the header chip, per-project tabs, and the changes strip */
+/* Sits in the tabs' own 30px band, so its text shares their line. */
 .q-etabs-note {
   font-size: 12px;
-  align-self: center;
+  line-height: 30px;
+  align-self: flex-end;
   padding-right: 8px;
 }
 .q-ide-empty {
@@ -5734,16 +5200,16 @@ fieldset.q-seg-fs {
   gap: 10px;
   width: 100%;
   height: 40px;
-  padding: 10px 20px 0;
-  font-size: 15px;
+  padding: 10px 16px 0;
+  font-size: 16px;
   color: var(--fg-2);
   text-align: left;
 }
 .q-ph-pg-h .q-pmono {
   width: 20px;
   height: 20px;
-  border-radius: 5px;
-  font-size: 11px;
+  border-radius: 6px;
+  font-size: 12px;
 }
 .q-ph-pg-h .hn {
   font-size: 14px;
@@ -5757,7 +5223,7 @@ fieldset.q-seg-fs {
   transform: rotate(-90deg);
 }
 .q-ph-pg .q-row {
-  padding: 12px 20px 13px;
+  padding: 12px 16px 13px;
   gap: 12px;
   min-height: 66px;
 }
@@ -5765,45 +5231,10 @@ fieldset.q-seg-fs {
   width: 20px;
   height: 22px;
 }
-.q-ph-sheet.large {
-  top: 10px;
-  display: flex;
-  flex-direction: column;
-  padding: 8px 0 0;
-}
-/* The panel sheet takes focus when it opens so typing stays out of the
+/* Phone sheets take focus when they open so typing stays out of the
    composer behind it; the dialog itself is not a control, so no ring. */
 .q-ph-sheet:focus {
   outline: none;
-}
-.q-ph-sheet.large .q-ph-body {
-  padding-bottom: 34px;
-}
-.q-ph-sh-nav {
-  display: flex;
-  align-items: center;
-  height: 44px;
-  padding: 0 8px;
-  flex: none;
-}
-.q-ph-sh-nav .ttl {
-  flex: 1;
-  text-align: center;
-  font-size: 17px;
-  font-weight: 600;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.q-ph-sh-nav .navbtn {
-  min-width: 64px;
-  height: 44px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: flex-end;
-  padding: 0 12px;
-  color: var(--accent-tx);
-  font-size: 17px;
 }
 .q-ph-sum {
   display: flex;
@@ -5820,7 +5251,7 @@ fieldset.q-seg-fs {
   margin: 4px 0 14px;
   border-radius: 12px;
   box-shadow: inset 0 0 0 1px var(--line);
-  font-size: 15px;
+  font-size: 16px;
   font-weight: 500;
   width: 100%;
   text-align: left;
@@ -5869,7 +5300,7 @@ fieldset.q-seg-fs {
     min-height: 52px;
     flex-wrap: wrap;
     row-gap: 8px;
-    padding: 10px 14px;
+    padding: 10px 16px;
     align-items: flex-start;
   }
   .q-pr-head {
@@ -5883,23 +5314,7 @@ fieldset.q-seg-fs {
   .q-pr-head h1 {
     white-space: nowrap;
   }
-  .q-pr-list-head .q-seg {
-    order: 10;
-    flex-basis: 100%;
-    overflow-x: auto;
-    scrollbar-width: none;
-  }
-  .q-pr-list-head .q-seg::-webkit-scrollbar {
-    display: none;
-  }
-  .q-tabs button {
-    flex: none;
-    white-space: nowrap;
-  }
-  .q-pr-list-head .q-seg button {
-    flex: none;
-    white-space: nowrap;
-  }
+
   .q-pr-cols {
     flex-direction: column;
     gap: 22px;
@@ -5908,14 +5323,7 @@ fieldset.q-seg-fs {
   .q-pr-side {
     width: auto;
   }
-  .q-tabs {
-    gap: 16px;
-    overflow-x: auto;
-    scrollbar-width: none;
-  }
-  .q-tabs::-webkit-scrollbar {
-    display: none;
-  }
+
   .q-cmt-h {
     flex-wrap: wrap;
     row-gap: 2px;
@@ -5967,21 +5375,14 @@ fieldset.q-seg-fs {
     display: none;
   }
   .q-ph .q-stats .q-stat .v {
-    font-size: 22px;
+    font-size: 20px;
     line-height: 28px;
   }
 }
 
 /* Remote account + live subagent additions */
-.q-host.on {
-  background: var(--sel);
-  color: var(--fg);
-}
-.q-host:disabled {
-  opacity: 0.6;
-}
 .q-account-name {
-  font-size: 12.5px;
+  font-size: 13px;
   font-weight: 500;
   color: var(--fg);
   white-space: nowrap;
@@ -6009,9 +5410,10 @@ fieldset.q-seg-fs {
 .q-node.q-sub-node {
   min-width: 0;
 }
+/* Indented by a full step, so its elbow drops from its parent's glyph. */
 .q-node.q-sub-node.kid2 {
-  margin-left: 14px;
-  width: calc(100% - 14px);
+  margin-left: 30px;
+  width: calc(100% - 30px);
 }
 .q-spin {
   animation: q-spin 1s linear infinite;
@@ -6030,8 +5432,11 @@ fieldset.q-seg-fs {
 /* Phone Settings: one column, grouped rows, one 2-line row per table item. */
 @media (max-width: 639px) {
   .q-form {
-    max-width: 100% !important;
+    max-width: 100%;
     padding: 16px 16px 32px;
+  }
+  .q-form:not(.wide) > * {
+    max-width: none;
   }
   .q-form-head {
     flex-wrap: wrap;
@@ -6074,14 +5479,14 @@ fieldset.q-seg-fs {
     justify-content: flex-start;
   }
   /* A lone switch stays on the label's row, at its trailing edge. */
-  .q-field:has(> .ctl > .q-switch:only-child) {
+  .q-field:has(> .ctl > [data-slot="switch"]:only-child) {
     flex-direction: row;
     align-items: center;
   }
-  .q-field:has(> .ctl > .q-switch:only-child) .lab {
+  .q-field:has(> .ctl > [data-slot="switch"]:only-child) .lab {
     flex: 1;
   }
-  .q-field:has(> .ctl > .q-switch:only-child) .ctl {
+  .q-field:has(> .ctl > [data-slot="switch"]:only-child) .ctl {
     flex: none;
   }
   .q-field .ctl > .q-input,
@@ -6101,20 +5506,7 @@ fieldset.q-seg-fs {
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .q-form .q-seg.inline {
-    display: flex;
-    width: 100%;
-  }
-  /* A single-choice picker gets a thumb-sized target on a phone. */
-  .q-seg.q-seg-choice > button {
-    min-height: 44px;
-    padding: 0 12px;
-  }
-  .q-form .q-seg.inline > button {
-    flex: 1 1 0;
-    min-width: 0;
-    padding: 0 6px;
-  }
+
   .q-pair-scopes {
     grid-template-columns: 1fr;
   }
@@ -6146,7 +5538,7 @@ fieldset.q-seg-fs {
     border: 0;
     white-space: normal;
     min-width: 0;
-    font-size: 12.5px;
+    font-size: 13px;
     color: var(--fg-2);
   }
   .q-tbl td:first-child {
@@ -6165,40 +5557,16 @@ fieldset.q-seg-fs {
   }
 }
 
-/* Disclosure: a 12 px chevron instead of the native triangle. */
-.q-disclosure > summary {
-  list-style: none;
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-}
-.q-disclosure > summary::-webkit-details-marker {
-  display: none;
-}
-.q-disclosure > summary::before {
-  content: "";
-  width: 12px;
-  height: 12px;
-  flex: none;
-  background: var(--fg-3);
-  -webkit-mask:
-    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m9 18 6-6-6-6'/%3E%3C/svg%3E")
-    center / contain no-repeat;
-  mask:
-    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m9 18 6-6-6-6'/%3E%3C/svg%3E")
-    center / contain no-repeat;
-  transition: transform var(--dur-1) var(--ease-out);
-}
-.q-disclosure[open] > summary::before {
-  transform: rotate(90deg);
-}
-
 /* Harness CLI versions and app update notice (ADR-043). */
 .q-group-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+  margin-bottom: 4px;
+}
+.q-group-head > h2 {
+  margin: 0;
 }
 /* One argument or environment override in the ACP agent form. */
 .q-acp-row {
@@ -6230,6 +5598,11 @@ fieldset.q-seg-fs {
     min-height: 44px;
   }
 }
+/* Each harness is its own wrapper, so its field is a first-of-type; only the
+   first row draws the top rule, or every boundary would be 2px. */
+.q-harness-row + .q-harness-row > .q-field {
+  border-top: 0;
+}
 .q-harness-manual {
   margin: 0;
   padding: 8px 0 10px;
@@ -6250,18 +5623,11 @@ fieldset.q-seg-fs {
   overflow: auto;
   border-radius: 6px;
   background: var(--bg-sunk);
-  font-size: 11.5px;
+  font-size: 12px;
   line-height: 1.5;
   white-space: pre-wrap;
 }
-.q-harness-log summary {
-  min-height: 28px;
-  align-content: center;
-  cursor: pointer;
-}
-.q-harness-log summary:hover {
-  color: var(--fg);
-}
+
 .q-harness-log section {
   max-height: 140px;
   overflow: auto;
@@ -6284,7 +5650,7 @@ fieldset.q-seg-fs {
   flex: none;
   width: 72px;
   height: 4px;
-  border-radius: 2px;
+  border-radius: 4px;
   background: var(--fill-2);
   overflow: hidden;
 }
@@ -6302,7 +5668,7 @@ fieldset.q-seg-fs {
   height: 24px;
   opacity: 0;
   background: var(--bg-side);
-  transition: opacity var(--dur-1);
+  transition: opacity var(--duration-micro);
 }
 .q-pg-h:hover .q-pg-more,
 .q-pg-h:focus-within .q-pg-more,
@@ -6337,7 +5703,7 @@ fieldset.q-seg-fs {
 }
 .q-pg.q-pg-drop {
   box-shadow: 0 -2px 0 var(--accent);
-  border-radius: 2px;
+  border-radius: 4px;
 }
 .q-pg-tail {
   height: 28px;
@@ -6378,8 +5744,8 @@ fieldset.q-seg-fs {
   color: var(--fg-2);
   text-align: left;
   transition:
-    background var(--dur-1),
-    box-shadow var(--dur-1);
+    background var(--duration-micro),
+    box-shadow var(--duration-micro);
 }
 .q-addp-mode:hover {
   background: var(--hover);
@@ -6484,7 +5850,7 @@ fieldset.q-seg-fs {
   white-space: nowrap;
 }
 .q-fb-row .tag {
-  font-size: 11px;
+  font-size: 12px;
 }
 .q-fb-msg {
   padding: 12px 8px;
@@ -6523,7 +5889,7 @@ fieldset.q-seg-fs {
 
 .q-imp-link {
   padding: 2px 4px;
-  border-radius: 5px;
+  border-radius: 6px;
   color: var(--fg-2);
   font-size: 12px;
 }
@@ -6552,7 +5918,7 @@ fieldset.q-seg-fs {
 
 .q-imp-group-h {
   padding: 6px 8px 2px;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--fg-3);
 }
 
@@ -6594,13 +5960,13 @@ fieldset.q-seg-fs {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--fg-3);
 }
 
 .q-imp-meta {
   flex: none;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--fg-3);
   font-variant-numeric: tabular-nums;
 }
@@ -6613,7 +5979,7 @@ fieldset.q-seg-fs {
 
 .q-imp-progress {
   height: 2px;
-  border-radius: 2px;
+  border-radius: 4px;
   background: var(--line);
   overflow: hidden;
 }
@@ -6622,7 +5988,8 @@ fieldset.q-seg-fs {
   display: block;
   height: 100%;
   background: var(--fg-3);
-  transition: width 160ms ease;
+  transform-origin: left;
+  transition: transform var(--duration-popup) var(--ease-enter);
 }
 
 .q-imp-note {
@@ -6638,7 +6005,7 @@ fieldset.q-seg-fs {
 }
 .q-imp .q-imp-warn p {
   margin: 0;
-  font-size: 11px;
+  font-size: 12px;
   line-height: 15px;
   color: var(--fg-3);
   text-wrap: pretty;
@@ -6702,13 +6069,6 @@ fieldset.q-seg-fs {
 }
 
 /* Git actions: the branch's own state, quiet enough to sit in a dialog. */
-.q-git-title {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-family: var(--font-mono);
-  font-size: 14px;
-}
 .q-git-status {
   display: grid;
   gap: 10px;
@@ -6742,7 +6102,7 @@ fieldset.q-seg-fs {
   gap: 2px;
 }
 .q-git-paths li {
-  font-size: 11.5px;
+  font-size: 12px;
   color: var(--fg-3);
   overflow-wrap: anywhere;
 }
@@ -6750,10 +6110,6 @@ fieldset.q-seg-fs {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
-}
-.q-git-footer {
-  flex-wrap: wrap;
   gap: 8px;
 }
 .q-git-pr-fields {
@@ -6792,7 +6148,7 @@ fieldset.q-seg-fs {
   background: transparent;
   color: inherit;
   font: inherit;
-  font-size: 12.5px;
+  font-size: 13px;
 }
 .q-issues-search:focus-within {
   outline: 2px solid var(--focus);
@@ -6860,7 +6216,7 @@ fieldset.q-seg-fs {
 .q-issue-repo,
 .q-issue-meta {
   color: var(--fg-3);
-  font-size: 11.5px;
+  font-size: 12px;
   white-space: nowrap;
 }
 .q-issues-more {
@@ -6869,7 +6225,7 @@ fieldset.q-seg-fs {
 .q-issues-note {
   margin: 12px 16px;
   color: var(--fg-3);
-  font-size: 12.5px;
+  font-size: 13px;
   display: flex;
   align-items: center;
   gap: 6px;
@@ -6934,7 +6290,7 @@ fieldset.q-seg-fs {
   border: 1px solid var(--line);
   border-radius: 4px;
   color: var(--fg-2, var(--fg));
-  font-size: 11px;
+  font-size: 12px;
 }
 .q-issue-body-input {
   width: 100%;
@@ -6944,12 +6300,12 @@ fieldset.q-seg-fs {
   background: var(--bg-raised);
   color: inherit;
   font: inherit;
-  font-size: 13.5px;
+  font-size: 14px;
   line-height: 1.55;
   resize: vertical;
 }
 .q-issue-description {
-  font-size: 13.5px;
+  font-size: 14px;
 }
 .q-issues-fields {
   display: grid;
@@ -6960,7 +6316,7 @@ fieldset.q-seg-fs {
   display: grid;
   gap: 4px;
   color: var(--fg-3);
-  font-size: 11.5px;
+  font-size: 12px;
 }
 .q-issues-fields input,
 .q-issues-actions select,
@@ -6972,7 +6328,7 @@ fieldset.q-seg-fs {
   background: var(--bg-raised);
   color: inherit;
   font: inherit;
-  font-size: 12.5px;
+  font-size: 13px;
 }
 .q-issues-actions {
   display: flex;
@@ -7014,7 +6370,7 @@ fieldset.q-seg-fs {
   align-items: baseline;
   gap: 8px;
   margin-bottom: 4px;
-  font-size: 12.5px;
+  font-size: 13px;
 }
 .q-issues-comment-form {
   display: grid;
@@ -7048,19 +6404,7 @@ fieldset.q-seg-fs {
   }
 }
 
-/* A phone shows five involvement tabs; let them wrap rather than run off
-   the 390 px screen, with targets tall enough for a thumb. */
 @media (max-width: 560px) {
-  .q-issues-head .q-seg {
-    flex-wrap: wrap;
-    width: 100%;
-  }
-  .q-issues-head .q-seg > button {
-    flex: 1 1 auto;
-    /* DESIGN.md's phone target size, so a thumb hits it as easily as the
-       nav bar's buttons. */
-    min-height: 44px;
-  }
   .q-issues-head .q-issues-search {
     min-width: 0;
   }
@@ -7075,7 +6419,7 @@ fieldset.q-seg-fs {
   border: 0;
   padding: 0;
   background: var(--scrim);
-  animation: q-fade var(--dur-2) var(--ease-out);
+  animation: q-fade var(--duration-popup) var(--ease-enter);
 }
 .q-switch-dialog {
   position: fixed;
@@ -7090,7 +6434,7 @@ fieldset.q-seg-fs {
   background: var(--bg-raised);
   border-radius: 12px;
   box-shadow:
-    var(--sh-dlg),
+    var(--shadow-modal),
     inset 0 0 0 1px var(--line);
   padding: 14px;
 }
@@ -7117,15 +6461,6 @@ fieldset.q-seg-fs {
   margin: 0;
 }
 /* Full-size touch targets in the phone sheet: 44 px rows and fields. */
-.q-switch-sheet .q-tctrl-row {
-  min-height: 44px;
-  padding: 0 8px;
-  font-size: 14px;
-}
-.q-switch-sheet .q-tctrl-model input {
-  height: 44px;
-  font-size: 14px;
-}
 .q-switch-sheet .q-tctrl-actions .q-btn {
   min-height: 44px;
 }
@@ -7139,15 +6474,59 @@ fieldset.q-seg-fs {
   transform: rotate(180deg);
 }
 
-/* Labels too long for the width (a longer language in a narrow sidebar):
-   tabs shrink with an ellipsis and keep their counts (`.q-seg .c` never
-   shrinks), never wrapping. */
-.q-seg.fit > button {
-  flex: 1 1 auto;
+/* Row actions sit over the time at the trailing edge, on hover or focus. */
+.q-row-tools {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  display: flex;
+  gap: 2px;
+  opacity: 0;
+  transition: opacity var(--duration-micro) var(--ease-enter);
+}
+.q-row-tools .q-ibtn {
+  position: relative;
+  width: 24px;
+  height: 24px;
+}
+.q-row:hover .q-row-tools,
+.q-row-tools:focus-within,
+.q-row-tools:has([data-open]) {
+  opacity: 1;
+}
+.q-row:hover .q-row-title,
+.q-row:has(.q-row-tools :focus-visible) .q-row-title {
+  padding-right: var(--row-tools-w, 0px);
+}
+.q-row:has(.q-row-tools > :nth-child(2)) {
+  --row-tools-w: 24px;
+}
+
+/* One label column and one control column: every control starts at the same
+   x and fills the column; read-only values sit in it too. */
+.q-field:has(> .lab + .ctl) {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 20rem;
+  column-gap: 24px;
+}
+.q-field:has(> .lab + .ctl) > .lab {
   min-width: 0;
 }
-.q-seg.fit > button > .l {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
+.q-field:has(> .lab + .ctl) > .ctl {
+  flex-wrap: wrap;
+  row-gap: 4px;
+}
+.q-field > .ctl > .q-input,
+.q-field > .ctl > input:not([type="checkbox"], [type="radio"]),
+.q-field > .ctl > textarea.q-input,
+.q-field > .ctl > [data-slot="select-trigger"],
+.q-field > .ctl > [data-slot="input"] {
+  flex: 1 1 0%;
+  width: auto;
+  min-width: 8rem;
+}
+@media (max-width: 639px) {
+  .q-field:has(> .lab + .ctl) {
+    display: flex;
+  }
 }

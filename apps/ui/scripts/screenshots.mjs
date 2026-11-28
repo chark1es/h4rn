@@ -17,7 +17,9 @@ import { fileURLToPath } from "node:url";
 import { chromium } from "playwright-core";
 
 const BASE = process.argv[2] ?? "http://127.0.0.1:1420";
-const OUT = fileURLToPath(new URL("../screenshots/", import.meta.url));
+const OUT = process.env.H4RN_SHOTS_OUT
+  ? `${process.env.H4RN_SHOTS_OUT.replace(/\/$/, "")}/`
+  : fileURLToPath(new URL("../screenshots/", import.meta.url));
 const EXECUTABLE =
   process.env.H4RN_CHROMIUM ??
   `${process.env.HOME}/.cache/ms-playwright/chromium_headless_shell-1248/chrome-headless-shell-linux64/chrome-headless-shell`;
@@ -58,9 +60,9 @@ const openPanelTab = async (page, name) => {
 const expandTree = async (page, path) => {
   const tree = page.getByRole("tree", { name: "Workspace files" });
   await tree.waitFor({ timeout: 10_000 });
-  const node = tree.locator(`button[title="${path}"]`).first();
+  const node = tree.locator(`[data-slot="tree-label"][title="${path}"]`).first();
   if (!(await node.count())) return;
-  if ((await node.getAttribute("aria-expanded")) === "false") {
+  if ((await node.locator("xpath=..").getAttribute("aria-expanded")) === "false") {
     await node.click();
     await page.waitForTimeout(250);
   }
@@ -70,7 +72,7 @@ const expandTree = async (page, path) => {
 const openTreeFile = async (page, path) => {
   const tree = page.getByRole("tree", { name: "Workspace files" });
   await tree.waitFor({ timeout: 10_000 });
-  const node = tree.locator(`button[title="${path}"]`).first();
+  const node = tree.locator(`[data-slot="tree-label"][title="${path}"]`).first();
   const appeared = await node
     .waitFor({ state: "visible", timeout: 5_000 })
     .then(() => true)
@@ -106,7 +108,7 @@ const SHOTS = [
     path: "/t/thr_h",
     wait: '[aria-label="Thread stream"]',
     action: async (page) => {
-      await page.getByRole("tab", { name: /Done/ }).click();
+      await page.getByRole("radio", { name: /Done/ }).click();
       await page.waitForTimeout(400);
     },
   },
@@ -166,8 +168,8 @@ const SHOTS = [
       await page.keyboard.press("Control+End");
       await page.keyboard.type(" ");
       await page.getByRole("tab", { name: "Diff" }).click();
-      await page.getByRole("button", { name: /Diff source/ }).click();
-      await page.getByRole("menuitem", { name: /^Turn/ }).click();
+      await page.getByRole("combobox", { name: /Diff source/ }).click();
+      await page.getByRole("option", { name: /^Turn/ }).click();
       await page.waitForTimeout(700);
     },
   },
@@ -194,7 +196,8 @@ const SHOTS = [
         .getByRole("tab", { name: /session\.test\.ts/ })
         .first()
         .click();
-      await page.getByRole("tab", { name: "vs agent" }).click();
+      await page.getByRole("tab", { name: /Changes/ }).click();
+      await page.getByRole("radio", { name: "vs agent" }).click();
       await sidebar.locator('[data-thread-id="thr_a"]').click();
       await page.getByRole("heading", { name: "api" }).waitFor({ timeout: 10_000 });
       await sidebar.locator('[data-thread-id="thr_b"]').click();
@@ -283,7 +286,10 @@ const SHOTS = [
     settle: 1200,
     action: async (page) => {
       await page.getByRole("button", { name: "Update Codex" }).click();
+      await page.getByRole("button", { name: "Update log" }).click({ timeout: 10_000 });
       await page.getByText("added 1 package in 4s").waitFor({ timeout: 5_000 });
+      // The log panel fades in; let it finish so the shot shows the log.
+      await page.waitForTimeout(400);
     },
   },
   {
@@ -308,7 +314,7 @@ const SHOTS = [
     settle: 2200,
     action: async (page) => {
       await page.getByRole("button", { name: "Restart to update" }).click();
-      await page.getByText(/Downloading h4rn 0\.2\.0 · \d+%/).waitFor({ timeout: 5_000 });
+      await page.getByText(/(Downloading|Installing) h4rn/).waitFor({ timeout: 5_000 });
     },
   },
   {
@@ -317,7 +323,7 @@ const SHOTS = [
     path: "/t/thr_a",
     wait: '[aria-label="Thread stream"]',
     action: async (page) => {
-      await page.getByTitle("Hosts and connection").click();
+      await page.locator(".q-hostbtn").click();
       await page.getByRole("menu", { name: "Hosts" }).waitFor();
       await page.waitForTimeout(350);
     },
@@ -351,7 +357,7 @@ const SHOTS = [
     name: "state-empty",
     device: "desktop",
     path: "/?scenario=empty",
-    wait: "text=No projects yet",
+    wait: "text=Start a thread",
     settle: 500,
   },
   {
@@ -379,7 +385,7 @@ const SHOTS = [
     // popover open from the footer trigger.
     settle: 2200,
     action: async (page) => {
-      await page.getByTitle("Hosts and connection").click();
+      await page.locator(".q-hostbtn").click();
       await page.getByRole("menu", { name: "Hosts" }).waitFor();
       await page.waitForTimeout(350);
     },
@@ -403,7 +409,7 @@ const SHOTS = [
     wait: '[aria-label="Thread stream"]',
     action: async (page) => {
       await page.getByRole("button", { name: "Changes and subagents" }).click();
-      const sheet = page.getByRole("dialog", { name: "Changes and subagents" });
+      const sheet = page.getByRole("dialog", { name: "Thread panel" });
       await sheet.getByText("tests/setup.ts").first().waitFor({ timeout: 10_000 });
       await page.waitForTimeout(500);
     },
@@ -446,7 +452,7 @@ const SHOTS = [
     wait: '[aria-label="Thread stream"]',
     action: async (page) => {
       await page.getByRole("button", { name: "Changes and subagents" }).click();
-      const sheet = page.getByRole("dialog", { name: "Changes and subagents" });
+      const sheet = page.getByRole("dialog", { name: "Thread panel" });
       await sheet.getByRole("tab", { name: /Subagents/ }).click();
       await sheet
         .getByText("Bisect the auth fixture change on CI")
@@ -462,7 +468,7 @@ const SHOTS = [
     wait: '[aria-label="Thread stream"]',
     action: async (page) => {
       await page.getByRole("button", { name: "Review" }).click();
-      await page.getByRole("dialog", { name: "Approve command" }).waitFor();
+      await page.getByRole("dialog").getByRole("button", { name: "Approve" }).waitFor();
       await page.waitForTimeout(450);
     },
   },
@@ -503,6 +509,189 @@ const SHOTS = [
   },
 ];
 
+/** Raise a toast through the dev server's own store module (mock mode only). */
+const raiseToast = async (page, input) => {
+  await page.evaluate(async (toast) => {
+    const store = await import("/src/lib/store/appStore.ts");
+    store.pushToast(toast);
+  }, input);
+  await page.waitForTimeout(450);
+};
+
+/** Surfaces the UI audit adds on top of the design shots (`H4RN_AUDIT=1`). */
+const AUDIT_SHOTS = [
+  {
+    name: "a-new-thread",
+    device: "desktop",
+    path: "/t/thr_a",
+    wait: '[aria-label="Thread stream"]',
+    action: async (page) => {
+      await page.getByRole("button", { name: "New thread", exact: true }).first().click();
+      await page.getByRole("dialog").waitFor({ state: "visible" });
+      await page.waitForTimeout(400);
+    },
+  },
+  {
+    name: "a-shortcuts",
+    device: "desktop",
+    path: "/t/thr_a",
+    wait: '[aria-label="Thread stream"]',
+    action: async (page) => {
+      await page.keyboard.press("ControlOrMeta+/");
+      await page.getByRole("dialog").waitFor({ state: "visible" });
+      await page.waitForTimeout(400);
+    },
+  },
+  {
+    name: "a-thread-actions",
+    device: "desktop",
+    path: "/t/thr_a",
+    wait: '[aria-label="Thread stream"]',
+    action: async (page) => {
+      await page.getByRole("button", { name: "Thread actions" }).click();
+      await page.getByRole("menu").first().waitFor({ state: "visible" });
+      await page.waitForTimeout(350);
+    },
+  },
+  {
+    name: "a-row-actions",
+    device: "desktop",
+    path: "/t/thr_a",
+    wait: '[aria-label="Thread stream"]',
+    action: async (page) => {
+      await page
+        .getByRole("button", { name: "Actions for Migrate session store to Redis" })
+        .click();
+      await page.getByRole("menu").first().waitFor({ state: "visible" });
+      await page.waitForTimeout(350);
+    },
+  },
+  {
+    name: "a-model-select",
+    device: "desktop",
+    path: "/t/thr_a",
+    wait: '[aria-label="Thread stream"]',
+    action: async (page) => {
+      // The composer's model chip opens the thread settings; show the model suggestions in it.
+      await page.locator("button.q-model").first().click();
+      const settings = page.getByRole("dialog", { name: "Thread settings" });
+      await settings.waitFor({ state: "visible" });
+      await settings.getByRole("button", { name: "Show suggestions" }).click();
+      await page.getByRole("listbox").first().waitFor({ state: "visible" });
+      await page.waitForTimeout(450);
+    },
+  },
+  {
+    name: "a-tooltip",
+    device: "desktop",
+    path: "/t/thr_a",
+    wait: '[aria-label="Thread stream"]',
+    action: async (page) => {
+      await page.getByRole("button", { name: "Right panel" }).hover();
+      await page.getByRole("tooltip").waitFor({ state: "visible" });
+      await page.waitForTimeout(250);
+    },
+  },
+  {
+    name: "a-toasts",
+    device: "desktop",
+    path: "/t/thr_a",
+    wait: '[aria-label="Thread stream"]',
+    action: async (page) => {
+      await raiseToast(page, { variant: "success", title: "Delegated to codex." });
+      await raiseToast(page, {
+        variant: "error",
+        title: "Couldn't send the reply to atlas.",
+        description: "The relay closed the stream. Your draft is still in the composer.",
+      });
+    },
+  },
+  {
+    name: "a-settings-appearance",
+    device: "desktop",
+    path: "/settings/appearance",
+    wait: 'main[aria-label="Settings"]',
+    settle: 1200,
+  },
+  {
+    name: "a-add-mcp",
+    device: "desktop",
+    path: "/library",
+    wait: "text=playwright",
+    settle: 1200,
+    action: async (page) => {
+      await page.getByRole("button", { name: "Add MCP server" }).first().click();
+      await page.getByRole("dialog").waitFor({ state: "visible" });
+      await page.waitForTimeout(400);
+    },
+  },
+  {
+    name: "a-settings-autoresume",
+    device: "desktop",
+    path: "/settings/resume",
+    wait: 'main[aria-label="Settings"]',
+    settle: 1200,
+  },
+  {
+    name: "a-settings-forges",
+    device: "desktop",
+    path: "/settings/forges",
+    wait: "text=Forges",
+    settle: 1200,
+  },
+  {
+    name: "a-settings-account",
+    device: "desktop",
+    path: "/settings/account",
+    wait: "text=Account",
+    settle: 1200,
+  },
+  {
+    name: "a-p-new-thread",
+    device: "phone",
+    path: "/",
+    wait: "text=Fix flaky auth test",
+    action: async (page) => {
+      await page.getByRole("button", { name: "New thread" }).first().click();
+      await page.getByRole("dialog").waitFor({ state: "visible" });
+      await page.waitForTimeout(450);
+    },
+  },
+  {
+    name: "a-p-thread-actions",
+    device: "phone",
+    path: "/t/thr_a",
+    wait: '[aria-label="Thread stream"]',
+    action: async (page) => {
+      await page.getByRole("button", { name: "Thread actions" }).click();
+      await page.getByRole("menu").first().waitFor({ state: "visible" });
+      await page.waitForTimeout(350);
+    },
+  },
+  {
+    name: "a-p-settings",
+    device: "phone",
+    path: "/settings/appearance",
+    wait: "main",
+    settle: 1200,
+  },
+  {
+    name: "a-p-toasts",
+    device: "phone",
+    path: "/t/thr_a",
+    wait: '[aria-label="Thread stream"]',
+    action: async (page) => {
+      await raiseToast(page, {
+        variant: "error",
+        title: "Couldn't send the reply to atlas.",
+        description: "The relay closed the stream. Your draft is still in the composer.",
+      });
+    },
+  },
+];
+
+if (process.env.H4RN_AUDIT === "1") SHOTS.push(...AUDIT_SHOTS);
+
 const browser = await chromium.launch({ executablePath: EXECUTABLE, args: ["--no-sandbox"] });
 await mkdir(OUT, { recursive: true });
 
@@ -514,7 +703,9 @@ const selected = only?.length ? SHOTS.filter((shot) => only.includes(shot.name))
 
 let failures = 0;
 for (const shot of selected) {
-  const sizes = shot.device === "phone" ? [PHONE, PHONE_SMALL] : [DESKTOP];
+  // H4RN_PHONE_FLOOR=0 skips the 360 px floor (the audit only needs 390).
+  const phones = process.env.H4RN_PHONE_FLOOR === "0" ? [PHONE] : [PHONE, PHONE_SMALL];
+  const sizes = shot.device === "phone" ? phones : [DESKTOP];
   for (const size of sizes) {
     const sizeName = String(size.width);
     for (const theme of ["light", "dark"]) {

@@ -1,10 +1,9 @@
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
-
 import { FileDiff } from "@/components/panel/FileDiff";
+import { Tip } from "@/components/ui/tooltip";
 import { againstFor, loadFileDiff, requestChangesTurn, totalLines } from "@/features/changes/store";
 import type { FsDiff, ThreadSummary } from "@/gen";
-import { titleWithShortcut } from "@/lib/keybindings";
 import { getClient, openInIde } from "@/lib/store/appStore";
 import type { StreamTurn } from "@/lib/store/projection";
 
@@ -61,14 +60,11 @@ export function ChangeSetCard({ turn, summary }: { turn: StreamTurn; summary: Th
           <span className="q-add">+{totals.added}</span>{" "}
           <span className="q-del">−{totals.removed}</span>
         </span>
-        <button
-          type="button"
-          className="q-btn ghost"
-          onClick={openChanges}
-          title={titleWithShortcut(t("changes.card.openPanel"), "panel.changes")}
-        >
-          {t("changes.card.review")}
-        </button>
+        <Tip label={t("changes.card.openPanel")} command="panel.changes">
+          <button type="button" className="q-btn ghost q-inline-end" onClick={openChanges}>
+            {t("changes.card.review")}
+          </button>
+        </Tip>
       </div>
       {changes.files.map((file) => {
         const { directory, name } = splitPath(file.path);

@@ -223,7 +223,7 @@ async function main() {
     // The fake adapter registers as Claude Code; pick it explicitly so a real
     // Codex/OpenCode install on the test machine cannot take the turn.
     await page.locator("#new-thread-harness").click();
-    await page.getByRole("menuitem", { name: "Claude Code" }).click();
+    await page.getByRole("option", { name: "Claude Code" }).click();
     await page.locator("#new-thread-task").fill("[[write:notes.txt]]hello from the fake harness");
     await page.waitForFunction(() => {
       const button = [...document.querySelectorAll("button")].find(
@@ -268,9 +268,9 @@ async function main() {
     const panel = page.getByRole("complementary", { name: "Thread panel" });
     await panel.waitFor({ timeout: 10_000 });
     await panel.getByRole("tab", { name: /Changes/ }).click();
-    await panel.getByRole("tab", { name: "vs agent" }).waitFor({ timeout: 10_000 });
+    await panel.getByRole("radio", { name: "vs agent" }).waitFor({ timeout: 10_000 });
     if (
-      (await panel.getByRole("tab", { name: "vs agent" }).getAttribute("aria-selected")) !== "true"
+      (await panel.getByRole("radio", { name: "vs agent" }).getAttribute("aria-checked")) !== "true"
     ) {
       throw new Error("Changes tab did not open in the right panel");
     }
@@ -333,8 +333,8 @@ async function main() {
 
     // Back to the parent through the sidebar, then cancel the live child. The
     // parent is settled, so switch the sidebar back to that state first.
-    const states = page.getByRole("tablist", { name: "Thread state" });
-    await states.getByRole("tab", { name: /^Settled/ }).click();
+    const states = page.getByRole("radiogroup", { name: "Thread state" });
+    await states.getByRole("radio", { name: /^Settled/ }).click();
     await page
       .getByRole("option")
       .filter({ hasText: "hello from the fake harness" })
@@ -353,7 +353,7 @@ async function main() {
 
     // The delegation check left the sidebar on Settled; the limit flow below
     // asserts the new thread's inbox row, which lives under Working.
-    await states.getByRole("tab", { name: /^Working/ }).click();
+    await states.getByRole("radio", { name: /^Working/ }).click();
 
     // ------------------------------------------------------------------
     // Usage wiring: the footer and the Usage screen read real ledger rows.
@@ -389,7 +389,7 @@ async function main() {
     await page.getByRole("button", { name: "New thread" }).first().click();
     await page.locator("#new-thread-workspace").fill(workspace);
     await page.locator("#new-thread-harness").click();
-    await page.getByRole("menuitem", { name: "Claude Code" }).click();
+    await page.getByRole("option", { name: "Claude Code" }).click();
     await page.locator("#new-thread-task").fill("Keep going [h4rn-limit]");
     await page.waitForFunction(() => {
       const button = [...document.querySelectorAll("button")].find(
@@ -450,7 +450,7 @@ async function main() {
     await page.getByRole("button", { name: "New thread" }).first().click();
     await page.locator("#new-thread-workspace").fill(workspace);
     await page.locator("#new-thread-harness").click();
-    await page.getByRole("menuitem", { name: "Claude Code" }).click();
+    await page.getByRole("option", { name: "Claude Code" }).click();
     await page.locator("#new-thread-task").fill("Fail me over [h4rn-limit]");
     await page.waitForFunction(() => {
       const button = [...document.querySelectorAll("button")].find(

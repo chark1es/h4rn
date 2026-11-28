@@ -7,7 +7,7 @@ vi.mock("./connect", () => ({ listProviders: () => Promise.resolve([]) }));
 
 import { setLocalePreference } from "@/lib/i18n";
 
-import { busyText, ConnectSignIn } from "./ConnectSignIn";
+import { busyText, ConnectSignIn, SignOutButton } from "./ConnectSignIn";
 import { type RemoteBusy, remoteStore } from "./remoteStore";
 
 const initial = remoteStore.getState();
@@ -68,5 +68,16 @@ describe("Connect sign-in progress", () => {
       });
       expect(words.at(-1)).toContain("atlas");
     }
+  });
+});
+
+describe("Sign out", () => {
+  it("can't be pressed while a request runs", () => {
+    remoteStore.setState({ ...remoteStore.getState(), busy: { kind: "requestingCode" } });
+    const { rerender } = render(<SignOutButton />);
+    expect(screen.getByRole("button", { name: "Sign out" }).hasAttribute("disabled")).toBe(true);
+    act(() => remoteStore.setState({ ...remoteStore.getState(), busy: null }));
+    rerender(<SignOutButton />);
+    expect(screen.getByRole("button", { name: "Sign out" }).hasAttribute("disabled")).toBe(false);
   });
 });

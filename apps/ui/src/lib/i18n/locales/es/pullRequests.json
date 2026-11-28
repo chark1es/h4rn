@@ -98,6 +98,7 @@
     "openOn": "Abrir en {{forge}}"
   },
   "tabs": {
+    "label": "Secciones de la pull request",
     "conversation": "Conversación",
     "commits": "Commits",
     "checks": "Comprobaciones",

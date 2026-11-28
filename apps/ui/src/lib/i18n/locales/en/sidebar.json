@@ -146,6 +146,7 @@
   },
   "row": {
     "actionsFor": "Actions for {{title}}",
+    "acknowledgeTitle": "Acknowledge {{title}}",
     "harnessOn": "{{harness}} on {{host}}",
     "resumeNow": "Resume now",
     "acknowledge": "Acknowledge",

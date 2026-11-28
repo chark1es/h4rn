@@ -141,6 +141,7 @@
   },
   "row": {
     "actionsFor": "{{title}} の操作",
+    "acknowledgeTitle": "{{title}} を確認",
     "harnessOn": "{{host}} の {{harness}}",
     "resumeNow": "今すぐ再開",
     "acknowledge": "確認",

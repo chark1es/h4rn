@@ -1,6 +1,7 @@
 import { Code2Icon, FileDigitIcon } from "lucide-react";
 import { useMemo } from "react";
 import { useTranslation } from "react-i18next";
+import { Tip } from "@/components/ui/tooltip";
 import { highlightCode } from "@/features/ide/DiffView";
 import { collapseDiff, computeDiff, type DiffRow } from "@/features/ide/diff";
 import type { FsDiff } from "@/gen";
@@ -61,15 +62,16 @@ export function FileDiff({
           <span className="q-num q-pm">
             <span className="q-add">+{added}</span> <span className="q-del">−{removed}</span>
           </span>
-          <button
-            type="button"
-            className="q-ibtn"
-            aria-label={t("changes.diff.open", { name })}
-            title={t("changes.openInIde")}
-            onClick={onOpen}
-          >
-            <Code2Icon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-          </button>
+          <Tip label={t("changes.openInIde")}>
+            <button
+              type="button"
+              className="q-ibtn"
+              aria-label={t("changes.diff.open", { name })}
+              onClick={onOpen}
+            >
+              <Code2Icon className="q-icon s14" strokeWidth={1.5} aria-hidden />
+            </button>
+          </Tip>
         </div>
       )}
       {loading && !diff ? (

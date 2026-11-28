@@ -13,7 +13,9 @@ import { Trans, useTranslation } from "react-i18next";
 
 import { ChipSelect } from "@/components/common/ChipSelect";
 import { LibraryErrorBanner } from "@/components/pages/LibraryErrorBanner";
+import { PhoneLargeTitle, PhoneNavButton } from "@/components/shell/PhoneNav";
 import { Button } from "@/components/ui/button";
+import { Switch } from "@/components/ui/switch";
 import type { HarnessKind, SkillConflict, SkillInstallState, SkillSummary } from "@/gen";
 import { useIsPhone } from "@/hooks/use-media-query";
 import { useNow } from "@/hooks/use-now";
@@ -112,7 +114,13 @@ function SyncBanner() {
           </span>
         ) : null}
       </span>
-      <Button variant="ghost" size="sm" onClick={() => void syncSkillsNow()} disabled={syncing}>
+      <Button
+        variant="ghost"
+        size="sm"
+        className="q-inline-end"
+        onClick={() => void syncSkillsNow()}
+        disabled={syncing}
+      >
         {syncing ? t("skills.sync.syncing") : t("skills.sync.syncNow")}
       </Button>
     </div>
@@ -135,11 +143,11 @@ function Conflicts({ conflicts }: { conflicts: SkillConflict[] }) {
         {conflicts.map((conflict) => {
           const choice = choices[conflict.id] ?? "keep_local";
           return (
-            <div className="q-conflict" key={conflict.id} style={{ flexWrap: "wrap", rowGap: 8 }}>
+            <div className="q-conflict flex-wrap gap-y-2" key={conflict.id}>
               <TriangleAlertIcon className="q-icon q-warn" aria-hidden />
               <div className="grow" style={{ minWidth: isPhone ? "calc(100% - 28px)" : undefined }}>
                 <div className="t">{conflict.name}</div>
-                <div className="q-muted" style={{ fontSize: 12, marginTop: 2 }}>
+                <div className="q-muted text-xs mt-0.5">
                   <Trans
                     t={t}
                     i18nKey="skills.conflicts.versions"
@@ -166,7 +174,6 @@ function Conflicts({ conflicts }: { conflicts: SkillConflict[] }) {
               />
               <Button
                 variant="secondary"
-                size="sm"
                 disabled={Boolean(busy[conflict.id])}
                 onClick={() => {
                   setBusy((current) => ({ ...current, [conflict.id]: true }));
@@ -205,12 +212,8 @@ function HarnessMatrix({ skill, isPhone }: { skill: SkillSummary; isPhone: boole
         const failed = enabled && !install?.installed;
         return (
           <div className="flex min-w-0 flex-col items-center gap-1" key={harness}>
-            <button
-              type="button"
-              role="switch"
-              className="q-switch"
-              aria-checked={enabled}
-              aria-disabled={pending[`${skill.id}:${harness}`] ? "true" : undefined}
+            <Switch
+              checked={enabled}
               disabled={!install || Boolean(pending[`${skill.id}:${harness}`])}
               aria-label={t("skills.row.toggle", {
                 skill: skill.name,
@@ -224,16 +227,16 @@ function HarnessMatrix({ skill, isPhone }: { skill: SkillSummary; isPhone: boole
                       version: install.version ?? t("skills.row.notInstalled"),
                     })
               }
-              onClick={() => {
+              onCheckedChange={() => {
                 if (!install) return;
                 void setSkillEnabled(skill.id, harness, !enabled);
               }}
             />
-            <span className="text-[10.5px] whitespace-nowrap text-[var(--fg-3)]">
+            <span className="text-xs whitespace-nowrap text-[var(--fg-3)]">
               {isPhone ? SHORT_HARNESS[harness] : HARNESS_LABELS[harness]}
             </span>
             <span
-              className={cn("q-mono text-[10px]", failed ? "q-warn" : "text-[var(--fg-3)]")}
+              className={cn("q-mono text-xs", failed ? "q-warn" : "text-[var(--fg-3)]")}
               title={failed ? t("skills.row.missingCopy") : undefined}
             >
               {shortVersion(install?.version ?? null)}
@@ -259,7 +262,7 @@ function SkillRow({
   return (
     <div className="q-li" style={{ flexWrap: isPhone ? "wrap" : undefined }}>
       <span
-        className="grid place-items-center rounded-[6px] bg-[var(--fill)]"
+        className="grid place-items-center rounded-md bg-[var(--fill)]"
         style={{ width: 26, height: 26, color: "var(--fg-2)" }}
       >
         <BlocksIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
@@ -272,13 +275,13 @@ function SkillRow({
           </span>
           {skill.conflicts > 0 ? (
             <span className="q-badge warn">
-              <TriangleAlertIcon className="q-icon s12" aria-hidden />{" "}
+              <TriangleAlertIcon className="q-icon s14" aria-hidden />{" "}
               {t("skills.row.conflicts", { count: skill.conflicts })}
             </span>
           ) : null}
         </div>
         <div className="s">{skill.description}</div>
-        <div className="q-faint mt-1 text-[11.5px]">
+        <div className="q-faint mt-1 text-xs">
           {t("skills.row.installs", {
             installed,
             count: skill.installs.length,
@@ -306,7 +309,7 @@ function SkeletonList({ label }: { label: string }) {
             />
             <div className="q-skel" style={{ width: "38%", height: 8, marginTop: 6 }} />
           </div>
-          <div className="q-skel" style={{ width: 180, height: 24 }} />
+          <div className="q-skel w-45 h-6" />
         </div>
       ))}
     </div>
@@ -351,29 +354,52 @@ export function SkillsPage() {
   return (
     <>
       <main className="q-main" aria-label={t("settings:nav.skills")}>
+        {isPhone ? (
+          <PhoneLargeTitle
+            title={t("settings:nav.skills")}
+            summary={
+              loading && !inventory
+                ? t("skills.loadingRegistry")
+                : t("skills.summaryShort", { installed: skills.length, count: detected })
+            }
+            actions={
+              <>
+                <PhoneNavButton
+                  label={t("skills.findExisting")}
+                  onClick={() => setImportOpen(true)}
+                >
+                  <DownloadIcon className="q-icon s22" strokeWidth={1.5} aria-hidden />
+                </PhoneNavButton>
+                <PhoneNavButton
+                  label={t("dialogs:skills.add.submit")}
+                  onClick={() => setAddOpen(true)}
+                >
+                  <PlusIcon className="q-icon s22" strokeWidth={1.5} aria-hidden />
+                </PhoneNavButton>
+              </>
+            }
+          />
+        ) : null}
         <div className="q-page">
-          <div className="q-wrap" style={{ maxWidth: 920 }}>
-            <div className="mb-5 flex flex-wrap items-start gap-3">
-              <div className="grow basis-0">
-                <h1 className="text-[20px] leading-[26px] font-semibold tracking-[-0.015em]">
-                  {t("settings:nav.skills")}
-                </h1>
-                <div className="q-muted mt-1">
-                  {loading && !inventory
-                    ? t("skills.loadingRegistry")
-                    : t(isPhone ? "skills.summaryShort" : "skills.summary", {
-                        installed: skills.length,
-                        count: detected,
-                      })}
+          <div className="q-form wide">
+            {isPhone ? null : (
+              <div className="mb-5 flex flex-wrap items-start gap-3">
+                <div className="grow basis-0">
+                  <h1 className="text-xl font-semibold">{t("settings:nav.skills")}</h1>
+                  <div className="q-muted mt-1">
+                    {loading && !inventory
+                      ? t("skills.loadingRegistry")
+                      : t("skills.summary", { installed: skills.length, count: detected })}
+                  </div>
                 </div>
+                <Button variant="secondary" onClick={() => setImportOpen(true)}>
+                  <DownloadIcon className="q-icon s14" aria-hidden /> {t("skills.findExisting")}
+                </Button>
+                <Button onClick={() => setAddOpen(true)}>
+                  <PlusIcon className="q-icon s14" aria-hidden /> {t("dialogs:skills.add.submit")}
+                </Button>
               </div>
-              <Button variant="secondary" onClick={() => setImportOpen(true)}>
-                <DownloadIcon className="q-icon s14" aria-hidden /> {t("skills.findExisting")}
-              </Button>
-              <Button onClick={() => setAddOpen(true)}>
-                <PlusIcon className="q-icon s14" aria-hidden /> {t("dialogs:skills.add.submit")}
-              </Button>
-            </div>
+            )}
 
             <SyncBanner />
 

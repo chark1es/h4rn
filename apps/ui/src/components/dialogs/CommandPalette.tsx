@@ -1,3 +1,4 @@
+import { createCommandController } from "@ui-sdk/react/command";
 import {
   ArchiveIcon,
   ArrowLeftRightIcon,
@@ -11,6 +12,7 @@ import {
   InboxIcon,
   KeyboardIcon,
   LibraryIcon,
+  LinkIcon,
   PanelLeftIcon,
   PanelRightIcon,
   PinIcon,
@@ -28,12 +30,12 @@ import {
   WorkflowIcon,
   XIcon,
 } from "lucide-react";
-import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import { type KeyboardEvent, type ReactNode, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { AgentGlyph } from "@/components/agent/AgentGlyph";
-import { ESC, KeyGlyphs } from "@/components/common/Kbd";
 import {
+  Command,
   CommandDialog,
   CommandEmpty,
   CommandFooter,
@@ -41,8 +43,8 @@ import {
   CommandInput,
   CommandItem,
   CommandList,
-  CommandShortcut,
 } from "@/components/ui/command";
+import { ESC, Kbd, KbdGroup } from "@/components/ui/kbd";
 import { openGuestShare } from "@/features/guest/guestStore";
 import { glyphForThread } from "@/lib/agent";
 import { harnessLabel } from "@/lib/entities";
@@ -95,16 +97,32 @@ function named(id: CommandId): RowName {
   return { name: commandName(id), english: commandName(id, "en") };
 }
 
+type PaletteRow = {
+  key: string;
+  /** What the search matches, with `keywords`. */
+  value: string;
+  keywords?: string[];
+  label: ReactNode;
+  icon?: ReactNode;
+  trailing?: ReactNode;
+  command?: CommandId | undefined;
+  disabled?: boolean | undefined;
+  onSelect: () => void;
+};
+
+type PaletteGroup = { key: string; heading: string; rows: PaletteRow[] };
+
 /**
- * One palette row. cmdk matches what was typed against the shown name, the
- * English name and the English synonyms, so someone who learned the palette
- * in English still finds "settle" or "diff" after switching language.
+ * One palette row. The search matches the shown name, the English name and
+ * the English synonyms, so someone who learned the palette in English still
+ * finds "settle" or "diff" after switching language.
  *
  * A row that opens a dialog ends in "…", the menu convention for "asks for
  * more first". The command's shared name stays without it, because Settings →
  * Shortcuts and the Keyboard shortcuts dialog list the same name.
  */
-function PaletteItem({
+function paletteRow({
+  key,
   row,
   synonyms,
   command,
@@ -113,6 +131,7 @@ function PaletteItem({
   opensDialog,
   onSelect,
 }: {
+  key: string;
   row: RowName;
   synonyms: string;
   command?: CommandId;
@@ -120,19 +139,39 @@ function PaletteItem({
   disabled?: boolean;
   opensDialog?: boolean;
   onSelect: () => void;
-}) {
-  return (
-    <CommandItem
-      value={row.name}
-      keywords={[row.english, synonyms]}
-      disabled={disabled ?? false}
-      onSelect={onSelect}
-    >
-      {icon}
-      {opensDialog ? `${row.name}…` : row.name}
-      {command ? <CommandShortcut command={command} /> : null}
-    </CommandItem>
-  );
+}): PaletteRow {
+  return {
+    key,
+    value: row.name,
+    keywords: [row.english, synonyms],
+    label: opensDialog ? `${row.name}…` : row.name,
+    icon,
+    command,
+    disabled,
+    onSelect,
+  };
+}
+
+/**
+ * Orders a search the way cmdk 1.1.1 did: rows that score 0 hide, and each
+ * group's enabled rows sort by score, with disabled matches left at the
+ * group's top. Groups keep their order: cmdk's group sort looked groups up by
+ * id in a `data-value` that holds the heading, so it never moved one.
+ */
+export function rankGroups(groups: PaletteGroup[], query: string): PaletteGroup[] {
+  if (!query.trim()) return groups;
+  return groups
+    .map((group) => {
+      const shown = group.rows
+        .map((row) => ({ row, score: paletteScore(row.value, query, row.keywords) }))
+        .filter((entry) => entry.score > 0);
+      const rows = [
+        ...shown.filter((entry) => entry.row.disabled),
+        ...shown.filter((entry) => !entry.row.disabled).sort((a, b) => b.score - a.score),
+      ].map((entry) => entry.row);
+      return { ...group, rows };
+    })
+    .filter((group) => group.rows.length > 0);
 }
 
 export function CommandPalette() {
@@ -151,7 +190,7 @@ export function CommandPalette() {
   );
   const { t } = useTranslation("commands");
   const [query, setQuery] = useState("");
-  const lastFocus = useRef<HTMLElement | null>(null);
+  const [controller] = useState(createCommandController);
 
   const currentId = route.kind === "thread" ? route.threadId : null;
   const current = currentId ? threads[currentId] : undefined;
@@ -159,19 +198,6 @@ export function CommandPalette() {
     currentId ? (state.logs[currentId]?.turns ?? NO_TURNS) : NO_TURNS,
   );
   const forkTurn = latestForkableTurn(currentTurns);
-
-  // The palette opens from a shortcut, not a trigger. Track the last element
-  // focused outside the dialog so Escape can put focus back where it was.
-  useEffect(() => {
-    const record = (event: FocusEvent) => {
-      const target = event.target;
-      if (!(target instanceof HTMLElement)) return;
-      if (target.closest('[data-slot="dialog-content"]')) return;
-      lastFocus.current = target;
-    };
-    document.addEventListener("focusin", record);
-    return () => document.removeEventListener("focusin", record);
-  }, []);
 
   // Reset the filter each time the palette opens so it always starts at the
   // prototype's short list rather than a stale search.
@@ -206,9 +232,414 @@ export function CommandPalette() {
 
   const hostNames = [...new Set(Object.values(hosts).map((host) => host.name))].slice(0, 3);
 
+  const go = (path: string, surface: "settings" | "library" | "usage" | "issues" | "pulls") =>
+    close(() => navigate({ kind: "placeholder", surface, path }));
+
   // The resting palette mirrors the prototype: three groups, ten rows, which
-  // fit the 454 px list exactly. The long tail appears once the person starts
+  // fit the resting list exactly. The long tail appears once the person starts
   // typing.
+  const groups: PaletteGroup[] = [];
+  if (current) {
+    groups.push({
+      key: "thread",
+      heading: t("palette.groups.thisThread"),
+      rows: [
+        ...(approvalId
+          ? [
+              paletteRow({
+                key: "approve",
+                row: named("approval.approve"),
+                synonyms: "approve pending action go",
+                icon: <ShieldCheckIcon aria-hidden />,
+                command: "approval.approve",
+                onSelect: () =>
+                  close(() => void respondApproval(current.thread_id, approvalId, "approve")),
+              }),
+              paletteRow({
+                key: "deny",
+                row: named("approval.deny"),
+                synonyms: "deny pending action refuse",
+                icon: <XIcon aria-hidden />,
+                command: "approval.deny",
+                onSelect: () =>
+                  close(() => void respondApproval(current.thread_id, approvalId, "deny")),
+              }),
+            ]
+          : []),
+        paletteRow({
+          key: "changes",
+          row: named("panel.changes"),
+          synonyms: "open changes diff files",
+          icon: <FileDiffIcon aria-hidden />,
+          command: "panel.changes",
+          onSelect: () => close(() => setPanelTab("changes")),
+        }),
+        paletteRow({
+          key: "subagents",
+          row: named("panel.subagents"),
+          synonyms: "open subagents agents tree",
+          icon: <WorkflowIcon aria-hidden />,
+          command: "panel.subagents",
+          onSelect: () => close(() => setPanelTab("subagents")),
+        }),
+        paletteRow({
+          key: "switchHarness",
+          row: item("switchHarness"),
+          synonyms: "switch harness provider model",
+          icon: <ArrowLeftRightIcon aria-hidden />,
+          onSelect: () => close(() => window.dispatchEvent(new CustomEvent("h4rn:switch-harness"))),
+        }),
+        paletteRow({
+          key: "linkPullRequest",
+          row: item("linkPullRequest"),
+          synonyms: "link pull request pr url",
+          icon: <GitPullRequestIcon aria-hidden />,
+          onSelect: () => openLinkPullRequest(),
+        }),
+        paletteRow({
+          key: "fork",
+          row: item("fork"),
+          synonyms: "fork branch copy latest turn",
+          icon: <GitForkIcon aria-hidden />,
+          disabled: !forkTurn,
+          onSelect: () => {
+            if (forkTurn) close(() => void forkThread(current.thread_id, forkTurn));
+          },
+        }),
+        ...(current.tab !== "settled"
+          ? [
+              paletteRow({
+                key: "share",
+                row: named("guest.share"),
+                synonyms: "share guest teammate link",
+                opensDialog: true,
+                icon: <Share2Icon aria-hidden />,
+                onSelect: () => close(() => openGuestShare(current.thread_id)),
+              }),
+            ]
+          : []),
+        paletteRow({
+          key: "pin",
+          row: current.pinned ? item("unpin") : named("thread.pin"),
+          synonyms: "pin keep working unpin",
+          icon: <PinIcon aria-hidden />,
+          command: "thread.pin",
+          onSelect: () => close(() => void togglePin(current.thread_id)),
+        }),
+        ...(current.tab === "done"
+          ? [
+              paletteRow({
+                key: "acknowledge",
+                row: named("thread.acknowledge"),
+                synonyms: "acknowledge done",
+                icon: <CheckIcon aria-hidden />,
+                command: "thread.acknowledge",
+                onSelect: () => close(() => void acknowledgeThread(current.thread_id)),
+              }),
+            ]
+          : []),
+        ...(current.tab !== "settled"
+          ? [
+              paletteRow({
+                key: "settle",
+                row: named("thread.settle"),
+                synonyms: "settle now archive",
+                icon: <ArchiveIcon aria-hidden />,
+                command: "thread.settle",
+                onSelect: () => close(() => setThreadTab(current.thread_id, "settled")),
+              }),
+            ]
+          : []),
+        ...(current.tab === "working"
+          ? [
+              paletteRow({
+                key: "interrupt",
+                row: named("turn.interrupt"),
+                synonyms: "interrupt turn stop",
+                icon: <SquareIcon aria-hidden />,
+                command: "turn.interrupt",
+                onSelect: () => close(() => void interruptThread(current.thread_id)),
+              }),
+            ]
+          : []),
+      ],
+    });
+  }
+  groups.push({
+    key: "threads",
+    heading: t("palette.groups.threads"),
+    rows: [
+      ...recent.map(
+        (thread): PaletteRow => ({
+          key: `thread:${thread.thread_id}`,
+          value: `${thread.title} ${thread.host} ${harnessLabel(thread.harness)}`,
+          label: thread.title,
+          icon: (
+            <AgentGlyph
+              glyph={glyphForThread(thread, hosts[thread.host]?.online ?? false)}
+              size={14}
+            />
+          ),
+          trailing: `${hosts[thread.host]?.name ?? thread.host} · ${harnessLabel(thread.harness)}`,
+          onSelect: () => close(() => openThread(thread.thread_id)),
+        }),
+      ),
+      paletteRow({
+        key: "new",
+        row: named("thread.new"),
+        synonyms: "new thread start",
+        opensDialog: true,
+        icon: <PlusIcon aria-hidden />,
+        command: "thread.new",
+        onSelect: () => close(openNewThread),
+      }),
+      ...(searching
+        ? [
+            paletteRow({
+              key: "search",
+              row: item("searchThreads"),
+              synonyms: "search threads find",
+              icon: <SearchIcon aria-hidden />,
+              onSelect: () =>
+                close(() => {
+                  navigate({ kind: "inbox" });
+                  requestSearchFocus();
+                }),
+            }),
+          ]
+        : []),
+    ],
+  });
+  groups.push({
+    key: "goTo",
+    heading: t("palette.groups.goTo"),
+    rows: [
+      paletteRow({
+        key: "working",
+        row: named("tab.working"),
+        synonyms: "go to working tab",
+        icon: <InboxIcon aria-hidden />,
+        command: "tab.working",
+        onSelect: () => close(() => setTab("working")),
+      }),
+      paletteRow({
+        key: "done",
+        row: named("tab.done"),
+        synonyms: "go to done tab",
+        icon: <CheckIcon aria-hidden />,
+        command: "tab.done",
+        onSelect: () => close(() => setTab("done")),
+      }),
+      paletteRow({
+        key: "settled",
+        row: named("tab.settled"),
+        synonyms: "go to settled tab",
+        icon: <ArchiveIcon aria-hidden />,
+        command: "tab.settled",
+        onSelect: () => close(() => setTab("settled")),
+      }),
+      paletteRow({
+        key: "pair",
+        row: item("pairDevice"),
+        synonyms: "pair a device phone qr code",
+        icon: <SmartphoneIcon aria-hidden />,
+        onSelect: () => go("/settings/devices", "settings"),
+      }),
+      ...(searching
+        ? [
+            paletteRow({
+              key: "hosts",
+              row: item("hosts"),
+              synonyms: "hosts machines",
+              icon: <ServerIcon aria-hidden />,
+              onSelect: () => close(() => navigate({ kind: "hosts" })),
+            }),
+            paletteRow({
+              key: "library",
+              row: named("nav.tools"),
+              synonyms: "library mcp servers skills",
+              icon: <LibraryIcon aria-hidden />,
+              command: "nav.tools",
+              onSelect: () => go("/library", "library"),
+            }),
+            paletteRow({
+              key: "usage",
+              row: named("nav.usage"),
+              synonyms: "usage limits",
+              icon: <ChartNoAxesColumnIcon aria-hidden />,
+              command: "nav.usage",
+              onSelect: () => go("/usage", "usage"),
+            }),
+            paletteRow({
+              key: "ide",
+              row: item("ide"),
+              synonyms: "ide editor",
+              icon: <Code2Icon aria-hidden />,
+              onSelect: () => close(() => navigate({ kind: "ide" })),
+            }),
+            paletteRow({
+              key: "issues",
+              row: named("nav.issues"),
+              synonyms: "open issues trackers",
+              icon: <CircleDotIcon aria-hidden />,
+              command: "nav.issues",
+              onSelect: () => go("/issues", "issues"),
+            }),
+            paletteRow({
+              key: "pulls",
+              row: named("nav.pulls"),
+              synonyms: "pull requests prs",
+              icon: <GitPullRequestIcon aria-hidden />,
+              command: "nav.pulls",
+              onSelect: () => go("/pulls", "pulls"),
+            }),
+            paletteRow({
+              key: "settings",
+              row: named("settings.open"),
+              synonyms: "settings preferences",
+              icon: <SettingsIcon aria-hidden />,
+              command: "settings.open",
+              onSelect: () => go("/settings", "settings"),
+            }),
+          ]
+        : []),
+    ],
+  });
+  groups.push({
+    key: "view",
+    heading: t("palette.groups.view"),
+    rows: [
+      ...(current
+        ? [
+            paletteRow({
+              key: "openInIde",
+              row: {
+                name: t("palette.items.openInIde", {
+                  project: projectName(current.workspace_path),
+                }),
+                english: english("palette.items.openInIde", {
+                  project: projectName(current.workspace_path),
+                }),
+              },
+              synonyms: `open ide editor project ${commandName("view.toggle", "en")}`,
+              icon: <Code2Icon aria-hidden />,
+              command: "view.toggle",
+              onSelect: () => close(toggleView),
+            }),
+          ]
+        : []),
+      paletteRow({
+        key: "panel",
+        row: panelOpen ? item("hideRightPanel") : item("showRightPanel"),
+        synonyms: `toggle right panel ${commandName("panel.toggle", "en")}`,
+        icon: <PanelRightIcon aria-hidden />,
+        command: "panel.toggle",
+        onSelect: () => close(togglePanel),
+      }),
+      paletteRow({
+        key: "terminal",
+        row: terminalOpen ? item("hideTerminal") : item("showTerminal"),
+        synonyms: "toggle terminal shell",
+        icon: <TerminalIcon aria-hidden />,
+        command: "terminal.toggle",
+        onSelect: () => close(toggleTerminal),
+      }),
+      paletteRow({
+        key: "sidebar",
+        row: sidebarOpen ? item("hideSidebar") : item("showSidebar"),
+        synonyms: "toggle sidebar",
+        icon: <PanelLeftIcon aria-hidden />,
+        command: "sidebar.toggle",
+        onSelect: () => close(toggleSidebar),
+      }),
+      ...(searching
+        ? [
+            paletteRow({
+              key: "theme",
+              row: named("theme.toggle"),
+              synonyms: "toggle theme dark light",
+              icon: <SunMoonIcon aria-hidden />,
+              command: "theme.toggle",
+              onSelect: () => close(toggleTheme),
+            }),
+            paletteRow({
+              key: "shortcuts",
+              row: named("shortcuts.open"),
+              synonyms: "keyboard shortcuts help",
+              opensDialog: true,
+              icon: <KeyboardIcon aria-hidden />,
+              command: "shortcuts.open",
+              onSelect: () => close(openShortcuts),
+            }),
+            paletteRow({
+              key: "copyLink",
+              row: item("copyLink"),
+              synonyms: "copy thread link",
+              icon: <LinkIcon aria-hidden />,
+              disabled: !current,
+              onSelect: () =>
+                close(() => {
+                  if (!current) return;
+                  void navigator.clipboard?.writeText(
+                    `${window.location.origin}/t/${current.thread_id}`,
+                  );
+                }),
+            }),
+            ...(connection !== "online"
+              ? [
+                  paletteRow({
+                    key: "reconnect",
+                    row: item("reconnect"),
+                    synonyms: "reconnect connection",
+                    icon: <RefreshCwIcon aria-hidden />,
+                    onSelect: () => close(() => getClient().reconnectNow()),
+                  }),
+                ]
+              : []),
+          ]
+        : []),
+    ],
+  });
+
+  const ranked = rankGroups(groups, query);
+
+  // cmdk's keys, which UI SDK's Command leaves to the field: Escape closes even
+  // with text typed, Home and End jump to the first and last result, ⌘ with an
+  // arrow jumps to an end, Alt with an arrow to the next group. Ctrl+J/K/N/P stay
+  // off, as on main, so Ctrl+K still reaches the global shortcut that closes us.
+  const onKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+    if (event.nativeEvent.isComposing || event.keyCode === 229) return;
+    const rows = ranked.flatMap((group) => group.rows).filter((row) => !row.disabled);
+    const at = rows.findIndex((row) => row.key === controller.getValue());
+    const jump = (index: number) => {
+      event.preventDefault();
+      const row = rows[index];
+      if (row) controller.setValue(row.key);
+    };
+    const toGroup = (step: 1 | -1) => {
+      const groupAt = ranked.findIndex((group) =>
+        group.rows.some((row) => row.key === rows[at]?.key),
+      );
+      for (let i = groupAt + step; groupAt >= 0 && i >= 0 && i < ranked.length; i += step) {
+        const first = ranked[i]?.rows.find((row) => !row.disabled);
+        if (first) return jump(rows.indexOf(first));
+      }
+      jump(at + step);
+    };
+    const move = (step: 1 | -1) => {
+      if (event.metaKey) return jump(step > 0 ? rows.length - 1 : 0);
+      if (event.altKey) return toGroup(step);
+      jump(at + step);
+    };
+    const key = event.key;
+    if (key === "Escape") {
+      event.preventDefault();
+      closePalette();
+    } else if (key === "Home") jump(0);
+    else if (key === "End") jump(rows.length - 1);
+    else if (key === "ArrowDown") move(1);
+    else if (key === "ArrowUp") move(-1);
+  };
 
   return (
     <CommandDialog
@@ -216,386 +647,64 @@ export function CommandPalette() {
       onOpenChange={(value) => (value ? undefined : closePalette())}
       title={t("palette.title")}
       description={t("palette.description")}
-      filter={paletteScore}
-      onCloseAutoFocus={(event) => {
-        event.preventDefault();
-        const target = lastFocus.current;
-        if (target && document.contains(target)) target.focus();
-      }}
     >
-      <CommandInput
-        placeholder={t("palette.placeholder")}
-        autoFocus
-        onValueChange={setQuery}
-        trailing={
-          current ? (
-            <span className="q-pal-ctx">
-              {currentGlyph ? <AgentGlyph glyph={currentGlyph} size={12} /> : null}
-              <span
-                style={{
-                  maxWidth: 220,
-                  overflow: "hidden",
-                  textOverflow: "ellipsis",
-                  whiteSpace: "nowrap",
-                }}
-              >
-                {current.title}
+      <Command
+        filter={false}
+        autoHighlight
+        loop={false}
+        controller={controller}
+        query={query}
+        onQueryChange={setQuery}
+      >
+        <CommandInput
+          aria-label={t("palette.title")}
+          onKeyDown={onKeyDown}
+          placeholder={t("palette.placeholder")}
+          trailing={
+            current ? (
+              <span className="inline-flex h-5.5 max-w-60 shrink-0 items-center gap-1.5 rounded-md bg-fill px-2 text-xs text-fg-2">
+                {currentGlyph ? <AgentGlyph glyph={currentGlyph} size={12} /> : null}
+                <span className="truncate">{current.title}</span>
               </span>
-            </span>
-          ) : null
-        }
-      />
-      <CommandList>
+            ) : null
+          }
+        />
         <CommandEmpty>{t("palette.empty")}</CommandEmpty>
-
-        {current ? (
-          <CommandGroup heading={t("palette.groups.thisThread")}>
-            {approvalId ? (
-              <>
-                <PaletteItem
-                  row={named("approval.approve")}
-                  synonyms="approve pending action go"
-                  icon={<ShieldCheckIcon aria-hidden />}
-                  command="approval.approve"
-                  onSelect={() =>
-                    close(() => void respondApproval(current.thread_id, approvalId, "approve"))
-                  }
-                />
-                <PaletteItem
-                  row={named("approval.deny")}
-                  synonyms="deny pending action refuse"
-                  icon={<XIcon aria-hidden />}
-                  command="approval.deny"
-                  onSelect={() =>
-                    close(() => void respondApproval(current.thread_id, approvalId, "deny"))
-                  }
-                />
-              </>
-            ) : null}
-            <PaletteItem
-              row={named("panel.changes")}
-              synonyms="open changes diff files"
-              icon={<FileDiffIcon aria-hidden />}
-              command="panel.changes"
-              onSelect={() => close(() => setPanelTab("changes"))}
-            />
-            <PaletteItem
-              row={named("panel.subagents")}
-              synonyms="open subagents agents tree"
-              icon={<WorkflowIcon aria-hidden />}
-              command="panel.subagents"
-              onSelect={() => close(() => setPanelTab("subagents"))}
-            />
-            <PaletteItem
-              row={item("switchHarness")}
-              synonyms="switch harness provider model"
-              icon={<ArrowLeftRightIcon aria-hidden />}
-              onSelect={() =>
-                close(() => window.dispatchEvent(new CustomEvent("h4rn:switch-harness")))
-              }
-            />
-            <PaletteItem
-              row={item("linkPullRequest")}
-              synonyms="link pull request pr url"
-              icon={<GitPullRequestIcon aria-hidden />}
-              onSelect={() => openLinkPullRequest()}
-            />
-            <PaletteItem
-              row={item("fork")}
-              synonyms="fork branch copy latest turn"
-              icon={<GitForkIcon aria-hidden />}
-              disabled={!forkTurn}
-              onSelect={() => {
-                if (forkTurn) close(() => void forkThread(current.thread_id, forkTurn));
-              }}
-            />
-            {current.tab !== "settled" ? (
-              <PaletteItem
-                row={named("guest.share")}
-                synonyms="share guest teammate link"
-                opensDialog
-                icon={<Share2Icon aria-hidden />}
-                onSelect={() => close(() => openGuestShare(current.thread_id))}
-              />
-            ) : null}
-            <PaletteItem
-              row={current.pinned ? item("unpin") : named("thread.pin")}
-              synonyms="pin keep working unpin"
-              icon={<PinIcon aria-hidden />}
-              command="thread.pin"
-              onSelect={() => close(() => void togglePin(current.thread_id))}
-            />
-            {current.tab === "done" ? (
-              <PaletteItem
-                row={named("thread.acknowledge")}
-                synonyms="acknowledge done"
-                icon={<CheckIcon aria-hidden />}
-                command="thread.acknowledge"
-                onSelect={() => close(() => void acknowledgeThread(current.thread_id))}
-              />
-            ) : null}
-            {current.tab !== "settled" ? (
-              <PaletteItem
-                row={named("thread.settle")}
-                synonyms="settle now archive"
-                icon={<InboxIcon aria-hidden />}
-                command="thread.settle"
-                onSelect={() => close(() => setThreadTab(current.thread_id, "settled"))}
-              />
-            ) : null}
-            {current.tab === "working" ? (
-              <PaletteItem
-                row={named("turn.interrupt")}
-                synonyms="interrupt turn stop"
-                icon={<SquareIcon aria-hidden />}
-                command="turn.interrupt"
-                onSelect={() => close(() => void interruptThread(current.thread_id))}
-              />
-            ) : null}
-          </CommandGroup>
-        ) : null}
-
-        <CommandGroup heading={t("palette.groups.threads")}>
-          {recent.map((thread) => (
-            <CommandItem
-              key={thread.thread_id}
-              value={`${thread.title} ${thread.host} ${harnessLabel(thread.harness)}`}
-              onSelect={() => close(() => openThread(thread.thread_id))}
-            >
-              <span className="ic inline-flex w-4 justify-center">
-                <AgentGlyph
-                  glyph={glyphForThread(thread, hosts[thread.host]?.online ?? false)}
-                  size={14}
-                />
-              </span>
-              <span className="min-w-0 truncate">{thread.title}</span>
-              <span className="ml-auto shrink-0 text-[12px] text-fg-3">
-                {hosts[thread.host]?.name ?? thread.host} · {harnessLabel(thread.harness)}
-              </span>
-            </CommandItem>
+        <CommandList>
+          {ranked.map((group) => (
+            <CommandGroup key={group.key} heading={group.heading}>
+              {group.rows.map((row) => (
+                <CommandItem
+                  key={row.key}
+                  value={row.key}
+                  icon={row.icon}
+                  trailing={row.trailing}
+                  command={row.command}
+                  disabled={row.disabled}
+                  onSelect={row.onSelect}
+                >
+                  {row.label}
+                </CommandItem>
+              ))}
+            </CommandGroup>
           ))}
-          <PaletteItem
-            row={named("thread.new")}
-            synonyms="new thread start"
-            opensDialog
-            icon={<PlusIcon aria-hidden />}
-            command="thread.new"
-            onSelect={() => close(openNewThread)}
-          />
-          {searching ? (
-            <PaletteItem
-              row={item("searchThreads")}
-              synonyms="search threads find"
-              icon={<SearchIcon aria-hidden />}
-              onSelect={() =>
-                close(() => {
-                  navigate({ kind: "inbox" });
-                  requestSearchFocus();
-                })
-              }
-            />
-          ) : null}
-        </CommandGroup>
-
-        <CommandGroup heading={t("palette.groups.goTo")}>
-          <PaletteItem
-            row={named("tab.working")}
-            synonyms="go to working tab"
-            icon={<InboxIcon aria-hidden />}
-            command="tab.working"
-            onSelect={() => close(() => setTab("working"))}
-          />
-          <PaletteItem
-            row={named("tab.done")}
-            synonyms="go to done tab"
-            icon={<CheckIcon aria-hidden />}
-            command="tab.done"
-            onSelect={() => close(() => setTab("done"))}
-          />
-          <PaletteItem
-            row={named("tab.settled")}
-            synonyms="go to settled tab"
-            icon={<ArchiveIcon aria-hidden />}
-            command="tab.settled"
-            onSelect={() => close(() => setTab("settled"))}
-          />
-          <PaletteItem
-            row={item("pairDevice")}
-            synonyms="pair a device phone qr code"
-            icon={<SmartphoneIcon aria-hidden />}
-            onSelect={() =>
-              close(() =>
-                navigate({ kind: "placeholder", surface: "settings", path: "/settings/devices" }),
-              )
-            }
-          />
-          {searching ? (
-            <>
-              <PaletteItem
-                row={item("hosts")}
-                synonyms="hosts machines"
-                icon={<ServerIcon aria-hidden />}
-                onSelect={() => close(() => navigate({ kind: "hosts" }))}
-              />
-              <PaletteItem
-                row={named("nav.tools")}
-                synonyms="library mcp servers skills"
-                icon={<LibraryIcon aria-hidden />}
-                command="nav.tools"
-                onSelect={() =>
-                  close(() =>
-                    navigate({ kind: "placeholder", surface: "library", path: "/library" }),
-                  )
-                }
-              />
-              <PaletteItem
-                row={named("nav.usage")}
-                synonyms="usage limits"
-                icon={<ChartNoAxesColumnIcon aria-hidden />}
-                command="nav.usage"
-                onSelect={() =>
-                  close(() => navigate({ kind: "placeholder", surface: "usage", path: "/usage" }))
-                }
-              />
-              <PaletteItem
-                row={item("ide")}
-                synonyms="ide editor"
-                icon={<Code2Icon aria-hidden />}
-                onSelect={() => close(() => navigate({ kind: "ide" }))}
-              />
-              <PaletteItem
-                row={named("nav.issues")}
-                synonyms="open issues trackers"
-                icon={<CircleDotIcon aria-hidden />}
-                command="nav.issues"
-                onSelect={() =>
-                  close(() => navigate({ kind: "placeholder", surface: "issues", path: "/issues" }))
-                }
-              />
-              <PaletteItem
-                row={named("nav.pulls")}
-                synonyms="pull requests prs"
-                icon={<GitPullRequestIcon aria-hidden />}
-                command="nav.pulls"
-                onSelect={() =>
-                  close(() => navigate({ kind: "placeholder", surface: "pulls", path: "/pulls" }))
-                }
-              />
-              <PaletteItem
-                row={named("settings.open")}
-                synonyms="settings preferences"
-                icon={<SettingsIcon aria-hidden />}
-                command="settings.open"
-                onSelect={() =>
-                  close(() =>
-                    navigate({ kind: "placeholder", surface: "settings", path: "/settings" }),
-                  )
-                }
-              />
-            </>
-          ) : null}
-        </CommandGroup>
-
-        <CommandGroup heading={t("palette.groups.view")}>
-          {current ? (
-            <PaletteItem
-              row={{
-                name: t("palette.items.openInIde", {
-                  project: projectName(current.workspace_path),
-                }),
-                english: english("palette.items.openInIde", {
-                  project: projectName(current.workspace_path),
-                }),
-              }}
-              synonyms={`open ide editor project ${commandName("view.toggle", "en")}`}
-              icon={<Code2Icon aria-hidden />}
-              command="view.toggle"
-              onSelect={() => close(toggleView)}
-            />
-          ) : null}
-          <PaletteItem
-            row={panelOpen ? item("hideRightPanel") : item("showRightPanel")}
-            synonyms={`toggle right panel ${commandName("panel.toggle", "en")}`}
-            icon={<PanelRightIcon aria-hidden />}
-            command="panel.toggle"
-            onSelect={() => close(togglePanel)}
-          />
-          <PaletteItem
-            row={terminalOpen ? item("hideTerminal") : item("showTerminal")}
-            synonyms="toggle terminal shell"
-            icon={<TerminalIcon aria-hidden />}
-            command="terminal.toggle"
-            onSelect={() => close(toggleTerminal)}
-          />
-          <PaletteItem
-            row={sidebarOpen ? item("hideSidebar") : item("showSidebar")}
-            synonyms="toggle sidebar"
-            icon={<PanelLeftIcon aria-hidden />}
-            command="sidebar.toggle"
-            onSelect={() => close(toggleSidebar)}
-          />
-          {searching ? (
-            <>
-              <PaletteItem
-                row={named("theme.toggle")}
-                synonyms="toggle theme dark light"
-                icon={<SunMoonIcon aria-hidden />}
-                command="theme.toggle"
-                onSelect={() => close(toggleTheme)}
-              />
-              <PaletteItem
-                row={named("shortcuts.open")}
-                synonyms="keyboard shortcuts help"
-                opensDialog
-                icon={<KeyboardIcon aria-hidden />}
-                command="shortcuts.open"
-                onSelect={() => close(openShortcuts)}
-              />
-              <PaletteItem
-                row={item("copyLink")}
-                synonyms="copy thread link"
-                disabled={!current}
-                onSelect={() =>
-                  close(() => {
-                    if (!current) return;
-                    void navigator.clipboard?.writeText(
-                      `${window.location.origin}/t/${current.thread_id}`,
-                    );
-                  })
-                }
-              />
-              {connection !== "online" ? (
-                <PaletteItem
-                  row={item("reconnect")}
-                  synonyms="reconnect connection"
-                  icon={<RefreshCwIcon aria-hidden />}
-                  onSelect={() => close(() => getClient().reconnectNow())}
-                />
-              ) : null}
-            </>
-          ) : null}
-        </CommandGroup>
-      </CommandList>
+        </CommandList>
+      </Command>
       <CommandFooter>
-        <span>
-          <span className="q-kbd">
-            <KeyGlyphs value="↑" />
-          </span>{" "}
-          <span className="q-kbd">
-            <KeyGlyphs value="↓" />
-          </span>{" "}
+        <span className="inline-flex items-center gap-1.5">
+          <KbdGroup>
+            <Kbd>↑</Kbd>
+            <Kbd>↓</Kbd>
+          </KbdGroup>
           {t("palette.footer.move")}
         </span>
-        <span>
-          <span className="q-kbd">
-            <KeyGlyphs value="↵" />
-          </span>{" "}
-          {t("palette.footer.run")}
+        <span className="inline-flex items-center gap-1.5">
+          <Kbd>↵</Kbd> {t("palette.footer.run")}
         </span>
-        <span>
-          <span className="q-kbd">{ESC}</span> {t("palette.footer.close")}
+        <span className="inline-flex items-center gap-1.5">
+          <Kbd>{ESC}</Kbd> {t("palette.footer.close")}
         </span>
-        <span style={{ flex: 1 }} />
+        <span className="flex-1" />
         <span>
           {hostNames.length > 0
             ? t("palette.footer.searchesHosts", {

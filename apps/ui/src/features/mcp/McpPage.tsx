@@ -4,6 +4,7 @@ import {
   ChevronRightIcon,
   KeyRoundIcon,
   MoreHorizontalIcon,
+  PencilIcon,
   PlugIcon,
   PlusIcon,
   RefreshCwIcon,
@@ -15,18 +16,14 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
 import { Popover } from "@/components/common/Popover";
 import { LibraryErrorBanner } from "@/components/pages/LibraryErrorBanner";
+import { PhoneLargeTitle, PhoneNavButton } from "@/components/shell/PhoneNav";
 import { Button } from "@/components/ui/button";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
+import { Menu, MenuContent, MenuItem, MenuSeparator, MenuTrigger } from "@/components/ui/menu";
+import { SegmentedControl, SegmentedControlItem } from "@/components/ui/segmented-control";
+import { Switch } from "@/components/ui/switch";
 import type { HarnessKind, HostId, McpServerView } from "@/gen";
 import { useIsPhone } from "@/hooks/use-media-query";
 import { useNow } from "@/hooks/use-now";
@@ -97,9 +94,9 @@ function Health({ server }: { server: McpServerView }) {
       )}
     >
       {status.tone === "ok" ? (
-        <CheckCircle2Icon className="q-icon s12" aria-hidden />
+        <CheckCircle2Icon className="q-icon s14" aria-hidden />
       ) : status.tone === "danger" || status.tone === "warn" ? (
-        <TriangleAlertIcon className="q-icon s12" aria-hidden />
+        <TriangleAlertIcon className="q-icon s14" aria-hidden />
       ) : null}
       {status.label}
     </span>
@@ -118,15 +115,11 @@ function Toggle({
   onToggle: () => void;
 }) {
   return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={checked}
+    <Switch
+      checked={checked}
       aria-label={label}
-      aria-disabled={busy ? "true" : undefined}
-      disabled={busy}
-      className="q-switch"
-      onClick={onToggle}
+      disabled={busy ?? false}
+      onCheckedChange={onToggle}
     />
   );
 }
@@ -217,9 +210,7 @@ function ConflictCard({ server }: { server: McpServerView }) {
       <TriangleAlertIcon className="q-icon q-warn" aria-hidden />
       <div className="grow">
         <div className="t">{text}</div>
-        <div className="q-muted" style={{ fontSize: 12, marginTop: 2 }}>
-          {t("mcp.conflict.body")}
-        </div>
+        <div className="q-muted text-xs mt-0.5">{t("mcp.conflict.body")}</div>
       </div>
       <Popover
         label={t("mcp.conflict.label", { name: server.name })}
@@ -263,10 +254,8 @@ function ResolvePanel({ server, close }: { server: McpServerView; close: () => v
         void settle();
       }}
     >
-      <div style={{ fontWeight: 600, marginBottom: 2 }}>
-        {t("mcp.resolve.title", { name: server.name })}
-      </div>
-      <div className="q-muted" style={{ fontSize: 12, marginBottom: 10 }}>
+      <div className="font-semibold mb-0.5">{t("mcp.resolve.title", { name: server.name })}</div>
+      <div className="q-muted text-xs mb-2.5">
         {t("mcp.resolve.choose", { harness: HARNESS_LABELS[harness] })}
       </div>
       {locked ? (
@@ -274,25 +263,21 @@ function ResolvePanel({ server, close }: { server: McpServerView; close: () => v
           {t("mcp.resolve.otherCopy", { harness: HARNESS_LABELS[harness] })}
         </div>
       ) : (
-        <div
-          className="q-seg q-resolve-seg"
-          role="radiogroup"
+        <SegmentedControl
+          width="full"
+          className="mb-2.5"
           aria-label={t("mcp.resolve.harness")}
+          value={harness}
+          onValueChange={(value) => {
+            if (value) setHarness(value as typeof harness);
+          }}
         >
           {MCP_HARNESSES.map((entry) => (
-            // biome-ignore lint/a11y/useSemanticElements: a segmented radio group, not a form radio
-            <button
-              key={entry}
-              type="button"
-              role="radio"
-              aria-checked={harness === entry}
-              aria-label={HARNESS_LABELS[entry]}
-              onClick={() => setHarness(entry)}
-            >
+            <SegmentedControlItem key={entry} value={entry}>
               {HARNESS_LABELS[entry]}
-            </button>
+            </SegmentedControlItem>
           ))}
-        </div>
+        </SegmentedControl>
       )}
       <div role="radiogroup" aria-label={t("mcp.resolve.resolution")}>
         {CONFLICT_CHOICES.map((option) => (
@@ -306,7 +291,7 @@ function ResolvePanel({ server, close }: { server: McpServerView; close: () => v
             />
             <span className={cn("q-radio", choice === option.value && "on")} aria-hidden />
             <span>
-              <span style={{ fontWeight: 500 }}>{t(CHOICE_LABELS[option.value])}</span>
+              <span className="font-medium">{t(CHOICE_LABELS[option.value])}</span>
               <span className="q-faint sub">{t(`mcp.resolve.hints.${option.value}`)}</span>
             </span>
           </label>
@@ -314,15 +299,14 @@ function ResolvePanel({ server, close }: { server: McpServerView; close: () => v
       </div>
       {choice === "rename" ? (
         <input
-          className="q-input"
-          style={{ marginTop: 8 }}
+          className="q-input mt-2"
           value={rename}
           onChange={(event) => setRename(event.target.value)}
           placeholder={t("mcp.resolve.newName")}
           aria-label={t("dialogs:mcp.import.newNameFor", { name: server.name })}
         />
       ) : null}
-      <div style={{ display: "flex", justifyContent: "flex-end", gap: 6, marginTop: 12 }}>
+      <div className="flex justify-end gap-1.5 mt-3">
         <button type="button" className="q-btn ghost" onClick={close}>
           {t("common:cancel")}
         </button>
@@ -352,10 +336,10 @@ function CredentialField({ server }: { server: McpServerView }) {
         {keys.length > 0 ? (
           <>
             <span className="q-secret">
-              <KeyRoundIcon className="q-icon s12" aria-hidden />{" "}
+              <KeyRoundIcon className="q-icon s14" aria-hidden />{" "}
               {t("mcp.credential.storedOn", { host: remoteHost ?? hostName })}
             </span>
-            <span className="q-faint" style={{ fontSize: 12 }}>
+            <span className="q-faint ms-auto" style={{ fontSize: 12 }}>
               {t(env ? "mcp.credential.env" : "mcp.credential.headers", { count: keys.length })}
             </span>
           </>
@@ -366,7 +350,7 @@ function CredentialField({ server }: { server: McpServerView }) {
         )}
         {server.shared_to.length > 0 ? (
           <span className="q-secret">
-            <Share2Icon className="q-icon s12" aria-hidden />{" "}
+            <Share2Icon className="q-icon s14" aria-hidden />{" "}
             {t("mcp.credential.sharedWith", {
               hosts: formatList(server.shared_to.map((machine) => hosts[machine]?.name ?? machine)),
             })}
@@ -409,7 +393,7 @@ function SharedWithYou({ current }: { current: McpServerView | null }) {
               >
                 <div className="t">
                   {server.name}{" "}
-                  <span className="q-faint" style={{ fontWeight: 400 }}>
+                  <span className="q-faint font-normal">
                     {t("mcp.sharedWithYou.from", { host: host?.name ?? machine })}
                   </span>
                 </div>
@@ -420,7 +404,7 @@ function SharedWithYou({ current }: { current: McpServerView | null }) {
                 </div>
               </button>
               <span className="q-secret">
-                <KeyRoundIcon className="q-icon s12" aria-hidden />{" "}
+                <KeyRoundIcon className="q-icon s14" aria-hidden />{" "}
                 {t("mcp.credential.storedOn", { host: host?.name ?? machine })}
               </span>
               <Toggle
@@ -431,7 +415,7 @@ function SharedWithYou({ current }: { current: McpServerView | null }) {
                 }
               />
               {current?.id === server.id ? null : (
-                <ChevronRightIcon className="q-icon s12 q-faint" aria-hidden />
+                <ChevronRightIcon className="q-icon s14 q-faint q-li-chev" aria-hidden />
               )}
             </div>
           );
@@ -501,7 +485,7 @@ function Activity({ server }: { server: McpServerView }) {
               )}
             </span>
             <div className="grow">
-              <div className="t q-mono" style={{ fontSize: 12.5 }}>
+              <div className="t q-mono" style={{ fontSize: 13 }}>
                 {entry.qualifiedName}
               </div>
               <div className="s">
@@ -522,17 +506,11 @@ function Activity({ server }: { server: McpServerView }) {
 
 function SkeletonDetail({ label }: { label: string }) {
   return (
-    <div
-      className="q-wrap"
-      style={{ maxWidth: 860 }}
-      role="status"
-      aria-busy="true"
-      aria-label={label}
-    >
-      <div className="q-skel" style={{ width: 180, height: 22, marginBottom: 8 }} />
-      <div className="q-skel" style={{ width: 420, height: 12, marginBottom: 28 }} />
-      <div className="q-skel" style={{ width: "100%", height: 48, marginBottom: 8 }} />
-      <div className="q-skel" style={{ width: "100%", height: 168 }} />
+    <div className="q-form wide" role="status" aria-busy="true" aria-label={label}>
+      <div className="q-skel w-45 h-5.5 mb-2" />
+      <div className="q-skel w-105 h-3 mb-7" />
+      <div className="q-skel w-full h-12 mb-2" />
+      <div className="q-skel w-full h-42" />
     </div>
   );
 }
@@ -574,28 +552,38 @@ function ServerList({
   const { t } = useTranslation(["library", "settings", "common"]);
   return (
     <main className="q-main" aria-label={t("settings:nav.mcpServers")}>
+      {isPhone ? (
+        <PhoneLargeTitle
+          title={t("settings:nav.mcpServers")}
+          summary={t("mcp.summary", { count: servers.length })}
+          actions={
+            <>
+              <PhoneNavButton label={t("mcp.import")} onClick={onImport}>
+                <UploadIcon className="q-icon s22" strokeWidth={1.5} aria-hidden />
+              </PhoneNavButton>
+              <PhoneNavButton label={t("settings:nav.addMcp")} onClick={onAdd}>
+                <PlusIcon className="q-icon s22" strokeWidth={1.5} aria-hidden />
+              </PhoneNavButton>
+            </>
+          }
+        />
+      ) : null}
       <div className="q-page">
-        <div className={cn("q-wrap", isPhone && "q-wrap-phone")} style={{ maxWidth: 860 }}>
-          <div className="mb-5 flex flex-wrap items-start gap-3">
-            <div className="grow basis-0">
-              <h1
-                className={
-                  isPhone
-                    ? "text-[30px] leading-[36px] font-semibold tracking-[-0.02em]"
-                    : "text-[20px] leading-[26px] font-semibold tracking-[-0.015em]"
-                }
-              >
-                {t("settings:nav.mcpServers")}
-              </h1>
-              <div className="q-muted mt-1">{t("mcp.summary", { count: servers.length })}</div>
+        <div className="q-form wide">
+          {isPhone ? null : (
+            <div className="mb-5 flex flex-wrap items-start gap-3">
+              <div className="grow basis-0">
+                <h1 className="text-xl font-semibold">{t("settings:nav.mcpServers")}</h1>
+                <div className="q-muted mt-1">{t("mcp.summary", { count: servers.length })}</div>
+              </div>
+              <Button variant="secondary" onClick={onImport}>
+                <UploadIcon className="q-icon s14" aria-hidden /> {t("mcp.import")}
+              </Button>
+              <Button onClick={onAdd}>
+                <PlusIcon className="q-icon s14" aria-hidden /> {t("common:add")}
+              </Button>
             </div>
-            <Button variant="secondary" onClick={onImport}>
-              <UploadIcon className="q-icon s14" aria-hidden /> {t("mcp.import")}
-            </Button>
-            <Button onClick={onAdd}>
-              <PlusIcon className="q-icon s14" aria-hidden /> {t("common:add")}
-            </Button>
-          </div>
+          )}
 
           <LibraryErrorBanner
             error={error}
@@ -788,9 +776,7 @@ export function McpPage() {
       <>
         <main className="q-main" aria-label={t("mcp.detail")}>
           <div className="q-page">
-            <div className="q-wrap" style={{ maxWidth: 860 }}>
-              {errorBanner}
-            </div>
+            <div className="q-form wide">{errorBanner}</div>
             <EmptyState onAdd={openAdd} onImport={openImport} />
           </div>
         </main>
@@ -829,7 +815,7 @@ export function McpPage() {
     <>
       <main className="q-main" aria-label={t("mcp.detail")}>
         <div className="q-page">
-          <div className="q-wrap" style={{ maxWidth: 860 }}>
+          <div className="q-form wide">
             {errorBanner}
 
             {isPhone ? (
@@ -844,9 +830,7 @@ export function McpPage() {
 
             <div className="mb-5 flex items-start gap-4">
               <div className="min-w-0 flex-1">
-                <h1 className="text-[20px] leading-[26px] font-semibold tracking-[-0.015em]">
-                  {server.name}
-                </h1>
+                <h1 className="text-xl font-semibold">{server.name}</h1>
                 <div className="q-muted mt-1 flex flex-wrap items-center gap-1.5">
                   <span>{transportKind(server.transport)}</span>
                   <span>·</span>
@@ -855,10 +839,13 @@ export function McpPage() {
                   <span>{t("mcp.tools", { count: server.tool_count })}</span>
                   <span>·</span>
                   <span>{checkedLabel(checkedAt, now)}</span>
-                  {refreshing ? <RefreshCwIcon className="q-icon s12 q-faint" aria-hidden /> : null}
+                  {refreshing ? <RefreshCwIcon className="q-icon s14 q-faint" aria-hidden /> : null}
                 </div>
               </div>
-              <Health server={server} />
+              {/* The header's controls are 28px tall; the health word sits on their line. */}
+              <span className="flex h-7 items-center">
+                <Health server={server} />
+              </span>
               <div className="hidden items-center gap-2 sm:flex">
                 <Button variant="secondary" onClick={() => setToolsServer(server)}>
                   <RefreshCwIcon className="q-icon s14" aria-hidden /> {t("mcp.test")}
@@ -873,35 +860,38 @@ export function McpPage() {
                   {t("common:edit")}
                 </Button>
               </div>
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <button type="button" className="q-ibtn" aria-label={t("mcp.actions")}>
-                    <MoreHorizontalIcon className="q-icon" aria-hidden />
-                  </button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="end" className="w-48">
-                  <DropdownMenuItem onSelect={() => setToolsServer(server)}>
-                    <WrenchIcon className="q-icon s14" aria-hidden /> {t("mcp.menu.tools")}
-                  </DropdownMenuItem>
-                  <DropdownMenuItem
+              <Menu>
+                <MenuTrigger className="q-ibtn" aria-label={t("mcp.actions")}>
+                  <MoreHorizontalIcon className="q-icon" aria-hidden />
+                </MenuTrigger>
+                <MenuContent align="end" className="w-48">
+                  <MenuItem icon={<WrenchIcon />} onSelect={() => setToolsServer(server)}>
+                    {t("mcp.menu.tools")}
+                  </MenuItem>
+                  <MenuItem
+                    icon={<PencilIcon />}
                     onSelect={() => {
                       setEditing(server);
                       setAddOpen(true);
                     }}
                   >
                     {t("mcp.menu.edit")}
-                  </DropdownMenuItem>
+                  </MenuItem>
                   {server.runs_on ? null : (
-                    <DropdownMenuItem onSelect={() => setShareServer(server)}>
-                      <Share2Icon className="q-icon s14" aria-hidden /> {t("mcp.menu.share")}
-                    </DropdownMenuItem>
+                    <MenuItem icon={<Share2Icon />} onSelect={() => setShareServer(server)}>
+                      {t("mcp.menu.share")}
+                    </MenuItem>
                   )}
-                  <DropdownMenuSeparator />
-                  <DropdownMenuItem variant="destructive" onSelect={() => setRemoveServer(server)}>
-                    <Trash2Icon className="q-icon s14" aria-hidden /> {t("mcp.menu.remove")}
-                  </DropdownMenuItem>
-                </DropdownMenuContent>
-              </DropdownMenu>
+                  <MenuSeparator />
+                  <MenuItem
+                    icon={<Trash2Icon />}
+                    destructive
+                    onSelect={() => setRemoveServer(server)}
+                  >
+                    {t("mcp.menu.remove")}
+                  </MenuItem>
+                </MenuContent>
+              </Menu>
             </div>
 
             {isPhone ? (
@@ -923,7 +913,7 @@ export function McpPage() {
 
             <CredentialField server={server} />
 
-            <div className="q-sec" style={{ marginTop: 28 }}>
+            <div className="q-sec mt-7">
               <div className="q-sec-h">
                 <h2>{t("mcp.where.title")}</h2>
                 <span className="aside">{t("mcp.where.aside")}</span>
@@ -936,9 +926,7 @@ export function McpPage() {
                       <th style={{ width: "22%" }}>{t("mcp.where.harness")}</th>
                       <th>{t("mcp.where.deliveredAs")}</th>
                       <th>{t("mcp.where.status")}</th>
-                      <th className="r" style={{ paddingRight: 0 }}>
-                        {t("common:on")}
-                      </th>
+                      <th className="r pr-0">{t("common:on")}</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -979,15 +967,15 @@ export function McpPage() {
                               )}
                             >
                               {row.tone === "warn" ? (
-                                <TriangleAlertIcon className="q-icon s12" aria-hidden />
+                                <TriangleAlertIcon className="q-icon s14" aria-hidden />
                               ) : row.tone === "ok" ? (
-                                <CheckCircle2Icon className="q-icon s12" aria-hidden />
+                                <CheckCircle2Icon className="q-icon s14" aria-hidden />
                               ) : null}
                               {row.note}
                             </span>
                           )}
                         </td>
-                        <td className="r" style={{ paddingRight: 0 }}>
+                        <td className="r pr-0">
                           <Toggle
                             checked={row.enabled}
                             busy={row.busy}

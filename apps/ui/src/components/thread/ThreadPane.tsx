@@ -1,9 +1,10 @@
 import { CircleAlertIcon, CopyIcon, InboxIcon, RefreshCwIcon, ServerIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
-
 import { AgentGlyph } from "@/components/agent/AgentGlyph";
 import { PhonePanelSheet } from "@/components/panel/PhonePanelSheet";
+import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "@/components/ui/collapsible";
+import { toastClearance } from "@/components/ui/sonner";
 import { TerminalPanel } from "@/features/terminal/TerminalPanel";
 import { AutoResumeCards } from "@/features/usage/AutoResumeCard";
 import { UsageFooter } from "@/features/usage/UsageFooter";
@@ -39,8 +40,8 @@ function HeaderSkeleton({ hostName }: { hostName?: string | undefined }) {
   return (
     <header className="q-th-head">
       <div className="q-th-titles">
-        <div className="q-skel" style={{ width: 240, height: 12, marginBottom: 8 }} />
-        <div className="q-skel" style={{ width: 360, height: 9 }} />
+        <div className="q-skel mb-2 h-3 w-60" />
+        <div className="q-skel h-2.5 w-90 max-w-full" />
       </div>
       <div className="q-th-state q-faint" style={{ fontWeight: 400 }}>
         {hostName ? t("pane.connectingTo", { host: hostName }) : t("pane.connecting")}
@@ -63,7 +64,7 @@ function WaitingForTurn({
   return (
     <div className="q-stream">
       <div className="q-col">
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <div className="flex items-center gap-2">
           <AgentGlyph glyph={glyph} size={14} />
           <p className="q-faint" style={{ margin: 0, fontSize: 12 }}>
             {t("pane.waitingFor", { harness, host })}
@@ -77,7 +78,7 @@ function WaitingForTurn({
             {t("common:cancel")}
           </button>
         </div>
-        <div style={{ marginTop: 16, display: "grid", gap: 8 }} aria-hidden>
+        <div className="mt-4 grid gap-2" aria-hidden>
           <div className="q-skel" style={{ height: 10, width: "82%" }} />
           <div className="q-skel" style={{ height: 10, width: "64%" }} />
           <div className="q-skel" style={{ height: 10, width: "44%" }} />
@@ -178,19 +179,19 @@ export function ThreadPane({ threadId }: { threadId: string }) {
     return (
       <main className="q-main" aria-label={t("header.thread")}>
         <div className="q-center-empty">
-          <div className="q-empty" style={{ width: 460, maxWidth: "100%", padding: 0 }}>
+          <div className="q-empty w-fit max-w-115" style={{ padding: 0 }}>
             <span className="q-danger">
               <CircleAlertIcon className="q-icon s22" strokeWidth={1.5} aria-hidden />
             </span>
-            <h3 style={{ fontSize: 17, lineHeight: "24px", marginTop: 10 }}>
+            <h3 style={{ fontSize: 16, lineHeight: "24px", marginTop: 10 }}>
               {t("pane.loadFailed")}
             </h3>
-            <p style={{ margin: 0 }}>
+            <p className="m-0">
               {threadError
                 ? t("pane.stillActive", { message: threadError.message })
                 : t("pane.notFound")}
             </p>
-            <div style={{ display: "flex", gap: 8 }}>
+            <div className="flex gap-2">
               <button type="button" className="q-btn primary" onClick={() => retryThread(threadId)}>
                 <RefreshCwIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
                 {t("common:retry")}
@@ -295,17 +296,17 @@ export function ThreadPane({ threadId }: { threadId: string }) {
 
       {!loaded && threadError && !log?.loading ? (
         <div className="q-center-empty">
-          <div className="q-empty" style={{ width: 460, maxWidth: "100%", padding: 0 }}>
+          <div className="q-empty w-fit max-w-115" style={{ padding: 0 }}>
             <span className="q-danger">
               <CircleAlertIcon className="q-icon s22" strokeWidth={1.5} aria-hidden />
             </span>
-            <h3 style={{ fontSize: 17, lineHeight: "24px", marginTop: 10 }}>
+            <h3 style={{ fontSize: 16, lineHeight: "24px", marginTop: 10 }}>
               {t("pane.loadFailed")}
             </h3>
-            <p style={{ margin: 0 }}>
+            <p className="m-0">
               {threadError.message} {threadError.hint ?? t("pane.nothingLost")}
             </p>
-            <div style={{ display: "flex", gap: 8 }}>
+            <div className="flex gap-2">
               <button type="button" className="q-btn primary" onClick={() => retryThread(threadId)}>
                 <RefreshCwIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
                 {t("common:retry")}
@@ -319,40 +320,41 @@ export function ThreadPane({ threadId }: { threadId: string }) {
                 {t("pane.openHost")}
               </button>
             </div>
-            <details
-              className="q-disclosure"
-              style={{ fontSize: 12, color: "var(--fg-2)", alignSelf: "stretch" }}
-            >
-              <summary style={{ cursor: "pointer" }}>{t("pane.details")}</summary>
-              <dl className="q-kv" style={{ marginTop: 10, textAlign: "left" }}>
-                <dt>{t("pane.host")}</dt>
-                <dd>{hostName}</dd>
-                <dt>{t("pane.lastSeen")}</dt>
-                <dd className="q-num">{absoluteTime(host?.last_seen ?? summary.last_activity)}</dd>
-                <dt>{t("pane.status")}</dt>
-                <dd>{threadError.code.replace(/_/g, " ")}</dd>
-                <dt>{t("pane.lastEvent")}</dt>
-                <dd className="q-num">{absoluteTime(summary.last_activity)}</dd>
-              </dl>
-              <button
-                type="button"
-                className="q-btn ghost"
-                style={{ marginTop: 8, marginLeft: -10 }}
-                onClick={() => {
-                  void navigator.clipboard?.writeText(
-                    [
-                      `thread: ${threadId}`,
-                      `host: ${hostName}`,
-                      `status: ${threadError.code}`,
-                      `message: ${threadError.message}`,
-                    ].join("\n"),
-                  );
-                }}
-              >
-                <CopyIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-                {t("pane.copyDiagnostics")}
-              </button>
-            </details>
+            <Collapsible className="self-stretch text-xs text-muted-foreground">
+              <CollapsibleTrigger className="text-xs">{t("pane.details")}</CollapsibleTrigger>
+              <CollapsiblePanel>
+                <dl className="q-kv" style={{ marginTop: 10, textAlign: "left" }}>
+                  <dt>{t("pane.host")}</dt>
+                  <dd>{hostName}</dd>
+                  <dt>{t("pane.lastSeen")}</dt>
+                  <dd className="q-num">
+                    {absoluteTime(host?.last_seen ?? summary.last_activity)}
+                  </dd>
+                  <dt>{t("pane.status")}</dt>
+                  <dd>{threadError.code.replace(/_/g, " ")}</dd>
+                  <dt>{t("pane.lastEvent")}</dt>
+                  <dd className="q-num">{absoluteTime(summary.last_activity)}</dd>
+                </dl>
+                <button
+                  type="button"
+                  className="q-btn ghost"
+                  style={{ marginTop: 8, marginLeft: -10 }}
+                  onClick={() => {
+                    void navigator.clipboard?.writeText(
+                      [
+                        `thread: ${threadId}`,
+                        `host: ${hostName}`,
+                        `status: ${threadError.code}`,
+                        `message: ${threadError.message}`,
+                      ].join("\n"),
+                    );
+                  }}
+                >
+                  <CopyIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
+                  {t("pane.copyDiagnostics")}
+                </button>
+              </CollapsiblePanel>
+            </Collapsible>
           </div>
         </div>
       ) : !loaded ? (
@@ -365,10 +367,10 @@ export function ThreadPane({ threadId }: { threadId: string }) {
         />
       ) : turns.length === 0 && summary.queued_count === 0 ? (
         <div className="q-center-empty">
-          <div className="q-empty" style={{ width: 460, maxWidth: "100%", padding: 0 }}>
+          <div className="q-empty w-fit max-w-115" style={{ padding: 0 }}>
             <InboxIcon className="q-icon s22 q-faint" strokeWidth={1.5} aria-hidden />
-            <h3 style={{ fontSize: 17, lineHeight: "24px" }}>{t("pane.emptyTitle")}</h3>
-            <p style={{ margin: 0 }}>
+            <h3 style={{ fontSize: 16, lineHeight: "24px" }}>{t("pane.emptyTitle")}</h3>
+            <p className="m-0">
               {summary.agent_state === "done"
                 ? t("pane.emptyFinished", { host: host?.name ?? summary.host })
                 : t("pane.emptyIdle", { host: host?.name ?? summary.host })}
@@ -392,7 +394,7 @@ export function ThreadPane({ threadId }: { threadId: string }) {
       )}
 
       {!threadError || loaded ? (
-        <div className="q-dock">
+        <div ref={toastClearance} className="q-dock">
           <div className="q-col">
             {isPhone ? (
               <>

@@ -508,7 +508,13 @@
     "neverConnected": "未接続",
     "confirmSignOut": "このデバイスからサインアウトしますか？",
     "confirmDisconnect": "このホストとの接続を切りますか？",
-    "confirmRevoke": "取り消しますか？",
+    "confirmRevoke": "{{name}} を取り消しますか？",
+    "confirmDescription": {
+      "direct": "{{name}} はこのコンピューターに接続できなくなります。使うにはもう一度ペアリングしてください。",
+      "revoke": "{{name}} は再びサインインするまでアカウントにアクセスできなくなります。",
+      "disconnect": "{{name}} はアカウントから外れます。再びサインインするまで、そのスレッドはここに表示されません。",
+      "signOut": "再びサインインするまで、このデバイスからホストに接続できなくなります。"
+    },
     "signOut": "サインアウト",
     "scopes": {
       "all": "すべて",

@@ -10,12 +10,12 @@ import {
   RefreshCwIcon,
   ServerIcon,
   SmartphoneIcon,
-  WifiOffIcon,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Trans, useTranslation } from "react-i18next";
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
 import { ChipSelect } from "@/components/common/ChipSelect";
+import { ConfirmDialog } from "@/components/common/ConfirmDialog";
 import type {
   ConnectDevice,
   HostSummary,
@@ -25,6 +25,7 @@ import type {
 } from "@/gen";
 import { useNow } from "@/hooks/use-now";
 import { harnessLabel, machineSeed } from "@/lib/entities";
+import { rememberNeighbours } from "@/lib/focus";
 import { formatList, formatNumber, formatRelativeTime, i18n } from "@/lib/i18n";
 import { getClient, navigate, pushToast, useApp } from "@/lib/store/appStore";
 import { cn } from "@/lib/utils";
@@ -56,14 +57,11 @@ import {
   useRemote,
 } from "./remoteStore";
 
+/** A presence word after a 6px dot, so every state's word starts on one column. */
 function Health({ tone, children }: { tone: "on" | "off" | "danger"; children: React.ReactNode }) {
   return (
     <span className={cn("q-health", tone === "danger" && "q-danger")}>
-      {tone === "danger" ? (
-        <WifiOffIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
-      ) : (
-        <span className={cn("q-dot", tone)} aria-hidden />
-      )}
+      <span className={cn("q-dot", tone === "danger" ? "off bad" : tone)} aria-hidden />
       {children}
     </span>
   );
@@ -100,7 +98,7 @@ function signedIn(user: unknown): boolean {
 function RelayUnreachable({ connectUrl }: { connectUrl: string }) {
   const { t } = useTranslation(["settings", "common"]);
   return (
-    <p className="q-muted" style={{ fontSize: 12, margin: "0 0 10px" }} role="status">
+    <p className="q-muted text-xs mt-0 mx-0 mb-2.5" role="status">
       {t("hosts.cantReach", { target: connectUrl })}
     </p>
   );
@@ -128,12 +126,7 @@ function MachineRows({
     <div className="q-group">
       <h2>
         {t("hosts.machines")} <span className="grow" />
-        <button
-          type="button"
-          className="q-btn ghost"
-          style={{ fontWeight: 500 }}
-          onClick={() => void refresh()}
-        >
+        <button type="button" className="q-btn secondary" onClick={() => void refresh()}>
           <RefreshCwIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
           {t("common:refresh")}
         </button>
@@ -163,7 +156,7 @@ function MachineRows({
                       label={machine.name}
                       size={18}
                     />
-                    <span style={{ fontWeight: 500 }}>{machine.name}</span>
+                    <span className="font-medium">{machine.name}</span>
                   </span>
                 </td>
                 <td className="q-muted">
@@ -194,21 +187,15 @@ function MachineRows({
                 <td className="r q-num q-muted">
                   {active ? latencyText(connection.latencyMs) : "—"}
                 </td>
-                <td className="r" style={{ paddingRight: 0 }}>
+                <td className="r pr-0">
                   {active ? (
-                    <button
-                      type="button"
-                      className="q-btn ghost"
-                      style={{ height: 24 }}
-                      onClick={forgetMachine}
-                    >
+                    <button type="button" className="q-btn secondary" onClick={forgetMachine}>
                       {t("hosts.disconnect")}
                     </button>
                   ) : (
                     <button
                       type="button"
                       className="q-btn secondary"
-                      style={{ height: 24 }}
                       disabled={!machine.online || busy !== null}
                       onClick={() => void activateMachine(machine.id)}
                     >
@@ -262,9 +249,9 @@ export function LiveHostsForm({ pairing: pairFirst = false }: { pairing?: boolea
   useEffect(() => setPairOpen(pairFirst), [pairFirst]);
 
   return (
-    <div className="q-form" style={{ maxWidth: 880 }}>
+    <div className="q-form wide">
       <div className="q-form-head">
-        <div style={{ flex: 1 }}>
+        <div className="flex-1">
           <h1>{t("hosts.title")}</h1>
           <p className="lead">{t("hosts.lead")}</p>
         </div>
@@ -332,7 +319,7 @@ export function LiveHostsForm({ pairing: pairFirst = false }: { pairing?: boolea
               </div>
             </div>
             <div className="ctl">
-              <span style={{ flex: 1 }} />
+              <span className="flex-1" />
               <UseThisMachineButton verb={connection.status === "online" ? "disconnect" : "use"} />
             </div>
           </div>
@@ -384,7 +371,7 @@ export function LiveHostsForm({ pairing: pairFirst = false }: { pairing?: boolea
       <div className="q-group" style={{ marginBottom: 0 }}>
         <h2>{t("hosts.table.hosts")}</h2>
       </div>
-      <table className="q-tbl" style={{ marginBottom: 36 }}>
+      <table className="q-tbl mb-9">
         <thead>
           <tr>
             <th>{t("hosts.table.host")}</th>
@@ -398,7 +385,7 @@ export function LiveHostsForm({ pairing: pairFirst = false }: { pairing?: boolea
         <tbody>
           {rows.length === 0 ? (
             <tr>
-              <td colSpan={6} className="q-muted" style={{ padding: "18px 0" }}>
+              <td colSpan={6} className="q-muted py-4 px-0">
                 {phase === "loading" ? t("hosts.loadingHosts") : t("hosts.noHostsYet")}
               </td>
             </tr>
@@ -410,13 +397,17 @@ export function LiveHostsForm({ pairing: pairFirst = false }: { pairing?: boolea
               <tr key={host.host_id} className="hov">
                 <td>
                   <span className="q-cell-id">
-                    <EntityAvatar
-                      seed={machineSeed(host.host_id)}
-                      kind="machine"
-                      label={host.name}
-                      size={host.platform.startsWith("wsl:") ? 16 : 18}
-                    />
-                    <span style={{ fontWeight: 500 }}>{host.name}</span>
+                    {/* A WSL host's smaller avatar sits in the same 18px slot, so
+                        every name starts on one column. */}
+                    <span className="grid size-4.5 shrink-0 place-items-center">
+                      <EntityAvatar
+                        seed={machineSeed(host.host_id)}
+                        kind="machine"
+                        label={host.name}
+                        size={host.platform.startsWith("wsl:") ? 16 : 18}
+                      />
+                    </span>
+                    <span className="font-medium">{host.name}</span>
                   </span>
                 </td>
                 <td className="q-muted">{host.platform}</td>
@@ -470,7 +461,7 @@ export function LiveHostsForm({ pairing: pairFirst = false }: { pairing?: boolea
             ) : (
               <Health tone="danger">{t("hosts.offline")}</Health>
             )}
-            <span style={{ flex: 1 }} />
+            <span className="flex-1" />
             <button type="button" className="q-btn secondary" onClick={() => void refresh()}>
               <RefreshCwIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
               {t("common:refresh")}
@@ -519,6 +510,7 @@ function DeviceRow({
   const [draft, setDraft] = useState(device.name);
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
+  const restoreFocus = useRef<(() => Promise<void>) | null>(null);
   const Icon = deviceIcon(device);
 
   const nameInput = useRef<HTMLInputElement>(null);
@@ -538,7 +530,7 @@ function DeviceRow({
         <span className="q-cell-id">
           <Icon className="q-icon" strokeWidth={1.5} aria-hidden />
           {editing ? (
-            <span style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
+            <span className="inline-flex gap-1.5 items-center">
               <input
                 className="q-input"
                 value={draft}
@@ -561,18 +553,13 @@ function DeviceRow({
               >
                 <CheckIcon className="q-icon s14" strokeWidth={2} aria-hidden />
               </button>
-              <button
-                type="button"
-                className="q-btn ghost"
-                style={{ height: 24 }}
-                onClick={() => setEditing(false)}
-              >
+              <button type="button" className="q-btn ghost" onClick={() => setEditing(false)}>
                 {t("common:cancel")}
               </button>
             </span>
           ) : (
             <span>
-              <span style={{ fontWeight: 500 }}>{device.name}</span>
+              <span className="font-medium">{device.name}</span>
               {current ? <span className="q-faint"> · {t("devices.thisDevice")}</span> : null}
             </span>
           )}
@@ -587,42 +574,9 @@ function DeviceRow({
           <span className="q-muted">{t("devices.neverConnected")}</span>
         )}
       </td>
-      <td className="r" style={{ paddingRight: 0 }}>
-        {editing ? null : confirming ? (
-          <span style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
-            <span className="q-faint" style={{ fontSize: 12 }}>
-              {current
-                ? t("devices.confirmSignOut")
-                : device.kind === "daemon"
-                  ? t("devices.confirmDisconnect")
-                  : t("devices.confirmRevoke")}
-            </span>
-            <button
-              type="button"
-              className="q-btn ghost"
-              style={{ height: 24 }}
-              onClick={() => setConfirming(false)}
-            >
-              {t("common:cancel")}
-            </button>
-            <button
-              type="button"
-              className="q-btn danger"
-              style={{ height: 24 }}
-              disabled={busy}
-              onClick={() => {
-                setBusy(true);
-                void onRevoke().then((ok) => {
-                  setBusy(false);
-                  if (!ok) setConfirming(false);
-                });
-              }}
-            >
-              {current ? t("devices.signOut") : t("common:revoke")}
-            </button>
-          </span>
-        ) : (
-          <span style={{ display: "inline-flex", gap: 4, alignItems: "center" }}>
+      <td className="r pr-0">
+        {editing ? null : (
+          <span className="inline-flex gap-1 items-center">
             <button
               type="button"
               className="q-ibtn"
@@ -634,13 +588,43 @@ function DeviceRow({
             <button
               type="button"
               className="q-btn danger"
-              style={{ height: 24 }}
-              onClick={() => setConfirming(true)}
+              disabled={busy}
+              onClick={(event) => {
+                restoreFocus.current = rememberNeighbours(event.currentTarget);
+                setConfirming(true);
+              }}
             >
               {current ? t("devices.signOut") : t("common:revoke")}
             </button>
           </span>
         )}
+        <ConfirmDialog
+          open={confirming}
+          title={
+            current
+              ? t("devices.confirmSignOut")
+              : device.kind === "daemon"
+                ? t("devices.confirmDisconnect")
+                : t("devices.confirmRevoke", { name: device.name })
+          }
+          description={
+            current
+              ? t("devices.confirmDescription.signOut")
+              : device.kind === "daemon"
+                ? t("devices.confirmDescription.disconnect", { name: device.name })
+                : t("devices.confirmDescription.revoke", { name: device.name })
+          }
+          confirmLabel={current ? t("devices.signOut") : t("common:revoke")}
+          onOpenChange={setConfirming}
+          onConfirm={() => {
+            if (busy) return;
+            setBusy(true);
+            void onRevoke().finally(() => {
+              setBusy(false);
+              void restoreFocus.current?.();
+            });
+          }}
+        />
       </td>
     </tr>
   );
@@ -716,7 +700,7 @@ function PairingConfirmations() {
     <div className="q-group">
       {confirmations.map((entry) => (
         <fieldset key={entry.device_id} className="q-sas-host">
-          <legend className="q-muted" style={{ fontSize: 12 }}>
+          <legend className="q-muted text-xs">
             {t("devices.pairing.wantsToConnect", { name: entry.device_name })}
           </legend>
           <div className="q-sas-code num" data-testid="host-sas">
@@ -725,7 +709,7 @@ function PairingConfirmations() {
           <div className="q-faint" style={{ fontSize: 12 }}>
             {t("devices.pairing.compare")}
           </div>
-          <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+          <div className="flex gap-2 mt-2.5">
             <button
               type="button"
               className="q-btn primary"
@@ -815,16 +799,13 @@ function PairDeviceGroup({ onClose }: { onClose: () => void }) {
             />
           </span>
         ) : null}
-        <button
-          type="button"
-          className="q-btn ghost"
-          style={{ height: 24, marginLeft: 8 }}
-          onClick={onClose}
-        >
+        <button type="button" className="q-btn secondary ml-2" onClick={onClose}>
           {t("common:done")}
         </button>
       </h2>
-      <div style={{ paddingTop: 12 }}>
+      {/* Cancels the heading's bottom margin: the heading row is as tall as its
+          Done button, so the rule already sits a normal gap below the words. */}
+      <div className="-mt-1">
         <div className="q-field" style={{ borderTop: "1px solid var(--line)" }}>
           <div className="lab">
             <div className="t">{t("hosts.table.machine")}</div>
@@ -835,7 +816,7 @@ function PairDeviceGroup({ onClose }: { onClose: () => void }) {
               label={t("devices.pairing.machineLabel")}
               value={machineId}
               placeholder={t("devices.pairing.noMachines")}
-              width={200}
+              className="w-50"
               options={available.map((machine) => ({
                 value: machine.id,
                 label: machine.name,
@@ -853,7 +834,6 @@ function PairDeviceGroup({ onClose }: { onClose: () => void }) {
               display: "flex",
               gap: 28,
               padding: "18px 0 4px",
-              borderTop: "1px solid var(--line)",
             }}
           >
             <div className="q-qr">
@@ -865,11 +845,9 @@ function PairDeviceGroup({ onClose }: { onClose: () => void }) {
                 size={148}
               />
             </div>
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <div className="q-muted" style={{ fontSize: 12 }}>
-                {t("devices.pairing.scan")}
-              </div>
-              <div className="q-code-big" style={{ margin: "4px 0 2px" }}>
+            <div className="flex-1 min-w-0">
+              <div className="q-muted text-xs">{t("devices.pairing.scan")}</div>
+              <div className="q-code-big mt-1 mx-0 mb-0.5">
                 {formatShortCode(pairing.shortCode)}
               </div>
               <div className="q-faint" style={{ fontSize: 12, marginBottom: 14 }}>
@@ -892,11 +870,11 @@ function PairDeviceGroup({ onClose }: { onClose: () => void }) {
                       aria-hidden
                     >
                       {scope.locked || scopes.includes(scope.id) ? (
-                        <CheckIcon className="q-icon s12" strokeWidth={2} />
+                        <CheckIcon className="q-icon s14" strokeWidth={2} />
                       ) : null}
                     </span>
                     <span>
-                      <span style={{ fontWeight: 500 }}>{scopeLabel(scope.id)}</span>
+                      <span className="font-medium">{scopeLabel(scope.id)}</span>
                       {scopeSub(scope.id) ? (
                         <span className="q-faint sub">{scopeSub(scope.id)}</span>
                       ) : null}
@@ -904,7 +882,7 @@ function PairDeviceGroup({ onClose }: { onClose: () => void }) {
                   </label>
                 ))}
               </div>
-              <div style={{ display: "flex", gap: 6, marginTop: 12, flexWrap: "wrap" }}>
+              <div className="flex gap-1.5 mt-3 flex-wrap">
                 <button
                   type="button"
                   className="q-btn secondary"
@@ -924,7 +902,7 @@ function PairDeviceGroup({ onClose }: { onClose: () => void }) {
                 </button>
                 <button
                   type="button"
-                  className="q-btn ghost"
+                  className="q-btn secondary"
                   onClick={() => void createPairing(machineId, scopes)}
                 >
                   <RefreshCwIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
@@ -988,7 +966,7 @@ function PairedDevicesGroup() {
         <tbody>
           {liveDevices.length === 0 ? (
             <tr>
-              <td colSpan={5} className="q-muted" style={{ padding: "16px 0" }}>
+              <td colSpan={5} className="q-muted py-4 px-0">
                 {t("devices.empty")}
               </td>
             </tr>
@@ -1057,7 +1035,7 @@ export function LiveAccountForm() {
                     <Health tone="danger">{t("hosts.offline")}</Health>
                     {active ? (
                       <>
-                        <span style={{ flex: 1 }} />
+                        <span className="flex-1" />
                         <UseThisMachineButton />
                       </>
                     ) : null}
@@ -1070,7 +1048,7 @@ export function LiveAccountForm() {
                 <div className="t">{t("account.relayUrl")}</div>
               </div>
               <div className="ctl">
-                <span className="q-faint q-mono" style={{ fontSize: 11.5 }}>
+                <span className="q-faint q-mono" style={{ fontSize: 12 }}>
                   {connectUrl}
                 </span>
               </div>
@@ -1082,7 +1060,7 @@ export function LiveAccountForm() {
               </div>
               <div className="ctl">
                 {error ? (
-                  <span className="q-muted" style={{ fontSize: 12 }} role="status">
+                  <span className="q-muted text-xs" role="status">
                     {t("hosts.cantReach", { target: connectUrl })}
                   </span>
                 ) : (
@@ -1093,7 +1071,7 @@ export function LiveAccountForm() {
                     })}
                   </span>
                 )}
-                <span style={{ flex: 1 }} />
+                <span className="flex-1" />
                 <button
                   type="button"
                   className="q-btn secondary"
@@ -1119,7 +1097,7 @@ export function LiveAccountForm() {
                 <div className="s">{user.email ?? user.id}</div>
               </div>
               <div className="ctl">
-                <span style={{ flex: 1 }} />
+                <span className="flex-1" />
                 <SignOutButton
                   onDone={() =>
                     navigate({ kind: "placeholder", surface: "settings", path: "/settings/hosts" })
@@ -1136,7 +1114,7 @@ export function LiveAccountForm() {
                 <span className="q-faint" style={{ fontSize: 12 }}>
                   {device?.platform ?? "web"} · {device?.kind ?? "web"}
                 </span>
-                <span style={{ flex: 1 }} />
+                <span className="flex-1" />
                 <button
                   type="button"
                   className="q-btn secondary"

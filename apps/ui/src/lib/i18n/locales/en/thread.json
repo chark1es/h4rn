@@ -165,8 +165,6 @@
     "phone": {
       "details": "Details",
       "review": "Review",
-      "close": "Close approval review",
-      "sheet": "Approve command",
       "runCommandOn": "Run a command on {{host}}",
       "reviewRequestOn": "Review a request on {{host}}",
       "folder": "Folder",
@@ -369,6 +367,7 @@
     "back": "Back to thread",
     "thread": "Thread",
     "title": "Terminal",
+    "tabs": "Terminals",
     "new": "New terminal",
     "close": "Close {{name}}",
     "find": "Find in terminal",

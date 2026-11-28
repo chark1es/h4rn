@@ -5,8 +5,10 @@ import {
   ChartNoAxesColumnIcon,
   CheckIcon,
   ChevronDownIcon,
+  ChevronLeftIcon,
   ChevronRightIcon,
   CircleAlertIcon,
+  CircleArrowUpIcon,
   CircleCheckIcon,
   CircleDotIcon,
   CircleIcon,
@@ -15,8 +17,10 @@ import {
   FolderPlusIcon,
   GitPullRequestIcon,
   KeyRoundIcon,
+  LogInIcon,
   PanelLeftIcon,
   PlugIcon,
+  PlusIcon,
   QrCodeIcon,
   SearchIcon,
   ServerIcon,
@@ -26,11 +30,22 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { Trans, useTranslation } from "react-i18next";
-
 import { AgentGlyph } from "@/components/agent/AgentGlyph";
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
-import { ShortcutCaps } from "@/components/common/Kbd";
 import { StateTabs } from "@/components/inbox/StateTabs";
+import { Button } from "@/components/ui/button";
+import { ShortcutCaps } from "@/components/ui/kbd";
+import {
+  Menu,
+  MenuContent,
+  MenuGroup,
+  MenuGroupLabel,
+  MenuItem,
+  MenuNote,
+  MenuSeparator,
+  MenuTrigger,
+} from "@/components/ui/menu";
+import { Tip } from "@/components/ui/tooltip";
 import {
   harnessUpdateCount,
   useHarnesses,
@@ -60,7 +75,7 @@ import { harnessLabel, machineSeed } from "@/lib/entities";
 import { absoluteTime } from "@/lib/format";
 import { formatAge, formatDateTime, formatList, formatNumber } from "@/lib/i18n";
 import { isSnoozed, needsAttention, snoozedThreads, tabCounts, threadsForTab } from "@/lib/inbox";
-import { type CommandId, titleWithShortcut } from "@/lib/keybindings";
+import type { CommandId } from "@/lib/keybindings";
 import { SETTINGS_SECTIONS, type SettingsGroup, settingsPath } from "@/lib/settings";
 import {
   loadThreads,
@@ -69,7 +84,6 @@ import {
   openNewThread,
   openThread,
   setLibrarySelected,
-  setSidebarWidth,
   setTab,
   setUi,
   toggleSidebar,
@@ -77,7 +91,6 @@ import {
 } from "@/lib/store/appStore";
 import { cn } from "@/lib/utils";
 import { hostStatus } from "./hostStatus";
-import { Resizer } from "./Resizer";
 import { snoozeWakeLabel } from "./snoozeWake";
 
 const SKELETON_WIDTHS: Array<[string, string]> = [
@@ -254,7 +267,7 @@ function useHostRows(): HostRow[] {
   }, [hosts, machines, activeMachineId, signedIn, connection]);
 }
 
-function HostsPopover({
+function HostsMenuContent({
   rows,
   connection,
   onClose,
@@ -274,16 +287,6 @@ function HostsPopover({
   // The daemon answers but this host does not: that is an unreachable host,
   // shown in `danger` with its last-seen time (DESIGN §States).
   const reachableLink = connection.status === "online";
-  const dots = (row: HostRow) =>
-    row.online ? (
-      <span className="q-dot on" role="img" aria-label={t("hosts.dot.online")} />
-    ) : (
-      <span
-        className={cn("q-dot off", reachableLink && "bad")}
-        role="img"
-        aria-label={reachableLink ? t("hosts.dot.unreachable") : t("hosts.dot.offline")}
-      />
-    );
   const connectionLine =
     connection.status === "online"
       ? connection.latencyMs !== null
@@ -309,151 +312,118 @@ function HostsPopover({
             ? "hosts.empty.unreachableMobile"
             : "hosts.empty.unreachable"
           : "hosts.empty.none";
+  const goToSettings = (path: string) =>
+    navigate({ kind: "placeholder", surface: "settings", path: settingsPath(path) });
   return (
-    <div className="q-hostpop" role="menu" aria-label={t("hosts.title")}>
-      <div className="q-hp-h">
-        <span>{t("hosts.title")}</span>
-        <span className="q-faint q-num">
-          {t("hosts.onlineCount", { online: formatNumber(online), count: rows.length })}
-        </span>
-      </div>
-      {rows.length === 0 ? (
-        <div className="q-hp-empty">
-          <Trans
-            t={t}
-            i18nKey={emptyKey}
-            values={{ name: stored?.machineName ?? "", command: "h4rn host" }}
-            components={{ b: <b />, code: <span className="q-mono" /> }}
-          />
-        </div>
-      ) : (
-        rows.map((row) => (
-          <button
-            key={row.id}
-            type="button"
-            className={cn("q-host", row.sub && "sub")}
-            role="menuitem"
-            title={formatList(row.harnesses, "conjunction", "narrow")}
-            aria-current={row.active ? "true" : undefined}
-            disabled={row.machineId !== null && busy !== null}
-            onClick={() => {
-              if (row.machineId) {
-                void activateMachine(row.machineId).then((ok) => {
-                  if (ok) onClose();
-                });
-                return;
-              }
-              navigate({ kind: "placeholder", surface: "settings", path: settingsPath("hosts") });
-              onClose();
-            }}
-          >
-            <EntityAvatar
-              seed={machineSeed(row.id)}
-              kind="machine"
-              label={row.name}
-              size={16}
-              decorative={false}
+    <MenuContent
+      side="top"
+      align="start"
+      aria-label={t("hosts.title")}
+      className="w-(--anchor-width) min-w-72"
+    >
+      <MenuGroup>
+        <MenuGroupLabel className="justify-between gap-2 text-sm font-semibold text-foreground">
+          <span>{t("hosts.title")}</span>
+          <span className="text-xs font-normal text-muted-foreground tabular-nums">
+            {t("hosts.onlineCount", { online: formatNumber(online), count: rows.length })}
+          </span>
+        </MenuGroupLabel>
+        {rows.length === 0 ? (
+          <MenuNote className="text-sm">
+            <Trans
+              t={t}
+              i18nKey={emptyKey}
+              values={{ name: stored?.machineName ?? "", command: "h4rn host" }}
+              components={{ b: <b />, code: <span className="font-mono" /> }}
             />
-            <span
-              className="lbl"
-              style={
-                row.online ? undefined : { color: reachableLink ? "var(--danger)" : "var(--fg-3)" }
-              }
-            >
-              {row.name}
-            </span>
-            {row.online ? (
-              <span className="meta q-num">
-                {row.path
-                  ? `${t(`hosts.path.${row.path}`)}${
-                      row.latencyMs !== null ? ` · ${latencyText(row.latencyMs)}` : ""
-                    }`
-                  : t("hosts.online")}
-              </span>
-            ) : (
-              <span
-                className="meta"
-                style={{
-                  display: "inline-flex",
-                  gap: 4,
-                  alignItems: "center",
-                  color: reachableLink ? "var(--danger)" : undefined,
+          </MenuNote>
+        ) : (
+          rows.map((row) => {
+            const state = row.online ? "online" : reachableLink ? "unreachable" : "offline";
+            return (
+              <MenuItem
+                key={row.id}
+                label={row.name}
+                className={cn(row.sub && "ps-6", row.active && "bg-sel")}
+                title={formatList(row.harnesses, "conjunction", "narrow")}
+                aria-current={row.active ? "true" : undefined}
+                disabled={row.machineId !== null && busy !== null}
+                icon={
+                  <EntityAvatar
+                    seed={machineSeed(row.id)}
+                    kind="machine"
+                    label={row.name}
+                    size={14}
+                  />
+                }
+                trailing={
+                  <>
+                    <span>
+                      {row.online
+                        ? row.path
+                          ? `${t(`hosts.path.${row.path}`)}${
+                              row.latencyMs !== null ? ` · ${latencyText(row.latencyMs)}` : ""
+                            }`
+                          : t("hosts.online")
+                        : row.lastSeen === null
+                          ? t(`hosts.dot.${state}`)
+                          : `${t(`hosts.dot.${state}`)} · ${formatAge(row.lastSeen, now)}`}
+                    </span>
+                    <span
+                      className={cn(
+                        "q-dot",
+                        row.online ? "on" : "off",
+                        state === "unreachable" && "bad",
+                      )}
+                      aria-hidden
+                    />
+                    <CheckIcon
+                      strokeWidth={2}
+                      className={cn(
+                        "size-3.5 text-muted-foreground",
+                        !(row.active && !row.sub) && "invisible",
+                      )}
+                      aria-label={row.active && !row.sub ? t("hosts.active") : undefined}
+                      aria-hidden={row.active && !row.sub ? undefined : true}
+                    />
+                  </>
+                }
+                onSelect={(event) => {
+                  if (row.machineId) {
+                    event.preventDefault();
+                    void activateMachine(row.machineId).then((ok) => {
+                      if (ok) onClose();
+                    });
+                    return;
+                  }
+                  goToSettings("hosts");
                 }}
               >
-                <WifiOffIcon className="q-icon s12" aria-hidden />
-                {row.lastSeen === null ? null : formatAge(row.lastSeen, now)}
-              </span>
-            )}
-            {dots(row)}
-            {row.active && !row.sub ? (
-              <CheckIcon
-                className="q-icon s12 q-host-on"
-                strokeWidth={2}
-                aria-label={t("hosts.active")}
-              />
-            ) : null}
-          </button>
-        ))
-      )}
-      <div className="q-hp-conn">{connectionLine}</div>
+                {row.name}
+              </MenuItem>
+            );
+          })
+        )}
+        <MenuNote className="q-hp-conn">{connectionLine}</MenuNote>
+      </MenuGroup>
       {stored ? (
-        <button
-          type="button"
-          className="q-nav"
-          role="menuitem"
-          onClick={() => {
-            forgetMachine();
-            onClose();
-          }}
-        >
-          <WifiOffIcon className="q-icon" strokeWidth={1.5} aria-hidden />
-          <span className="lbl">{t("hosts.disconnect", { name: stored.machineName })}</span>
-        </button>
+        <MenuItem icon={<WifiOffIcon />} onSelect={() => forgetMachine()}>
+          {t("hosts.disconnect", { name: stored.machineName })}
+        </MenuItem>
       ) : null}
-      <div className="q-hp-sep" />
+      <MenuSeparator />
       {user ? null : (
-        <button
-          type="button"
-          className="q-nav"
-          role="menuitem"
-          onClick={() => {
-            navigate({ kind: "placeholder", surface: "settings", path: settingsPath("devices") });
-            onClose();
-          }}
-        >
-          <ServerIcon className="q-icon" strokeWidth={1.5} aria-hidden />
-          <span className="lbl">{t("hosts.signIn")}</span>
-        </button>
+        <MenuItem icon={<LogInIcon />} onSelect={() => goToSettings("devices")}>
+          {t("hosts.signIn")}
+        </MenuItem>
       )}
-      <button
-        type="button"
-        className="q-nav"
-        role="menuitem"
-        onClick={() => {
-          navigate({
-            kind: "placeholder",
-            surface: "settings",
-            path: settingsPath("devices"),
-          });
-          onClose();
-        }}
-      >
-        <QrCodeIcon className="q-icon" strokeWidth={1.5} aria-hidden />
-        <span className="lbl">{t("hosts.pair")}</span>
-      </button>
-      <button
-        type="button"
-        className="q-nav"
-        role="menuitem"
-        onClick={() => {
-          navigate({ kind: "placeholder", surface: "settings", path: settingsPath("hosts") });
-          onClose();
-        }}
-      >
-        <ServerIcon className="q-icon" strokeWidth={1.5} aria-hidden />
-        <span className="lbl">{t("hosts.manage")}</span>
-      </button>
-    </div>
+      <MenuItem icon={<QrCodeIcon />} onSelect={() => goToSettings("devices")}>
+        {t("hosts.pair")}
+      </MenuItem>
+      <MenuItem icon={<ServerIcon />} onSelect={() => goToSettings("hosts")}>
+        {t("hosts.manage")}
+      </MenuItem>
+    </MenuContent>
   );
 }
 
@@ -513,44 +483,44 @@ function SidebarFooter({
   const hostLine = hostStatus({ loading, offline, rows });
 
   return (
-    <>
-      <div className="q-side-ft">
-        <button
-          type="button"
-          className={cn("q-hostbtn", popoverOpen && "on")}
-          aria-haspopup="menu"
-          aria-expanded={popoverOpen}
-          title={t("footer.hostsButton")}
-          onClick={() => setPopoverOpen((value) => !value)}
-        >
-          {hostLine.icon === "orb" ? (
-            <AgentGlyph
-              glyph={{
-                kind: "orb",
-                state: "breathing",
-                speed: 0.35,
-                label: t("footer.connecting"),
-              }}
-              size={14}
-            />
-          ) : hostLine.icon === "off" ? (
-            <span className="q-faint" style={{ display: "inline-flex" }}>
-              <WifiOffIcon className="q-icon s14" aria-hidden />
-            </span>
-          ) : (
-            <span className="q-dot on" />
-          )}
-          <span>{hostLine.text}</span>
-          <ChevronDownIcon className="q-icon s12 q-faint" strokeWidth={1.5} aria-hidden />
-        </button>
-        {DESTINATIONS.map((item) => (
+    <div className="q-side-ft">
+      <Menu open={popoverOpen} onOpenChange={setPopoverOpen}>
+        <Tip label={t("footer.hostsButton")}>
+          <MenuTrigger className={cn("q-hostbtn", popoverOpen && "on")}>
+            {hostLine.icon === "orb" ? (
+              <AgentGlyph
+                glyph={{
+                  kind: "orb",
+                  state: "breathing",
+                  speed: 0.35,
+                  label: t("footer.connecting"),
+                }}
+                size={14}
+              />
+            ) : hostLine.icon === "off" ? (
+              <span className="q-faint" style={{ display: "inline-flex" }}>
+                <WifiOffIcon className="q-icon s14" aria-hidden />
+              </span>
+            ) : (
+              <span className="q-dot on" />
+            )}
+            <span>{hostLine.text}</span>
+            <ChevronDownIcon className="q-icon s14 q-faint" strokeWidth={1.5} aria-hidden />
+          </MenuTrigger>
+        </Tip>
+        <HostsMenuContent
+          rows={rows}
+          connection={connection}
+          onClose={() => setPopoverOpen(false)}
+        />
+      </Menu>
+      {DESTINATIONS.map((item) => (
+        <Tip key={item.key} label={t(`footer.${item.key}`)} command={item.command}>
           <button
-            key={item.key}
             type="button"
             className={cn("q-ibtn q-side-dest", destination === item.key && "on")}
             aria-current={destination === item.key ? "page" : undefined}
             aria-label={t(`footer.${item.key}`)}
-            title={titleWithShortcut(t(`footer.${item.key}`), item.command)}
             onClick={() =>
               navigate({
                 kind: "placeholder",
@@ -568,12 +538,9 @@ function SidebarFooter({
           >
             <item.icon className="q-icon" strokeWidth={1.5} aria-hidden />
           </button>
-        ))}
-      </div>
-      {popoverOpen ? (
-        <HostsPopover rows={rows} connection={connection} onClose={() => setPopoverOpen(false)} />
-      ) : null}
-    </>
+        </Tip>
+      ))}
+    </div>
   );
 }
 
@@ -609,7 +576,12 @@ function OfflineNotice({
       {remoteName ? (
         <UseThisMachineButton compact />
       ) : (
-        <button type="button" className="q-btn ghost" style={{ height: 24 }} onClick={onReconnect}>
+        <button
+          type="button"
+          className="q-btn ghost q-inline-end"
+          style={{ height: 24 }}
+          onClick={onReconnect}
+        >
           {t("offline.reconnect")}
         </button>
       )}
@@ -678,29 +650,26 @@ function ThreadsSidebar() {
   const activate = (value: ThreadTab) => setTab(value);
 
   return (
-    <nav className="q-side" aria-label={t("label")} style={{ width: layout.sidebarWidth }}>
+    <nav className="q-side" aria-label={t("label")}>
       <div className="q-side-hd">
         <div className="q-side-top">
           <span className="q-word">h4rn</span>
           <span className="grow" />
-          <button
-            type="button"
-            className="q-ibtn"
-            aria-label={t("hide")}
-            title={titleWithShortcut(t("hide"), "sidebar.toggle")}
-            onClick={toggleSidebar}
-          >
-            <PanelLeftIcon className="q-icon" strokeWidth={1.5} aria-hidden />
-          </button>
-          <button
-            type="button"
-            className="q-ibtn"
-            aria-label={t("newThread")}
-            title={titleWithShortcut(t("newThread"), "thread.new")}
-            onClick={() => openNewThread()}
-          >
-            <SquarePenIcon className="q-icon" strokeWidth={1.5} aria-hidden />
-          </button>
+          <Tip label={t("hide")} command="sidebar.toggle">
+            <button type="button" className="q-ibtn" aria-label={t("hide")} onClick={toggleSidebar}>
+              <PanelLeftIcon className="q-icon" strokeWidth={1.5} aria-hidden />
+            </button>
+          </Tip>
+          <Tip label={t("newThread")} command="thread.new">
+            <button
+              type="button"
+              className="q-ibtn"
+              aria-label={t("newThread")}
+              onClick={() => openNewThread()}
+            >
+              <SquarePenIcon className="q-icon" strokeWidth={1.5} aria-hidden />
+            </button>
+          </Tip>
         </div>
         <button
           type="button"
@@ -738,7 +707,7 @@ function ThreadsSidebar() {
           ) : (
             <button
               type="button"
-              className="q-btn ghost"
+              className="q-btn ghost q-inline-end"
               style={{ height: 24 }}
               onClick={() => void loadThreads()}
             >
@@ -815,14 +784,6 @@ function ThreadsSidebar() {
         offline={connection.status === "offline"}
         rows={rows}
         connection={connection}
-      />
-      <Resizer
-        side="side"
-        width={layout.sidebarWidth}
-        min={240}
-        max={420}
-        label={t("sidebar:resize")}
-        onChange={setSidebarWidth}
       />
     </nav>
   );
@@ -938,27 +899,19 @@ function SettingsSidebar() {
   };
 
   return (
-    <nav
-      className="q-side q-set-side"
-      aria-label={t("page.label")}
-      style={{ width: layout.sidebarWidth }}
-    >
+    <nav className="q-side q-set-side" aria-label={t("page.label")}>
       <div className="q-side-hd">
         <div className="q-side-top">
-          <button
-            type="button"
-            className="q-ibtn"
-            aria-label={t("nav.back")}
-            title={t("nav.backTitle")}
-            onClick={() => navigate({ kind: "inbox" })}
-          >
-            <ChevronRightIcon
-              className="q-icon"
-              style={{ transform: "rotate(180deg)" }}
-              strokeWidth={1.5}
-              aria-hidden
-            />
-          </button>
+          <Tip label={t("nav.backTitle")}>
+            <button
+              type="button"
+              className="q-ibtn"
+              aria-label={t("nav.back")}
+              onClick={() => navigate({ kind: "inbox" })}
+            >
+              <ChevronLeftIcon className="q-icon" strokeWidth={1.5} aria-hidden />
+            </button>
+          </Tip>
           <span className="q-word">{t("page.label")}</span>
         </div>
         <label className="q-side-search">
@@ -974,7 +927,7 @@ function SettingsSidebar() {
           return (
             <div key={item.key} style={{ display: "contents" }}>
               {header ? (
-                <div className="q-side-h" style={{ paddingTop: 18 }}>
+                <div className="q-side-h">
                   <span>{t(`nav.groups.${header}`)}</span>
                 </div>
               ) : null}
@@ -991,9 +944,16 @@ function SettingsSidebar() {
                 <item.icon className="q-icon" strokeWidth={1.5} aria-hidden />
                 <span className="lbl">{t(`nav.sections.${item.key}`)}</span>
                 {item.key === "harnesses" && harnessUpdates > 0 ? (
-                  <span className="ct q-num" title={t("nav.harnessUpdates")}>
-                    {harnessUpdates}
-                  </span>
+                  <Tip label={t("nav.harnessUpdates")}>
+                    <span className="ct q-num inline-flex items-center gap-1">
+                      <CircleArrowUpIcon
+                        className="size-3.5 shrink-0"
+                        strokeWidth={1.5}
+                        aria-hidden
+                      />
+                      {harnessUpdates}
+                    </span>
+                  </Tip>
                 ) : null}
                 {item.key === "hosts" ? (
                   <span
@@ -1011,18 +971,21 @@ function SettingsSidebar() {
                 <>
                   <div className="q-side-h">
                     <span>{t("nav.tools")}</span>
-                    <button
-                      type="button"
-                      className="q-ibtn s22"
-                      aria-label={t("nav.addMcp")}
-                      title={t("nav.addMcp")}
-                      onClick={() => {
-                        setLibrarySelected("__new");
-                        goLibrary("/library");
-                      }}
-                    >
-                      +
-                    </button>
+                    <Tip label={t("nav.addMcp")}>
+                      {/* Its hover pad hangs past the edge so the + ends with the counts below. */}
+                      <Button
+                        variant="ghost"
+                        size="icon-sm"
+                        className="-me-1"
+                        aria-label={t("nav.addMcp")}
+                        onClick={() => {
+                          setLibrarySelected("__new");
+                          goLibrary("/library");
+                        }}
+                      >
+                        <PlusIcon strokeWidth={1.5} aria-hidden />
+                      </Button>
+                    </Tip>
                   </div>
                   <button
                     type="button"
@@ -1085,14 +1048,6 @@ function SettingsSidebar() {
         rows={rows}
         connection={connection}
       />
-      <Resizer
-        side="side"
-        width={layout.sidebarWidth}
-        min={240}
-        max={420}
-        label={t("sidebar:resize")}
-        onChange={setSidebarWidth}
-      />
     </nav>
   );
 }
@@ -1142,25 +1097,27 @@ export function SidebarReveal() {
   if (layout.sidebarOpen) return null;
   return (
     <div className="q-hd-l">
-      <button
-        type="button"
-        className="q-ibtn"
-        aria-label={needsYou > 0 ? t("showNeedsYou", { count: needsYou }) : t("show")}
-        title={titleWithShortcut(t("show"), "sidebar.toggle")}
-        onClick={toggleSidebar}
-      >
-        <PanelLeftIcon className="q-icon" strokeWidth={1.5} aria-hidden />
-        {needsYou > 0 ? <span className="q-pip" aria-hidden="true" /> : null}
-      </button>
-      <button
-        type="button"
-        className="q-ibtn"
-        aria-label={t("newThread")}
-        title={titleWithShortcut(t("newThread"), "thread.new")}
-        onClick={() => openNewThread()}
-      >
-        <SquarePenIcon className="q-icon" strokeWidth={1.5} aria-hidden />
-      </button>
+      <Tip label={t("show")} command="sidebar.toggle">
+        <button
+          type="button"
+          className="q-ibtn"
+          aria-label={needsYou > 0 ? t("showNeedsYou", { count: needsYou }) : t("show")}
+          onClick={toggleSidebar}
+        >
+          <PanelLeftIcon className="q-icon" strokeWidth={1.5} aria-hidden />
+          {needsYou > 0 ? <span className="q-pip" aria-hidden="true" /> : null}
+        </button>
+      </Tip>
+      <Tip label={t("newThread")} command="thread.new">
+        <button
+          type="button"
+          className="q-ibtn"
+          aria-label={t("newThread")}
+          onClick={() => openNewThread()}
+        >
+          <SquarePenIcon className="q-icon" strokeWidth={1.5} aria-hidden />
+        </button>
+      </Tip>
       <span className="q-vsep" />
     </div>
   );

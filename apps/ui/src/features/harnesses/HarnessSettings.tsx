@@ -1,8 +1,8 @@
 import { PencilIcon, PlusIcon, RefreshCwIcon, Trash2Icon, UnplugIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Trans, useTranslation } from "react-i18next";
-
 import { ChipSelect } from "@/components/common/ChipSelect";
+import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "@/components/ui/collapsible";
 import type { AcpAgent, HarnessKind, HarnessVersionInfo } from "@/gen";
 import { HARNESS_LABELS } from "@/lib/entities";
 import { formatList, i18n } from "@/lib/i18n";
@@ -49,7 +49,7 @@ function HarnessRow({ row }: { row: HarnessVersionInfo }) {
   return (
     <div className="q-harness-row">
       <div className="q-field">
-        <div className="lab" style={{ width: 200 }}>
+        <div className="lab">
           <div className="t">{HARNESS_LABELS[kind]}</div>
           <div className="s">{statusText(row)}</div>
         </div>
@@ -58,7 +58,7 @@ function HarnessRow({ row }: { row: HarnessVersionInfo }) {
             {row.installed ?? "—"}
             {row.update_available && row.latest ? ` → ${row.latest}` : ""}
           </span>
-          <span style={{ flex: 1 }} />
+          <span className="flex-1" />
           {row.update_available && runnable ? (
             <button
               type="button"
@@ -85,13 +85,17 @@ function HarnessRow({ row }: { row: HarnessVersionInfo }) {
       {showOutput ? (
         <div className="q-harness-out">
           {output?.length ? (
-            <details className="q-harness-log">
-              <summary>{t("harnesses.updateLog")}</summary>
-              {/* biome-ignore lint/a11y/noNoninteractiveTabindex: A scrollable log needs keyboard focus. */}
-              <section tabIndex={0} aria-label={t("harnesses.updateLog")}>
-                <pre className="q-mono">{output.join("\n")}</pre>
-              </section>
-            </details>
+            <Collapsible className="q-harness-log">
+              <CollapsibleTrigger className="min-h-7">
+                {t("harnesses.updateLog")}
+              </CollapsibleTrigger>
+              <CollapsiblePanel>
+                {/* biome-ignore lint/a11y/noNoninteractiveTabindex: A scrollable log needs keyboard focus. */}
+                <section tabIndex={0} aria-label={t("harnesses.updateLog")}>
+                  <pre className="q-mono">{output.join("\n")}</pre>
+                </section>
+              </CollapsiblePanel>
+            </Collapsible>
           ) : null}
           <div role="status">
             {result ? (
@@ -161,7 +165,7 @@ function AgentRow({ agent, onEdit }: { agent: AcpAgent; onEdit: () => void }) {
           </span>
           <button
             type="button"
-            className="q-btn ghost"
+            className="q-btn secondary"
             disabled={probing}
             onClick={() => void probeAcpAgent(agent.id).then(setError)}
           >
@@ -174,7 +178,7 @@ function AgentRow({ agent, onEdit }: { agent: AcpAgent; onEdit: () => void }) {
           </button>
           <button
             type="button"
-            className="q-btn ghost"
+            className="q-btn secondary"
             onClick={onEdit}
             aria-label={t("harnesses.acp.editLabel", { name: agent.name })}
           >
@@ -183,7 +187,7 @@ function AgentRow({ agent, onEdit }: { agent: AcpAgent; onEdit: () => void }) {
           </button>
           <button
             type="button"
-            className="q-btn ghost danger"
+            className="q-btn danger"
             disabled={removing}
             aria-label={t("harnesses.acp.removeLabel", { name: agent.name })}
             onClick={() => {
@@ -283,7 +287,7 @@ function AgentForm({
         ) : (
           <p className="q-muted">{t("harnesses.acp.reading")}</p>
         )}
-        <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 12 }}>
+        <div className="flex justify-end mt-3">
           <button type="button" className="q-btn ghost" onClick={onDone}>
             {t("common:close")}
           </button>
@@ -312,7 +316,6 @@ function AgentForm({
             value={form.name}
             onChange={(event) => patch({ name: event.target.value })}
             aria-label={t("harnesses.acp.displayNameLabel")}
-            style={{ maxWidth: 300 }}
           />
         </div>
       </div>
@@ -329,7 +332,6 @@ function AgentForm({
             disabled={agent !== "new"}
             onChange={(event) => patch({ id: event.target.value })}
             aria-label={t("harnesses.acp.instanceIdLabel")}
-            style={{ maxWidth: 240 }}
           />
         </div>
       </div>
@@ -346,7 +348,6 @@ function AgentForm({
             onChange={(event) => patch({ command: event.target.value })}
             aria-label={t("harnesses.acp.commandLabel")}
             placeholder="deepseek-acp"
-            style={{ maxWidth: 360 }}
           />
         </div>
       </div>
@@ -372,7 +373,7 @@ function AgentForm({
               />
               <button
                 type="button"
-                className="q-btn ghost"
+                className="q-btn secondary"
                 aria-label={t("harnesses.acp.removeArgument", { row: index + 1 })}
                 onClick={() => patch({ args: form.args.filter((_, at) => at !== index) })}
               >
@@ -382,7 +383,7 @@ function AgentForm({
           ))}
           <button
             type="button"
-            className="q-btn ghost"
+            className="q-btn secondary"
             style={{ alignSelf: "flex-start" }}
             onClick={() => patch({ args: [...form.args, ""] })}
           >
@@ -424,7 +425,7 @@ function AgentForm({
               />
               <button
                 type="button"
-                className="q-btn ghost"
+                className="q-btn secondary"
                 aria-label={t("harnesses.acp.removeEnv", { row: index + 1 })}
                 disabled={form.env.length === 1 && row.key === "" && row.value === ""}
                 onClick={() => patch({ env: form.env.filter((_, at) => at !== index) })}
@@ -435,7 +436,7 @@ function AgentForm({
           ))}
           <button
             type="button"
-            className="q-btn ghost"
+            className="q-btn secondary"
             style={{ alignSelf: "flex-start" }}
             onClick={() => patch({ env: [...form.env, { key: "", value: "" }] })}
           >
@@ -468,7 +469,6 @@ function AgentForm({
               onChange={(event) => patch({ path: event.target.value })}
               aria-label={t("harnesses.acp.fixedPathLabel")}
               placeholder="/home/you/project"
-              style={{ maxWidth: 320 }}
             />
           ) : null}
         </div>
@@ -480,7 +480,7 @@ function AgentForm({
         </p>
       ) : null}
 
-      <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 12 }}>
+      <div className="flex justify-end gap-2 mt-3">
         <button type="button" className="q-btn ghost" onClick={onDone} disabled={saving}>
           {t("common:cancel")}
         </button>
@@ -525,7 +525,7 @@ export function HarnessSettings() {
           <h2>{t("harnesses.cliVersions")}</h2>
           <button
             type="button"
-            className="q-btn ghost"
+            className="q-btn secondary"
             disabled={loading || connection !== "online"}
             onClick={() => void loadHarnessVersions()}
           >
@@ -534,7 +534,7 @@ export function HarnessSettings() {
           </button>
         </div>
         {!loaded ? (
-          <div className="q-skel" style={{ height: 120 }} />
+          <div className="q-skel h-30" />
         ) : error ? (
           <p className="q-muted">{error.message}</p>
         ) : (
@@ -559,7 +559,7 @@ export function HarnessSettings() {
         </div>
         <p className="desc">{t("harnesses.acp.hint")}</p>
         {!agentsLoaded ? (
-          <div className="q-skel" style={{ height: 80 }} />
+          <div className="q-skel h-20" />
         ) : agentsError ? (
           <p className="q-muted">{agentsError.message}</p>
         ) : agents.length === 0 ? (

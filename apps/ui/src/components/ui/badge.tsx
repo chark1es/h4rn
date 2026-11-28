@@ -4,15 +4,16 @@ import type * as React from "react";
 import { cn } from "@/lib/utils";
 
 const badgeVariants = cva(
-  "inline-flex w-fit shrink-0 items-center gap-1 rounded-xs px-1.5 py-0.5 text-small font-medium whitespace-nowrap [&>svg]:size-3",
+  "inline-flex h-5 w-fit shrink-0 items-center gap-1 rounded-sm px-1.5 text-xs font-medium whitespace-nowrap tabular-nums [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-3",
   {
     variants: {
       variant: {
-        default: "bg-bg-side text-fg-2",
+        default: "bg-muted text-muted-foreground",
         accent: "bg-accent-soft text-accent-tx",
         ok: "bg-ok-soft text-ok",
+        warn: "bg-warn-soft text-warn",
         danger: "bg-danger-soft text-danger",
-        outline: "border border-line text-fg-2",
+        outline: "border border-border text-muted-foreground",
       },
     },
     defaultVariants: {
@@ -27,7 +28,12 @@ function Badge({
   ...props
 }: React.ComponentProps<"span"> & VariantProps<typeof badgeVariants>) {
   return (
-    <span data-slot="badge" className={cn(badgeVariants({ variant }), className)} {...props} />
+    <span
+      data-slot="badge"
+      data-variant={variant ?? "default"}
+      className={cn(badgeVariants({ variant }), className)}
+      {...props}
+    />
   );
 }
 

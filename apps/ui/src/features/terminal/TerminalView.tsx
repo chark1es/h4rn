@@ -1,3 +1,5 @@
+import { Toggle } from "@ui-sdk/react/toggle";
+import { Toolbar, ToolbarButton } from "@ui-sdk/react/toolbar";
 import {
   ArrowDownIcon,
   ArrowLeftIcon,
@@ -7,16 +9,8 @@ import {
   RefreshCwIcon,
   WifiOffIcon,
 } from "lucide-react";
-import {
-  type ButtonHTMLAttributes,
-  type ReactNode,
-  useCallback,
-  useEffect,
-  useRef,
-  useState,
-} from "react";
+import { type ReactNode, useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-
 import type { H4rnClient } from "@/lib/client/client";
 import { cn } from "@/lib/utils";
 
@@ -158,7 +152,7 @@ export function TerminalView({
 
         {showOpening ? (
           <div
-            className="pointer-events-none absolute inset-0 flex items-center justify-center text-[12px] text-[var(--fg-3)]"
+            className="pointer-events-none absolute inset-0 flex items-center justify-center text-xs text-[var(--fg-3)]"
             style={{ background: "color-mix(in oklch, var(--bg-sunk) 85%, transparent)" }}
           >
             {t("terminal.opening")}
@@ -175,15 +169,15 @@ export function TerminalView({
             ) : (
               <CircleAlertIcon className="size-5 text-[var(--danger)]" aria-hidden />
             )}
-            <p className="text-[13px] font-medium text-[var(--fg)]">
+            <p className="text-sm font-medium text-[var(--fg)]">
               {showOffline ? t("terminal.daemonOffline") : status.message}
             </p>
-            <p className="max-w-[46ch] text-[12px] text-[var(--fg-2)]">
+            <p className="max-w-[46ch] text-xs text-[var(--fg-2)]">
               {status.hint ?? (showOffline ? t("terminal.reconnectHint") : t("terminal.closeHint"))}
             </p>
             <button
               type="button"
-              className="mt-1 inline-flex h-7 items-center gap-1.5 rounded-md border border-[var(--line-2)] px-2.5 text-[12px] font-medium text-[var(--fg)] transition-colors hover:bg-[var(--hover)]"
+              className="mt-1 inline-flex h-7 items-center gap-1.5 rounded-lg border border-[var(--line-2)] px-2.5 text-xs font-medium text-[var(--fg)] transition-colors hover:bg-[var(--hover)]"
               onClick={() => {
                 if (showOffline) client.reconnectNow();
                 setAttempt((value) => value + 1);
@@ -203,19 +197,20 @@ export function TerminalView({
         </div>
       ) : null}
 
-      <div
+      <Toolbar
         className={cn("q-keybar sm:hidden", status.phase !== "attached" && "opacity-60")}
-        role="toolbar"
         aria-label={t("terminal.keys")}
       >
         <KeyButton label={KEYCAP.esc} onPress={() => sendKey("\u001b")} />
         <KeyButton label={KEYCAP.tab} onPress={() => sendKey("\t")} />
-        <KeyButton
-          label={KEYCAP.ctrl}
-          active={ctrlArmed}
-          aria-pressed={ctrlArmed}
-          onPress={() => setCtrlArmed((value) => !value)}
-        />
+        <Toggle
+          aria-label={KEYCAP.ctrl}
+          className={cn("q-key", ctrlArmed && "on")}
+          pressed={ctrlArmed}
+          onPressedChange={setCtrlArmed}
+        >
+          {KEYCAP.ctrl}
+        </Toggle>
         <KeyButton
           icon={<ArrowUpIcon strokeWidth={1.75} aria-hidden />}
           label="↑"
@@ -241,10 +236,10 @@ export function TerminalView({
           onPress={() => arrow("ArrowRight")}
         />
         <KeyButton label={t("terminal.paste")} onPress={() => void paste()} />
-      </div>
+      </Toolbar>
 
       {status.phase === "exited" ? (
-        <div className="flex h-8 shrink-0 items-center justify-center border-t border-[var(--line)] bg-[var(--bg-sunk)] text-[12px] text-[var(--fg-3)]">
+        <div className="flex h-8 shrink-0 items-center justify-center border-t border-[var(--line)] bg-[var(--bg-sunk)] text-xs text-[var(--fg-3)]">
           {status.exit
             ? status.exit.signal
               ? t("terminal.exitedSignal", { signal: status.exit.signal })
@@ -260,25 +255,16 @@ function KeyButton({
   label,
   ariaLabel,
   icon,
-  active,
   onPress,
-  ...rest
 }: {
   label: string;
   ariaLabel?: string;
   icon?: ReactNode;
-  active?: boolean;
   onPress: () => void;
-} & Pick<ButtonHTMLAttributes<HTMLButtonElement>, "aria-pressed">) {
+}) {
   return (
-    <button
-      type="button"
-      aria-label={ariaLabel ?? label}
-      className={cn("q-key", active && "on")}
-      onClick={onPress}
-      {...rest}
-    >
+    <ToolbarButton aria-label={ariaLabel ?? label} className="q-key" onClick={onPress}>
       {icon ?? label}
-    </button>
+    </ToolbarButton>
   );
 }

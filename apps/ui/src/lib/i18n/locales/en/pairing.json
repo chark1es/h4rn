@@ -66,7 +66,7 @@
   },
   "hostsPane": {
     "pairDevice": "Pair a device",
-    "pairingLater": "Pairing arrives in Phase 2",
+    "pairingLater": "Pairing arrives in phase 2",
     "loading": "Loading hosts",
     "emptyTitle": "No hosts yet.",
     "emptyBody": "A host is a machine running the h4rn daemon. Pair this device or add a host on your tailnet to give agents somewhere to run.",

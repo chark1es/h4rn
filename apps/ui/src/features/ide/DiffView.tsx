@@ -1,15 +1,16 @@
 import {
   FileDiffIcon,
   FileTextIcon,
-  Loader2Icon,
   MessageSquareIcon,
   RefreshCwIcon,
   TriangleAlertIcon,
 } from "lucide-react";
 import { Fragment, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { Trans, useTranslation } from "react-i18next";
+import { AgentGlyph } from "@/components/agent/AgentGlyph";
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
 import { ChipSelect } from "@/components/common/ChipSelect";
+import { Tip } from "@/components/ui/tooltip";
 import type {
   FsDiff,
   FsDiffCommitList,
@@ -304,7 +305,7 @@ function CommentNote({
   return (
     <div className="q-review-note" role="note" aria-label={t("comments.on", { range })}>
       <div className="q-review-meta">
-        <MessageSquareIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+        <MessageSquareIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
         {range} · {describeSource(comment.source, comment.sourceLabel)}
       </div>
       {editing ? (
@@ -511,7 +512,10 @@ export function DiffView({
       >
         <div className="q-empty" style={{ padding: 0 }}>
           <p style={{ margin: 0, display: "flex", alignItems: "center", gap: 8 }}>
-            <Loader2Icon className="q-icon s14 animate-spin" aria-hidden />
+            <AgentGlyph
+              glyph={{ kind: "orb", state: "breathing", speed: 0.35, label: t("diff.loadingText") }}
+              size={14}
+            />
             {t("diff.loadingText")}
           </p>
         </div>
@@ -571,7 +575,15 @@ export function DiffView({
         >
           <div className="q-empty" style={{ padding: 0 }}>
             <p style={{ margin: 0, display: "flex", alignItems: "center", gap: 8 }}>
-              <Loader2Icon className="q-icon s14 animate-spin" aria-hidden />
+              <AgentGlyph
+                glyph={{
+                  kind: "orb",
+                  state: "breathing",
+                  speed: 0.35,
+                  label: t("diff.listingText"),
+                }}
+                size={14}
+              />
               {t("diff.listingText")}
             </p>
           </div>
@@ -600,7 +612,7 @@ export function DiffView({
       <div className="q-center-empty" style={{ flex: 1 }}>
         <div className="q-empty" style={{ padding: 0 }}>
           <FileTextIcon className="q-icon s18 q-faint" aria-hidden />
-          <h3 style={{ fontSize: 13.5 }}>
+          <h3 style={{ fontSize: 14 }}>
             {emptyBranch
               ? files?.base
                 ? t("diff.noBranchChanges", { base: files.base })
@@ -819,17 +831,18 @@ export function DiffView({
         </span>
         <span className="grow" />
         {source === "branch" || source === "commit" ? (
-          <button
-            type="button"
-            className="q-btn ghost"
-            style={{ height: 24 }}
-            title={t("diff.refreshHint")}
-            aria-label={t("diff.refreshLabel")}
-            onClick={onRefresh}
-          >
-            <RefreshCwIcon className="q-icon s12" aria-hidden />
-            {isPhone ? null : t("common:refresh")}
-          </button>
+          <Tip label={t("diff.refreshHint")}>
+            <button
+              type="button"
+              className="q-btn ghost"
+              style={{ height: 24 }}
+              aria-label={t("diff.refreshLabel")}
+              onClick={onRefresh}
+            >
+              <RefreshCwIcon className="q-icon s14" aria-hidden />
+              {isPhone ? null : t("common:refresh")}
+            </button>
+          </Tip>
         ) : null}
         {range ? (
           <button

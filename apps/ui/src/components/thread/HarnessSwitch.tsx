@@ -1,8 +1,9 @@
-import { ArrowLeftRightIcon, CheckIcon, ChevronDownIcon } from "lucide-react";
+import { ArrowLeftRightIcon, ChevronDownIcon } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-
 import { Popover } from "@/components/common/Popover";
+import { SuggestInput } from "@/components/ui/autocomplete";
+import { Listbox, ListboxItem } from "@/components/ui/listbox";
 import { useAcpAgents, useHarnesses, useHarnessVersions } from "@/features/harnesses/harnessStore";
 import { proxyModelsFor, useProxyCatalog } from "@/features/proxy/proxyStore";
 import type { DroppedSetting, HarnessKind, RuntimeMode, ThreadSummary } from "@/gen";
@@ -190,30 +191,25 @@ function SwitchPanel({ summary, onClose }: { summary: ThreadSummary; onClose: ()
     <div className="q-tctrl">
       <p className="q-tctrl-note">{t("harnessSwitch.note")}</p>
 
-      <div role="menu" aria-label={t("harnessSwitch.harness")} className="q-tctrl-list">
+      <Listbox
+        aria-label={t("harnessSwitch.harness")}
+        activation="manual"
+        value={target?.key ?? null}
+        onValueChange={(key) => {
+          const choice = targets.find((candidate) => candidate.key === key);
+          if (!choice) return;
+          initialized.current = choice.key;
+          setTargetKey(choice.key);
+          setModelDraft(defaultModelFor(choice, agents, summary.host, threadValues));
+          setError(null);
+        }}
+      >
         {targets.map((choice) => (
-          <button
-            key={choice.key}
-            type="button"
-            role="menuitemradio"
-            aria-checked={choice.key === target?.key}
-            className="q-tctrl-row"
-            onClick={() => {
-              initialized.current = choice.key;
-              setTargetKey(choice.key);
-              setModelDraft(defaultModelFor(choice, agents, summary.host, threadValues));
-              setError(null);
-            }}
-          >
-            <span className="q-tctrl-check" aria-hidden>
-              {choice.key === target?.key ? (
-                <CheckIcon className="q-icon s12" strokeWidth={2} />
-              ) : null}
-            </span>
-            <span className="grow min-w-0 truncate">{choice.label}</span>
-          </button>
+          <ListboxItem key={choice.key} value={choice.key}>
+            {choice.label}
+          </ListboxItem>
         ))}
-      </div>
+      </Listbox>
 
       <div className="q-tctrl-head">{t("harnessSwitch.model")}</div>
       <form
@@ -223,18 +219,15 @@ function SwitchPanel({ summary, onClose }: { summary: ThreadSummary; onClose: ()
           void submit();
         }}
       >
-        <input
+        <SuggestInput
           aria-label={t("harnessSwitch.modelLabel")}
-          list={`h4rn-switch-models-${summary.thread_id}`}
           value={modelDraft}
-          onChange={(event) => setModelDraft(event.target.value)}
-          className="q-mono"
+          onValueChange={setModelDraft}
+          suggestions={models}
+          showLabel={t("common:showSuggestions")}
+          mono
+          className="flex-1"
         />
-        <datalist id={`h4rn-switch-models-${summary.thread_id}`}>
-          {models.map((model) => (
-            <option key={model} value={model} />
-          ))}
-        </datalist>
       </form>
 
       {error ? (
@@ -253,7 +246,7 @@ function SwitchPanel({ summary, onClose }: { summary: ThreadSummary; onClose: ()
           disabled={busy || !target || !modelDraft.trim()}
           onClick={() => void submit()}
         >
-          <ArrowLeftRightIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+          <ArrowLeftRightIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
           {busy ? t("harnessSwitch.switching") : t("harnessSwitch.switch")}
         </button>
       </div>
@@ -278,9 +271,14 @@ export function HarnessSwitch({ summary }: { summary: ThreadSummary }) {
   const trigger = (
     <>
       <span className="sr-only">{t("harnessSwitch.trigger")}</span>
-      <span>{threadHarnessLabel(summary.harness, summary.agent_id)}</span>
+      <span
+        className="min-w-0 truncate"
+        title={threadHarnessLabel(summary.harness, summary.agent_id)}
+      >
+        {threadHarnessLabel(summary.harness, summary.agent_id)}
+      </span>
       <ChevronDownIcon
-        className={cn("q-icon s12", open && "q-rot180")}
+        className={cn("q-icon s14", open && "q-rot180")}
         strokeWidth={1.5}
         aria-hidden
       />

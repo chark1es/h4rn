@@ -68,7 +68,7 @@
     },
     "proxyModels_other": "来自 {{profile}} 的 {{count, number}} 个模型；harness 通过它转发请求。",
     "effort": "推理强度",
-    "effortHint": "未设置时使用 harness 默认值",
+    "effortHint": "未设置时使用 harness 默认值。",
     "speed": "速度",
     "fastMode": "快速模式",
     "fastHint": "优先服务层级，用量更高。",
@@ -78,8 +78,6 @@
     "agentDecides": "智能体自行决定审批。",
     "modeLater": "之后可以在输入框中更改。",
     "where": "位置",
-    "whereFixed": "由智能体固定",
-    "whereHost": "在主机上",
     "whereNote": {
       "fixed": "这个智能体总是在其配置的目录中运行。",
       "git": "智能体在这里工作，或在你要求时使用它自己的检出目录。",

@@ -50,7 +50,7 @@ function MiddlePath({ path }: { path: string }) {
       <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
         {head}
       </span>
-      <span style={{ flex: "none", whiteSpace: "nowrap" }}>{tail}</span>
+      <span className="flex-none whitespace-nowrap">{tail}</span>
     </span>
   );
 }
@@ -208,7 +208,6 @@ export function WorktreeSettings() {
               placeholder="~/worktrees"
               spellCheck={false}
               onChange={(event) => setLocation(event.target.value)}
-              style={{ maxWidth: 320, fontSize: 12 }}
             />
           </div>
         </div>
@@ -228,7 +227,6 @@ export function WorktreeSettings() {
               placeholder="h4rn/"
               spellCheck={false}
               onChange={(event) => setPrefix(event.target.value)}
-              style={{ maxWidth: 220, fontSize: 12 }}
             />
           </div>
         </div>
@@ -260,9 +258,7 @@ export function WorktreeSettings() {
               </span>
             ) : null}
             {!settingsError && settings !== null && !settingsDirty ? (
-              <span className="q-muted" style={{ fontSize: 12 }}>
-                {t("worktrees.saved")}
-              </span>
+              <span className="q-muted text-xs">{t("worktrees.saved")}</span>
             ) : null}
           </div>
         </div>
@@ -282,7 +278,7 @@ export function WorktreeSettings() {
       <div className="q-group">
         <div className="q-group-head">
           <h2>{t("worktrees.settled")}</h2>
-          <div style={{ display: "flex", gap: 8 }}>
+          <div className="flex gap-2">
             <button
               type="button"
               className="q-btn ghost"
@@ -312,7 +308,7 @@ export function WorktreeSettings() {
 
         {page.kind === "loading" ? (
           online ? (
-            <div className="q-skel" style={{ height: 120 }} />
+            <div className="q-skel h-30" />
           ) : (
             <p className="q-muted">{t("worktrees.offline")}</p>
           )
@@ -337,8 +333,7 @@ export function WorktreeSettings() {
                 {forceable.length > 0 ? (
                   <button
                     type="button"
-                    className="q-btn secondary"
-                    style={{ marginTop: 8 }}
+                    className="q-btn secondary mt-2"
                     disabled={busy}
                     onClick={() =>
                       setForcing(

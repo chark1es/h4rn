@@ -1,9 +1,10 @@
 import { TriangleAlertIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
-
+import { Button } from "@/components/ui/button";
 import {
   Dialog,
+  DialogBody,
   DialogContent,
   DialogDescription,
   DialogFooter,
@@ -110,103 +111,98 @@ export function RewindDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-[460px]">
+      <DialogContent size="sm">
         <DialogHeader>
           <DialogTitle>{t("rewind.title")}</DialogTitle>
           <DialogDescription>{t("rewind.description", { title: thread.title })}</DialogDescription>
         </DialogHeader>
-
-        {filesOffered ? (
-          <fieldset className="q-rewind-choices" aria-label={t("rewind.choices")}>
-            <label className={cn("q-rewind-choice", choice === "keep" && "on")}>
-              <input
-                type="radio"
-                name="rewind-choice"
-                value="keep"
-                checked={choice === "keep"}
-                onChange={() => setChoice("keep")}
-              />
-              <span className="q-rewind-tx">
-                <b>{t("rewind.keep.title")}</b>
-                <span>{t("rewind.keep.body")}</span>
-              </span>
-            </label>
-
-            {canRestoreFiles ? (
-              <label className={cn("q-rewind-choice", choice === "files" && "on")}>
+        <DialogBody>
+          {filesOffered ? (
+            <fieldset className="q-rewind-choices" aria-label={t("rewind.choices")}>
+              <label className={cn("q-rewind-choice", choice === "keep" && "on")}>
                 <input
                   type="radio"
                   name="rewind-choice"
-                  value="files"
-                  checked={choice === "files"}
-                  onChange={() => setChoice("files")}
+                  value="keep"
+                  checked={choice === "keep"}
+                  onChange={() => setChoice("keep")}
                 />
                 <span className="q-rewind-tx">
-                  <b>{t("rewind.files.title")}</b>
-                  <span>{t("rewind.files.body")}</span>
+                  <b>{t("rewind.keep.title")}</b>
+                  <span>{t("rewind.keep.body")}</span>
                 </span>
               </label>
-            ) : (
-              <p className="q-rewind-note">
-                {!thread.file_rewind
-                  ? t("rewind.filesLeft.projectFolder")
-                  : checkpointReady
-                    ? t("rewind.filesLeft.unsafe")
-                    : t("rewind.filesLeft.noCheckpoint")}
-              </p>
-            )}
-          </fieldset>
-        ) : null}
 
-        {canRestoreFiles && choice === "files" ? (
-          <div className="q-rewind-warning" role="note">
-            <TriangleAlertIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-            <span>{t("rewind.warning")}</span>
-          </div>
-        ) : null}
+              {canRestoreFiles ? (
+                <label className={cn("q-rewind-choice", choice === "files" && "on")}>
+                  <input
+                    type="radio"
+                    name="rewind-choice"
+                    value="files"
+                    checked={choice === "files"}
+                    onChange={() => setChoice("files")}
+                  />
+                  <span className="q-rewind-tx">
+                    <b>{t("rewind.files.title")}</b>
+                    <span>{t("rewind.files.body")}</span>
+                  </span>
+                </label>
+              ) : (
+                <p className="q-rewind-note">
+                  {!thread.file_rewind
+                    ? t("rewind.filesLeft.projectFolder")
+                    : checkpointReady
+                      ? t("rewind.filesLeft.unsafe")
+                      : t("rewind.filesLeft.noCheckpoint")}
+                </p>
+              )}
+            </fieldset>
+          ) : null}
 
-        {canRestoreFiles && choice === "files" && leftAlone ? (
-          <p className="q-rewind-note" role="note">
-            {t("rewind.ignored", { paths: leftAlone })}
+          {canRestoreFiles && choice === "files" ? (
+            <div className="q-rewind-warning" role="note">
+              <TriangleAlertIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
+              <span>{t("rewind.warning")}</span>
+            </div>
+          ) : null}
+
+          {canRestoreFiles && choice === "files" && leftAlone ? (
+            <p className="q-rewind-note" role="note">
+              {t("rewind.ignored", { paths: leftAlone })}
+            </p>
+          ) : null}
+
+          <p className="q-rewind-note">
+            {plan?.method === "handoff"
+              ? t("rewind.method.handoff")
+              : plan?.method === "native"
+                ? t("rewind.method.native", { harness: harnessLabel(thread.harness) })
+                : plan?.method === "unsupported"
+                  ? t("rewind.method.unsupported", { harness: harnessLabel(thread.harness) })
+                  : checking
+                    ? t("rewind.checking")
+                    : null}
           </p>
-        ) : null}
 
-        <p className="q-rewind-note">
-          {plan?.method === "handoff"
-            ? t("rewind.method.handoff")
-            : plan?.method === "native"
-              ? t("rewind.method.native", { harness: harnessLabel(thread.harness) })
-              : plan?.method === "unsupported"
-                ? t("rewind.method.unsupported", { harness: harnessLabel(thread.harness) })
-                : checking
-                  ? t("rewind.checking")
-                  : null}
-        </p>
+          {planError ? (
+            <p className="q-rewind-note q-warn" role="status">
+              {planError === PLAN_FAILED ? t("rewind.planError") : planError}
+            </p>
+          ) : null}
 
-        {planError ? (
-          <p className="q-rewind-note q-warn" role="status">
-            {planError === PLAN_FAILED ? t("rewind.planError") : planError}
-          </p>
-        ) : null}
-
-        {refusal ? (
-          <p className="q-rewind-note q-warn" role="status">
-            {refusal}
-          </p>
-        ) : null}
-
+          {refusal ? (
+            <p className="q-rewind-note q-warn" role="status">
+              {refusal}
+            </p>
+          ) : null}
+        </DialogBody>
         <DialogFooter>
-          <button type="button" className="q-btn ghost" onClick={() => onOpenChange(false)}>
+          <Button variant="ghost" onClick={() => onOpenChange(false)}>
             {t("common:cancel")}
-          </button>
-          <button
-            type="button"
-            className="q-btn primary"
-            disabled={submitting || blocked}
-            onClick={() => void submit()}
-          >
+          </Button>
+          <Button disabled={submitting || blocked} onClick={() => void submit()}>
             {submitting ? t("rewind.submitting") : t("rewind.submit")}
-          </button>
+          </Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

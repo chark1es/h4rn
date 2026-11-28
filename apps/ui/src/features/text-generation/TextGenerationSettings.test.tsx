@@ -79,14 +79,14 @@ describe("the title-mode picker", () => {
     expect(document.activeElement).toBe(radio("Off"));
   });
 
-  it("jumps to the ends with Home and End", () => {
+  it("moves back with ArrowLeft and wraps at the start", () => {
     render(<PickerHarness initial="coding_agent" />);
 
-    fireEvent.keyDown(radio("Coding agent"), { key: "Home" });
+    fireEvent.keyDown(radio("Coding agent"), { key: "ArrowLeft" });
     expect(radio("Off").getAttribute("aria-checked")).toBe("true");
     expect(document.activeElement).toBe(radio("Off"));
 
-    fireEvent.keyDown(radio("Off"), { key: "End" });
+    fireEvent.keyDown(radio("Off"), { key: "ArrowLeft" });
     const last = radio("Text generator");
     expect(last.getAttribute("aria-checked")).toBe("true");
     expect(document.activeElement).toBe(last);
@@ -117,16 +117,16 @@ describe("the coding-agent choice", () => {
   it("defaults to following the thread's agent and can pick one agent instead", async () => {
     render(<ThreadSettings />);
 
-    const trigger = screen.getByRole("button", {
+    const trigger = screen.getByRole("combobox", {
       name: "Coding agent for titles: Follow the thread's agent",
     });
     openChip(trigger);
     // Codex is installed on this host but is not offered as a title agent.
-    expect(screen.queryByRole("menuitem", { name: /^Codex/ })).toBeNull();
-    fireEvent.click(await screen.findByRole("menuitem", { name: /^Claude Code/ }));
+    expect(screen.queryByRole("option", { name: /^Codex/ })).toBeNull();
+    fireEvent.click(await screen.findByRole("option", { name: /^Claude Code/ }));
 
     expect(
-      screen.getByRole("button", { name: "Coding agent for titles: Claude Code" }),
+      screen.getByRole("combobox", { name: "Coding agent for titles: Claude Code" }),
     ).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() =>

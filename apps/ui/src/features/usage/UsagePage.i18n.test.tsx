@@ -169,7 +169,7 @@ describe("the usage page in another language", () => {
     await renderPage();
     expect(screen.getByRole("heading", { name: "Usage" })).toBeTruthy();
     expect(screen.getByRole("heading", { name: "Tokens per day by harness" })).toBeTruthy();
-    expect(screen.getByRole("tab", { name: "14 days", selected: true })).toBeTruthy();
+    expect(screen.getByRole("radio", { name: "14 days", checked: true })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Refresh usage" })).toBeTruthy();
     expect(screen.getByText("3 turns")).toBeTruthy();
     expect(screen.getByText("50% active")).toBeTruthy();
@@ -185,8 +185,8 @@ describe("the usage page in another language", () => {
     await renderPage();
     expect(screen.getByRole("heading", { name: "使用量" })).toBeTruthy();
     expect(screen.getByRole("heading", { name: "harness 別の 1 日あたりのトークン" })).toBeTruthy();
-    expect(screen.getByRole("tab", { name: "14 日間", selected: true })).toBeTruthy();
-    expect(screen.getByRole("tablist", { name: "期間" })).toBeTruthy();
+    expect(screen.getByRole("radio", { name: "14 日間", checked: true })).toBeTruthy();
+    expect(screen.getByRole("radiogroup", { name: "期間" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "使用量を更新" })).toBeTruthy();
     // The token stat sets the compact unit apart: 1.2 and 万, never "12.4k".
     expect(screen.getByText("万")).toBeTruthy();

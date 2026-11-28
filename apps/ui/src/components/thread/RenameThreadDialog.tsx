@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-
+import { Button } from "@/components/ui/button";
 import {
   Dialog,
+  DialogBody,
   DialogContent,
   DialogDescription,
   DialogFooter,
@@ -68,37 +69,34 @@ export function RenameThreadDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-[420px]">
+      <DialogContent size="sm">
         <DialogHeader>
           <DialogTitle>{t("rename.title")}</DialogTitle>
           <DialogDescription>{t("rename.description")}</DialogDescription>
         </DialogHeader>
-        <input
-          ref={input}
-          className="q-input"
-          aria-label={t("rename.field")}
-          value={value}
-          maxLength={200}
-          onChange={(event) => setValue(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === "Enter") {
-              event.preventDefault();
-              void submit();
-            }
-          }}
-        />
+        <DialogBody>
+          <input
+            ref={input}
+            className="q-input"
+            aria-label={t("rename.field")}
+            value={value}
+            maxLength={200}
+            onChange={(event) => setValue(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                void submit();
+              }
+            }}
+          />
+        </DialogBody>
         <DialogFooter>
-          <button type="button" className="q-btn ghost" onClick={() => onOpenChange(false)}>
+          <Button variant="ghost" onClick={() => onOpenChange(false)}>
             {t("common:cancel")}
-          </button>
-          <button
-            type="button"
-            className="q-btn primary"
-            disabled={saving || !value.trim()}
-            onClick={() => void submit()}
-          >
+          </Button>
+          <Button disabled={saving || !value.trim()} onClick={() => void submit()}>
             {saving ? t("common:saving") : t("rename.save")}
-          </button>
+          </Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

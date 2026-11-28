@@ -8,9 +8,10 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-
 import { ChipSelect } from "@/components/common/ChipSelect";
 import { ConfirmDialog } from "@/components/common/ConfirmDialog";
+import { SuggestInput } from "@/components/ui/autocomplete";
+import { Switch } from "@/components/ui/switch";
 import {
   loadAcpAgents,
   loadHarnessVersions,
@@ -22,9 +23,8 @@ import { onScheduleFrame } from "@/lib/client/frames";
 import { HARNESS_LABELS, harnessLabel } from "@/lib/entities";
 import { i18n } from "@/lib/i18n";
 import { HARNESS_MODELS } from "@/lib/models";
-import { openThread, useApp } from "@/lib/store/appStore";
+import { openThread, pushToast, useApp } from "@/lib/store/appStore";
 import { MODE_CHOICES } from "@/lib/threadControls";
-
 import {
   applyScheduleEvent,
   createSchedule,
@@ -97,7 +97,7 @@ function ScheduleFields({
           <ChipSelect<ScheduleKind>
             label={t("schedules.editor.schedule")}
             value={schedule.kind}
-            width={150}
+            className="w-37.5"
             options={SCHEDULE_KINDS.map((kind) => ({
               value: kind,
               label: scheduleKindLabel(kind),
@@ -152,7 +152,7 @@ function ScheduleFields({
             <ChipSelect<"minutes" | "hours">
               label={t("schedules.editor.intervalUnit")}
               value={schedule.unit}
-              width={110}
+              className="w-27.5"
               options={[
                 { value: "minutes", label: unitLabel("minutes") },
                 { value: "hours", label: unitLabel("hours") },
@@ -266,7 +266,6 @@ function WebhookPanel({ task }: { task: ScheduleTask | null }) {
       ? state.webhookPathError.message
       : null,
   );
-  const [copied, setCopied] = useState<string | null>(null);
   const [rotating, setRotating] = useState(false);
   const hasPath = live?.webhook_path_set ?? false;
 
@@ -281,9 +280,9 @@ function WebhookPanel({ task }: { task: ScheduleTask | null }) {
     if (!path) return;
     try {
       await navigator.clipboard.writeText(path);
-      setCopied(i18n.t("settings:schedules.webhook.copied"));
+      pushToast({ title: i18n.t("settings:schedules.webhook.copied"), variant: "success" });
     } catch {
-      setCopied(i18n.t("settings:schedules.webhook.copyFailed"));
+      pushToast({ title: i18n.t("settings:schedules.webhook.copyFailed"), variant: "error" });
     }
   };
   return (
@@ -341,11 +340,6 @@ function WebhookPanel({ task }: { task: ScheduleTask | null }) {
       {revealError ? (
         <p className="q-muted" role="alert">
           {revealError}
-        </p>
-      ) : null}
-      {copied ? (
-        <p className="q-muted" role="status" aria-live="polite">
-          {copied}
         </p>
       ) : null}
       <div className="q-field q-field-block">
@@ -459,19 +453,15 @@ function ScheduleEditor({
           <FieldError message={errors.timezone} />
         </div>
         <div className="ctl">
-          <input
-            className="q-input q-mono"
+          <SuggestInput
             aria-label={t("schedules.editor.timezone")}
-            list="schedule-timezones"
             value={draft.timezone}
-            onChange={(event) => patch({ timezone: event.target.value })}
-            style={{ width: 220 }}
+            onValueChange={(next) => patch({ timezone: next })}
+            suggestions={timezoneOptions(timezone)}
+            showLabel={t("common:showSuggestions")}
+            mono
+            className="w-55"
           />
-          <datalist id="schedule-timezones">
-            {timezoneOptions(timezone).map((name) => (
-              <option key={name} value={name} />
-            ))}
-          </datalist>
         </div>
       </div>
 
@@ -484,7 +474,7 @@ function ScheduleEditor({
           <ChipSelect<ScheduleDraft["destination"]>
             label={t("schedules.editor.destination")}
             value={draft.destination}
-            width={220}
+            className="w-55"
             options={DESTINATIONS.map((value) => ({
               value,
               label: describeDestination(value),
@@ -500,21 +490,15 @@ function ScheduleEditor({
           <FieldError message={errors.workspace} />
         </div>
         <div className="ctl">
-          <input
-            className="q-input q-mono"
+          <SuggestInput
             aria-label={t("schedules.editor.workspaceLabel")}
-            list="schedule-workspaces"
             value={draft.workspace_path}
-            onChange={(event) => patch({ workspace_path: event.target.value })}
-            style={{ width: 320 }}
+            onValueChange={(next) => patch({ workspace_path: next })}
+            suggestions={projects.map((project) => project.path)}
+            showLabel={t("common:showSuggestions")}
+            mono
+            className="w-80"
           />
-          <datalist id="schedule-workspaces">
-            {projects.map((project) => (
-              <option key={project.id} value={project.path}>
-                {project.name}
-              </option>
-            ))}
-          </datalist>
         </div>
       </div>
 
@@ -526,7 +510,7 @@ function ScheduleEditor({
           <ChipSelect<string>
             label={t("schedules.editor.harness")}
             value={draft.harness === "acp" ? `acp:${draft.agent_id ?? ""}` : draft.harness}
-            width={200}
+            className="w-50"
             options={[
               ...harnesses
                 .filter((kind) => kind !== "acp")
@@ -591,7 +575,7 @@ function ScheduleEditor({
           <ChipSelect<ScheduleDraft["runtime_mode"]>
             label={t("threads.permissions")}
             value={draft.runtime_mode}
-            width={190}
+            className="w-47.5"
             options={MODE_CHOICES.map((choice) => ({
               value: choice.value,
               label: t(`common:permissionModes.${choice.value}`),
@@ -625,13 +609,10 @@ function ScheduleEditor({
           <div className="s">{t("schedules.editor.enabledHint")}</div>
         </div>
         <div className="ctl">
-          <button
-            type="button"
-            className="q-switch"
-            role="switch"
-            aria-checked={draft.enabled}
+          <Switch
+            checked={draft.enabled}
             aria-label={t("schedules.editor.enabledLabel")}
-            onClick={() => patch({ enabled: !draft.enabled })}
+            onCheckedChange={() => patch({ enabled: !draft.enabled })}
           />
         </div>
       </div>
@@ -749,18 +730,15 @@ function TaskRow({
         ) : null}
       </div>
       <div className="ctl" style={{ flex: "0 1 auto", justifyContent: "flex-end" }}>
-        <button
-          type="button"
-          className="q-switch"
-          role="switch"
-          aria-checked={task.enabled}
+        <Switch
+          checked={task.enabled}
           aria-label={
             task.enabled
               ? t("schedules.task.pause", { name: task.name })
               : t("schedules.task.resume", { name: task.name })
           }
           disabled={busy}
-          onClick={() => void toggle()}
+          onCheckedChange={() => void toggle()}
         />
         {task.schedule.kind !== "webhook" ? (
           <button

@@ -1,13 +1,15 @@
-import { type ReactNode, useCallback, useEffect, useId, useRef, useState } from "react";
+import { type CSSProperties, type ReactNode, useState } from "react";
+
+import {
+  PopoverContent,
+  Popover as PopoverRoot,
+  PopoverTitle,
+  PopoverTrigger,
+} from "@/components/ui/popover";
 
 /**
- * A small anchored panel for a short decision: a trigger button, a raised
- * `.q-pop` card, Esc or an outside press to dismiss, focus back on the trigger.
- *
- * It is not a menu (no arrow-key list) and not a dialog (nothing is blocked),
- * which is what the design's "Resolve…" and "Hand to agent" panels are. A
- * control inside that opens its own portaled menu would count as an outside
- * press, so the panel's contents use plain buttons and inputs.
+ * A small anchored panel for a short decision, like "Resolve…" or the thread
+ * controls: not a menu (no arrow-key list) and not a dialog (nothing is blocked).
  */
 export function Popover({
   label,
@@ -39,81 +41,23 @@ export function Popover({
 }) {
   const [uncontrolledOpen, setUncontrolledOpen] = useState(false);
   const open = controlledOpen ?? uncontrolledOpen;
-  const root = useRef<HTMLDivElement>(null);
-  const triggerRef = useRef<HTMLButtonElement>(null);
-  const panelId = useId();
-
-  const setOpen = useCallback(
-    (next: boolean) => {
-      if (onOpenChange) onOpenChange(next);
-      else setUncontrolledOpen(next);
-    },
-    [onOpenChange],
-  );
-
-  const close = useCallback(() => {
-    setOpen(false);
-    triggerRef.current?.focus();
-  }, [setOpen]);
-
-  useEffect(() => {
-    if (!open) return;
-    const onPointer = (event: PointerEvent) => {
-      if (!root.current?.contains(event.target as Node)) setOpen(false);
-    };
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.stopPropagation();
-        close();
-      }
-    };
-    document.addEventListener("pointerdown", onPointer);
-    document.addEventListener("keydown", onKey, true);
-    return () => {
-      document.removeEventListener("pointerdown", onPointer);
-      document.removeEventListener("keydown", onKey, true);
-    };
-  }, [open, close, setOpen]);
-
-  // Focus the first control when the panel opens.
-  useEffect(() => {
-    if (!open) return;
-    const panel = document.getElementById(panelId);
-    panel
-      ?.querySelector<HTMLElement>(
-        "input:checked, [role='radio'][aria-checked='true'], button, input",
-      )
-      ?.focus();
-  }, [open, panelId]);
+  const setOpen = (next: boolean) => {
+    if (onOpenChange) onOpenChange(next);
+    else setUncontrolledOpen(next);
+  };
 
   return (
-    <div ref={root} style={{ position: "relative", display: "inline-block" }}>
-      <button
-        ref={triggerRef}
-        type="button"
-        className={triggerClassName}
-        aria-haspopup="dialog"
-        aria-expanded={open}
-        aria-controls={open ? panelId : undefined}
-        onClick={() => setOpen(!open)}
+    <PopoverRoot open={open} onOpenChange={setOpen}>
+      <PopoverTrigger className={triggerClassName}>{trigger({ open })}</PopoverTrigger>
+      <PopoverContent
+        side={placement === "above" ? "top" : "bottom"}
+        align={align}
+        className="w-(--popover-width)"
+        style={{ "--popover-width": `${width}px` } as CSSProperties}
       >
-        {trigger({ open })}
-      </button>
-      {open ? (
-        <div
-          id={panelId}
-          role="dialog"
-          aria-label={label}
-          className="q-pop"
-          style={{
-            [placement === "above" ? "bottom" : "top"]: "calc(100% + 6px)",
-            [align === "end" ? "right" : "left"]: 0,
-            width,
-          }}
-        >
-          {children({ close })}
-        </div>
-      ) : null}
-    </div>
+        <PopoverTitle className="sr-only">{label}</PopoverTitle>
+        {children({ close: () => setOpen(false) })}
+      </PopoverContent>
+    </PopoverRoot>
   );
 }

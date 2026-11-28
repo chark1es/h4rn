@@ -512,7 +512,13 @@
     "neverConnected": "Never connected",
     "confirmSignOut": "Sign out of this device?",
     "confirmDisconnect": "Disconnect this host?",
-    "confirmRevoke": "Revoke?",
+    "confirmRevoke": "Revoke {{name}}?",
+    "confirmDescription": {
+      "direct": "{{name}} can no longer connect to this computer. Pair it again to use it.",
+      "revoke": "{{name}} loses access to your account until it signs in again.",
+      "disconnect": "{{name}} leaves your account. Its threads stop showing here until it signs in again.",
+      "signOut": "This device stops reaching your hosts until you sign in again."
+    },
     "signOut": "Sign out",
     "scopes": {
       "all": "All",

@@ -72,7 +72,9 @@ function search(text: string) {
 
 /** The visible rows' text, in order. */
 function rows(): string[] {
-  return [...document.querySelectorAll("[cmdk-item]")].map((row) => row.textContent ?? "");
+  return [...document.querySelectorAll('[data-slot="command-item"]')].map(
+    (row) => row.textContent ?? "",
+  );
 }
 
 beforeAll(() => {
@@ -184,9 +186,9 @@ describe("command palette in another language", () => {
     await act(() => setLocalePreference("ja"));
     renderPalette();
 
-    const row = screen.getByText("スレッドを整理").closest("[cmdk-item]");
+    const row = screen.getByText("スレッドを整理").closest('[data-slot="command-item"]');
     if (!(row instanceof HTMLElement)) throw new Error("the settle row is not a command item");
-    const caps = [...row.querySelectorAll(".q-kbd")].map((cap) => cap.textContent);
+    const caps = [...row.querySelectorAll("[data-slot='kbd']")].map((cap) => cap.textContent);
     expect(caps).toEqual(["Ctrl", "Shift", "S"]);
 
     const footer = document.querySelector("[data-slot='command-footer']");

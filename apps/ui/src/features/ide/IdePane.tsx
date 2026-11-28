@@ -11,23 +11,25 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-
 import { AgentGlyph } from "@/components/agent/AgentGlyph";
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
 import { ChipSelect } from "@/components/common/ChipSelect";
 import { EmptyState } from "@/components/common/EmptyState";
-import { MOD, SHIFT } from "@/components/common/Kbd";
 import { SidebarReveal } from "@/components/shell/Sidebar";
 import { ViewCluster } from "@/components/thread/ThreadHeader";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
+  DialogBody,
   DialogContent,
   DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { MOD, SHIFT } from "@/components/ui/kbd";
+import { Tabs, TabsList, TabsTab } from "@/components/ui/tabs";
+import { Tip } from "@/components/ui/tooltip";
 import { TerminalPanel } from "@/features/terminal/TerminalPanel";
 import type { ThreadSummary } from "@/gen";
 import { useIsPhone } from "@/hooks/use-media-query";
@@ -37,7 +39,6 @@ import { readThreadDraft, writeThreadDraft } from "@/lib/drafts";
 import { machineSeed } from "@/lib/entities";
 import { monogram } from "@/lib/grouping";
 import { formatNumber, i18n } from "@/lib/i18n";
-import { titleWithShortcut } from "@/lib/keybindings";
 import {
   ensureThread,
   navigate,
@@ -404,6 +405,13 @@ export function IdePane() {
   })();
 
   const showDiff = panel === "diff";
+  const enterDiff = () => {
+    // Entering the pane already asks for the tab's file; mark the tab as
+    // handled so the follow effect does not ask twice.
+    followedTabRef.current = active?.path ?? null;
+    setPanel("diff");
+    void session.selectDiffSource(state.diffSource);
+  };
   const shownPath = showDiff
     ? (state.diffPath ?? active?.path ?? workspace.path)
     : (active?.path ?? workspace.path);
@@ -439,24 +447,21 @@ export function IdePane() {
               />
               <span>{workspace.host}</span>
               <span className="q-sep">/</span>
-              <span className="q-mono" style={{ fontSize: 11.5 }}>
+              <span className="q-mono" style={{ fontSize: 12 }}>
                 {workspace.path}
               </span>
             </div>
           </div>
           {thread ? (
-            <button
-              type="button"
-              className="q-tchip"
-              title={titleWithShortcut(t("header.backToThread"), "view.toggle")}
-              onClick={backToThread}
-            >
-              <AgentGlyph glyph={glyph} size={14} />
-              <span className="t">{thread.title}</span>
-              {thread.needs_attention ? (
-                <span className="s">{t("header.needsApproval")}</span>
-              ) : null}
-            </button>
+            <Tip label={t("header.backToThread")} command="view.toggle">
+              <button type="button" className="q-tchip" onClick={backToThread}>
+                <AgentGlyph glyph={glyph} size={14} />
+                <span className="t">{thread.title}</span>
+                {thread.needs_attention ? (
+                  <span className="s">{t("header.needsApproval")}</span>
+                ) : null}
+              </button>
+            </Tip>
           ) : null}
           <div className="q-th-actions">
             <span className="q-vsep" />
@@ -497,31 +502,30 @@ export function IdePane() {
             {shownPath}
           </span>
           <span className="grow" />
-          <div className="q-seg inline" role="tablist" aria-label={t("bar.mode")}>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={!showDiff}
-              onClick={() => setPanel((current) => (current === "diff" ? null : current))}
-            >
-              {t("common:edit")}
-            </button>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={showDiff}
-              disabled={!active && !state.diffPath}
-              onClick={() => {
-                // Entering the pane already asks for the tab's file; mark the
-                // tab as handled so the follow effect does not ask twice.
-                followedTabRef.current = active?.path ?? null;
-                setPanel("diff");
-                void session.selectDiffSource(state.diffSource);
-              }}
-            >
-              {t("bar.diff")}
-            </button>
-          </div>
+          <Tabs
+            className="flex-row"
+            value={showDiff ? "diff" : "edit"}
+            onValueChange={(value) => {
+              if (value === "edit") {
+                setPanel((current) => (current === "diff" ? null : current));
+              } else if (value === "diff") {
+                enterDiff();
+              }
+            }}
+          >
+            <TabsList variant="segmented" aria-label={t("bar.mode")}>
+              <TabsTab value="edit">{t("common:edit")}</TabsTab>
+              <TabsTab
+                value="diff"
+                disabled={!active && !state.diffPath}
+                onClick={() => {
+                  if (showDiff) enterDiff();
+                }}
+              >
+                {t("bar.diff")}
+              </TabsTab>
+            </TabsList>
+          </Tabs>
           <ChipSelect<DiffSource>
             label={t("bar.source")}
             value={state.diffSource}
@@ -581,16 +585,17 @@ export function IdePane() {
             />
           ) : null}
           {active ? (
-            <button
-              type="button"
-              className="q-btn ghost"
-              style={{ height: 24 }}
-              onClick={() => openNewThread()}
-              title={t("bar.handToAgentHint")}
-            >
-              <HandIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-              {t("bar.handToAgent")}
-            </button>
+            <Tip label={t("bar.handToAgentHint")}>
+              <button
+                type="button"
+                className="q-btn ghost q-inline-end"
+                style={{ height: 24 }}
+                onClick={() => openNewThread()}
+              >
+                <HandIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
+                {t("bar.handToAgent")}
+              </button>
+            </Tip>
           ) : null}
         </div>
 
@@ -756,7 +761,7 @@ export function IdePane() {
         <div className="q-statusbar">
           {thread?.branch ? (
             <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
-              <GitBranchIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+              <GitBranchIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
               {thread.branch}
             </span>
           ) : null}
@@ -778,7 +783,7 @@ export function IdePane() {
               style={{ display: "flex", alignItems: "center", gap: 4, color: "var(--danger)" }}
               title={t("status.daemonOffline")}
             >
-              <WifiOffIcon className="q-icon s12" aria-hidden />
+              <WifiOffIcon className="q-icon s14" aria-hidden />
               <span className={isPhone ? "hidden" : undefined}>{t("status.offline")}</span>
             </span>
           ) : null}
@@ -816,7 +821,7 @@ export function IdePane() {
         open={state.conflict !== null}
         onOpenChange={(open) => !open && session.patch({ conflict: null })}
       >
-        <DialogContent className="sm:max-w-2xl">
+        <DialogContent size="lg">
           <DialogHeader>
             <DialogTitle>
               {state.conflict?.deleted
@@ -827,27 +832,29 @@ export function IdePane() {
               {state.conflict?.deleted ? t("conflict.deletedBody") : t("conflict.changedBody")}
             </DialogDescription>
           </DialogHeader>
-          {state.conflict ? (
-            <div className="max-h-64 overflow-auto rounded-md border border-line bg-bg-side font-mono text-[10px] leading-4">
-              {computeDiff(state.conflict.theirs, state.conflict.mine)
-                .slice(0, 80)
-                .map((line) => (
-                  <div
-                    key={`${line.kind}-${line.oldLine}-${line.newLine}`}
-                    className={cn(
-                      "flex gap-2 px-2",
-                      line.kind === "added" && "bg-ok-soft text-ok",
-                      line.kind === "removed" && "bg-danger-soft text-danger",
-                    )}
-                  >
-                    <span className="w-4 shrink-0 text-fg-3">
-                      {line.kind === "added" ? "+" : line.kind === "removed" ? "−" : " "}
-                    </span>
-                    <span className="whitespace-pre-wrap">{line.text || " "}</span>
-                  </div>
-                ))}
-            </div>
-          ) : null}
+          <DialogBody>
+            {state.conflict ? (
+              <div className="max-h-64 overflow-auto rounded-lg border border-line bg-bg-side font-mono text-xs leading-4">
+                {computeDiff(state.conflict.theirs, state.conflict.mine)
+                  .slice(0, 80)
+                  .map((line) => (
+                    <div
+                      key={`${line.kind}-${line.oldLine}-${line.newLine}`}
+                      className={cn(
+                        "flex gap-2 px-2",
+                        line.kind === "added" && "bg-ok-soft text-ok",
+                        line.kind === "removed" && "bg-danger-soft text-danger",
+                      )}
+                    >
+                      <span className="w-4 shrink-0 text-fg-3">
+                        {line.kind === "added" ? "+" : line.kind === "removed" ? "−" : " "}
+                      </span>
+                      <span className="whitespace-pre-wrap">{line.text || " "}</span>
+                    </div>
+                  ))}
+              </div>
+            ) : null}
+          </DialogBody>
           <DialogFooter>
             <Button variant="ghost" onClick={() => session.patch({ conflict: null })}>
               {t("common:cancel")}

@@ -162,8 +162,6 @@
     "phone": {
       "details": "詳細",
       "review": "確認",
-      "close": "承認の確認を閉じる",
-      "sheet": "コマンドを承認",
       "runCommandOn": "{{host}} でコマンドを実行",
       "reviewRequestOn": "{{host}} のリクエストを確認",
       "folder": "フォルダー",
@@ -355,6 +353,7 @@
     "back": "スレッドに戻る",
     "thread": "スレッド",
     "title": "ターミナル",
+    "tabs": "ターミナル",
     "new": "新しいターミナル",
     "close": "{{name}} を閉じる",
     "find": "ターミナル内を検索",

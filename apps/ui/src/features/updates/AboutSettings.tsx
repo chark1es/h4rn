@@ -1,9 +1,8 @@
 import { useTranslation } from "react-i18next";
-
+import { Switch } from "@/components/ui/switch";
 import { formatRelativeTime, i18n } from "@/lib/i18n";
 import { updateShell } from "@/lib/platform/appUpdate";
 import { useApp } from "@/lib/store/appStore";
-
 import {
   appUpdateErrorText,
   checkForAppUpdates,
@@ -73,7 +72,7 @@ export function AboutSettings() {
         </div>
         <div className="ctl">
           <span className="q-mono q-muted">{version ?? "—"}</span>
-          <span style={{ flex: 1 }} />
+          <span className="flex-1" />
           <button
             type="button"
             className="q-btn secondary"
@@ -98,13 +97,10 @@ export function AboutSettings() {
           <div className="s">{t("about.checkAutomaticallyHint")}</div>
         </div>
         <div className="ctl">
-          <button
-            type="button"
-            className="q-switch"
-            role="switch"
-            aria-checked={autoCheck}
+          <Switch
+            checked={autoCheck}
             aria-label={t("about.checkAutomaticallyLabel")}
-            onClick={() => void setAutoCheck(!autoCheck)}
+            onCheckedChange={() => void setAutoCheck(!autoCheck)}
           />
         </div>
       </div>

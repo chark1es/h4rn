@@ -9,20 +9,19 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Trans, useTranslation } from "react-i18next";
-
 import { ChipSelect } from "@/components/common/ChipSelect";
 import { Markdown } from "@/components/thread/Markdown";
 import {
-  DropdownMenu,
-  DropdownMenuCheckboxItem,
-  DropdownMenuContent,
-  DropdownMenuGroup,
-  DropdownMenuLabel,
-  DropdownMenuRadioGroup,
-  DropdownMenuRadioItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
+  Menu,
+  MenuCheckboxItem,
+  MenuContent,
+  MenuFooter,
+  MenuGroup,
+  MenuRadioGroup,
+  MenuRadioItem,
+  MenuTrigger,
+} from "@/components/ui/menu";
+import { SegmentedControl, SegmentedControlItem } from "@/components/ui/segmented-control";
 import { accountsForRepo, forgeLabel } from "@/features/forge/store";
 import { useProjects } from "@/features/projects/store";
 import type {
@@ -663,33 +662,28 @@ export function IssuesPage() {
             </button>
           ) : null}
         </form>
-        <div className="q-seg" role="tablist" aria-label={t("filters.label")}>
+        <SegmentedControl
+          className="max-[560px]:h-auto max-[560px]:w-full max-[560px]:flex-wrap max-[560px]:[&>[data-slot=segmented-control-item]]:min-h-11 max-[560px]:[&>[data-slot=segmented-control-item]]:flex-auto"
+          aria-label={t("filters.label")}
+          value={filter}
+          onValueChange={(value) => {
+            if (value) changeFilter(value as typeof filter);
+          }}
+        >
           {filters.map((key) => (
-            <button
-              key={key}
-              type="button"
-              role="tab"
-              aria-selected={filter === key}
-              onClick={() => changeFilter(key)}
-            >
+            <SegmentedControlItem key={key} value={key}>
               {t(`filters.${key}`)}
-            </button>
+            </SegmentedControlItem>
           ))}
-        </div>
+        </SegmentedControl>
         <span className="grow" />
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <button type="button" className="q-btn ghost" aria-label={t("projects.label")}>
-              {t("projects.label")}
-            </button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end" className="w-64 max-h-80 overflow-y-auto">
-            <DropdownMenuLabel>{t("projects.label")}</DropdownMenuLabel>
-            <DropdownMenuSeparator />
+        <Menu>
+          <MenuTrigger className="q-btn ghost" aria-label={t("projects.label")}>
+            {t("projects.label")}
+          </MenuTrigger>
+          <MenuContent align="end" className="w-64">
             {projects.length === 0 ? (
-              <p className="q-faint" style={{ padding: "6px 8px", fontSize: 12 }}>
-                {t("projects.none")}
-              </p>
+              <MenuFooter>{t("projects.none")}</MenuFooter>
             ) : (
               projects.map((project) => {
                 const repo = repos[project.id];
@@ -699,36 +693,37 @@ export function IssuesPage() {
                     (candidate) => candidate.account_id === accountChoices[project.id],
                   ) ?? candidates[0];
                 return (
-                  <DropdownMenuGroup key={project.id}>
-                    <DropdownMenuCheckboxItem
+                  <MenuGroup
+                    key={project.id}
+                    aria-label={project.name}
+                    className="not-first:-mx-1 not-first:mt-1 not-first:border-t not-first:border-border not-first:px-1 not-first:pt-1"
+                  >
+                    <MenuCheckboxItem
+                      value={project.id}
                       checked={!hidden.has(project.id)}
                       onCheckedChange={() => toggleProject(project.id)}
-                      onSelect={(event) => event.preventDefault()}
                     >
                       {project.name}
-                    </DropdownMenuCheckboxItem>
+                    </MenuCheckboxItem>
                     {candidates.length > 1 ? (
-                      <DropdownMenuRadioGroup
+                      <MenuRadioGroup
                         value={chosen?.account_id ?? ""}
-                        onValueChange={(accountId) => chooseAccount(project.id, accountId)}
+                        onValueChange={(accountId: string) => chooseAccount(project.id, accountId)}
                         aria-label={t("projects.accountFor", { name: project.name })}
                       >
                         {candidates.map((candidate) => (
-                          <DropdownMenuRadioItem
-                            key={candidate.account_id}
-                            value={candidate.account_id}
-                          >
+                          <MenuRadioItem key={candidate.account_id} value={candidate.account_id}>
                             {candidate.username ?? candidate.display_name ?? candidate.account_id}
-                          </DropdownMenuRadioItem>
+                          </MenuRadioItem>
                         ))}
-                      </DropdownMenuRadioGroup>
+                      </MenuRadioGroup>
                     ) : null}
-                  </DropdownMenuGroup>
+                  </MenuGroup>
                 );
               })
             )}
-          </DropdownMenuContent>
-        </DropdownMenu>
+          </MenuContent>
+        </Menu>
       </header>
 
       <div className="q-issues-body">

@@ -9,8 +9,10 @@ import {
 } from "lucide-react";
 import { Fragment, useEffect, useMemo, useState } from "react";
 import { Trans, useTranslation } from "react-i18next";
-
 import { ChipSelect } from "@/components/common/ChipSelect";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "@/components/ui/collapsible";
+import { Switch } from "@/components/ui/switch";
 import type {
   AgentState,
   HarnessKind,
@@ -24,7 +26,6 @@ import { HARNESS_LABELS } from "@/lib/entities";
 import { formatList, formatNumber, formatRelativeTime, i18n } from "@/lib/i18n";
 import { useApp } from "@/lib/store/appStore";
 import { cn } from "@/lib/utils";
-
 import {
   addProxyProfile,
   applyProxyOverrides,
@@ -206,11 +207,11 @@ function Diagnostics({ diagnostics }: { diagnostics: ProxyDiagnostic[] }) {
           className="q-li"
           style={{ display: "block" }}
         >
-          <div style={{ display: "flex", gap: 6, alignItems: "flex-start" }}>
+          <div className="flex gap-1.5 items-start">
             {diagnostic.level === "error" ? (
-              <TriangleAlertIcon className="q-icon s12 q-danger" strokeWidth={1.5} aria-hidden />
+              <TriangleAlertIcon className="q-icon s14 q-danger" strokeWidth={1.5} aria-hidden />
             ) : null}
-            <span style={{ fontWeight: 500 }}>{diagnostic.message}</span>
+            <span className="font-medium">{diagnostic.message}</span>
           </div>
           {diagnostic.hint ? (
             <div className="q-faint" style={{ fontSize: 12, marginTop: 3 }}>
@@ -308,7 +309,6 @@ function AddProfile() {
             value={name}
             onChange={(event) => setName(event.target.value)}
             aria-label={t("proxy.add.labelLabel")}
-            style={{ maxWidth: 260 }}
           />
         </div>
       </div>
@@ -322,7 +322,6 @@ function AddProfile() {
             value={baseUrl}
             onChange={(event) => setBaseUrl(event.target.value)}
             aria-label={t("proxy.add.baseUrlLabel")}
-            style={{ maxWidth: 300, fontSize: 12 }}
           />
         </div>
       </div>
@@ -339,7 +338,6 @@ function AddProfile() {
             onChange={(event) => setManagementKey(event.target.value)}
             placeholder={t("proxy.storedOn", { host })}
             aria-label={t("proxy.managementKey")}
-            style={{ maxWidth: 300, fontSize: 12 }}
           />
         </div>
       </div>
@@ -356,7 +354,6 @@ function AddProfile() {
             onChange={(event) => setApiKey(event.target.value)}
             placeholder={t("proxy.storedOn", { host })}
             aria-label={t("proxy.accessKey")}
-            style={{ maxWidth: 300, fontSize: 12 }}
           />
         </div>
       </div>
@@ -365,19 +362,14 @@ function AddProfile() {
           <div className="t">{t("common:default")}</div>
         </div>
         <div className="ctl">
-          <button
-            type="button"
-            className={cn("q-check", isDefault && "on")}
-            role="switch"
-            aria-checked={isDefault}
+          <Checkbox
+            checked={isDefault}
             aria-label={t("proxy.add.defaultLabel")}
-            onClick={() => setIsDefault((value) => !value)}
-          >
-            {isDefault ? <CheckIcon className="q-icon s12" strokeWidth={2} aria-hidden /> : null}
-          </button>
+            onCheckedChange={(next) => setIsDefault(next === true)}
+          />
         </div>
       </div>
-      <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+      <div className="flex gap-2 justify-end">
         <button type="button" className="q-btn ghost" onClick={() => setOpen(false)}>
           {t("common:cancel")}
         </button>
@@ -429,7 +421,6 @@ function ProfileField({
           value={draft}
           onChange={(event) => setDraft(event.target.value)}
           aria-label={label}
-          style={{ maxWidth: 300, fontSize: 12 }}
         />
         <button
           type="button"
@@ -477,7 +468,6 @@ function SecretField({
               onChange={(event) => setValue(event.target.value)}
               placeholder={t("proxy.newKey")}
               aria-label={t("proxy.newKeyLabel", { label })}
-              style={{ maxWidth: 240, fontSize: 12 }}
             />
             <button
               type="button"
@@ -498,15 +488,15 @@ function SecretField({
         ) : (
           <>
             <span className="q-secret">
-              <KeyRoundIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+              <KeyRoundIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
               {hasKey ? t("proxy.storedOn", { host }) : t("proxy.noKeyStored")}
             </span>
-            <span style={{ flex: 1 }} />
-            <button type="button" className="q-btn ghost" onClick={() => setEditing(true)}>
+            <span className="flex-1" />
+            <button type="button" className="q-btn secondary" onClick={() => setEditing(true)}>
               {t("proxy.replace")}
             </button>
             {hasKey ? (
-              <button type="button" className="q-btn ghost" onClick={onClear}>
+              <button type="button" className="q-btn danger" onClick={onClear}>
                 {t("common:remove")}
               </button>
             ) : null}
@@ -533,14 +523,11 @@ function HarnessRow({ profile, harness }: { profile: ProxyProfile; harness: Harn
           <div className="s">{enabled ? t("proxy.harness.routed") : t("proxy.harness.own")}</div>
         </div>
         <div className="ctl">
-          <button
-            type="button"
-            className="q-switch"
-            role="switch"
-            aria-checked={enabled}
+          <Switch
+            checked={enabled}
             aria-label={t("proxy.harness.routeLabel", { harness: HARNESS_LABELS[harness] })}
             disabled={saving}
-            onClick={() =>
+            onCheckedChange={() =>
               void setHarnessOverride(
                 profile.id,
                 harness,
@@ -551,7 +538,6 @@ function HarnessRow({ profile, harness }: { profile: ProxyProfile; harness: Harn
           />
           <ChipSelect
             label={t("proxy.harness.defaultModel", { harness: HARNESS_LABELS[harness] })}
-            width={190}
             disabled={!enabled}
             value={defaultModel}
             options={[
@@ -800,29 +786,34 @@ function ProfileDetail({ profile }: { profile: ProxyProfile }) {
               </div>
             ) : null}
             {details.length > 0 || report ? (
-              <details className="q-details">
-                <summary>{t("proxy.probe.details")}</summary>
-                {details.length > 0 ? (
-                  <div className="q-probe">
-                    {details.map((row) => (
-                      <Fragment key={row.label}>
-                        <span className={row.ok ? "q-ok" : "q-faint"}>
-                          {row.ok ? (
-                            <CheckIcon className="q-icon s12" strokeWidth={2} aria-hidden />
-                          ) : null}
-                        </span>
-                        <div className="k">{row.label}</div>
-                        <div className={cn("v", !row.ok && "q-faint")}>{row.value}</div>
-                      </Fragment>
-                    ))}
-                  </div>
-                ) : null}
-                {report ? (
-                  <div style={{ marginTop: 12 }}>
-                    <Diagnostics diagnostics={report.diagnostics} />
-                  </div>
-                ) : null}
-              </details>
+              <Collapsible className="mt-2 text-xs">
+                {/* Chevron and label on the probe rows' icon and label columns. */}
+                <CollapsibleTrigger className="gap-3 text-xs">
+                  {t("proxy.probe.details")}
+                </CollapsibleTrigger>
+                <CollapsiblePanel className="mt-2">
+                  {details.length > 0 ? (
+                    <div className="q-probe">
+                      {details.map((row) => (
+                        <Fragment key={row.label}>
+                          <span className={row.ok ? "q-ok" : "q-faint"}>
+                            {row.ok ? (
+                              <CheckIcon className="q-icon s14" strokeWidth={2} aria-hidden />
+                            ) : null}
+                          </span>
+                          <div className="k">{row.label}</div>
+                          <div className={cn("v", !row.ok && "q-faint")}>{row.value}</div>
+                        </Fragment>
+                      ))}
+                    </div>
+                  ) : null}
+                  {report ? (
+                    <div className="mt-3">
+                      <Diagnostics diagnostics={report.diagnostics} />
+                    </div>
+                  ) : null}
+                </CollapsiblePanel>
+              </Collapsible>
             ) : null}
           </div>
         </div>
@@ -937,8 +928,8 @@ export function ProxySettings() {
     return (
       <div className="q-form">
         <h1>CLIProxyAPI</h1>
-        <div className="q-skel" style={{ height: 12, width: 260 }} />
-        <div className="q-skel" style={{ height: 120, marginTop: 18 }} />
+        <div className="q-skel h-3 w-65" />
+        <div className="q-skel h-30 mt-4" />
       </div>
     );
   }
@@ -948,7 +939,7 @@ export function ProxySettings() {
       <div className="q-form">
         <h1>CLIProxyAPI</h1>
         <div className="q-empty">
-          <p style={{ margin: 0 }}>{error.message}</p>
+          <p className="m-0">{error.message}</p>
           <p className="q-faint" style={{ margin: "4px 0 12px" }}>
             {error.hint ?? t("proxy.startDaemon")}
           </p>
@@ -967,7 +958,7 @@ export function ProxySettings() {
   return (
     <div className="q-form">
       <div className="q-form-head">
-        <div style={{ flex: 1 }}>
+        <div className="flex-1">
           <h1>
             {selected?.name ?? "CLIProxyAPI"}
             {selected && !selected.name.includes(host) ? ` ${t("proxy.onHost", { host })}` : ""}
@@ -977,7 +968,6 @@ export function ProxySettings() {
         {profiles.length > 1 ? (
           <ChipSelect
             label={t("proxy.profile")}
-            width={160}
             value={selected?.id ?? ""}
             options={profiles.map((profile) => ({
               value: profile.id,
@@ -999,13 +989,13 @@ export function ProxySettings() {
 
       {selected ? <ProfileDetail profile={selected} /> : null}
       {profiles.length > 0 ? (
-        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 12 }}>
+        <div className="flex gap-2 justify-end mt-3">
           <AddProfile />
         </div>
       ) : null}
 
       {saveError ? (
-        <p className="q-danger" style={{ fontSize: 12, marginTop: 12 }}>
+        <p className="q-danger text-xs mt-3">
           {saveError.message}
           {saveError.hint ? ` ${saveError.hint}` : ""}
         </p>

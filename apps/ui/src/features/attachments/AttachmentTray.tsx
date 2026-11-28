@@ -2,6 +2,7 @@ import type { TFunction } from "i18next";
 import { CircleAlertIcon, FileTextIcon, RotateCcwIcon, XIcon } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
+import { Tip } from "@/components/ui/tooltip";
 import { formatNumber, i18n } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 import { describeUploadFailure, formatBytes } from "./upload";
@@ -75,16 +76,19 @@ function Chip({ task, onRemove }: { task: AttachmentDraft; onRemove: () => void 
         <span className="q-att-nm">{task.file.name}</span>
         <span className="q-att-meta q-num">{statusLine(t, task)}</span>
       </span>
-      <button
-        type="button"
-        onClick={onRemove}
-        aria-label={t("attachments.remove", { name: task.file.name })}
-        title={t("common:remove")}
-        className="q-att-x"
-      >
-        <XIcon className="q-icon s12" strokeWidth={2} aria-hidden />
-      </button>
-      {busy ? <span aria-hidden className="q-att-bar" style={{ width: `${percent}%` }} /> : null}
+      <Tip label={t("common:remove")}>
+        <button
+          type="button"
+          onClick={onRemove}
+          aria-label={t("attachments.remove", { name: task.file.name })}
+          className="q-att-x"
+        >
+          <XIcon className="q-icon s14" strokeWidth={2} aria-hidden />
+        </button>
+      </Tip>
+      {busy ? (
+        <span aria-hidden className="q-att-bar" style={{ transform: `scaleX(${percent / 100})` }} />
+      ) : null}
     </div>
   );
 }
@@ -118,7 +122,7 @@ export function AttachmentTray({
         return (
           <div
             key={`failure-${task.key}`}
-            className="mt-1.5 flex items-start gap-2 rounded-md border border-danger/40 bg-danger-soft/60 px-2 py-1.5"
+            className="mt-1.5 flex items-start gap-2 rounded-lg border border-danger/40 bg-danger-soft/60 px-2 py-1.5"
           >
             <CircleAlertIcon className="mt-0.5 size-3.5 shrink-0 text-danger" aria-hidden />
             <div className="min-w-0 flex-1">
@@ -134,7 +138,7 @@ export function AttachmentTray({
               <button
                 type="button"
                 onClick={() => onRetry(task.key)}
-                className="flex h-8 shrink-0 items-center gap-1 rounded-sm border border-danger/40 px-1.5 text-small font-medium text-danger transition-colors duration-[var(--dur-instant)] hover:bg-danger-soft focus-visible:ring-2 focus-visible:ring-focus focus-visible:outline-none sm:h-6"
+                className="flex h-8 shrink-0 items-center gap-1 rounded-md border border-danger/40 px-1.5 text-small font-medium text-danger transition-colors duration-micro hover:bg-danger-soft focus-visible:ring-2 focus-visible:ring-focus focus-visible:outline-none sm:h-6"
               >
                 <RotateCcwIcon className="size-3" aria-hidden />
                 {t("common:retry")}

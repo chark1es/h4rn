@@ -1,4 +1,6 @@
 /* biome-ignore-all lint/complexity/noImportantStyles: shiki + reduced-motion overrides must win the cascade */
+@layer ui-sdk;
+
 @import "tailwindcss";
 @import "./tokens.css";
 @import "./quiet.css";
@@ -78,11 +80,11 @@ button {
   }
 
   .stream-prose h1 {
-    font-size: 17px;
+    font-size: 16px;
   }
 
   .stream-prose h2 {
-    font-size: 15px;
+    font-size: 14px;
   }
 
   .stream-prose h3 {
@@ -151,7 +153,7 @@ button {
 
   .stream-prose :not(pre) > code {
     font-family: var(--mono);
-    font-size: 12.5px;
+    font-size: 12px;
     background: var(--fill);
     border-radius: 4px;
     padding: 1px 5px;
@@ -167,7 +169,7 @@ button {
     min-width: max-content;
     padding: 0.75rem;
     font-family: var(--mono);
-    font-size: 0.78125rem;
+    font-size: 12px;
     line-height: 1.6;
   }
 
@@ -180,76 +182,54 @@ button {
     color: var(--fg);
   }
 
-  /* Radix state animation utilities used by the shadcn skins. */
-  [data-slot="dialog-overlay"][data-state="open"],
-  [data-slot="sheet-overlay"][data-state="open"] {
-    animation: h4rn-fade-in var(--dur-fast) var(--ease-out);
-  }
-
-  [data-slot="dialog-overlay"][data-state="closed"],
-  [data-slot="sheet-overlay"][data-state="closed"] {
-    animation: h4rn-fade-out var(--dur-fast) var(--ease-in) forwards;
-  }
-
-  [data-slot="dialog-content"][data-state="open"] {
-    animation: h4rn-dialog-in var(--dur-base) var(--ease-out);
-  }
-
-  [data-slot="dialog-content"][data-state="closed"] {
-    animation: h4rn-fade-out var(--dur-fast) var(--ease-in) forwards;
-  }
-
+  /* Radix state animation for the dropdown menu skin. */
   [data-slot="dropdown-menu-content"][data-state="open"] {
-    animation: h4rn-pop-in var(--dur-fast) var(--ease-out);
-  }
-
-  [data-slot="sheet-content"][data-side="bottom"][data-state="open"] {
-    animation: h4rn-sheet-up var(--dur-slow) var(--ease-out);
-  }
-
-  [data-slot="sheet-content"][data-side="bottom"][data-state="closed"] {
-    animation: h4rn-sheet-down var(--dur-fast) var(--ease-in) forwards;
-  }
-
-  [data-slot="sheet-content"][data-side="right"][data-state="open"] {
-    animation: h4rn-sheet-right var(--dur-slow) var(--ease-out);
+    animation: h4rn-pop-in var(--duration-popup) var(--ease-enter);
   }
 
   [data-slot="skeleton"] {
-    animation: h4rn-skeleton 1.5s ease-in-out infinite;
+    animation: h4rn-skeleton 1.6s ease-in-out infinite;
   }
 }
 
-@keyframes h4rn-fade-in {
-  from {
-    opacity: 0;
-  }
-  to {
-    opacity: 1;
-  }
+/* Sonner's own stylesheet is unlayered, so its motion is retimed here with a
+   more specific selector rather than with utilities. */
+[data-sonner-toaster] [data-sonner-toast] {
+  transition:
+    transform var(--duration-popup) var(--ease-enter),
+    opacity var(--duration-popup) var(--ease-enter),
+    height var(--duration-popup) var(--ease-enter),
+    box-shadow var(--duration-micro);
 }
 
-@keyframes h4rn-fade-out {
-  from {
-    opacity: 1;
-  }
-  to {
-    opacity: 0;
-  }
+[data-sonner-toaster] [data-sonner-toast][data-removed="true"] {
+  transition-duration: var(--duration-popup-exit);
+  transition-timing-function: var(--ease-exit);
 }
 
-/* Dialogs are placed with the `translate` property (Tailwind v4), so the
-   entrance only scales; animating `transform: translate()` here stacked a
-   second -50% offset on top and threw the dialog up and left while it ran. */
-@keyframes h4rn-dialog-in {
-  from {
-    opacity: 0;
-    transform: scale(0.985);
-  }
-  to {
-    opacity: 1;
-    transform: scale(1);
-  }
+[data-sonner-toaster] [data-sonner-toast] > * {
+  transition: opacity var(--duration-popup) var(--ease-enter);
+}
+
+/* Sonner only hides the content of toasts stacked behind on styled toasts. */
+[data-sonner-toaster] [data-sonner-toast][data-expanded="false"][data-front="false"] > * {
+  opacity: 0;
+}
+
+/* Sonner paints its dark-theme close button even on unstyled toasts. */
+[data-sonner-toaster]
+  [data-sonner-toast]
+  [data-close-button][data-close-button][data-close-button] {
+  border-color: transparent;
+  background: transparent;
+  color: var(--fg-3);
+}
+
+[data-sonner-toaster]
+  [data-sonner-toast]
+  [data-close-button][data-close-button][data-close-button]:hover {
+  background: var(--accent-surface);
+  color: var(--fg);
 }
 
 @keyframes h4rn-pop-in {
@@ -260,39 +240,6 @@ button {
   to {
     opacity: 1;
     transform: translateY(0) scale(1);
-  }
-}
-
-@keyframes h4rn-sheet-up {
-  from {
-    transform: translateY(12px);
-    opacity: 0;
-  }
-  to {
-    transform: translateY(0);
-    opacity: 1;
-  }
-}
-
-@keyframes h4rn-sheet-down {
-  from {
-    transform: translateY(0);
-    opacity: 1;
-  }
-  to {
-    transform: translateY(12px);
-    opacity: 0;
-  }
-}
-
-@keyframes h4rn-sheet-right {
-  from {
-    transform: translateX(12px);
-    opacity: 0;
-  }
-  to {
-    transform: translateX(0);
-    opacity: 1;
   }
 }
 
@@ -307,10 +254,6 @@ button {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  [data-slot="dialog-content"],
-  [data-slot="dialog-overlay"],
-  [data-slot="sheet-content"],
-  [data-slot="sheet-overlay"],
   [data-slot="dropdown-menu-content"] {
     animation: none !important;
   }

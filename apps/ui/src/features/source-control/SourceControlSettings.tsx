@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-
 import { ChipSelect } from "@/components/common/ChipSelect";
+import { SegmentedControl, SegmentedControlItem } from "@/components/ui/segmented-control";
 import { useHarnesses, useHarnessVersions } from "@/features/harnesses/harnessStore";
 import { LinearSettings } from "@/features/issues/LinearSettings";
 import {
@@ -29,24 +29,20 @@ function ModePicker({
 }) {
   const { t } = useTranslation(["settings", "common"]);
   return (
-    <div
-      className="q-seg inline q-seg-choice"
-      role="radiogroup"
+    <SegmentedControl
+      className="phone:w-full"
       aria-label={t("sourceControl.modeLabel")}
+      value={value}
+      onValueChange={(next) => {
+        if (next) onChange(next as SourceControlModelMode);
+      }}
     >
       {MODES.map((mode) => (
-        // biome-ignore lint/a11y/useSemanticElements: a segmented radio group, not a form radio
-        <button
-          key={mode}
-          type="button"
-          role="radio"
-          aria-checked={value === mode}
-          onClick={() => onChange(mode)}
-        >
+        <SegmentedControlItem key={mode} value={mode} className="phone:min-w-0 phone:flex-1">
           {t(`sourceControl.modes.${mode}`)}
-        </button>
+        </SegmentedControlItem>
       ))}
-    </div>
+    </SegmentedControl>
   );
 }
 
@@ -172,7 +168,6 @@ export function SourceControlSettings() {
                   <ChipSelect<AgentChoice>
                     label={t("sourceControl.codingAgentLabel")}
                     value={draft.harness ?? FOLLOW_THREAD}
-                    width={220}
                     options={[
                       {
                         value: FOLLOW_THREAD,
@@ -204,7 +199,6 @@ export function SourceControlSettings() {
                     <ChipSelect
                       label={t("sourceControl.modes.text_generator")}
                       value={draft.generator_id ?? ""}
-                      width={220}
                       options={generators.map((candidate) => ({
                         value: candidate.id,
                         label: candidate.name,
@@ -222,7 +216,6 @@ export function SourceControlSettings() {
                   <div className="ctl">
                     <input
                       className="q-input q-mono"
-                      style={{ width: 240 }}
                       aria-label={t("sourceControl.modelLabel")}
                       placeholder={generator?.model ?? t("sourceControl.modelPlaceholder")}
                       value={draft.model ?? ""}
@@ -265,7 +258,7 @@ export function SourceControlSettings() {
             </p>
           ) : null}
 
-          <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+          <div className="flex gap-2 justify-end">
             <button
               type="button"
               className="q-btn ghost"

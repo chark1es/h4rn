@@ -1010,6 +1010,17 @@ describe("Composer @ file picker", () => {
     );
   });
 
+  it("keeps a title on the attach and @ buttons while they're disabled", () => {
+    mock.state.connection.status = "offline";
+    renderComposer();
+    const attach = screen.getByRole("button", { name: "Attach files" });
+    const mention = screen.getByRole("button", { name: "Mention a file" });
+    expect(attach.hasAttribute("disabled")).toBe(true);
+    expect(mention.hasAttribute("disabled")).toBe(true);
+    expect(attach.getAttribute("title")).toBeTruthy();
+    expect(mention.getAttribute("title")).toBe("Mention a file");
+  });
+
   it("opens from the @ button", async () => {
     renderComposer();
     fireEvent.click(screen.getByRole("button", { name: "Mention a file" }));

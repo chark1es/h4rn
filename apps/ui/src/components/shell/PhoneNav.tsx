@@ -99,25 +99,58 @@ export function PhoneNav() {
   );
 }
 
+/**
+ * The top of every phone tab screen: a 44 px nav bar holding up to two
+ * actions, the large title, and an optional muted summary line, all on the
+ * 16 px phone gutter.
+ */
 export function PhoneLargeTitle({
   title,
+  summary,
   children,
   actions,
 }: {
   title: string;
+  summary?: React.ReactNode;
   children?: React.ReactNode;
   actions?: React.ReactNode;
 }) {
   return (
     <>
       <div className="q-ph-nav">
-        <span style={{ width: 44 }} />
+        <span className="w-11" />
         <span className="ttl" />
-        {actions}
+        <span className="q-ph-nav-actions">{actions}</span>
       </div>
       <h1 className="q-ph-lt">{title}</h1>
+      {summary ? <p className="q-ph-sub">{summary}</p> : null}
       {children}
     </>
+  );
+}
+
+/** An icon action in the phone nav bar: a 44 px target named by its label. */
+export function PhoneNavButton({
+  label,
+  onClick,
+  disabled,
+  children,
+}: {
+  label: string;
+  onClick: () => void;
+  disabled?: boolean;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      className="navbtn"
+      aria-label={label}
+      disabled={disabled}
+      onClick={onClick}
+    >
+      {children}
+    </button>
   );
 }
 
