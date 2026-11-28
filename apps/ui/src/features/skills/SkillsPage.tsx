@@ -168,7 +168,6 @@ function Conflicts({ conflicts }: { conflicts: SkillConflict[] }) {
               />
               <Button
                 variant="secondary"
-                size="sm"
                 disabled={Boolean(busy[conflict.id])}
                 onClick={() => {
                   setBusy((current) => ({ ...current, [conflict.id]: true }));
