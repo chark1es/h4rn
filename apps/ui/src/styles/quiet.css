@@ -3483,6 +3483,10 @@
   padding-block: 14px;
   align-items: flex-start;
 }
+/* The header block is centred on its title line, so the action sits there. */
+.q-pr-head > .q-btn {
+  align-self: center;
+}
 .q-pr-meta {
   display: flex;
   flex-wrap: wrap;
@@ -3638,10 +3642,13 @@
 .q-form:not(.wide) > * {
   max-width: var(--container-form);
 }
+/* A 28px line from the top of the header, the height of the buttons beside
+   it, so a title and its actions share a centre line; the lead below stays
+   where it was. */
 .q-form h1 {
   font-size: 20px;
-  line-height: 26px;
-  margin: 4px 0;
+  line-height: 28px;
+  margin: 0 0 6px;
   font-weight: 600;
   letter-spacing: -0.015em;
 }
