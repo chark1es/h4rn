@@ -179,7 +179,7 @@ export function ThreadPane({ threadId }: { threadId: string }) {
     return (
       <main className="q-main" aria-label={t("header.thread")}>
         <div className="q-center-empty">
-          <div className="q-empty" style={{ width: 460, maxWidth: "100%", padding: 0 }}>
+          <div className="q-empty w-fit max-w-115" style={{ padding: 0 }}>
             <span className="q-danger">
               <CircleAlertIcon className="q-icon s22" strokeWidth={1.5} aria-hidden />
             </span>
@@ -296,7 +296,7 @@ export function ThreadPane({ threadId }: { threadId: string }) {
 
       {!loaded && threadError && !log?.loading ? (
         <div className="q-center-empty">
-          <div className="q-empty" style={{ width: 460, maxWidth: "100%", padding: 0 }}>
+          <div className="q-empty w-fit max-w-115" style={{ padding: 0 }}>
             <span className="q-danger">
               <CircleAlertIcon className="q-icon s22" strokeWidth={1.5} aria-hidden />
             </span>
@@ -367,7 +367,7 @@ export function ThreadPane({ threadId }: { threadId: string }) {
         />
       ) : turns.length === 0 && summary.queued_count === 0 ? (
         <div className="q-center-empty">
-          <div className="q-empty" style={{ width: 460, maxWidth: "100%", padding: 0 }}>
+          <div className="q-empty w-fit max-w-115" style={{ padding: 0 }}>
             <InboxIcon className="q-icon s22 q-faint" strokeWidth={1.5} aria-hidden />
             <h3 style={{ fontSize: 16, lineHeight: "24px" }}>{t("pane.emptyTitle")}</h3>
             <p className="m-0">
