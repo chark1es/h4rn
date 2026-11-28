@@ -972,9 +972,11 @@ function SettingsSidebar() {
                   <div className="q-side-h">
                     <span>{t("nav.tools")}</span>
                     <Tip label={t("nav.addMcp")}>
+                      {/* Its hover pad hangs past the edge so the + ends with the counts below. */}
                       <Button
                         variant="ghost"
                         size="icon-sm"
+                        className="-me-1"
                         aria-label={t("nav.addMcp")}
                         onClick={() => {
                           setLibrarySelected("__new");
