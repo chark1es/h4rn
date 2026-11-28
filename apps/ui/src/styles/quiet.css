@@ -3105,7 +3105,9 @@
   border-bottom: 1px solid var(--line);
   padding: 0 8px;
   gap: 2px;
-  flex: none;
+  /* Fills the row so its rule runs to the panel edge. */
+  flex: 1;
+  min-width: 0;
 }
 .q-etab {
   display: inline-flex;
@@ -5110,9 +5112,11 @@
 }
 
 /* IDE: the header chip, per-project tabs, and the changes strip */
+/* Sits in the tabs' own 30px band, so its text shares their line. */
 .q-etabs-note {
   font-size: 12px;
-  align-self: center;
+  line-height: 30px;
+  align-self: flex-end;
   padding-right: 8px;
 }
 .q-ide-empty {
