@@ -98,7 +98,7 @@ export function TerminalPanel({
               aria-label={t("terminal.back")}
               onClick={onClose}
             >
-              <ChevronLeftIcon className="q-icon s24" strokeWidth={1.5} aria-hidden />
+              <ChevronLeftIcon className="q-icon s22 -ms-1" strokeWidth={1.5} aria-hidden />
               {t("terminal.thread")}
             </button>
             <span className="ttl">{t("terminal.title")}</span>

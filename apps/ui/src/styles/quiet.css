@@ -4198,13 +4198,21 @@
   padding: 0 5px;
   font-weight: 600;
 }
+/* Back, title, actions: the side slots share what the title leaves, so the
+   title sits on the screen's centre whatever the two sides hold. */
 .q-ph-nav {
-  display: flex;
+  display: grid;
+  grid-template-columns: 1fr minmax(0, auto) 1fr;
   align-items: center;
-  justify-content: space-between;
   height: 44px;
   padding: 0 8px;
   flex: none;
+}
+.q-ph-nav > :first-child {
+  justify-self: start;
+}
+.q-ph-nav > :last-child {
+  justify-self: end;
 }
 .q-ph-nav .navbtn {
   min-width: 44px;
@@ -4218,9 +4226,9 @@
   padding: 0 8px;
 }
 .q-ph-nav .ttl {
+  min-width: 0;
   font-size: 16px;
   font-weight: 600;
-  flex: 1;
   text-align: center;
   white-space: nowrap;
   overflow: hidden;

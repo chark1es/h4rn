@@ -106,9 +106,9 @@ export function PairingPage() {
         }
       >
         <div className="q-ph-nav">
-          <span style={{ width: 60 }} />
+          <span />
           <span className="ttl">{waiting ? t("sas.waitingTitle") : t("sas.checkTitle")}</span>
-          <span style={{ width: 60 }} />
+          <span />
         </div>
         <div className="q-ph-body q-pair-body">
           <div className="q-pair-hero">
@@ -177,7 +177,7 @@ export function PairingPage() {
           {t("common:cancel")}
         </button>
         <span className="ttl">{title}</span>
-        <span style={{ width: 60 }} />
+        <span />
       </div>
       <div className="q-ph-body q-pair-body">
         <div className="q-pair-hero">
