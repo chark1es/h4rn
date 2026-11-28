@@ -87,6 +87,9 @@ function UserMessage({
       {item.text ? <div className="q-bubble">{item.text}</div> : null}
       <MessageAttachments attachments={item.attachments} align="end" />
       <div className="q-you-meta">
+        {/* First, so the hover-only menu takes its room on the free side and
+            the row's right edge stays on the bubble's whether or not it shows. */}
+        {fork ? <TurnMenu {...fork} /> : null}
         <span>{absoluteTime(at)}</span>
         {onEdit ? (
           <button
@@ -100,7 +103,6 @@ function UserMessage({
             {t("turn.editFromHere")}
           </button>
         ) : null}
-        {fork ? <TurnMenu {...fork} /> : null}
       </div>
     </div>
   );
