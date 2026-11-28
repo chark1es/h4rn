@@ -150,11 +150,11 @@ export function AutoResumeSettings() {
               }}
               onChange={(event) => patch({ prompt: event.target.value })}
               className="q-input"
-              style={{ fontSize: 13, padding: 8, resize: "none", overflow: "hidden" }}
+              style={{ fontSize: 13, padding: "8px 10px", resize: "none", overflow: "hidden" }}
             />
           </div>
         </div>
-        <div className="flex gap-2 justify-end">
+        <div className="flex gap-2 justify-end pt-2.5">
           <span
             className="q-faint"
             style={{ fontSize: 12, marginRight: "auto", alignSelf: "center" }}
