@@ -628,9 +628,7 @@ export function PullRequestsPage() {
                       <span className="q-row-meta">
                         {pr.head_branch} → {pr.base_branch}
                       </span>
-                      <span className={`q-row-status q-pr-state ${state.tone}`}>
-                        {state.label}
-                      </span>
+                      <span className={`q-row-status q-pr-state ${state.tone}`}>{state.label}</span>
                       {checks ? (
                         <span
                           className={`q-row-status q-pr-checks ${pr.checks === "failing" ? "danger" : ""}`}

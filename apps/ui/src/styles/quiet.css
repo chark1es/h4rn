@@ -1115,20 +1115,6 @@
   gap: 6px;
   min-width: 0;
 }
-/* The picker's hover pad hangs into the gaps on both sides, so its label
-   keeps the same spacing to the separators as plain text. */
-.q-prov .q-harness-switch {
-  margin-right: -6px;
-}
-/* The chevron's glyph sits inset in its box; pull it in so the gap after it
-   reads like the gap after text. */
-.q-prov .q-harness-switch > svg:last-child {
-  margin-right: -4px;
-}
-/* An ellipsized name keeps a few letters rather than shrinking to a sliver. */
-.q-prov .q-harness-switch > .truncate {
-  min-width: 3ch;
-}
 .q-signin-details .q-mono {
   display: block;
   margin-top: 4px;
@@ -2319,6 +2305,20 @@
 .q-harness-switch:hover {
   background: var(--hover);
   color: var(--fg-1);
+}
+/* The picker's hover pad hangs into the gaps on both sides, so its label
+   keeps the same spacing to the separators as plain text. */
+.q-prov .q-harness-switch {
+  margin-right: -6px;
+}
+/* The chevron's glyph sits inset in its box; pull it in so the gap after it
+   reads like the gap after text. */
+.q-prov .q-harness-switch > svg:last-child {
+  margin-right: -4px;
+}
+/* An ellipsized name keeps a few letters rather than shrinking to a sliver. */
+.q-prov .q-harness-switch > .truncate {
+  min-width: 3ch;
 }
 /* A harness switch is a seam in the transcript, not a turn. */
 .q-switch-line {
