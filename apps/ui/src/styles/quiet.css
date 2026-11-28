@@ -4137,7 +4137,7 @@
     font-size: 14px;
   }
   .q-dock {
-    padding: 8px 12px max(34px, env(safe-area-inset-bottom, 0px));
+    padding: 8px 16px max(34px, env(safe-area-inset-bottom, 0px));
     border-top: 1px solid var(--line);
     display: flex;
     flex-direction: column;
