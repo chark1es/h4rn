@@ -74,9 +74,11 @@ function SuggestInput({
             inputClassName,
           )}
         />
+        {/* The chevron sits where a Select trigger's does: inside the border,
+            then the field's own end padding. */}
         <AutocompleteTrigger
           aria-label={showLabel}
-          className="absolute inset-y-0 end-0 inline-flex w-7 items-center justify-center rounded-e-md text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring phone:w-10"
+          className="absolute inset-y-0 end-px inline-flex w-7 items-center justify-end rounded-e-md pe-2.5 text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring phone:w-10 phone:pe-3"
         >
           <ChevronDownIcon className="size-3.5" aria-hidden="true" />
         </AutocompleteTrigger>
@@ -91,7 +93,9 @@ function SuggestInput({
             <AutocompleteItem
               key={suggestion}
               value={suggestion}
-              className={cn(itemRow, mono && "font-mono")}
+              // Text starts where the field's own text does (popup border and
+              // padding plus this row's).
+              className={cn(itemRow, "px-1.5 phone:px-2", mono && "font-mono")}
             >
               <span className="min-w-0 flex-1 truncate">{suggestion}</span>
             </AutocompleteItem>
