@@ -138,7 +138,7 @@ function ScopePicker({ compact = false }: { compact?: boolean }) {
       value={scope}
       options={options}
       onChange={setScope}
-      className={cn("w-30", compact && "ms-auto me-4 mt-2")}
+      className={cn("w-30", compact && "ms-auto me-2 mt-2")}
     />
   );
 }
