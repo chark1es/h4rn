@@ -3713,6 +3713,13 @@
   gap: 8px;
   min-width: 0;
 }
+/* A row's "opens" chevron hangs in the page gutter, so the row's last control
+   lines up with the column edge like the table rows above it. */
+@media (min-width: 640px) {
+  .q-li-chev {
+    margin-right: -26px;
+  }
+}
 .q-secret {
   display: inline-flex;
   align-items: center;

@@ -339,7 +339,7 @@ function CredentialField({ server }: { server: McpServerView }) {
               <KeyRoundIcon className="q-icon s14" aria-hidden />{" "}
               {t("mcp.credential.storedOn", { host: remoteHost ?? hostName })}
             </span>
-            <span className="q-faint" style={{ fontSize: 12 }}>
+            <span className="q-faint ms-auto" style={{ fontSize: 12 }}>
               {t(env ? "mcp.credential.env" : "mcp.credential.headers", { count: keys.length })}
             </span>
           </>
@@ -415,7 +415,7 @@ function SharedWithYou({ current }: { current: McpServerView | null }) {
                 }
               />
               {current?.id === server.id ? null : (
-                <ChevronRightIcon className="q-icon s14 q-faint" aria-hidden />
+                <ChevronRightIcon className="q-icon s14 q-faint q-li-chev" aria-hidden />
               )}
             </div>
           );
@@ -842,7 +842,10 @@ export function McpPage() {
                   {refreshing ? <RefreshCwIcon className="q-icon s14 q-faint" aria-hidden /> : null}
                 </div>
               </div>
-              <Health server={server} />
+              {/* The header's controls are 28px tall; the health word sits on their line. */}
+              <span className="flex h-7 items-center">
+                <Health server={server} />
+              </span>
               <div className="hidden items-center gap-2 sm:flex">
                 <Button variant="secondary" onClick={() => setToolsServer(server)}>
                   <RefreshCwIcon className="q-icon s14" aria-hidden /> {t("mcp.test")}
