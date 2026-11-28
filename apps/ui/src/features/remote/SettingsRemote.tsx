@@ -10,7 +10,6 @@ import {
   RefreshCwIcon,
   ServerIcon,
   SmartphoneIcon,
-  WifiOffIcon,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Trans, useTranslation } from "react-i18next";
@@ -58,14 +57,11 @@ import {
   useRemote,
 } from "./remoteStore";
 
+/** A presence word after a 6px dot, so every state's word starts on one column. */
 function Health({ tone, children }: { tone: "on" | "off" | "danger"; children: React.ReactNode }) {
   return (
     <span className={cn("q-health", tone === "danger" && "q-danger")}>
-      {tone === "danger" ? (
-        <WifiOffIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-      ) : (
-        <span className={cn("q-dot", tone)} aria-hidden />
-      )}
+      <span className={cn("q-dot", tone === "danger" ? "off bad" : tone)} aria-hidden />
       {children}
     </span>
   );
@@ -401,12 +397,16 @@ export function LiveHostsForm({ pairing: pairFirst = false }: { pairing?: boolea
               <tr key={host.host_id} className="hov">
                 <td>
                   <span className="q-cell-id">
-                    <EntityAvatar
-                      seed={machineSeed(host.host_id)}
-                      kind="machine"
-                      label={host.name}
-                      size={host.platform.startsWith("wsl:") ? 16 : 18}
-                    />
+                    {/* A WSL host's smaller avatar sits in the same 18px slot, so
+                        every name starts on one column. */}
+                    <span className="grid size-4.5 shrink-0 place-items-center">
+                      <EntityAvatar
+                        seed={machineSeed(host.host_id)}
+                        kind="machine"
+                        label={host.name}
+                        size={host.platform.startsWith("wsl:") ? 16 : 18}
+                      />
+                    </span>
                     <span className="font-medium">{host.name}</span>
                   </span>
                 </td>
@@ -803,7 +803,9 @@ function PairDeviceGroup({ onClose }: { onClose: () => void }) {
           {t("common:done")}
         </button>
       </h2>
-      <div className="pt-3">
+      {/* Cancels the heading's bottom margin: the heading row is as tall as its
+          Done button, so the rule already sits a normal gap below the words. */}
+      <div className="-mt-1">
         <div className="q-field" style={{ borderTop: "1px solid var(--line)" }}>
           <div className="lab">
             <div className="t">{t("hosts.table.machine")}</div>
@@ -832,7 +834,6 @@ function PairDeviceGroup({ onClose }: { onClose: () => void }) {
               display: "flex",
               gap: 28,
               padding: "18px 0 4px",
-              borderTop: "1px solid var(--line)",
             }}
           >
             <div className="q-qr">
