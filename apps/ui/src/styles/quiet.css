@@ -4741,8 +4741,10 @@
 .q-pair-note + .q-pair-note {
   margin-top: 6px;
 }
+/* As wide as the 22px avatar in the "also included" card below, so both
+   cards' text starts on one column. */
 .q-scope-mark {
-  width: 18px;
+  width: 22px;
   height: 18px;
   display: inline-grid;
   place-items: center;
