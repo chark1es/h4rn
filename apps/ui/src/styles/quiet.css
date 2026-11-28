@@ -2921,7 +2921,6 @@
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 2px;
 }
 .q-ph-li .grow,
 .q-ph-chg .grow {
@@ -3184,8 +3183,10 @@
 .q-sc {
   color: var(--syn-cm);
 }
+/* Bottom bars are 44px like the sidebar's footer, so the bars that sit side
+   by side (sidebar, editor, right panel) share one top edge. */
 .q-statusbar {
-  height: 26px;
+  height: 44px;
   display: flex;
   align-items: center;
   gap: 16px;
@@ -3692,6 +3693,7 @@
 }
 .q-agentchg .t {
   font-weight: 600;
+  line-height: 16px;
 }
 .q-field .lab .t {
   font-weight: 500;
@@ -3709,6 +3711,7 @@
 }
 .q-agentchg .s {
   font-size: 12px;
+  line-height: 16px;
   color: var(--fg-3);
   white-space: nowrap;
   overflow: hidden;
@@ -4960,7 +4963,8 @@
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 10px 12px;
+  height: 44px;
+  padding: 0 12px;
   border-top: 1px solid var(--line);
 }
 .q-rp .q-tree {
@@ -5000,13 +5004,15 @@
     inset 0 0 0 1px var(--focus),
     0 0 0 3px color-mix(in oklch, var(--focus) 25%, transparent);
 }
+/* A 44px bottom bar like the others; its two lines are set tight to fit. */
 .q-agentchg {
   flex: none;
   display: flex;
   align-items: center;
   gap: 10px;
   width: 100%;
-  padding: 10px 12px 10px 16px;
+  height: 44px;
+  padding: 0 12px 0 16px;
   border-top: 1px solid var(--line);
   text-align: left;
   transition: background var(--duration-micro);
