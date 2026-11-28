@@ -787,7 +787,8 @@ function ProfileDetail({ profile }: { profile: ProxyProfile }) {
             ) : null}
             {details.length > 0 || report ? (
               <Collapsible className="mt-2 text-xs">
-                <CollapsibleTrigger className="text-xs">
+                {/* Chevron and label on the probe rows' icon and label columns. */}
+                <CollapsibleTrigger className="gap-3 text-xs">
                   {t("proxy.probe.details")}
                 </CollapsibleTrigger>
                 <CollapsiblePanel className="mt-2">
