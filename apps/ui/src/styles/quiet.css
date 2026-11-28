@@ -3245,8 +3245,11 @@
   letter-spacing: -0.015em;
   margin-top: 6px;
 }
+/* A unit is smaller type on the value's baseline; its own line height must not
+   make the value line taller than a tile without one. */
 .q-stat .v small {
   font-size: 13px;
+  line-height: 1;
   font-weight: 500;
   color: var(--fg-2);
   margin-left: 2px;
