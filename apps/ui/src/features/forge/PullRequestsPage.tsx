@@ -1459,6 +1459,14 @@ function PrDetail({
                         {thread.comments.map((comment) => (
                           <div className="mb-2.5" key={comment.comment_id}>
                             <div className="q-cmt-h" style={{ marginBottom: 2 }}>
+                              {/* The same avatar as the conversation's comments, so
+                                  every author name starts on one column. */}
+                              <EntityAvatar
+                                seed={userSeed(comment.author)}
+                                kind="user"
+                                label={comment.author}
+                                size={18}
+                              />
                               <b>{comment.author}</b> · {formatAge(comment.created_at)}
                               {comment.comment_id.startsWith("tmp_") ? (
                                 <span className="q-faint"> · {t("conversation.sending")}</span>
