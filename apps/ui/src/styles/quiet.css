@@ -2461,11 +2461,23 @@
   border-bottom: 1px solid var(--line-2);
   border-bottom-left-radius: 6px;
 }
-.q-kids > .q-node:not(:last-child)::after {
+/* Deeper rows (.kid2) follow every direct child and hang under the last
+   one, so a direct child's spine runs on only to a later direct child, and
+   the last one carries a line from its glyph down to the rows under it. */
+.q-kids > .q-node:not(.kid2):has(~ .q-node:not(.kid2))::after,
+.q-kids > .q-node.kid2:not(:last-child)::after {
   content: "";
   position: absolute;
   left: -14px;
   top: 0;
+  bottom: 0;
+  border-left: 1px solid var(--line-2);
+}
+.q-kids > .q-node:not(.kid2):has(+ .kid2)::after {
+  content: "";
+  position: absolute;
+  left: 16px;
+  top: 30px;
   bottom: 0;
   border-left: 1px solid var(--line-2);
 }
@@ -5391,9 +5403,10 @@
 .q-node.q-sub-node {
   min-width: 0;
 }
+/* Indented by a full step, so its elbow drops from its parent's glyph. */
 .q-node.q-sub-node.kid2 {
-  margin-left: 14px;
-  width: calc(100% - 14px);
+  margin-left: 30px;
+  width: calc(100% - 30px);
 }
 .q-spin {
   animation: q-spin 1s linear infinite;
