@@ -400,7 +400,8 @@ export function ThreadHeader({
           />
           <HarnessSwitch summary={summary} />
           <span className="opt">
-            <span className="q-sep">/</span> {summary.model}
+            <span className="q-sep">/</span>
+            <span className="truncate">{summary.model}</span>
           </span>
           {changedSettings.length > 0 ? (
             <span className="q-faint" style={{ fontSize: 12 }}>
