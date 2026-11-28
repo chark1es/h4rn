@@ -681,6 +681,9 @@
   flex: none;
   transition: transform var(--duration-popup) var(--ease-enter);
 }
+/* The hover-only chevron hangs into the row's own padding, so the resting
+   meta ends 14px in from the column: the same edge as a changes card's file
+   stats and actions. */
 .q-tool .chev {
   color: var(--fg-3);
   opacity: 0;
@@ -688,6 +691,7 @@
     opacity var(--duration-micro),
     transform var(--duration-popup) var(--ease-enter);
   flex: none;
+  margin: 0 -8px 0 -2px;
 }
 .q-ph-pg-h .chev {
   color: var(--fg-3);
