@@ -2816,6 +2816,11 @@
   padding: 0 12px 0 0;
   white-space: nowrap;
 }
+/* The last column ends on the content edge, like the controls around it. */
+.q-tbl th:last-child,
+.q-tbl td:last-child {
+  padding-right: 0;
+}
 .q-tbl .r {
   text-align: right;
 }
