@@ -73,7 +73,8 @@ function SheetFooter({ className, ...props }: React.ComponentProps<"div">) {
     <div
       data-slot="sheet-footer"
       className={cn(
-        "flex shrink-0 items-center gap-3 px-4 pt-3 [&>button]:h-11 [&>button]:flex-1 [&>button]:justify-center",
+        // Equal columns: flex-1 would still give a bordered button its border.
+        "grid shrink-0 grid-flow-col auto-cols-fr items-center gap-3 px-4 pt-3 [&>button]:h-11 [&>button]:justify-center",
         className,
       )}
       {...props}

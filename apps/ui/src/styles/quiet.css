@@ -4549,7 +4549,7 @@
   animation: q-fade var(--duration-popup) var(--ease-enter);
 }
 .q-ph-sheet-cmd {
-  margin: 14px 20px 4px;
+  margin: 14px 16px 4px;
   font-size: 13px;
   line-height: 21px;
   padding: 12px 14px;
