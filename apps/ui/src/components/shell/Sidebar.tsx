@@ -576,7 +576,12 @@ function OfflineNotice({
       {remoteName ? (
         <UseThisMachineButton compact />
       ) : (
-        <button type="button" className="q-btn ghost" style={{ height: 24 }} onClick={onReconnect}>
+        <button
+          type="button"
+          className="q-btn ghost q-inline-end"
+          style={{ height: 24 }}
+          onClick={onReconnect}
+        >
           {t("offline.reconnect")}
         </button>
       )}
@@ -702,7 +707,7 @@ function ThreadsSidebar() {
           ) : (
             <button
               type="button"
-              className="q-btn ghost"
+              className="q-btn ghost q-inline-end"
               style={{ height: 24 }}
               onClick={() => void loadThreads()}
             >
