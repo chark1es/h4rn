@@ -330,7 +330,7 @@ export function McpServerDialog({
                 ))}
                 <button
                   type="button"
-                  className="q-btn ghost"
+                  className="q-btn ghost q-inline-start"
                   style={{ alignSelf: "flex-start" }}
                   onClick={() => setSecrets((current) => [...current, newSecretRow()])}
                 >

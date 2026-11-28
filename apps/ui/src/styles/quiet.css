@@ -166,6 +166,20 @@
   background: var(--hover);
   color: var(--fg);
 }
+/* An inline action: a text-only button that starts or ends a column. Its 6px
+   hover pad hangs past that edge so the label lines up with the text and
+   fields around it, and it keeps this compact size on a phone (its hit area
+   still grows to 44px). */
+.q-inline-start,
+.q-inline-end {
+  padding-inline: 6px;
+}
+.q-inline-start {
+  margin-inline-start: -6px;
+}
+.q-inline-end {
+  margin-inline-end: -6px;
+}
 .q-btn.danger {
   color: var(--danger);
   box-shadow: inset 0 0 0 1px var(--line-2);
@@ -1292,8 +1306,6 @@
 /* Edit from here: a quiet action under a sent message. */
 .q-edit-here {
   height: 22px;
-  padding: 0 6px;
-  margin-right: -6px;
   font-size: 12px;
   font-weight: 500;
   color: var(--fg-3);
@@ -1678,7 +1690,7 @@
   align-items: center;
   gap: 10px;
   height: 40px;
-  padding: 0 8px 0 14px;
+  padding: 0 14px;
 }
 .q-ch-head .t {
   font-weight: 500;
@@ -3119,7 +3131,7 @@
   align-items: center;
   gap: 10px;
   height: 40px;
-  padding: 0 12px 0 16px;
+  padding: 0 16px;
   border-bottom: 1px solid var(--line);
   background: var(--bg-sunk);
   flex: none;
@@ -4311,7 +4323,7 @@
 .q-ph-ask-f .q-btn {
   flex: 1;
 }
-.q-ph .q-btn {
+.q-ph .q-btn:where(:not(.q-inline-start, .q-inline-end)) {
   height: 44px;
   border-radius: 12px;
   font-size: 16px;
@@ -4617,7 +4629,7 @@
   height: 16px;
 }
 
-.q-ph .q-btn.sm {
+.q-ph .q-btn.sm:where(:not(.q-inline-start, .q-inline-end)) {
   height: 34px;
   border-radius: 8px;
   font-size: 14px;

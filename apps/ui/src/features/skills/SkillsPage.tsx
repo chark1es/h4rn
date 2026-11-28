@@ -114,7 +114,13 @@ function SyncBanner() {
           </span>
         ) : null}
       </span>
-      <Button variant="ghost" size="sm" onClick={() => void syncSkillsNow()} disabled={syncing}>
+      <Button
+        variant="ghost"
+        size="sm"
+        className="q-inline-end"
+        onClick={() => void syncSkillsNow()}
+        disabled={syncing}
+      >
         {syncing ? t("skills.sync.syncing") : t("skills.sync.syncNow")}
       </Button>
     </div>

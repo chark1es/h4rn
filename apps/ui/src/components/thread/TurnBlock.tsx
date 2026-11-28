@@ -94,7 +94,7 @@ function UserMessage({
         {onEdit ? (
           <button
             type="button"
-            className="q-btn ghost q-edit-here"
+            className="q-btn ghost q-edit-here q-inline-end"
             disabled={Boolean(editDisabledReason)}
             title={editDisabledReason ?? t("turn.editHint")}
             onClick={() => onEdit(item)}

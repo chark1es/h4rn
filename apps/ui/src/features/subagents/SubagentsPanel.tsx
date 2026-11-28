@@ -342,7 +342,7 @@ export function SubagentsPanel({ thread }: { thread: ThreadSummary }) {
             <RefreshCwIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
           </button>
         </Tip>
-        <button type="button" className="q-btn ghost" onClick={openDelegate}>
+        <button type="button" className="q-btn ghost q-inline-end" onClick={openDelegate}>
           <PlusIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
           {t("subagents.delegate")}
         </button>

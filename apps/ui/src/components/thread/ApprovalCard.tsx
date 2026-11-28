@@ -80,7 +80,7 @@ export function ApprovalCard({ threadId }: { threadId: string }) {
         ) : (
           <button
             type="button"
-            className="q-btn ghost"
+            className="q-btn ghost q-inline-start"
             aria-disabled="true"
             title={t("approval.notAvailable")}
             onClick={(event) => event.preventDefault()}

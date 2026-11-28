@@ -257,7 +257,7 @@ export function PhonePanelSheet({
                       : t("subagents.count", { count: subagents.total })}
                 </span>
                 <span className="grow" />
-                <button type="button" className="q-btn ghost sm" onClick={openDelegate}>
+                <button type="button" className="q-btn ghost sm q-inline-end" onClick={openDelegate}>
                   <PlusIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
                   {t("subagents.delegate")}
                 </button>

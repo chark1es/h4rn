@@ -771,7 +771,7 @@ export function NewThreadDialog() {
                 onClick={attachments.openPicker}
                 aria-label={t("newThread.attachFiles")}
                 title={offline ? t("newThread.reconnectToAttach") : t("newThread.attachTitle")}
-                className="hit-area relative -my-1 inline-flex h-6 items-center gap-1.5 rounded-md px-1.5 text-xs text-fg-2 transition-colors duration-micro hover:bg-accent hover:text-foreground focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-offset-2 focus-visible:outline-ring"
+                className="q-inline-end hit-area relative -my-1 inline-flex h-6 items-center gap-1.5 rounded-md text-xs text-fg-2 transition-colors duration-micro hover:bg-accent hover:text-foreground focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-offset-2 focus-visible:outline-ring"
               >
                 <PaperclipIcon className="size-3.5" aria-hidden />
                 {attachments.attachments.length > 0

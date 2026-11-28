@@ -61,7 +61,7 @@ export function ChangeSetCard({ turn, summary }: { turn: StreamTurn; summary: Th
           <span className="q-del">−{totals.removed}</span>
         </span>
         <Tip label={t("changes.card.openPanel")} command="panel.changes">
-          <button type="button" className="q-btn ghost" onClick={openChanges}>
+          <button type="button" className="q-btn ghost q-inline-end" onClick={openChanges}>
             {t("changes.card.review")}
           </button>
         </Tip>

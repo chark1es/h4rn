@@ -588,7 +588,7 @@ export function IdePane() {
             <Tip label={t("bar.handToAgentHint")}>
               <button
                 type="button"
-                className="q-btn ghost"
+                className="q-btn ghost q-inline-end"
                 style={{ height: 24 }}
                 onClick={() => openNewThread()}
               >
