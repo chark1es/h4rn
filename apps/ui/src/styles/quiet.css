@@ -988,14 +988,46 @@
 .q-row-status.danger {
   color: var(--danger);
 }
-/* A pull request's chips wrap to a second line rather than run off a phone
-   when they do not fit (Spanish at 360 px). */
+/* A pull request's line 2 is a row of columns: the branch takes what is
+   left and ellipsizes, and state, checks and review keep the same x on every
+   row (a cell only grows past its column for a longer translation). */
 .q-pr-rows .q-row-l2 {
-  flex-wrap: wrap;
-  row-gap: 2px;
+  display: grid;
+  grid-template-columns:
+    minmax(0, 1fr) minmax(max-content, 5rem) minmax(max-content, 9rem)
+    minmax(max-content, 9rem);
+  column-gap: 16px;
+}
+.q-pr-rows .q-row-meta {
+  grid-column: 1;
+  max-width: none;
 }
 .q-pr-rows .q-row-status {
+  margin-left: 0;
   white-space: nowrap;
+}
+.q-pr-rows .q-pr-state {
+  grid-column: 2;
+}
+.q-pr-rows .q-pr-checks {
+  grid-column: 3;
+}
+.q-pr-rows .q-pr-review {
+  grid-column: 4;
+  justify-self: end;
+}
+/* A narrow pane (a phone) has no room for columns: the chips pack after the
+   branch on one line, the branch gives way first and then the chips
+   ellipsize. */
+@container (max-width: 720px) {
+  .q-pr-rows .q-row-l2 {
+    grid-template-columns: minmax(0, 1fr) repeat(3, minmax(0, max-content));
+    column-gap: 8px;
+  }
+  .q-pr-rows .q-row-status {
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
 }
 .q-ph-pg .q-row-meta,
 .q-ph-pg .q-row-status {
@@ -3887,12 +3919,12 @@
   }
   .q-snoozed {
     min-height: 66px;
-    padding: 0 20px;
+    padding: 0 16px;
     font-size: 16px;
   }
   .q-row {
     min-height: 66px;
-    padding: 12px 20px 13px;
+    padding: 12px 16px 13px;
     border-radius: 0;
   }
   .q-row-title {
@@ -3909,7 +3941,7 @@
     height: 22px;
   }
   .q-row + .q-row::before {
-    left: 46px;
+    left: 42px;
     right: 0;
   }
   .q-rows .q-inbox-vrow {
@@ -3917,7 +3949,7 @@
     right: 0;
   }
   .q-rows [data-index]:not(:first-child) > .q-row::before {
-    left: 46px;
+    left: 42px;
     right: 0;
   }
   .q-th-head {
@@ -5081,7 +5113,7 @@
   gap: 10px;
   width: 100%;
   height: 40px;
-  padding: 10px 20px 0;
+  padding: 10px 16px 0;
   font-size: 16px;
   color: var(--fg-2);
   text-align: left;
@@ -5104,7 +5136,7 @@
   transform: rotate(-90deg);
 }
 .q-ph-pg .q-row {
-  padding: 12px 20px 13px;
+  padding: 12px 16px 13px;
   gap: 12px;
   min-height: 66px;
 }
