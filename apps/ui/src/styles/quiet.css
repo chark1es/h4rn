@@ -1682,12 +1682,22 @@
 }
 
 .q-changes {
+  position: relative;
   border-radius: 12px;
-  box-shadow: inset 0 0 0 1px var(--line);
   margin: 4px 0 16px;
   overflow: hidden;
   padding-bottom: 4px;
   background: var(--bg);
+}
+/* The outline is drawn over the card's rows: an inset shadow on the card
+   itself sits under the file header and diff rows, which hide its sides. */
+.q-changes::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  box-shadow: inset 0 0 0 1px var(--line);
+  pointer-events: none;
 }
 .q-ch-head {
   display: flex;
