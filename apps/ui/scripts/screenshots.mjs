@@ -288,6 +288,8 @@ const SHOTS = [
       await page.getByRole("button", { name: "Update Codex" }).click();
       await page.getByRole("button", { name: "Update log" }).click({ timeout: 10_000 });
       await page.getByText("added 1 package in 4s").waitFor({ timeout: 5_000 });
+      // The log panel fades in; let it finish so the shot shows the log.
+      await page.waitForTimeout(400);
     },
   },
   {

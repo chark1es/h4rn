@@ -5518,6 +5518,11 @@
     min-height: 44px;
   }
 }
+/* Each harness is its own wrapper, so its field is a first-of-type; only the
+   first row draws the top rule, or every boundary would be 2px. */
+.q-harness-row + .q-harness-row > .q-field {
+  border-top: 0;
+}
 .q-harness-manual {
   margin: 0;
   padding: 8px 0 10px;
